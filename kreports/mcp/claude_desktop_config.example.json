@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "kreports": {
+      "command": "kreports",
+      "args": ["serve"],
+      "env": {
+        "DART_API_KEY": "YOUR_DART_API_KEY_HERE"
+      }
+    }
+  }
+}

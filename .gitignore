@@ -1,0 +1,48 @@
+# Database
+kreports.db
+dart_platform.db
+*.db-journal
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DART API cache
+.cache/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Logs
+*.log

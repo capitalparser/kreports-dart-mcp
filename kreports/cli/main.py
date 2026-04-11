@@ -1,0 +1,699 @@
+import logging
+import os
+import sys
+from datetime import date
+from typing import Optional
+
+# CLI는 headless 환경
+os.environ.setdefault("KREPORTS_HEADLESS", "1")
+os.environ.setdefault("DART_HEADLESS", "1")  # backward compat
+
+import typer
+from tabulate import tabulate
+
+from kreports.config import settings
+from kreports.db.engine import init_db, get_session
+from kreports.db.models import (
+    Company, Financial, Disclosure, Auditor, AuditFee, FetchLog,
+    AccountingPolicyItem,
+)
+
+app = typer.Typer(
+    name="kreports",
+    help="KReports — Korean Financial Intelligence CLI",
+    no_args_is_help=True,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+@app.command()
+def init():
+    """DB 테이블 생성 및 마이그레이션."""
+    init_db()
+    typer.echo("DB 초기화 완료.")
+
+
+@app.command()
+def serve():
+    """MCP stdio 서버를 실행한다. Claude Desktop / Claude Code에 연결."""
+    from kreports.mcp.server import main as mcp_main
+    mcp_main()
+
+
+# ---------------------------------------------------------------------------
+# collect-seed — 업종 벤치마킹용 핵심 기업 자동 수집
+# ---------------------------------------------------------------------------
+
+@app.command("collect-seed")
+def collect_seed_cmd(
+    size: str = typer.Option("small", help="small (350사 ~20분) / medium (950사 ~50분) / full (전체 ~11시간)"),
+    year_from: Optional[int] = typer.Option(None, "--year-from", help="수집 시작 연도 (기본: 최근 3년)"),
+    year_to: Optional[int] = typer.Option(None, "--year-to", help="수집 종료 연도 (기본: 올해)"),
+    annual_only: bool = typer.Option(True, "--annual-only/--all-quarters", help="Q4만 수집 (벤치마킹 용도)"),
+):
+    """
+    업종 벤치마킹용 핵심 기업 재무데이터를 수집한다.
+
+    Q4(연간) 우선 수집으로 동종업종 비교를 빠르게 활성화한다.
+    이미 수집된 데이터는 건너뛴다 (중복 수집 없음).
+
+    예시:
+      kreports collect-seed                      # KOSPI200+KOSDAQ150, 최근3년 Q4
+      kreports collect-seed --size medium         # KOSPI 전체
+      kreports collect-seed --all-quarters        # Q1~Q4 모두
+      kreports collect-seed --year-from 2020      # 2020~올해
+    """
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정. .env 파일에 DART_API_KEY를 설정하세요.", err=True)
+        raise typer.Exit(1)
+
+    from kreports.collector.seed_collector import collect_seed, SEED_SIZES
+
+    cfg = SEED_SIZES.get(size, SEED_SIZES["small"])
+    q_label = "Q4만" if annual_only else "Q1~Q4"
+    typer.echo(f"seed 수집 시작: {cfg['desc']} · {q_label}")
+
+    def _progress(done, total, name, year, q):
+        if done % 50 == 0 or done == total or done == 1:
+            typer.echo(f"\r  [{done:,}/{total:,}] {name} {year}Q{q}", nl=False)
+
+    result = collect_seed(
+        size=size,
+        year_from=year_from,
+        year_to=year_to,
+        annual_only=annual_only,
+        progress_callback=_progress,
+    )
+    typer.echo(
+        f"\n완료 — {result['companies']:,}사 대상 | "
+        f"수집 {result['collected']:,} | 건너뜀 {result['skipped']:,} | "
+        f"오류 {result['error']:,} | 업종 커버 {result['industries_covered']}개"
+    )
+
+
+# ---------------------------------------------------------------------------
+# sync-companies
+# ---------------------------------------------------------------------------
+
+@app.command("sync-companies")
+def sync_companies(
+    market: Optional[str] = typer.Option(
+        None, help="수집 시장 필터 (KOSPI,KOSDAQ 또는 생략하면 전체 상장사)",
+    ),
+):
+    """DART 기업코드 목록을 동기화한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    market_filter = [m.strip() for m in market.split(",")] if market else ["KOSPI", "KOSDAQ"]
+    typer.echo(f"기업 동기화 시작 (시장: {market_filter})")
+
+    from kreports.collector.corp_sync import sync_companies as _sync
+    count = _sync(market_filter=market_filter)
+    typer.echo(f"동기화 완료: {count:,}개사")
+
+
+# ---------------------------------------------------------------------------
+# enrich-market
+# ---------------------------------------------------------------------------
+
+@app.command("enrich-market")
+def enrich_market_cmd():
+    """market 또는 induty_code가 NULL인 상장사의 시장구분·업종코드를 DART API로 보완한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    from sqlalchemy import or_
+
+    with get_session() as session:
+        null_count = (
+            session.query(Company)
+            .filter(Company.stock_code.isnot(None))
+            .filter(or_(Company.market.is_(None), Company.induty_code.is_(None)))
+            .count()
+        )
+
+    if null_count == 0:
+        typer.echo("보완 대상이 없습니다 (market/induty_code 모두 채워짐).")
+        raise typer.Exit(0)
+
+    typer.echo(f"시장·업종 보완 시작: {null_count:,}개사 (약 {null_count * 0.5 / 60:.0f}분 소요 예상)")
+
+    from kreports.collector.corp_sync import enrich_market as _enrich
+
+    def _progress(done, total, corp_code):
+        if done % 50 == 0 or done == total:
+            typer.echo(f"\r[{done}/{total}] {corp_code}", nl=False)
+
+    result = _enrich(progress_callback=_progress)
+    typer.echo(
+        f"\n완료 — 처리 {result['total']:,}개사 | "
+        f"KOSPI/KOSDAQ/KONEX {result['updated']:,} | 기타 {result['skipped']:,} | "
+        f"오류 {result['error']:,} | induty 채움 {result['induty_filled']:,}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# collect-policies — 사업보고서 주석 회계정책 영속화
+# ---------------------------------------------------------------------------
+
+@app.command("collect-policies")
+def collect_policies_cmd(
+    stock: Optional[str] = typer.Argument(
+        None, help="종목코드 (예: 005930). 생략 시 --all 필요."
+    ),
+    year: Optional[int] = typer.Option(
+        None, "--year", help="사업연도. 미지정 시 해당 기업 사업보고서가 있는 전체 연도."
+    ),
+    fs_div: str = typer.Option("CFS", "--fs-div", help="CFS/OFS"),
+    all_corps: bool = typer.Option(
+        False, "--all", help="AccountingPolicyItem에 이미 있는 기업 전체 재수집."
+    ),
+):
+    """
+    사업보고서 주석에서 회계정책 item들을 파싱하여 DB에 영속화한다.
+
+    예시:
+      dart collect-policies 005930              # 삼성 전체 연도
+      dart collect-policies 005930 --year 2024  # 삼성 2024 사업연도만
+      dart collect-policies 005930 --fs-div OFS # 별도
+    """
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    if not stock and not all_corps:
+        typer.echo("종목코드 또는 --all 플래그 필요", err=True)
+        raise typer.Exit(1)
+
+    from kreports.collector.policy_collector import (
+        collect_policies_batch,
+    )
+
+    # 대상 수집: (corp_code, bsns_year, fs_div) 튜플 리스트
+    targets: list[tuple[str, int, str]] = []
+
+    if stock:
+        with get_session() as session:
+            row = session.query(Company).filter_by(stock_code=stock).first()
+            if row is None:
+                typer.echo(f"오류: 종목코드 '{stock}' DB 미등록", err=True)
+                raise typer.Exit(1)
+            corp_code = row.corp_code
+            corp_name = row.corp_name
+
+            # 사업보고서 연도 목록 조회 (Disclosure에서)
+            if year is not None:
+                years_to_process = [year]
+            else:
+                report_years = (
+                    session.query(Disclosure.disc_date)
+                    .filter_by(corp_code=corp_code)
+                    .filter(Disclosure.report_nm.like("%사업보고서%"))
+                    .order_by(Disclosure.disc_date.desc())
+                    .all()
+                )
+                years_to_process = sorted({r[0].year - 1 for r in report_years})
+
+        for y in years_to_process:
+            targets.append((corp_code, y, fs_div))
+        typer.echo(
+            f"수집 시작: {corp_name} ({corp_code}) · "
+            f"{len(targets)}개 (사업연도={','.join(str(t[1]) for t in targets)}) · fs_div={fs_div}"
+        )
+
+    if not targets:
+        typer.echo("대상 없음. 종료.")
+        raise typer.Exit(0)
+
+    def _progress(idx, total, cc, yy, fd):
+        if idx == 1 or idx % 5 == 0 or idx == total:
+            typer.echo(f"  [{idx}/{total}] {cc} {yy} {fd}")
+
+    agg = collect_policies_batch(targets, progress_callback=_progress)
+
+    typer.echo(
+        f"\n완료 — 처리 {agg['total']} | 성공 {agg['ok']} | 실패 {agg['failed']} | "
+        f"items {agg['items_total']} (신규 {agg['items_new']} · 변경 {agg['items_changed']})"
+    )
+
+    if agg["errors"]:
+        typer.echo("\n실패 목록:")
+        for e in agg["errors"][:10]:
+            typer.echo(f"  {e['corp_code']} {e['bsns_year']} {e['fs_div']}: {e['error']}")
+        if len(agg["errors"]) > 10:
+            typer.echo(f"  ... 외 {len(agg['errors']) - 10}건")
+
+
+# ---------------------------------------------------------------------------
+# collect (단일 종목)
+# ---------------------------------------------------------------------------
+
+@app.command("collect")
+def collect(
+    stock: str = typer.Argument(..., help="종목코드 (예: 005930)"),
+    year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
+    year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
+):
+    """단일 종목 재무데이터를 수집한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    current_year = date.today().year
+    y_to = year_to or current_year
+    y_from = year_from or (y_to - settings.collect_years + 1)
+
+    typer.echo(f"수집 시작: {stock} ({y_from}~{y_to}년)")
+    from kreports.collector.fin_collector import collect_financial_range
+    result = collect_financial_range(stock, year_from=y_from, year_to=y_to)
+    typer.echo(f"완료 — 성공: {result['success']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
+
+
+# ---------------------------------------------------------------------------
+# collect-all (전체 배치)
+# ---------------------------------------------------------------------------
+
+@app.command("collect-all")
+def collect_all(
+    year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
+    year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
+):
+    """전체 상장사 재무데이터를 배치 수집한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    from kreports.collector.fin_collector import collect_all_companies
+
+    def _progress(done, total, corp_name):
+        typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
+
+    typer.echo("전체 재무 배치 수집 시작...")
+    result = collect_all_companies(year_from, year_to, progress_callback=_progress)
+    typer.echo(f"\n완료 — 성공: {result['success']:,}, 데이터없음: {result['no_data']:,}, 오류: {result['error']:,}")
+
+
+# ---------------------------------------------------------------------------
+# collect-disclosures (공시 수집)
+# ---------------------------------------------------------------------------
+
+@app.command("collect-disclosures")
+def collect_disclosures_cmd(
+    stock: Optional[str] = typer.Option(None, help="단일 종목코드. 생략 시 전체 수집."),
+):
+    """공시 목록을 수집한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    if stock:
+        from kreports.collector.corp_sync import get_corp_code
+        from kreports.collector.disc_collector import collect_disclosures
+        corp_code = get_corp_code(stock)
+        if not corp_code:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        result = collect_disclosures(corp_code)
+        typer.echo(f"완료 — 저장: {result['saved']}, 스킵: {result['skipped']}")
+    else:
+        from kreports.collector.disc_collector import collect_all_disclosures
+
+        def _progress(done, total, corp_name):
+            typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
+
+        typer.echo("전체 공시 배치 수집 시작...")
+        result = collect_all_disclosures(progress_callback=_progress)
+        typer.echo(f"\n완료 — 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
+
+
+# ---------------------------------------------------------------------------
+# collect-auditors (감사인 이력 수집)
+# ---------------------------------------------------------------------------
+
+@app.command("collect-auditors")
+def collect_auditors_cmd(
+    stock: Optional[str] = typer.Option(None, help="단일 종목코드. 생략 시 전체 수집."),
+):
+    """감사인 이력을 수집하고 플래그를 계산한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    if stock:
+        from kreports.collector.corp_sync import get_corp_code
+        from kreports.collector.audit_collector import collect_auditors
+        from kreports.judge.auditor_flags import compute_auditor_flags
+        corp_code = get_corp_code(stock)
+        if not corp_code:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        result = collect_auditors(corp_code)
+        compute_auditor_flags(corp_code)
+        typer.echo(f"완료 — 저장: {result['saved']}, 스킵: {result['skipped']}")
+    else:
+        from kreports.collector.audit_collector import collect_all_auditors
+        from kreports.judge.auditor_flags import compute_all_auditor_flags
+
+        def _progress(done, total, corp_name):
+            typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
+
+        typer.echo("전체 감사인 배치 수집 시작...")
+        result = collect_all_auditors(progress_callback=_progress)
+        typer.echo(f"\n플래그 계산 중...")
+        compute_all_auditor_flags()
+        typer.echo(f"완료 — 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
+
+
+# ---------------------------------------------------------------------------
+# collect-audit-fees (DS002 감사보수 수집)
+# ---------------------------------------------------------------------------
+
+@app.command("collect-audit-fees")
+def collect_audit_fees_cmd(
+    stock: Optional[str] = typer.Option(None, help="단일 종목코드. 생략 시 전체 수집."),
+    year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
+    year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
+):
+    """DS002 감사보수/비감사보수를 수집하고 NAS ratio를 계산한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    if stock:
+        from kreports.collector.corp_sync import get_corp_code
+        from kreports.collector.audit_fee_collector import collect_audit_fees
+        corp_code = get_corp_code(stock)
+        if not corp_code:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        result = collect_audit_fees(corp_code, year_from, year_to)
+        typer.echo(f"완료 — 저장: {result['saved']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
+    else:
+        from kreports.collector.audit_fee_collector import collect_all_audit_fees
+
+        def _progress(done, total, corp_name):
+            if done % 50 == 0 or done == total:
+                typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
+
+        typer.echo("전체 감사보수 배치 수집 시작...")
+        result = collect_all_audit_fees(year_from, year_to, progress_callback=_progress)
+        typer.echo(
+            f"\n완료 — 저장: {result['saved']:,}, "
+            f"데이터없음: {result['no_data']:,}, 오류: {result['error']:,}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# compute-flags (판단 플래그 재계산)
+# ---------------------------------------------------------------------------
+
+@app.command("compute-flags")
+def compute_flags_cmd(
+    stock: Optional[str] = typer.Option(None, help="단일 종목코드. 생략 시 전체."),
+):
+    """재무 판단 플래그(CFS/OFS 괴리, 트렌드, CF, Beneish)를 재계산한다."""
+    from kreports.judge.flags import (
+        compute_all_gap_flags, compute_all_trend_cf_flags,
+    )
+    from kreports.judge.beneish import compute_all_beneish
+
+    def _run_all(corp_code: str) -> dict:
+        gap_n = compute_all_gap_flags(corp_code)
+        trend_n = compute_all_trend_cf_flags(corp_code)
+        beneish_n = compute_all_beneish(corp_code)
+        return {"gap": gap_n, "trend": trend_n, "beneish": beneish_n}
+
+    if stock:
+        from kreports.collector.corp_sync import get_corp_code
+        corp_code = get_corp_code(stock)
+        if not corp_code:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        r = _run_all(corp_code)
+        typer.echo(
+            f"완료 — gap: {r['gap']}기간, trend+CF: {r['trend']}기간, "
+            f"Beneish: {r['beneish']}연도"
+        )
+    else:
+        with get_session() as session:
+            corp_codes = [
+                r[0] for r in
+                session.query(Company.corp_code).filter(Company.stock_code.isnot(None)).all()
+            ]
+        totals = {"gap": 0, "trend": 0, "beneish": 0}
+        for idx, cc in enumerate(corp_codes, 1):
+            if idx % 100 == 0:
+                typer.echo(f"\r[{idx}/{len(corp_codes)}]", nl=False)
+            r = _run_all(cc)
+            for k in totals:
+                totals[k] += r[k]
+        typer.echo(
+            f"\n완료 — gap: {totals['gap']:,}기간, "
+            f"trend+CF: {totals['trend']:,}기간, "
+            f"Beneish: {totals['beneish']:,}연도"
+        )
+
+
+# ---------------------------------------------------------------------------
+# show (재무 조회)
+# ---------------------------------------------------------------------------
+
+@app.command("show")
+def show(
+    stock: str = typer.Argument(..., help="종목코드 (예: 005930)"),
+    year_from: Optional[int] = typer.Option(None, help="조회 시작 연도"),
+    year_to: Optional[int] = typer.Option(None, help="조회 종료 연도"),
+    unit: str = typer.Option("억원", help="금액 단위 (억원 / 십억원 / 원)"),
+):
+    """수집된 재무지표를 테이블로 출력한다."""
+    with get_session() as session:
+        company = session.query(Company).filter_by(stock_code=stock).first()
+        if not company:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        corp_code = company.corp_code
+        corp_name = company.corp_name
+        market = company.market
+
+        q = session.query(Financial).filter_by(corp_code=corp_code)
+        if year_from:
+            q = q.filter(Financial.year >= year_from)
+        if year_to:
+            q = q.filter(Financial.year <= year_to)
+
+        rows = [
+            {
+                "year": r.year, "quarter": r.quarter, "fs_div": r.fs_div,
+                "revenue": r.revenue, "operating_profit": r.operating_profit,
+                "net_income": r.net_income, "total_debt": r.total_debt,
+                "total_equity": r.total_equity,
+                "map_conf": r.account_map_confidence,
+                "gap_flag": r.cfs_ofs_gap_flag,
+            }
+            for r in q.order_by(Financial.year, Financial.quarter).all()
+        ]
+
+    if not rows:
+        typer.echo("수집된 데이터가 없습니다. collect 명령을 먼저 실행하세요.")
+        raise typer.Exit(0)
+
+    divisor, unit_label = _get_divisor(unit)
+    headers = [
+        "연도", "분기", "구분",
+        f"매출액({unit_label})", f"영업이익({unit_label})", f"순이익({unit_label})",
+        "부채비율(%)", "매핑률", "CFS/OFS괴리",
+    ]
+    table = []
+    for r in rows:
+        debt_ratio = None
+        if r["total_debt"] is not None and r["total_equity"]:
+            debt_ratio = round(r["total_debt"] / r["total_equity"] * 100, 1)
+        gap = "O" if r["gap_flag"] else ("-" if r["gap_flag"] is None else "")
+        conf = f"{r['map_conf']:.0%}" if r["map_conf"] is not None else "-"
+        table.append([
+            r["year"], f"Q{r['quarter']}", r["fs_div"],
+            _fmt(r["revenue"], divisor), _fmt(r["operating_profit"], divisor),
+            _fmt(r["net_income"], divisor),
+            f"{debt_ratio:.1f}" if debt_ratio is not None else "-",
+            conf, gap,
+        ])
+
+    typer.echo(f"\n종목: {corp_name} ({stock}) | 시장: {market}")
+    typer.echo(tabulate(table, headers=headers, tablefmt="rounded_outline", numalign="right"))
+
+
+# ---------------------------------------------------------------------------
+# show-disclosures
+# ---------------------------------------------------------------------------
+
+@app.command("show-disclosures")
+def show_disclosures(
+    stock: str = typer.Argument(..., help="종목코드"),
+    limit: int = typer.Option(20, help="출력 건수"),
+):
+    """수집된 공시 목록을 출력한다."""
+    with get_session() as session:
+        company = session.query(Company).filter_by(stock_code=stock).first()
+        if not company:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        corp_name = company.corp_name
+
+        rows = (
+            session.query(Disclosure)
+            .filter_by(corp_code=company.corp_code)
+            .order_by(Disclosure.disc_date.desc())
+            .limit(limit)
+            .all()
+        )
+        rows = [(r.disc_date, r.disc_type, r.report_nm[:60], r.flr_nm or "-") for r in rows]
+
+    if not rows:
+        typer.echo("수집된 공시가 없습니다. collect-disclosures 먼저 실행하세요.")
+        raise typer.Exit(0)
+
+    headers = ["공시일", "유형", "공시명", "제출인"]
+    typer.echo(f"\n종목: {corp_name} ({stock})")
+    typer.echo(tabulate(rows, headers=headers, tablefmt="rounded_outline"))
+
+
+# ---------------------------------------------------------------------------
+# show-auditors
+# ---------------------------------------------------------------------------
+
+@app.command("show-auditors")
+def show_auditors(
+    stock: str = typer.Argument(..., help="종목코드"),
+):
+    """감사인 이력을 출력한다."""
+    with get_session() as session:
+        company = session.query(Company).filter_by(stock_code=stock).first()
+        if not company:
+            typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
+            raise typer.Exit(1)
+        corp_name = company.corp_name
+
+        rows = (
+            session.query(Auditor)
+            .filter_by(corp_code=company.corp_code)
+            .order_by(Auditor.fs_div, Auditor.bsns_year)
+            .all()
+        )
+        data = [
+            (
+                r.bsns_year, r.fs_div, r.auditor_nm,
+                r.audit_opinion or "-",
+                "교체" if r.is_auditor_changed else ("최초" if r.is_auditor_changed is None else "유지"),
+                r.consecutive_years or "-",
+            )
+            for r in rows
+        ]
+
+    if not data:
+        typer.echo("감사인 이력이 없습니다. collect-auditors 먼저 실행하세요.")
+        raise typer.Exit(0)
+
+    headers = ["회계연도", "구분", "감사인", "감사의견", "교체여부", "연속연수"]
+    typer.echo(f"\n종목: {corp_name} ({stock})")
+    typer.echo(tabulate(data, headers=headers, tablefmt="rounded_outline"))
+
+
+# ---------------------------------------------------------------------------
+# schedule-start (일별 증분 수집 스케줄러)
+# ---------------------------------------------------------------------------
+
+@app.command("schedule-start")
+def schedule_start():
+    """일별 증분 수집 스케줄러를 포그라운드로 실행한다. Ctrl+C로 종료."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    import time
+    import signal
+    from kreports.collector.scheduler import start_scheduler, list_jobs
+
+    sched = start_scheduler()
+    typer.echo("스케줄러 실행 중...")
+    for job in list_jobs(sched):
+        typer.echo(f"  [{job['id']}] {job['name']} — 다음 실행: {job['next_run']}")
+    typer.echo("Ctrl+C로 종료하세요.")
+
+    def _shutdown(signum, frame):
+        typer.echo("\n스케줄러 종료 중...")
+        sched.shutdown()
+        raise typer.Exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    try:
+        while True:
+            time.sleep(60)
+    except (SystemExit, KeyboardInterrupt):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+@app.command()
+def status():
+    """수집 현황을 출력한다."""
+    from sqlalchemy import func
+    with get_session() as session:
+        total_companies = session.query(Company).filter(Company.stock_code.isnot(None)).count()
+        total_financials = session.query(Financial).count()
+        total_disclosures = session.query(Disclosure).count()
+        total_auditors = session.query(Auditor).count()
+        total_audit_fees = session.query(AuditFee).count()
+        log_summary = list(
+            session.query(FetchLog.task_type, FetchLog.status, func.count(FetchLog.id))
+            .group_by(FetchLog.task_type, FetchLog.status)
+            .all()
+        )
+
+    typer.echo(f"등록 기업:     {total_companies:,}개사")
+    typer.echo(f"재무 레코드:   {total_financials:,}건")
+    typer.echo(f"공시 레코드:   {total_disclosures:,}건")
+    typer.echo(f"감사인 레코드: {total_auditors:,}건")
+    typer.echo(f"감사보수 레코드: {total_audit_fees:,}건")
+    if log_summary:
+        typer.echo("\n수집 이력:")
+        for task_type, stat, cnt in log_summary:
+            typer.echo(f"  [{task_type}] {stat}: {cnt:,}건")
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def _fmt(value, divisor):
+    if value is None:
+        return "-"
+    return f"{value // divisor:,}"
+
+
+def _get_divisor(unit):
+    if unit == "원":
+        return 1, "원"
+    if unit == "십억원":
+        return 1_000_000_000, "십억원"
+    return 100_000_000, "억원"
+
+
+if __name__ == "__main__":
+    app()
