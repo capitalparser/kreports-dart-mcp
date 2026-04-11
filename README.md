@@ -255,6 +255,9 @@ kreports schedule-start       # Start daily scheduler
 
 ### Screenshots
 
+#### Business Overview (NEW)
+![Business Overview](docs/images/business_overview.png)
+
 #### Financial Summary
 ![Financial Summary](docs/images/financial_summary.png)
 
@@ -269,6 +272,9 @@ kreports schedule-start       # Start daily scheduler
 
 #### Accounting Policy
 ![Accounting Policy](docs/images/accounting_policy.png)
+
+#### Enterprise Valuation — DCF (NEW)
+![Enterprise Valuation](docs/images/enterprise_valuation.png)
 
 ### Requirements
 
@@ -500,6 +506,9 @@ kreports schedule-start       # 스케줄러 실행
 
 ### 대시보드 스크린샷
 
+#### 사업 개요 (신규)
+![Business Overview](docs/images/business_overview.png)
+
 #### 재무 요약
 ![Financial Summary](docs/images/financial_summary.png)
 
@@ -514,6 +523,9 @@ kreports schedule-start       # 스케줄러 실행
 
 #### 회계정책 현황
 ![Accounting Policy](docs/images/accounting_policy.png)
+
+#### 기업가치 — DCF (신규)
+![Enterprise Valuation](docs/images/enterprise_valuation.png)
 
 ### 아키텍처
 
