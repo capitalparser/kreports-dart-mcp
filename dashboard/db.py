@@ -445,6 +445,116 @@ def get_financials_extended(corp_code: str, fs_div: str = "CFS") -> pd.DataFrame
     return df
 
 
+def _extract_da_from_footnotes(corp_code: str, bsns_year: int, fs_div: str = "CFS") -> int | None:
+    """
+    사업보고서 주석 유형자산/무형자산 테이블에서 감가상각비(D&A)를 추출한다.
+
+    fnlttSinglAcntAll API는 CF 조정항목(감가상각비)을 제공하지 않는 경우가 많음.
+    이 함수는 주석 XML의 유형자산 변동 테이블에서 "감가상각" 행의 합계를 추출한다.
+
+    Returns:
+        감가상각비 합계 (원 단위, 음수) 또는 None
+    """
+    import re as _re
+
+    # 사업보고서 rcept_no 조회
+    with get_session() as session:
+        row = (
+            session.query(Disclosure.rcept_no)
+            .filter_by(corp_code=corp_code)
+            .filter(Disclosure.report_nm.like("%사업보고서%"))
+            .filter(Disclosure.disc_date >= f"{bsns_year + 1}-01-01")
+            .filter(Disclosure.disc_date <= f"{bsns_year + 1}-12-31")
+            .order_by(Disclosure.disc_date.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        rcept_no = row.rcept_no
+
+    all_files = _fetch_note_files_cached(rcept_no)
+    if not all_files:
+        return None
+
+    content = _select_note_file(all_files, fs_div)
+    if not content:
+        return None
+
+    # 주석 섹션 추출
+    m_note = _re.search(r'<TITLE[^>]*>주석</TITLE>', content)
+    if not m_note:
+        return None
+    note_start = m_note.start()
+    next_major = _re.search(
+        r'<TITLE[^>]*>(?:연결 내부|내부회계|외부감사 실시|독립된)',
+        content[note_start + 100:]
+    )
+    note_end = note_start + 100 + next_major.start() if next_major else len(content)
+    note_section = content[note_start:note_end]
+
+    chapters = _note_chapters(note_section)
+
+    total_da = 0
+    found_any = False
+
+    for label, cs, ce in chapters:
+        if "유형자산" not in label and "무형자산" not in label:
+            continue
+
+        chunk = note_section[cs:ce]
+
+        # 단위 감지: "백만원", "천원", "원" → 원 단위 환산 배수
+        unit_multiplier = 1_000_000  # 기본 백만원 가정 (대부분의 상장사)
+        unit_match = _re.search(r'단위\s*[:：]?\s*(백만원|천원|원)', chunk)
+        if unit_match:
+            unit_str = unit_match.group(1)
+            if unit_str == "원":
+                unit_multiplier = 1
+            elif unit_str == "천원":
+                unit_multiplier = 1_000
+            elif unit_str == "백만원":
+                unit_multiplier = 1_000_000
+
+        rows = _re.findall(r'<TR[^>]*>(.*?)</TR>', chunk, _re.DOTALL | _re.IGNORECASE)
+
+        # 당기 감가상각비만 추출 (첫 번째 매칭 행 = 당기)
+        first_dep_found = False
+        for tr in rows:
+            if "누계" in tr:
+                continue
+            is_dep_row = False
+            if "유형자산" in label and "감가상각" in tr:
+                is_dep_row = True
+            elif "무형자산" in label and "상각" in tr and "감가" not in tr:
+                is_dep_row = True
+
+            if not is_dep_row:
+                continue
+
+            # 이미 이 챕터에서 당기 행을 찾았으면 (다음은 전기) 건너뜀
+            if first_dep_found:
+                break
+            first_dep_found = True
+
+            cells = _re.findall(r'<TD[^>]*>(.*?)</TD>', tr, _re.DOTALL | _re.IGNORECASE)
+            clean = [_re.sub(r'<[^>]+>', '', c).strip().replace('\xa0', '').replace(' ', '')
+                     for c in cells]
+
+            # 마지막 숫자 셀 = 합계
+            for cell in reversed(clean):
+                if not cell or cell == '-':
+                    continue
+                m = _re.match(r'^\(?([0-9,]+)\)?$', cell)
+                if m:
+                    val = int(m.group(1).replace(',', ''))
+                    val = val * unit_multiplier  # 원 단위로 환산
+                    total_da += val
+                    found_any = True
+                    break
+
+    return -total_da if found_any else None  # 감가상각은 비용이므로 음수로 반환
+
+
 def get_dcf_inputs(corp_code: str, fs_div: str = "CFS") -> pd.DataFrame:
     """
     DCF 밸류에이션 입력 데이터를 산출한다.
@@ -537,6 +647,10 @@ def get_dcf_inputs(corp_code: str, fs_div: str = "CFS") -> pd.DataFrame:
         st_borrow_raw = _extract_fact_value(bs, "short_term_borrowings")
         lt_borrow_raw = _extract_fact_value(bs, "long_term_borrowings")
         cur_lt_raw = _extract_fact_value(bs, "current_portion_lt_debt")
+
+        # D&A fallback: fnlttSinglAcntAll에 감가상각비가 없으면 주석 유형자산 테이블에서 추출
+        if da_raw is None:
+            da_raw = _extract_da_from_footnotes(corp_code, year, fs_div)
 
         # 억원 변환
         da = abs(da_raw) / _UNIT if da_raw is not None else None
