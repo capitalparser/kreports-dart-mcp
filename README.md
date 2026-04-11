@@ -3,6 +3,7 @@
 **Korean Financial Intelligence MCP**
 
 > DART를 매년 수작업으로 뒤지던 Big4 감사인이 만든 재무 인텔리전스 MCP 서버.
+> An MCP server for Korean financial intelligence, built by a Big4 auditor who got tired of manual DART lookups.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -12,37 +13,40 @@
 
 ## What is KReports?
 
-KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 기반으로 감사인과 투자자를 위한 재무 분석 도구를 제공합니다.
+KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC filing system) to Claude via the [MCP protocol](https://modelcontextprotocol.io), turning Korean public company filings into actionable financial intelligence.
 
-- **MCP 서버**: Claude Desktop / Claude Code에 연결하여 자연어로 재무 분석
-- **CLI**: 터미널에서 데이터 수집 + 분석
-- **대시보드**: Streamlit 기반 시각적 분석 (선택 사항)
-- **Python API**: `import kreports`로 프로그래밍 방식 사용
+KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결하여 감사인과 투자자를 위한 재무 분석 도구를 제공합니다.
 
-### 핵심 기능
+**4 ways to use / 4가지 사용 방법:**
+- **MCP Server**: Connect to Claude Desktop / Claude Code for natural language financial analysis
+- **CLI**: Collect and analyze data from your terminal
+- **Python API**: `import kreports` for programmatic access
+- **Dashboard**: Streamlit-based visual analytics (optional)
 
-| 기능 | 감사인 | 투자자 | 설명 |
-|------|:------:|:------:|------|
-| 재무 스냅샷 | O | O | 매출·영업이익·FCF·ROIC·CCC 연도별 추세 |
-| 업종 벤치마킹 | O | O | KSIC 업종 내 P25/P50/P75 분포 + 박스플롯 |
-| 계속기업 스코어 | O | O | 6인자 100점 감점 스코어카드 |
-| 소급 재작성 감지 | O | - | 사업보고서 간 전기 금액 변동 자동 탐지 |
-| 회계정책 추출 | O | - | 15개 표준 item_key별 주석 발췌 + 연도별 변화 추적 |
-| 감사인 이력 | O | O | 교체·의견·연속연수 타임라인 |
-| 종속회사 감사인 | O | - | 연결그룹 감사인 매트릭스 |
-| Beneish M-Score | O | O | 이익 조작 가능성 지표 |
+### Features / 핵심 기능
+
+| Feature | Auditor | Investor | Description |
+|---------|:-------:|:--------:|-------------|
+| Financial Snapshot / 재무 스냅샷 | O | O | Revenue, operating profit, FCF, ROIC, CCC by year |
+| Industry Benchmarking / 업종 벤치마킹 | O | O | KSIC industry P25/P50/P75 distribution + box plot |
+| Going Concern Score / 계속기업 스코어 | O | O | 6-factor 100-point deduction scorecard |
+| Restatement Detection / 소급 재작성 감지 | O | - | Auto-detect prior period error between annual reports |
+| Accounting Policy / 회계정책 추출 | O | - | 15 standard item_keys + year-over-year change tracking |
+| Auditor History / 감사인 이력 | O | O | Change, opinion, consecutive years timeline |
+| Subsidiary Auditors / 종속회사 감사인 | O | - | Group audit matrix (slim mode for large groups) |
+| Beneish M-Score | O | O | Earnings manipulation probability score |
 
 ---
 
 ## Quick Start
 
-### 1. 설치
+### 1. Install / 설치
 
 ```bash
 pip install kreports
 ```
 
-또는 소스에서:
+Or from source / 소스에서 설치:
 
 ```bash
 git clone https://github.com/capitalparser/kreports.git
@@ -50,51 +54,55 @@ cd kreports
 pip install -e .
 ```
 
-### 2. DART API 키 설정
+### 2. DART API Key / API 키 설정
 
-[DART OpenAPI](https://opendart.fss.or.kr) 에서 무료 API 키를 발급받으세요 (1분).
+Get your free API key from [DART OpenAPI](https://opendart.fss.or.kr) (takes 1 minute).
+
+[DART OpenAPI](https://opendart.fss.or.kr)에서 무료 API 키를 발급받으세요 (1분 소요).
 
 ```bash
 echo "DART_API_KEY=your_api_key_here" > .env
 ```
 
-### 3. 초기 데이터 수집
+### 3. Initial Data Collection / 초기 데이터 수집
 
 ```bash
+# Initialize DB + sync listed companies
 # DB 초기화 + 상장사 목록 동기화
 kreports init
 kreports sync-companies
 kreports enrich-market
 
+# Collect core companies (~20 min, 350 companies Q4)
 # 핵심 기업 재무데이터 수집 (~20분, 350사 Q4)
 kreports collect-seed --size small
 ```
 
-### 4. 사용
+### 4. Use / 사용
 
-**MCP 서버 (Claude Desktop / Claude Code)**:
+**MCP Server (Claude Desktop / Claude Code):**
 ```bash
 kreports serve
 ```
 
-**Python API**:
+**Python API:**
 ```python
 import kreports
 
-# Samsung 재무 스냅샷
+# Samsung financial snapshot
 snap = kreports.get_financial_snapshot("005930", years=3)
-print(snap["rows"])
 
-# 계속기업 위험 스코어
+# Going concern risk score
 gc = kreports.score_going_concern("005930")
 print(f"Score: {gc['score']}/100 ({gc['grade']})")
 
-# 업종 벤치마킹
+# Industry benchmark
 bench = kreports.get_industry_aggregates("264", metric="영업이익률")
-print(f"P50: {bench['quantiles']['p50']}%")
+print(f"Median: {bench['quantiles']['p50']}%")
+print(f"Industry: {bench['industry_name']}")
 ```
 
-**대시보드** (선택):
+**Dashboard (optional):**
 ```bash
 pip install kreports[dashboard]
 streamlit run dashboard/app.py
@@ -102,9 +110,9 @@ streamlit run dashboard/app.py
 
 ---
 
-## Claude Desktop 연결
+## Claude Desktop Setup / Claude Desktop 연결
 
-`~/.claude/claude_desktop_config.json`:
+Add to `~/.claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -120,144 +128,240 @@ streamlit run dashboard/app.py
 }
 ```
 
-연결 후 Claude에게 이렇게 말하세요:
+Then ask Claude / Claude에게 이렇게 물어보세요:
 
-> "삼성전자 최근 3년 재무 스냅샷 보여줘"
-> "SK하이닉스 계속기업 위험 스코어 확인해줘"
-> "삼성전자와 동종업종 영업이익률 비교해줘"
-
----
-
-## MCP 도구 (8개)
-
-| 도구 | 입력 | 설명 |
-|------|------|------|
-| `search_company` | 회사명 / 종목코드 | DART 등록 상장사 검색 |
-| `get_financial_snapshot` | company, years | 연도별 핵심 재무 + 자본배분 지표 |
-| `score_going_concern` | company | 6인자 계속기업 스코어카드 |
-| `detect_restatement` | company, threshold | 소급 재작성 감지 |
-| `get_accounting_policy` | company, year | 회계정책 15개 항목 추출 |
-| `get_audit_history` | company | 감사인·의견·연속연수 이력 |
-| `get_subsidiary_auditors` | company | 종속회사 감사인 매트릭스 |
-| `compare_to_industry` | company, metric | 동종업종 벤치마킹 (P25/P50/P75) |
+> "Show me Samsung Electronics' financial snapshot for the last 3 years"
+> "삼성전자의 계속기업 위험 스코어 확인해줘"
+> "Compare SK Hynix operating margin to industry peers"
 
 ---
 
-## 대시보드 스크린샷
+## MCP Tools (8)
 
-### 재무 요약
+| Tool | Input | Description |
+|------|-------|-------------|
+| `search_company` | query | Search DART-registered listed companies by name or stock code |
+| `get_financial_snapshot` | company, years | Annual financials + capital allocation metrics (FCF, ROIC, CCC) |
+| `score_going_concern` | company | 6-factor going concern scorecard (100-point deduction) |
+| `detect_restatement` | company, threshold | Detect prior period restatements between annual reports |
+| `get_accounting_policy` | company, year | Extract 15 standard accounting policy items from footnotes |
+| `get_audit_history` | company | Auditor name, opinion, change, consecutive years by year |
+| `get_subsidiary_auditors` | company | Subsidiary/associate auditor matrix with slim mode |
+| `compare_to_industry` | company, metric | KSIC industry benchmarking with P25/P50/P75 + percentile |
+
+All tools accept company name, stock code (6-digit), or corp_code (8-digit DART ID).
+
+모든 도구는 회사명, 종목코드(6자리), corp_code(8자리) 중 아무거나 입력 가능합니다.
+
+---
+
+## Screenshots / 대시보드 스크린샷
+
+### Financial Summary / 재무 요약
 ![Financial Summary](docs/images/financial_summary.png)
 
-### 업종 벤치마킹
+### Industry Benchmarking / 업종 벤치마킹
 ![Industry Benchmark](docs/images/industry_benchmark.png)
 
-### 위험 신호 (Going Concern Scorecard)
+### Risk Signals (Going Concern Scorecard) / 위험 신호
 ![Risk Signals](docs/images/risk_signals.png)
 
-### 감사인 이력
+### Auditor History / 감사인 이력
 ![Auditor History](docs/images/auditor_history.png)
 
-### 회계정책 현황
+### Accounting Policy / 회계정책 현황
 ![Accounting Policy](docs/images/accounting_policy.png)
 
 ---
 
-## CLI 명령어
+## Data Update Schedule / 데이터 업데이트 주기
+
+DART filings follow a predictable schedule. KReports includes a built-in scheduler for automated updates.
+
+DART 공시는 예측 가능한 일정을 따릅니다. KReports는 자동 업데이트를 위한 스케줄러를 내장하고 있습니다.
+
+### DART Filing Calendar / DART 공시 캘린더
+
+| Period | Report Type | DART Deadline | Recommended Collection |
+|--------|------------|---------------|----------------------|
+| FY (Q4) | 사업보고서 Annual Report | T+90 days (Mar) | **April** — `kreports collect-seed` |
+| Q1 | 분기보고서 Quarterly | T+45 days (May) | June |
+| H1 (Q2) | 반기보고서 Semi-annual | T+45 days (Aug) | September |
+| Q3 | 분기보고서 Quarterly | T+45 days (Nov) | December |
+
+### Recommended Update Cadence / 권장 업데이트 주기
 
 ```
-kreports init                 # DB 초기화
-kreports serve                # MCP stdio 서버 실행
-kreports sync-companies       # 상장사 목록 동기화
-kreports enrich-market        # 시장구분·업종코드 보완
-kreports collect-seed         # 핵심 기업 재무 자동 수집
-kreports collect <종목코드>    # 단일 종목 수집
-kreports collect-all          # 전체 상장사 배치 수집
-kreports collect-disclosures  # 공시 목록 수집
-kreports collect-auditors     # 감사인 이력 수집
-kreports collect-audit-fees   # 감사보수 수집
-kreports collect-policies     # 회계정책 영속화
-kreports compute-flags        # 판단 플래그 재계산
-kreports show <종목코드>       # 재무지표 조회
+일별 (Daily)     — kreports schedule-start
+                    또는 수동: kreports collect-disclosures
+                    공시 모니터링 (신규 공시, 주요사항보고)
+
+분기별 (Quarterly) — kreports collect-seed --size small
+                    핵심 기업 재무 갱신 (350사 Q4, ~20분)
+
+연 1회 (Annual)   — kreports collect-seed --size full
+                    전체 상장사 재무 갱신 (3,951사, ~11시간)
+                    kreports collect-auditors
+                    감사인·의견 이력 갱신
+                    kreports collect-policies <종목코드>
+                    회계정책 영속화
+```
+
+### Built-in Scheduler / 내장 스케줄러
+
+```bash
+# Start background scheduler (APScheduler)
+kreports schedule-start
+```
+
+| Time (KST) | Job | Description |
+|-------------|-----|-------------|
+| 07:00 | Disclosure sync | Collect yesterday's new filings for all listed companies |
+| 07:30 | Retry failures | Re-attempt failed financial data collections |
+| 08:00 | Flag computation | Recalculate risk flags for recently collected companies |
+
+### Data Freshness Indicators / 데이터 최신성
+
+The dashboard and MCP responses include data freshness info:
+- **Industry benchmarking**: Shows `coverage_pct` (e.g., "16/494 companies, 3.2%") and `year`
+- **Financial snapshot**: Shows `fetched_at` timestamp per record
+- **Sparse data warning**: When peer count < 10, suggests running `kreports collect-seed`
+
+---
+
+## CLI Commands / CLI 명령어
+
+```
+kreports init                 # Initialize DB / DB 초기화
+kreports serve                # Start MCP stdio server / MCP 서버 실행
+kreports sync-companies       # Sync listed company registry / 상장사 동기화
+kreports enrich-market        # Enrich market + industry codes / 시장·업종코드 보완
+kreports collect-seed         # Auto-collect core companies / 핵심 기업 자동 수집
+kreports collect <stock>      # Collect single company / 단일 종목 수집
+kreports collect-all          # Batch collect all companies / 전체 배치 수집
+kreports collect-disclosures  # Collect filings / 공시 수집
+kreports collect-auditors     # Collect auditor history / 감사인 이력 수집
+kreports collect-audit-fees   # Collect audit fees / 감사보수 수집
+kreports collect-policies     # Persist accounting policies / 회계정책 영속화
+kreports compute-flags        # Recompute risk flags / 플래그 재계산
+kreports show <stock>         # Show financial metrics / 재무지표 조회
+kreports schedule-start       # Start daily scheduler / 스케줄러 실행
 ```
 
 ---
 
-## 아키텍처
+## Architecture / 아키텍처
 
 ```
-kreports/                   # pip 패키지
-├── analysis/               # 공개 API (dict 반환, JSON-safe)
-│   ├── api.py              # 10개 분석 함수
-│   └── queries.py          # DB 쿼리 레이어 (Streamlit 무의존)
-├── mcp/                    # MCP stdio 서버 (8개 도구)
-├── cli/                    # Typer CLI (17개 명령)
-├── db/                     # SQLAlchemy 모델 (8개 테이블)
-├── collector/              # DART API 수집기 (9개 모듈)
-├── processor/              # XBRL/XML 파서 (8개 모듈)
-└── judge/                  # 위험 플래그 엔진 (Beneish, Going Concern)
+kreports/                   # pip package
+├── analysis/               # Public API (dict returns, JSON-safe)
+│   ├── api.py              # 10 analysis functions
+│   └── queries.py          # DB query layer (no Streamlit dependency)
+├── mcp/                    # MCP stdio server (8 tools)
+├── cli/                    # Typer CLI (17 commands)
+├── db/                     # SQLAlchemy models (8 tables)
+├── collector/              # DART API collectors (9 modules)
+├── processor/              # XBRL/XML parsers (8 modules)
+└── judge/                  # Risk flag engine (Beneish, Going Concern)
 ```
 
-**DB 테이블**: Company, Financial, FinancialFact, Disclosure, Auditor, AuditFee, AccountingPolicyItem, FetchLog
+### Database / 데이터베이스
+
+SQLite (`kreports.db`), no external DB required. Tables:
+
+| Table | Records | Purpose |
+|-------|--------:|---------|
+| companies | 3,951 | Listed company master (corp_code, induty_code) |
+| financials | 786 | 6-metric summary + risk flags + Beneish |
+| financial_facts | 99,425 | Full XBRL accounts (detailed) |
+| disclosures | 5,536 | Filing list |
+| auditors | 173 | Auditor history |
+| audit_fees | - | Audit fees (DS002) |
+| accounting_policy_items | 38 | Persisted policy items with body_hash |
+| fetch_log | 873 | Collection history |
+
+### Cache / 캐시
+
+- `.cache/corp_code.zip` — DART company registry XML (TTL: 30 days, auto-refresh)
+- Financial data is cached in SQLite (no Redis required)
+- `_already_collected()` skips duplicate API calls for existing records
 
 ---
 
-## 분석 지표
+## Benchmarking Metrics / 벤치마킹 지표 (8)
 
-### 계속기업 스코어카드 (100점 감점)
+| Metric | Unit | Category |
+|--------|------|----------|
+| 영업이익률 (Operating Margin) | % | Profitability |
+| 순이익률 (Net Margin) | % | Profitability |
+| ROE | % | Profitability |
+| ROA | % | Profitability |
+| 부채비율 (Debt Ratio) | % | Stability |
+| 자기자본비율 (Equity Ratio) | % | Stability |
+| 매출성장률 (Revenue Growth YoY) | % | Growth |
+| Beneish M-Score | score | Manipulation risk |
 
-| 인자 | 감점 | 기준 |
-|------|------|------|
-| 자본잠식 | -30 | 자본총계 < 0 |
-| 2년 연속 영업손실 | -20 | 최근 2년 영업이익 < 0 |
-| 부채비율 > 200% | -15 | 부채/자본 > 200% |
-| 이자보상배율 < 1.0 | -15 | 영업이익/이자비용 < 1 |
-| 영업CF 음수 | -10 | 최근 연도 영업활동현금흐름 < 0 |
-| 비적정 감사의견 | -10 | 한정/부적정/의견거절 |
+Industry matching uses KSIC codes: 2-digit (major category) or 3-digit (mid category).
+
+업종 매칭은 KSIC 코드 2자리(대분류) 또는 3자리(중분류) 사용.
+
+---
+
+## Going Concern Scorecard / 계속기업 스코어카드
+
+100-point deduction system / 100점 감점 방식:
+
+| Factor | Deduction | Threshold |
+|--------|----------:|-----------|
+| Capital impairment / 자본잠식 | -30 | Total equity < 0 |
+| 2-year consecutive operating loss / 2년 연속 영업손실 | -20 | Operating profit < 0 for 2 years |
+| Debt ratio > 200% / 부채비율 > 200% | -15 | Debt / Equity > 200% |
+| Interest coverage < 1.0 / 이자보상배율 < 1.0 | -15 | Operating profit / Interest expense < 1 |
+| Negative operating CF / 영업CF 음수 | -10 | Operating cash flow < 0 |
+| Non-clean audit opinion / 비적정 감사의견 | -10 | Qualified / Adverse / Disclaimer |
+
+Grades: Stable (80+) / Caution (60-79) / Warning (40-59) / Danger (<40)
 
 등급: 안정(80+) / 주의(60-79) / 경고(40-59) / 위험(<40)
 
-### 업종 벤치마킹 지표 (8개)
+---
 
-영업이익률, 순이익률, ROE, ROA, 부채비율, 자기자본비율, 매출성장률, Beneish M-Score
+## Data Collection Strategy / 데이터 수집 전략
 
-KSIC 업종코드 2자리(대분류) 또는 3자리(중분류)로 peer 그룹 자동 매칭.
+```bash
+kreports collect-seed --size small     # KOSPI200+KOSDAQ150, ~20 min
+kreports collect-seed --size medium    # KOSPI full, ~50 min
+kreports collect-seed --size full      # All listed, ~11 hours
+```
+
+- **Q4 priority**: Benchmarking uses annual (Q4) data. `--annual-only` enabled by default.
+- **Industry diversity**: Round-robin selection by KSIC 2-digit prefix. At least 1 company per industry.
+- **Deduplication**: Already-collected company-year-quarter combos are auto-skipped.
+- **DART API limit**: 10,000 calls/day. `collect-seed small` uses ~1,050 calls.
 
 ---
 
-## 데이터 수집 전략
-
-```
-kreports collect-seed --size small     # KOSPI200+KOSDAQ150, ~20분
-kreports collect-seed --size medium    # KOSPI 전체, ~50분
-kreports collect-seed --size full      # 전체 상장사, ~11시간
-```
-
-- **Q4 우선**: 벤치마킹은 연간(Q4) 데이터만 사용. `--annual-only` 기본 활성화.
-- **업종 분산**: KSIC 2자리 기준 라운드 로빈 선택. 모든 업종에 최소 1개 기업 보장.
-- **중복 방지**: 이미 수집된 기업-연도-분기는 자동 건너뜀.
-- **DART API 제한**: 일 10,000건. `collect-seed small`은 ~1,050건 사용.
-
----
-
-## 요구 사항
+## Requirements / 요구 사항
 
 - Python 3.11+
-- DART OpenAPI 키 ([무료 발급](https://opendart.fss.or.kr))
+- DART OpenAPI key ([free registration](https://opendart.fss.or.kr))
 
 ---
 
-## 라이선스
+## License / 라이선스
 
-Apache License 2.0. 자유롭게 사용, 수정, 배포 가능.
-
----
-
-## 기여
-
-이슈 리포트와 풀 리퀘스트를 환영합니다.
+Apache License 2.0. Free to use, modify, and distribute.
 
 ---
 
-## 만든 사람
+## Contributing / 기여
 
-**capitalparser** — Big4 회계법인 7년차 공인회계사. 감사 현장에서 매년 반복하던 DART 수작업을 자동화하기 위해 만들었습니다.
+Issues and pull requests are welcome. 이슈 리포트와 풀 리퀘스트를 환영합니다.
+
+---
+
+## Author / 만든 사람
+
+**capitalparser** — Big4 accounting firm, 7-year CPA. Built to automate the annual DART manual labor from audit fieldwork.
+
+Big4 회계법인 7년차 공인회계사. 감사 현장에서 매년 반복하던 DART 수작업을 자동화하기 위해 만들었습니다.
