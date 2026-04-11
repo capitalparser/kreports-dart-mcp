@@ -430,10 +430,24 @@ def insight(text: str, level: str = "info") -> str:
     )
 
 
-def no_data(msg: str = "수집된 데이터가 없습니다.") -> str:
+def no_data(msg: str = "수집된 데이터가 없습니다.", state: str = "not_collected") -> str:
+    """데이터 없음 안내 박스.
+
+    state:
+        "not_collected" — 아직 수집되지 않음 (수집 버튼 안내)
+        "empty" — 수집했으나 DART에 해당 데이터가 없음
+    """
+    if state == "empty":
+        icon = "🔍"
+        sub = (f'<div style="font-size:0.78rem;margin-top:0.3rem;opacity:0.7;">'
+               f'DART 공시 데이터에 해당 항목이 없습니다.</div>')
+    else:
+        icon = "📭"
+        sub = (f'<div style="font-size:0.78rem;margin-top:0.3rem;opacity:0.7;">'
+               f'아래 버튼으로 데이터를 수집하세요.</div>')
     return (
         f'<div style="background:{WHITE};border:1px dashed {BORDER};border-radius:10px;'
         f'padding:2rem;text-align:center;color:{TEXT_MID};">'
-        f'<div style="font-size:2rem;margin-bottom:0.5rem;">📭</div>'
-        f'<div style="font-weight:600;color:{TEXT_DARK};">{msg}</div></div>'
+        f'<div style="font-size:2rem;margin-bottom:0.5rem;">{icon}</div>'
+        f'<div style="font-weight:600;color:{TEXT_DARK};">{msg}</div>{sub}</div>'
     )

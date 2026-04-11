@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-from dashboard.db import get_auditors, get_company, get_audit_fee_history, get_auditors_for_corp_codes, get_companies_by_corp_codes, get_subsidiaries_with_auditors
+from dashboard.db import get_auditors, get_company, get_audit_fees, get_audit_fee_history, get_auditors_for_corp_codes, get_companies_by_corp_codes, get_subsidiaries_with_auditors
 from dashboard.styles import CSS, page_header, kpi_card, section_title, insight, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE, WHITE, BORDER, TEXT_DARK, TEXT_MID, LIGHT_BG
 
 st.set_page_config(page_title="감사인 이력", layout="wide")
@@ -28,7 +28,8 @@ st.markdown(page_header(
     "감사인 교체·연속 연수·감사의견 타임라인"
 ), unsafe_allow_html=True)
 
-df = get_auditors(company["corp_code"])
+with st.spinner("감사인 이력 로딩 중..."):
+    df = get_auditors(company["corp_code"])
 if df.empty:
     st.markdown(no_data("감사인 이력이 없습니다."), unsafe_allow_html=True)
     if st.button("감사인 이력 수집", type="primary", use_container_width=True):
@@ -163,13 +164,14 @@ if auditor_changes == 0 and max_tenure < 6:
 
 # 감사용역 체결현황
 st.markdown(section_title("감사용역 체결현황"), unsafe_allow_html=True)
-if st.button("감사용역 현황 조회", use_container_width=True):
-    with st.spinner("감사용역 현황 조회 중 (API 호출, 잠시 대기)..."):
+fee_df = get_audit_fees(company["corp_code"])
+if fee_df.empty:
+    with st.spinner("감사용역 현황 조회 중 (API 호출)..."):
         fee_df = get_audit_fee_history(company["corp_code"])
-    if not fee_df.empty:
-        st.dataframe(fee_df[['사업연도', '감사인', '보수(백만원)']], use_container_width=True, hide_index=True)
-    else:
-        st.info("감사용역 데이터가 없습니다.")
+if not fee_df.empty:
+    st.dataframe(fee_df[['사업연도', '감사인', '보수(백만원)']], use_container_width=True, hide_index=True)
+else:
+    st.info("감사용역 데이터가 없습니다.")
 
 # ── 종속회사·지분법 회사 감사인 현황 ─────────────────────────────────────
 st.markdown("---")

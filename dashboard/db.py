@@ -37,10 +37,34 @@ else:
         st = _HeadlessST()  # type: ignore
 
 import pandas as pd
+from sqlalchemy import func as sa_func
 from dart_platform.db.engine import get_session
 from dart_platform.db.models import Company, Financial, FinancialFact, Disclosure, Auditor, AuditFee
 
 _UNIT = 1e8  # 억원
+
+
+def get_data_freshness(corp_code: str) -> dict:
+    """각 데이터 유형별 최종 수집 시각을 반환한다."""
+    with get_session() as session:
+        fin_dt = session.query(sa_func.max(Financial.fetched_at)).filter_by(corp_code=corp_code).scalar()
+        disc_dt = session.query(sa_func.max(Disclosure.fetched_at)).filter_by(corp_code=corp_code).scalar()
+        aud_dt = session.query(sa_func.max(Auditor.fetched_at)).filter_by(corp_code=corp_code).scalar()
+    return {"financial": fin_dt, "disclosure": disc_dt, "auditor": aud_dt}
+
+
+def has_been_collected(corp_code: str, task_type: str) -> bool:
+    """해당 기업의 데이터가 한 번이라도 수집된 적 있는지 확인한다."""
+    try:
+        from dart_platform.db.models import FetchLog
+        with get_session() as session:
+            return session.query(FetchLog).filter(
+                FetchLog.corp_code == corp_code,
+                FetchLog.task_type == task_type,
+                FetchLog.status.in_(["success", "no_data"])
+            ).count() > 0
+    except Exception:
+        return False
 
 
 def search_companies(query: str, limit: int = 30) -> list[dict]:

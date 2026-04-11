@@ -85,7 +85,8 @@ col_y, col_div, col_space = st.columns([2, 2, 6])
 with col_y:
     sel_year = st.selectbox("사업연도", years, index=0)
 with col_div:
-    sel_div = st.selectbox("재무제표 구분", ["CFS (연결)", "OFS (별도)"], index=0)
+    _fs_default = 0 if st.session_state.get("fs_div", "CFS") == "CFS" else 1
+    sel_div = st.selectbox("재무제표 구분", ["CFS (연결)", "OFS (별도)"], index=_fs_default)
 fs_div = "CFS" if sel_div.startswith("CFS") else "OFS"
 
 st.markdown("<hr style='border:none;border-top:1px solid #D1D8F0;margin:0.8rem 0;'>", unsafe_allow_html=True)

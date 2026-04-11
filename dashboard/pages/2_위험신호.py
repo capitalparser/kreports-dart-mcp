@@ -31,7 +31,8 @@ st.markdown(page_header(
     "감사 계획 수립 및 위험 평가 지원 · K-IFRS 기반 이상 탐지"
 ), unsafe_allow_html=True)
 
-summary = get_risk_summary(company["corp_code"])
+with st.spinner("위험 신호 분석 중..."):
+    summary = get_risk_summary(company["corp_code"])
 
 if not summary["has_data"]:
     st.markdown(no_data(f"{company['corp_name']} 재무 데이터가 아직 수집되지 않았습니다."), unsafe_allow_html=True)
@@ -203,6 +204,16 @@ c13.markdown(kpi_card(
     _risk(summary["nas_risk_count"]),
     tooltip="비감사보수/감사보수 비율(NAS ratio)이 1.0 초과한 연도 수. 비감사용역 의존도가 높을수록 감사인 독립성 저하 위험이 증가합니다.",
 ), unsafe_allow_html=True)
+
+# ── CSV 다운로드 (위험 신호 요약) ──────────────────────────────────────
+_risk_export = {k: v for k, v in summary.items() if k != "has_data"}
+_risk_csv = pd.DataFrame([{"지표": k, "값": v} for k, v in _risk_export.items()])
+st.download_button(
+    "CSV 다운로드 (위험 신호 요약)",
+    data=_risk_csv.to_csv(index=False).encode("utf-8-sig"),
+    file_name=f"{company['corp_name']}_위험신호.csv",
+    mime="text/csv",
+)
 
 # ── 재무 이상 탐지 ──────────────────────────────────────────────────────
 st.markdown(section_title("재무 이상 탐지"), unsafe_allow_html=True)
