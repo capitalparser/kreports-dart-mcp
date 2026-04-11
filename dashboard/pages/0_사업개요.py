@@ -73,8 +73,9 @@ if not result:
     ), unsafe_allow_html=True)
     st.stop()
 
-sections = result.get("sections", {})
-rcept_no = result.get("rcept_no", "")
+# get_business_report_sections는 {section_key: {...}} dict를 직접 반환
+sections = result if isinstance(result, dict) else {}
+rcept_no = ""
 
 if not sections:
     st.markdown(no_data(
