@@ -207,6 +207,47 @@ _FACT_PATTERNS: dict[str, list[tuple[list[str], list[str]]]] = {
         (["현금및현금성자산"], []),
         (["현금 및 현금성자산"], []),
     ],
+    # 감가상각비 및 무형자산상각비 (CF) — DCF D&A
+    "depreciation_amortization": [
+        (["감가상각비 및 무형자산상각비"], []),
+        (["감가상각비및무형자산상각비"], []),
+        (["감가상각비"], ["상각"]),
+    ],
+    # 법인세비용 (IS) — 실효세율 계산용
+    "tax_expense": [
+        (["법인세비용"], ["이연", "차감전"]),
+        (["법인세 비용"], ["이연"]),
+    ],
+    # 법인세비용차감전순이익 (IS) — 실효세율 계산용
+    "pretax_income": [
+        (["법인세비용차감전순이익"], []),
+        (["법인세비용차감전 순이익"], []),
+        (["법인세비용차감전계속사업이익"], []),
+        (["세전이익"], []),
+        (["세전순이익"], []),
+    ],
+    # 무형자산 취득 (CF) — 무형 CapEx
+    "intangible_capex": [
+        (["무형자산의 취득"], []),
+        (["무형자산 취득"], []),
+    ],
+    # 단기차입금 (BS)
+    "short_term_borrowings": [
+        (["단기차입금"], []),
+        (["단기 차입금"], []),
+    ],
+    # 장기차입금 (BS)
+    "long_term_borrowings": [
+        (["장기차입금"], []),
+        (["장기 차입금"], []),
+        (["비유동차입금"], []),
+        (["사채"], ["전환"]),
+    ],
+    # 유동성장기부채 (BS)
+    "current_portion_lt_debt": [
+        (["유동성장기부채"], []),
+        (["유동성 장기부채"], []),
+    ],
 }
 
 
@@ -400,6 +441,208 @@ def get_financials_extended(corp_code: str, fs_div: str = "CFS") -> pd.DataFrame
         df.at[idx, "DSO"] = dso
         df.at[idx, "DPO"] = dpo
         df.at[idx, "CCC"] = ccc
+
+    return df
+
+
+def get_dcf_inputs(corp_code: str, fs_div: str = "CFS") -> pd.DataFrame:
+    """
+    DCF 밸류에이션 입력 데이터를 산출한다.
+
+    get_financials_extended() 결과를 기반으로 연간(Q4) 데이터에 DCF 관련 추가 컬럼을
+    붙여 반환한다.
+
+    추가 컬럼 (억원 단위):
+      D&A, 무형CapEx, 법인세비용, 세전이익, 실효세율, NOPAT, EBITDA,
+      NWC, Delta_NWC, Unlevered_FCF,
+      단기차입금, 유동성장기부채, 장기차입금, 총차입금, Net_Debt,
+      매출_CAGR
+    """
+    df = get_financials_extended(corp_code, fs_div)
+    if df.empty:
+        return df
+
+    # 연간(Q4)만 대상
+    df = df[df["분기"] == 4].copy().reset_index(drop=True)
+    if df.empty:
+        return df
+
+    # DCF 확장 컬럼 초기화
+    dcf_cols = [
+        "D&A", "무형CapEx", "법인세비용", "세전이익", "실효세율",
+        "NOPAT", "EBITDA", "NWC", "Delta_NWC", "Unlevered_FCF",
+        "단기차입금", "유동성장기부채", "장기차입금", "총차입금", "Net_Debt",
+    ]
+    for c in dcf_cols:
+        df[c] = pd.NA
+
+    annual_years = sorted(df["연도"].dropna().astype(int).unique().tolist())
+
+    # FinancialFact 전체 조회 (연간 reprt_code=11011)
+    with get_session() as session:
+        q = (
+            session.query(FinancialFact)
+            .filter_by(corp_code=corp_code, fs_div=fs_div, reprt_code="11011")
+            .filter(FinancialFact.bsns_year.in_(annual_years))
+        )
+        rows = q.all()
+        fact_data = [
+            {
+                "연도": r.bsns_year,
+                "재무표": r.sj_div,
+                "계정명": r.account_nm,
+                "당기": r.thstrm_amount,
+            }
+            for r in rows
+        ]
+    if not fact_data and fs_div == "CFS":
+        with get_session() as session:
+            q = (
+                session.query(FinancialFact)
+                .filter_by(corp_code=corp_code, fs_div="OFS", reprt_code="11011")
+                .filter(FinancialFact.bsns_year.in_(annual_years))
+            )
+            rows = q.all()
+            fact_data = [
+                {
+                    "연도": r.bsns_year,
+                    "재무표": r.sj_div,
+                    "계정명": r.account_nm,
+                    "당기": r.thstrm_amount,
+                }
+                for r in rows
+            ]
+
+    facts_all = pd.DataFrame(fact_data)
+
+    for year in annual_years:
+        row_mask = df["연도"] == year
+        if not row_mask.any():
+            continue
+        if facts_all.empty:
+            continue
+        year_facts = facts_all[facts_all["연도"] == year]
+        if year_facts.empty:
+            continue
+
+        bs = year_facts[year_facts["재무표"] == "BS"]
+        is_ = year_facts[year_facts["재무표"] == "IS"]
+        cf = year_facts[year_facts["재무표"] == "CF"]
+
+        # 새 패턴에서 값 추출
+        da_raw = _extract_fact_value(cf, "depreciation_amortization")
+        intang_capex_raw = _extract_fact_value(cf, "intangible_capex")
+        tax_raw = _extract_fact_value(is_, "tax_expense")
+        pretax_raw = _extract_fact_value(is_, "pretax_income")
+        st_borrow_raw = _extract_fact_value(bs, "short_term_borrowings")
+        lt_borrow_raw = _extract_fact_value(bs, "long_term_borrowings")
+        cur_lt_raw = _extract_fact_value(bs, "current_portion_lt_debt")
+
+        # 억원 변환
+        da = abs(da_raw) / _UNIT if da_raw is not None else None
+        intang_capex = abs(intang_capex_raw) / _UNIT if intang_capex_raw is not None else None
+        tax_exp = tax_raw / _UNIT if tax_raw is not None else None
+        pretax = pretax_raw / _UNIT if pretax_raw is not None else None
+        st_borrow = st_borrow_raw / _UNIT if st_borrow_raw is not None else None
+        lt_borrow = lt_borrow_raw / _UNIT if lt_borrow_raw is not None else None
+        cur_lt = cur_lt_raw / _UNIT if cur_lt_raw is not None else None
+
+        row = df[row_mask].iloc[0]
+        op = row.get("영업이익")
+        capex = row.get("CapEx")  # 이미 억원 단위, get_financials_extended에서 계산
+        inv = row.get("재고자산")
+        ar = row.get("매출채권")
+        ap = row.get("매입채무")
+        cash = row.get("현금성자산")
+
+        # 실효세율 = 법인세비용 / 세전이익 (0-50% 클램프, 기본 22%)
+        eff_tax = 0.22  # fallback
+        if (tax_exp is not None and pretax is not None
+                and pd.notna(tax_exp) and pd.notna(pretax) and pretax != 0):
+            raw_rate = tax_exp / pretax
+            eff_tax = max(0.0, min(raw_rate, 0.5))
+
+        # NOPAT = 영업이익 × (1 - 실효세율)
+        nopat = None
+        if pd.notna(op):
+            nopat = op * (1 - eff_tax)
+
+        # EBITDA = 영업이익 + D&A
+        ebitda = None
+        if pd.notna(op) and da is not None:
+            ebitda = op + da
+
+        # NWC = 재고자산 + 매출채권 - 매입채무
+        nwc = None
+        if (inv is not None and ar is not None and ap is not None
+                and pd.notna(inv) and pd.notna(ar) and pd.notna(ap)):
+            nwc = inv + ar - ap
+
+        # Total CapEx = 유형자산 CapEx + 무형 CapEx
+        total_capex = 0
+        if capex is not None and pd.notna(capex):
+            total_capex += capex
+        if intang_capex is not None:
+            total_capex += intang_capex
+
+        # 총차입금 = 단기차입금 + 유동성장기부채 + 장기차입금
+        total_debt = None
+        st_val = st_borrow if st_borrow is not None else 0
+        lt_val = lt_borrow if lt_borrow is not None else 0
+        cur_lt_val = cur_lt if cur_lt is not None else 0
+        if st_borrow is not None or lt_borrow is not None or cur_lt is not None:
+            total_debt = st_val + cur_lt_val + lt_val
+
+        # Net_Debt = 총차입금 - 현금성자산
+        net_debt = None
+        if total_debt is not None:
+            cash_val = cash if (cash is not None and pd.notna(cash)) else 0
+            net_debt = total_debt - cash_val
+
+        # 값 기록
+        idx = df.index[row_mask][0]
+        df.at[idx, "D&A"] = da
+        df.at[idx, "무형CapEx"] = intang_capex
+        df.at[idx, "법인세비용"] = tax_exp
+        df.at[idx, "세전이익"] = pretax
+        df.at[idx, "실효세율"] = round(eff_tax * 100, 1)
+        df.at[idx, "NOPAT"] = round(nopat, 2) if nopat is not None else None
+        df.at[idx, "EBITDA"] = round(ebitda, 2) if ebitda is not None else None
+        df.at[idx, "NWC"] = round(nwc, 2) if nwc is not None else None
+        df.at[idx, "단기차입금"] = st_borrow
+        df.at[idx, "유동성장기부채"] = cur_lt
+        df.at[idx, "장기차입금"] = lt_borrow
+        df.at[idx, "총차입금"] = round(total_debt, 2) if total_debt is not None else None
+        df.at[idx, "Net_Debt"] = round(net_debt, 2) if net_debt is not None else None
+
+    # Delta_NWC: NWC의 전년 대비 변동 (shift)
+    df = df.sort_values("연도").reset_index(drop=True)
+    nwc_series = pd.to_numeric(df["NWC"], errors="coerce")
+    df["Delta_NWC"] = nwc_series - nwc_series.shift(1)
+
+    # Unlevered_FCF = NOPAT + D&A - CapEx(유형+무형) - Delta_NWC
+    nopat_s = pd.to_numeric(df["NOPAT"], errors="coerce")
+    da_s = pd.to_numeric(df["D&A"], errors="coerce").fillna(0)
+    capex_s = pd.to_numeric(df["CapEx"], errors="coerce").fillna(0)
+    intang_capex_s = pd.to_numeric(df["무형CapEx"], errors="coerce").fillna(0)
+    delta_nwc_s = pd.to_numeric(df["Delta_NWC"], errors="coerce").fillna(0)
+    df["Unlevered_FCF"] = nopat_s + da_s - capex_s - intang_capex_s - delta_nwc_s
+    # NOPAT이 NaN이면 Unlevered_FCF도 NaN
+    df.loc[nopat_s.isna(), "Unlevered_FCF"] = pd.NA
+
+    # 매출_CAGR: 전체 기간 연평균 성장률
+    rev_series = pd.to_numeric(df["매출액"], errors="coerce").dropna()
+    if len(rev_series) >= 2 and rev_series.iloc[0] > 0:
+        first_rev = rev_series.iloc[0]
+        last_rev = rev_series.iloc[-1]
+        n_years = len(rev_series) - 1
+        if first_rev > 0 and last_rev > 0 and n_years > 0:
+            cagr = (last_rev / first_rev) ** (1 / n_years) - 1
+            df["매출_CAGR"] = round(cagr * 100, 2)
+        else:
+            df["매출_CAGR"] = pd.NA
+    else:
+        df["매출_CAGR"] = pd.NA
 
     return df
 
@@ -1717,6 +1960,51 @@ def _extract_topic_chapter_items(note_section: str) -> dict[str, dict]:
                     break
 
     return items
+
+
+# ---------------------------------------------------------------------------
+# 사업보고서 본문 섹션 추출
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_business_report_sections(corp_code: str, bsns_year: int) -> dict | None:
+    """
+    사업보고서 본문 XML에서 핵심 경영 정보 섹션(사업의 개요, 사업의 내용 등)을 추출한다.
+
+    Returns:
+        {section_key: {"title": str, "body_text": str, "body_html": str, "length": int}}
+        또는 None (데이터 없음)
+    """
+    from kreports.processor.report_section_parser import select_main_body_file, extract_report_sections
+
+    # 사업보고서 rcept_no 조회 — 사업연도 N의 사업보고서는 N+1년 1~12월에 공시
+    with get_session() as session:
+        row = (
+            session.query(Disclosure.rcept_no)
+            .filter_by(corp_code=corp_code)
+            .filter(Disclosure.report_nm.like("%사업보고서%"))
+            .filter(Disclosure.disc_date >= f"{bsns_year + 1}-01-01")
+            .filter(Disclosure.disc_date <= f"{bsns_year + 1}-12-31")
+            .order_by(Disclosure.disc_date.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        rcept_no = row.rcept_no
+
+    all_files = _fetch_note_files_cached(rcept_no)
+    if not all_files:
+        return None
+
+    main_body = select_main_body_file(all_files)
+    if not main_body:
+        return None
+
+    sections = extract_report_sections(main_body)
+    if not sections:
+        return None
+
+    return sections
 
 
 # ---------------------------------------------------------------------------

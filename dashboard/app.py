@@ -57,12 +57,14 @@ with st.sidebar:
     <div style="font-size:0.72rem; opacity:0.6; line-height:1.7;">
     <b>페이지</b><br>
     홈 · 기업 검색<br>
+    0 · 사업 개요<br>
     1 · 재무 요약<br>
     2 · 위험 신호<br>
     3 · 감사인 이력<br>
     4 · 공시 타임라인<br>
     5 · 재무 상세<br>
-    6 · 회계정책
+    6 · 회계정책<br>
+    7 · 기업가치 (DCF)
     </div>
     """, unsafe_allow_html=True)
 
@@ -103,6 +105,12 @@ if query:
             corp_name = results[idx]["corp_name"]
             st.session_state["selected_stock"] = stock_code
             st.session_state["selected_corp_name"] = corp_name
+            # 최근 조회 종목에 추가
+            _recent = st.session_state.get("recent_stocks", [])
+            _new = {"stock_code": stock_code, "corp_name": corp_name}
+            _recent = [r for r in _recent if r["stock_code"] != stock_code]
+            _recent.insert(0, _new)
+            st.session_state["recent_stocks"] = _recent[:5]
             st.rerun()
     else:
         st.warning("검색 결과가 없습니다.")

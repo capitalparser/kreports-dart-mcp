@@ -3,6 +3,9 @@ kreports.db
 dart_platform.db
 *.db-journal
 
+# Legacy package symlink
+dart_platform
+
 # Environment
 .env
 .env.*

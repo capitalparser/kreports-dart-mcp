@@ -35,6 +35,12 @@ def render_sidebar() -> None:
                 if st.button("선택", use_container_width=True, key="sidebar_select_btn_global"):
                     st.session_state["selected_stock"] = options[chosen_label]
                     st.session_state["selected_corp_name"] = chosen_label.split(" (")[0]
+                    # 최근 조회 종목에 추가
+                    _recent = st.session_state.get("recent_stocks", [])
+                    _new = {"stock_code": options[chosen_label], "corp_name": chosen_label.split(" (")[0]}
+                    _recent = [r for r in _recent if r["stock_code"] != _new["stock_code"]]
+                    _recent.insert(0, _new)
+                    st.session_state["recent_stocks"] = _recent[:5]
                     st.rerun()
             else:
                 st.caption("검색 결과 없음")
@@ -65,3 +71,22 @@ def render_sidebar() -> None:
                 key="sidebar_fs_div_global",
             )
             st.session_state["fs_div"] = "CFS" if "CFS" in _fs_choice else "OFS"
+
+        # 최근 조회 종목
+        _recent = st.session_state.get("recent_stocks", [])
+        if _recent:
+            st.divider()
+            st.markdown(
+                '<div style="font-size:0.72rem;opacity:0.6;color:white;margin-bottom:0.3rem;">최근 조회</div>',
+                unsafe_allow_html=True,
+            )
+            for i, item in enumerate(_recent[:5]):
+                if item["stock_code"] != st.session_state.get("selected_stock"):
+                    if st.button(
+                        f"{item['corp_name']} ({item['stock_code']})",
+                        use_container_width=True,
+                        key=f"recent_{i}",
+                    ):
+                        st.session_state["selected_stock"] = item["stock_code"]
+                        st.session_state["selected_corp_name"] = item["corp_name"]
+                        st.rerun()
