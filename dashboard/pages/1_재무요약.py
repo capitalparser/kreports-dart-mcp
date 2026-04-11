@@ -62,6 +62,19 @@ def _delta(cur, prev_val):
     color = GREEN if d > 0 else RED
     return f"<span style='color:{color}; font-size:0.72rem'>{sign} {abs(d):,.1f}</span>"
 
+
+def _fmt_krw(v):
+    """억원 값을 적절한 단위로 포맷. 10,000억 이상이면 조원 표시."""
+    if v is None or pd.isna(v):
+        return "-"
+    abs_v = abs(v)
+    if abs_v >= 10000:
+        return f"{v / 10000:,.1f}조"
+    elif abs_v >= 1:
+        return f"{v:,.0f}억"
+    else:
+        return f"{v:.1f}억"
+
 cols = st.columns(5)
 metrics = [
     ("매출액", "억원", "revenue"),
@@ -91,7 +104,12 @@ if prev is not None:
 for col, (label, unit, key) in zip(cols, metrics):
     v = val_map.get(key)
     p = prev_map.get(key)
-    fmt = f"{v:,.0f}{unit}" if v is not None and not pd.isna(v) else "-"
+    if unit == "억원":
+        fmt = _fmt_krw(v)
+    elif unit == "%":
+        fmt = f"{v:.1f}%" if v is not None and not pd.isna(v) else "-"
+    else:
+        fmt = f"{v:,.0f}{unit}" if v is not None and not pd.isna(v) else "-"
     delta_html = _delta(v, p)
     risk = "bad" if key == "debt_ratio" and v is not None and not pd.isna(v) and v > 200 else "ok"
     col.markdown(kpi_card(label, fmt, delta_html, risk), unsafe_allow_html=True)
@@ -118,12 +136,11 @@ cols2[1].markdown(kpi_card(
     _delta(roa_v, roa_p), _roe_risk(roa_v),
 ), unsafe_allow_html=True)
 cols2[2].markdown(kpi_card(
-    "자본총계", f"{eq_v:,.0f}억원" if eq_v is not None and not pd.isna(eq_v) else "-",
+    "자본총계", _fmt_krw(eq_v),
     "", "ok",
 ), unsafe_allow_html=True)
 cols2[3].markdown(kpi_card(
-    "영업CF",
-    f"{ocf_v:,.0f}억원" if ocf_v is not None and not pd.isna(ocf_v) else "-",
+    "영업CF", _fmt_krw(ocf_v),
     _delta(ocf_v, ocf_p),
     "bad" if ocf_v is not None and not pd.isna(ocf_v) and ocf_v < 0 else "ok",
     tooltip="영업활동현금흐름. 음수 지속 시 이익 품질 저하 또는 운전자본 악화 시그널.",

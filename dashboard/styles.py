@@ -400,14 +400,28 @@ def kpi_card(label: str, value: str, sub: str = "", risk_level: str = "ok", tool
         )
     else:
         label_html = label
+    # 값 길이에 따라 폰트 크기 자동 조절 (한 줄 유지)
+    vlen = len(value)
+    if vlen > 12:
+        val_size = "1.0rem"
+    elif vlen > 8:
+        val_size = "1.2rem"
+    elif vlen > 5:
+        val_size = "1.4rem"
+    else:
+        val_size = "1.6rem"
     return f"""
     <div style="background:{WHITE};border:1px solid {BORDER};border-radius:10px;
-                border-top:3px solid {top_color};padding:1rem 1.2rem;text-align:center;
-                box-shadow:0 1px 4px rgba(0,51,141,0.06);">
-      <div style="color:{TEXT_MID};font-size:0.75rem;font-weight:600;
-                  letter-spacing:0.5px;text-transform:uppercase;margin-bottom:0.3rem;">{label_html}</div>
-      <div style="color:{TEXT_DARK};font-size:1.6rem;font-weight:700;line-height:1.2;">{value}</div>
-      <div style="color:{TEXT_MID};font-size:0.72rem;margin-top:0.15rem;">{sub}</div>
+                border-top:3px solid {top_color};padding:0.8rem 0.6rem;text-align:center;
+                box-shadow:0 1px 4px rgba(0,51,141,0.06);min-height:90px;
+                display:flex;flex-direction:column;justify-content:center;">
+      <div style="color:{TEXT_MID};font-size:0.7rem;font-weight:600;
+                  letter-spacing:0.3px;text-transform:uppercase;margin-bottom:0.2rem;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{label_html}</div>
+      <div style="color:{TEXT_DARK};font-size:{val_size};font-weight:700;line-height:1.15;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{value}</div>
+      <div style="color:{TEXT_MID};font-size:0.68rem;margin-top:0.1rem;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{sub}</div>
     </div>
     """
 

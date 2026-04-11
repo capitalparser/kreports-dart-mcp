@@ -11,6 +11,19 @@ from dashboard.styles import (
     PRIMARY, NAVY, RED, GREEN, ORANGE, WHITE, BORDER, TEXT_DARK, TEXT_MID,
 )
 
+
+def _fmt_krw(v):
+    """억원 값을 적절한 단위로 포맷."""
+    if v is None or pd.isna(v):
+        return "-"
+    abs_v = abs(v)
+    if abs_v >= 10000:
+        return f"{v / 10000:,.1f}조"
+    elif abs_v >= 1:
+        return f"{v:,.0f}억"
+    else:
+        return f"{v:.1f}억"
+
 st.set_page_config(page_title="기업가치 — DCF 지원", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
 from dashboard.sidebar import render_sidebar
@@ -90,7 +103,7 @@ if ebitda_v is not None and rev_v is not None and pd.notna(ebitda_v) and pd.notn
 ebitda_fmt = f"{ebitda_margin:.1f}%" if ebitda_margin is not None else "-"
 c2.markdown(kpi_card(
     "EBITDA 마진", ebitda_fmt,
-    f"EBITDA {ebitda_v:,.0f}억원" if ebitda_v is not None and pd.notna(ebitda_v) else "",
+    f"EBITDA {_fmt_krw(ebitda_v)}" if ebitda_v is not None and pd.notna(ebitda_v) else "",
     "ok" if ebitda_margin is not None and ebitda_margin > 10 else "warn",
     tooltip="EBITDA / 매출액. 영업이익 + 감가상각비. 현금 기반 영업 수익성 지표.",
 ), unsafe_allow_html=True)
@@ -111,7 +124,7 @@ c3.markdown(kpi_card(
 
 # Unlevered FCF
 ufcf_v = latest.get("Unlevered_FCF")
-ufcf_fmt = f"{ufcf_v:,.0f}억원" if ufcf_v is not None and pd.notna(ufcf_v) else "-"
+ufcf_fmt = _fmt_krw(ufcf_v)
 c4.markdown(kpi_card(
     "Unlevered FCF", ufcf_fmt,
     "NOPAT+D&A-CapEx-ΔNWC",
@@ -244,11 +257,11 @@ if "Net_Debt" in df.columns and df["Net_Debt"].notna().any():
 
     nc1, nc2, nc3 = st.columns(3)
     nc1.markdown(kpi_card(
-        "총차입금", f"{td_v:,.0f}억원" if td_v is not None and pd.notna(td_v) else "-",
+        "총차입금", _fmt_krw(td_v),
         "단기+유동성장기+장기", "ok",
     ), unsafe_allow_html=True)
     nc2.markdown(kpi_card(
-        "Net Debt", f"{nd_v:,.0f}억원" if nd_v is not None and pd.notna(nd_v) else "-",
+        "Net Debt", _fmt_krw(nd_v),
         "총차입금 - 현금성자산",
         "warn" if nd_v is not None and pd.notna(nd_v) and nd_v > 0 else "ok",
     ), unsafe_allow_html=True)
