@@ -29,15 +29,22 @@ st.markdown(page_header(
     f"{stock} | {company['market']}"
 ), unsafe_allow_html=True)
 
-# FS 구분 선택
-fs_div = st.radio("재무제표 구분", ["CFS (연결)", "OFS (별도)"], horizontal=True)
+# FS 구분 선택 (사이드바 설정 연동)
+_fs_default = 0 if st.session_state.get("fs_div", "CFS") == "CFS" else 1
+fs_div = st.radio("재무제표 구분", ["CFS (연결)", "OFS (별도)"], horizontal=True, index=_fs_default)
 fs_div_code = "CFS" if "CFS" in fs_div else "OFS"
 
-df = get_financials(company["corp_code"], fs_div_code)
+with st.spinner("재무 데이터 로딩 중..."):
+    df = get_financials(company["corp_code"], fs_div_code)
 if df.empty:
-    st.markdown(no_data(f"{company['corp_name']} 재무 데이터가 없습니다."), unsafe_allow_html=True)
-    from dashboard.collector import render_collect_button
-    render_collect_button(company["corp_code"], stock)
+    from dashboard.db import has_been_collected
+    _collected = has_been_collected(company["corp_code"], "financial")
+    if _collected:
+        st.markdown(no_data(f"{company['corp_name']} 재무 데이터가 DART에 없습니다.", state="empty"), unsafe_allow_html=True)
+    else:
+        st.markdown(no_data(f"{company['corp_name']} 재무 데이터가 아직 수집되지 않았습니다."), unsafe_allow_html=True)
+        from dashboard.collector import render_collect_button
+        render_collect_button(company["corp_code"], stock)
     st.stop()
 
 annual = df[df["분기"] == 4].copy()
@@ -128,6 +135,18 @@ cols2[4].markdown(kpi_card(
     "bad" if accrual_v is not None and not pd.isna(accrual_v) and abs(accrual_v) > 1.0 else "ok",
     tooltip="발생액비율 = (순이익 - 영업CF) / |순이익|. |1.0| 초과 시 현금 뒷받침 없는 장부 이익 비중 과다 (Sloan 1996).",
 ), unsafe_allow_html=True)
+
+# ── CSV 다운로드 ──────────────────────────────────────────────────────────
+if not annual.empty:
+    _csv_cols = [c for c in ["연도", "매출액", "영업이익", "순이익", "영업이익률", "순이익률",
+                              "부채비율", "ROE", "ROA", "자본총계", "영업CF", "발생액비율"] if c in annual.columns]
+    _csv_data = annual[_csv_cols].to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "CSV 다운로드 (연간 재무요약)",
+        data=_csv_data,
+        file_name=f"{company['corp_name']}_재무요약_{fs_div_code}.csv",
+        mime="text/csv",
+    )
 
 # ── 차트 영역 ──────────────────────────────────────────────────────────────
 st.markdown(section_title("수익성 추세"), unsafe_allow_html=True)

@@ -3,8 +3,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
-from dashboard.db import search_companies, get_financials, get_auditors, get_risk_summary
-from dashboard.styles import CSS, page_header, kpi_card, section_title, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE
+from dashboard.db import search_companies, get_financials, get_auditors, get_risk_summary, get_data_freshness
+from dashboard.styles import CSS, page_header, kpi_card, section_title, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE, TEXT_MID
 
 st.set_page_config(
     page_title="DART 감사·투자 분석",
@@ -25,6 +25,8 @@ with st.sidebar:
     st.divider()
 
     search_input = st.text_input("종목 검색", placeholder="회사명 또는 종목코드", key="sidebar_search")
+    if not search_input and "selected_stock" not in st.session_state:
+        st.caption("또는 메인 화면에서 검색하세요")
     if search_input:
         candidates = search_companies(search_input, limit=10)
         if candidates:
@@ -44,6 +46,11 @@ with st.sidebar:
           <div style="font-size:0.75rem; opacity:0.8;">{st.session_state.get('selected_stock','')}</div>
         </div>
         """, unsafe_allow_html=True)
+        if st.button("✕ 선택 해제", use_container_width=True, key="sidebar_clear_btn"):
+            del st.session_state["selected_stock"]
+            if "selected_corp_name" in st.session_state:
+                del st.session_state["selected_corp_name"]
+            st.rerun()
 
     st.divider()
     st.markdown("""
@@ -53,7 +60,9 @@ with st.sidebar:
     1 · 재무 요약<br>
     2 · 위험 신호<br>
     3 · 감사인 이력<br>
-    4 · 공시 타임라인
+    4 · 공시 타임라인<br>
+    5 · 재무 상세<br>
+    6 · 회계정책
     </div>
     """, unsafe_allow_html=True)
 
@@ -144,6 +153,21 @@ if "selected_stock" in st.session_state:
             "한정·부적정·의견거절",
             _risk(summary["non_clean_opinion_count"])
         ), unsafe_allow_html=True)
+
+        # 데이터 신선도 표시
+        freshness = get_data_freshness(
+            next(iter([c["corp_code"] for c in search_companies(stock, 1)]), None) or ""
+        )
+        _parts = []
+        for label, dt in [("재무", freshness["financial"]), ("공시", freshness["disclosure"]), ("감사", freshness["auditor"])]:
+            if dt:
+                _parts.append(f"{label}: {dt.strftime('%Y-%m-%d')}")
+        if _parts:
+            st.markdown(
+                f'<div style="font-size:0.72rem; color:{TEXT_MID}; margin-top:0.5rem;">'
+                f'최종 수집 — {" · ".join(_parts)}</div>',
+                unsafe_allow_html=True,
+            )
 
         st.caption("상세 분석은 좌측 사이드바 또는 상단 메뉴에서 페이지를 선택하세요.")
 else:

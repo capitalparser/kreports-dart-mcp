@@ -48,3 +48,20 @@ def render_sidebar() -> None:
               <div style="font-size:0.75rem; opacity:0.8; color:white;">{st.session_state.get('selected_stock', '')}</div>
             </div>
             """, unsafe_allow_html=True)
+            if st.button("✕ 선택 해제", use_container_width=True, key="sidebar_clear_btn_global"):
+                del st.session_state["selected_stock"]
+                if "selected_corp_name" in st.session_state:
+                    del st.session_state["selected_corp_name"]
+                st.rerun()
+
+            # CFS/OFS 구분 — 페이지 간 공유
+            st.divider()
+            _fs_default = 0 if st.session_state.get("fs_div", "CFS") == "CFS" else 1
+            _fs_choice = st.radio(
+                "재무제표 구분",
+                ["CFS (연결)", "OFS (별도)"],
+                index=_fs_default,
+                horizontal=True,
+                key="sidebar_fs_div_global",
+            )
+            st.session_state["fs_div"] = "CFS" if "CFS" in _fs_choice else "OFS"

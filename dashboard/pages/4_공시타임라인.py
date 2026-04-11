@@ -39,11 +39,17 @@ st.markdown(page_header(
     "DART 전체 공시 흐름 · 감사 관련 공시 필터"
 ), unsafe_allow_html=True)
 
-df = get_disclosures(company["corp_code"])
+with st.spinner("공시 데이터 로딩 중..."):
+    df = get_disclosures(company["corp_code"])
 if df.empty:
-    st.markdown(no_data("공시 데이터가 없습니다."), unsafe_allow_html=True)
-    from dashboard.collector import render_collect_button
-    render_collect_button(company["corp_code"], stock)
+    from dashboard.db import has_been_collected
+    _collected = has_been_collected(company["corp_code"], "disclosure")
+    if _collected:
+        st.markdown(no_data("공시 데이터가 DART에 없습니다.", state="empty"), unsafe_allow_html=True)
+    else:
+        st.markdown(no_data("공시 데이터가 아직 수집되지 않았습니다."), unsafe_allow_html=True)
+        from dashboard.collector import render_collect_button
+        render_collect_button(company["corp_code"], stock)
     st.stop()
 
 df["공시일"] = pd.to_datetime(df["공시일"], errors="coerce")

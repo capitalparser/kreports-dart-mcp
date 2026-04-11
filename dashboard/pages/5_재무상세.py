@@ -108,7 +108,8 @@ with col_f2:
     sel_reprt = st.selectbox("보고서", ["연간(Q4)", "Q3", "Q2", "Q1"])
     reprt_code = _REPRT_MAP[sel_reprt]
 with col_f3:
-    sel_fs = st.radio("재무제표", ["CFS (연결)", "OFS (별도)"], horizontal=True)
+    _fs_default = 0 if st.session_state.get("fs_div", "CFS") == "CFS" else 1
+    sel_fs = st.radio("재무제표", ["CFS (연결)", "OFS (별도)"], horizontal=True, index=_fs_default)
     fs_div = "CFS" if "CFS" in sel_fs else "OFS"
 with col_f4:
     sel_sj = st.selectbox("재무표", list(_SJ_MAP.keys()))
