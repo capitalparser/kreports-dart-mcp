@@ -38,6 +38,8 @@ KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC filing system) to 
 | Auditor History | O | O | Change, opinion, consecutive years timeline |
 | Subsidiary Auditors | O | - | Group audit matrix (slim mode for large groups) |
 | Beneish M-Score | O | O | Earnings manipulation probability score |
+| **Business Report Sections** | **O** | **O** | **Extract key narrative from annual reports (overview, risk, MD&A)** |
+| **DCF Valuation Support** | - | **O** | **NOPAT, EBITDA, Unlevered FCF, effective tax rate, NWC delta** |
 
 ### Quick Start
 
@@ -196,8 +198,23 @@ kreports/                   # pip package
 ├── cli/                    # Typer CLI (17 commands)
 ├── db/                     # SQLAlchemy models (8 tables)
 ├── collector/              # DART API collectors (9 modules)
-├── processor/              # XBRL/XML parsers (8 modules)
+├── processor/              # XBRL/XML parsers (9 modules)
+│   └── report_section_parser.py  # Business report narrative extraction
 └── judge/                  # Risk flag engine (Beneish, Going Concern)
+
+dashboard/                  # Streamlit analytics UI (9 pages)
+├── app.py                  # Home + company search
+├── sidebar.py              # Shared sidebar (search, CFS/OFS, recent stocks)
+├── pages/
+│   ├── 0_사업개요.py        # Business report key sections
+│   ├── 1_재무요약.py        # Financial summary + KPIs
+│   ├── 2_위험신호.py        # Risk signals + Going Concern
+│   ├── 3_감사인이력.py      # Auditor history + subsidiary auditors
+│   ├── 4_공시타임라인.py    # Disclosure timeline
+│   ├── 5_재무상세.py        # XBRL account explorer
+│   ├── 6_회계정책.py        # Accounting policy checklist
+│   └── 7_기업가치.py        # DCF valuation support
+└── db.py                   # Query layer with Streamlit caching
 ```
 
 Database: SQLite (`kreports.db`), no external DB required.
@@ -220,6 +237,21 @@ kreports compute-flags        # Recompute risk flags
 kreports show <stock>         # Show financial metrics
 kreports schedule-start       # Start daily scheduler
 ```
+
+### Dashboard (9 Pages)
+
+| # | Page | Description |
+|---|------|-------------|
+| 0 | Business Overview | Key narrative sections from annual reports (overview, risk, MD&A) |
+| 1 | Financial Summary | KPIs, profitability/health charts, industry benchmarking |
+| 2 | Risk Signals | Going concern scorecard, anomaly detection, Beneish M-Score |
+| 3 | Auditor History | Auditor timeline, fee history, subsidiary audit matrix |
+| 4 | Disclosure Timeline | DART filing calendar with audit-related filtering |
+| 5 | Financial Details | Full XBRL account explorer with footnote lookup |
+| 6 | Accounting Policy | Industry checklist, year-over-year policy change tracking |
+| 7 | Enterprise Valuation | DCF inputs: NOPAT, EBITDA, Unlevered FCF, waterfall chart, CSV export |
+
+**UX Features:** CFS/OFS sync across pages, recently viewed stocks, data freshness display, CSV export, loading spinners, smart empty-state messages.
 
 ### Screenshots
 
@@ -281,6 +313,8 @@ KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이�
 | 감사인 이력 | O | O | 교체·의견·연속연수 타임라인 |
 | 종속회사 감사인 | O | - | 연결그룹 감사인 매트릭스 |
 | Beneish M-Score | O | O | 이익 조작 가능성 지표 |
+| **사업보고서 섹션 추출** | **O** | **O** | **사업개요·위험관리·경영계획 등 본문 핵심 섹션 자동 추출** |
+| **DCF 평가 지원** | - | **O** | **NOPAT·EBITDA·Unlevered FCF·실효세율·NWC 변동 산출** |
 
 ### 빠른 시작
 
@@ -449,6 +483,21 @@ kreports show <종목코드>       # 재무지표 조회
 kreports schedule-start       # 스케줄러 실행
 ```
 
+### 대시보드 (9개 페이지)
+
+| # | 페이지 | 설명 |
+|---|--------|------|
+| 0 | 사업 개요 | 사업보고서 본문 핵심 섹션 추출 (사업개요, 위험관리, 경영계획 등) |
+| 1 | 재무 요약 | KPI 카드, 수익성/건전성 차트, 업종 벤치마킹 |
+| 2 | 위험 신호 | Going Concern 스코어카드, 이상 탐지, Beneish M-Score |
+| 3 | 감사인 이력 | 감사인 타임라인, 감사보수, 종속회사 감사인 매트릭스 |
+| 4 | 공시 타임라인 | DART 공시 캘린더, 감사 관련 필터링 |
+| 5 | 재무 상세 | XBRL 전체 계정 탐색, 주석 조회 |
+| 6 | 회계정책 | 업종별 체크리스트, 연도별 정책 변화 추적 |
+| 7 | 기업가치 (DCF) | NOPAT, EBITDA, Unlevered FCF, 워터폴 차트, CSV 내보내기 |
+
+**UX 기능:** CFS/OFS 페이지 간 연동, 최근 조회 종목, 데이터 신선도 표시, CSV 내보내기, 로딩 스피너, 데이터 상태 구분 메시지.
+
 ### 대시보드 스크린샷
 
 #### 재무 요약
@@ -477,8 +526,15 @@ kreports/                   # pip 패키지
 ├── cli/                    # Typer CLI (17개 명령)
 ├── db/                     # SQLAlchemy 모델 (8개 테이블)
 ├── collector/              # DART API 수집기 (9개 모듈)
-├── processor/              # XBRL/XML 파서 (8개 모듈)
+├── processor/              # XBRL/XML 파서 (9개 모듈)
+│   └── report_section_parser.py  # 사업보고서 본문 섹션 추출
 └── judge/                  # 위험 플래그 엔진 (Beneish, Going Concern)
+
+dashboard/                  # Streamlit 분석 대시보드 (9개 페이지)
+├── app.py                  # 홈 + 기업 검색
+├── sidebar.py              # 공유 사이드바 (검색, CFS/OFS, 최근 조회)
+├── pages/                  # 0_사업개요 ~ 7_기업가치
+└── db.py                   # 쿼리 레이어 (Streamlit 캐싱)
 ```
 
 데이터베이스: SQLite (`kreports.db`), 외부 DB 불필요.
