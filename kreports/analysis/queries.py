@@ -562,6 +562,12 @@ def get_risk_summary(corp_code: str) -> dict:
     df = get_financials_both(corp_code)
     if not df.empty:
         result["has_data"] = True
+
+        # 최근 2개 사업연도(8분기)로 제한 — 오래된 이력이 현재 위험으로 오해되는 것 방지
+        if "연도" in df.columns and len(df) > 0:
+            recent_years = sorted(df["연도"].dropna().unique())[-2:]
+            df = df[df["연도"].isin(recent_years)].copy()
+
         def _flag_count(col: str) -> int:
             if col not in df.columns:
                 return 0
@@ -991,7 +997,7 @@ def _fetch_note_files_cached(rcept_no: str) -> dict:
 # dart_platform.processor.policy_parser.POLICY_KEYWORDS 는 TITLE 기반 폴백용으로 유지하고,
 # 여기서는 <P> 세그먼트 헤드 매칭용으로 더 엄격한 키워드를 사용한다.
 _POLICY_HEAD_KEYWORDS: dict[str, list[str]] = {
-    "revenue_recognition": ["수익인식", "수익의 인식", "매출인식", "수익 인식"],
+    "revenue_recognition": ["수익인식", "수익의 인식", "매출인식", "수익 인식", "수행의무", "변동대가"],
     "inventory_valuation": ["재고자산", "저가법", "선입선출", "평균법", "총평균법"],
     "depreciation": ["감가상각", "유형자산"],
     "intangible_assets": ["무형자산", "개발비", "영업권"],
@@ -1002,7 +1008,7 @@ _POLICY_HEAD_KEYWORDS: dict[str, list[str]] = {
     "consolidation": ["관계기업", "공동기업", "연결범위", "연결대상", "종속기업의 변동"],
     "employee_benefits": ["종업원급여", "퇴직급여", "확정급여", "확정기여", "주식기준보상"],
     "foreign_currency": ["외화환산", "외화거래", "기능통화", "표시통화"],
-    "construction_contract": ["건설계약", "공사계약", "진행률", "공사손실"],
+    "construction_contract": ["건설계약", "공사계약", "진행률", "공사손실", "공사수익", "진행기준"],
     "financial_instruments_hedge": ["헤지회계", "위험회피회계", "파생상품"],
     "tax": ["법인세", "이연법인세", "당기법인세"],
     "insurance_contract": ["IFRS 17", "K-IFRS 제1117호", "보험부채", "보험수익"],

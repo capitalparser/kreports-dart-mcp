@@ -485,6 +485,46 @@ TOOL_COMPARE_TO_INDUSTRY = Tool(
 
 
 # ---------------------------------------------------------------------------
+# 9. get_business_overview
+# ---------------------------------------------------------------------------
+
+def _handle_get_business_overview(args: dict) -> dict:
+    corp_code = _resolve_or_error(args["company"])
+    bsns_year = args.get("bsns_year")
+    if bsns_year is not None:
+        bsns_year = int(bsns_year)
+    return kreports.get_business_overview(corp_code, bsns_year=bsns_year)
+
+
+TOOL_GET_BUSINESS_OVERVIEW = Tool(
+    name="get_business_overview",
+    description=(
+        "사업보고서 핵심 경영 정보 텍스트 + 업종 특화 인사이트 반환. "
+        "사업개요, 사업내용, 위험관리, 경영계획, R&D, 주요계약 6개 섹션의 본문 텍스트와 "
+        "KSIC 업종 분류 기반 rule-based 인사이트(R&D 비율, 위험 분포, 업종 키워드)를 포함. "
+        "Claude가 이 텍스트를 받아 업종 맥락에 맞는 심층 분석을 수행할 수 있다. "
+        "감사 계획 수립(ISA 315 사업 이해), 투자 분석(비즈니스 모델 파악)에 활용."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {
+                "type": "string",
+                "description": "corp_code / 종목코드 / 회사명",
+            },
+            "bsns_year": {
+                "type": "integer",
+                "description": "사업연도. 생략 시 최신 사업보고서.",
+                "minimum": 2000,
+                "maximum": 2100,
+            },
+        },
+        "required": ["company"],
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -497,6 +537,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_GET_AUDIT_HISTORY,
     TOOL_GET_SUBSIDIARY_AUDITORS,
     TOOL_COMPARE_TO_INDUSTRY,
+    TOOL_GET_BUSINESS_OVERVIEW,
 ]
 
 HANDLERS: dict[str, Callable[[dict], Any]] = {
@@ -508,6 +549,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "get_audit_history": _handle_get_audit_history,
     "get_subsidiary_auditors": _handle_get_subsidiary_auditors,
     "compare_to_industry": _handle_compare_to_industry,
+    "get_business_overview": _handle_get_business_overview,
 }
 
 

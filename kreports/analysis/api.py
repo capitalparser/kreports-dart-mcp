@@ -556,6 +556,109 @@ def get_industry_aggregates(
     }
 
 
+# ---------------------------------------------------------------------------
+# 사업개요 (MCP용 — Claude가 업종 맥락 분석에 활용)
+# ---------------------------------------------------------------------------
+
+def get_business_overview(
+    corp_code: str,
+    bsns_year: Optional[int] = None,
+) -> dict:
+    """
+    사업보고서 핵심 섹션 텍스트 + 업종 분류 + rule-based 인사이트 반환.
+    Claude가 MCP로 호출하여 업종별 심층 분석에 활용.
+
+    Args:
+        corp_code: 8자리 DART corp_code
+        bsns_year: 사업연도 (None이면 최신)
+
+    Returns:
+        {
+          "corp_code", "corp_name", "induty_code", "industry_name",
+          "bsns_year",
+          "sections": {section_key: {"title", "body_text", "length"}},
+          "insights": [{"title", "value", "detail", "audience", "risk_level"}],
+          "total_chars": int,
+        }
+    """
+    # 기업 정보
+    with get_session() as session:
+        row = session.query(Company).filter_by(corp_code=corp_code).first()
+        if row is None:
+            return {"error": f"corp_code '{corp_code}'를 찾을 수 없습니다."}
+        corp_name = row.corp_name
+        stock_code = row.stock_code
+        induty_code = row.induty_code or ""
+
+    # 업종명
+    industry_name = _get_industry_name(induty_code[:2]) if induty_code else ""
+
+    # 사업보고서 연도 결정
+    if bsns_year is None:
+        years = _queries.get_years_with_business_report(corp_code)
+        if not years:
+            return {
+                "corp_code": corp_code, "corp_name": corp_name,
+                "induty_code": induty_code, "industry_name": industry_name,
+                "bsns_year": None,
+                "sections": {},
+                "insights": [],
+                "total_chars": 0,
+                "note": "수집된 사업보고서가 없습니다.",
+            }
+        bsns_year = years[0]  # 가장 최근
+
+    # 섹션 추출 — dashboard.db에만 있는 함수 (queries.py에 미포함)
+    import os as _os
+    _os.environ.setdefault("DART_HEADLESS", "1")
+    from dashboard.db import get_business_report_sections as _get_brs
+    raw = _get_brs(corp_code, bsns_year)
+
+    if not raw or not isinstance(raw, dict):
+        return {
+            "corp_code": corp_code, "corp_name": corp_name,
+            "induty_code": induty_code, "industry_name": industry_name,
+            "bsns_year": bsns_year,
+            "sections": {},
+            "insights": [],
+            "total_chars": 0,
+            "note": f"{bsns_year}년 사업보고서 본문을 추출할 수 없습니다.",
+        }
+
+    # 텍스트만 반환 (HTML 제거 — MCP 응답 크기 절약)
+    sections_clean = {}
+    total_chars = 0
+    for key, sec in raw.items():
+        if not isinstance(sec, dict):
+            continue
+        body = sec.get("body_text", "")
+        # MCP 응답 크기 제한: 각 섹션 최대 3000자
+        if len(body) > 3000:
+            body = body[:3000] + "\n... (이하 생략)"
+        sections_clean[key] = {
+            "title": sec.get("title", key),
+            "body_text": body,
+            "length": sec.get("length", len(body)),
+        }
+        total_chars += sec.get("length", 0)
+
+    # 인사이트
+    from kreports.analysis.business_insights import generate_business_insights
+    insights = generate_business_insights(raw, induty_code=induty_code)
+
+    return _clean_dict({
+        "corp_code": corp_code,
+        "corp_name": corp_name,
+        "induty_code": induty_code,
+        "industry_name": industry_name,
+        "bsns_year": bsns_year,
+        "sections": sections_clean,
+        "insights": insights,
+        "total_chars": total_chars,
+        "section_count": len(sections_clean),
+    })
+
+
 _SUBSIDIARY_SLIM_FIELDS = (
     "name", "relation", "ownership_pct", "listed_yn",
     "corp_code", "stock_code", "market", "auditor",

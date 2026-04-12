@@ -36,6 +36,18 @@ fs_div_code = "CFS" if "CFS" in fs_div else "OFS"
 
 with st.spinner("재무 데이터 로딩 중..."):
     df = get_financials(company["corp_code"], fs_div_code)
+    # OFS 선택인데 데이터 없으면 CFS 폴백
+    _fell_back = False
+    if df.empty and fs_div_code == "OFS":
+        df = get_financials(company["corp_code"], "CFS")
+        if not df.empty:
+            _fell_back = True
+    # CFS 선택인데 데이터 없으면 OFS 폴백
+    if df.empty and fs_div_code == "CFS":
+        df = get_financials(company["corp_code"], "OFS")
+        if not df.empty:
+            _fell_back = True
+
 if df.empty:
     from dashboard.db import has_been_collected
     _collected = has_been_collected(company["corp_code"], "financial")
@@ -46,6 +58,17 @@ if df.empty:
         from dashboard.collector import render_collect_button
         render_collect_button(company["corp_code"], stock)
     st.stop()
+
+if _fell_back:
+    _alt = "CFS (연결)" if fs_div_code == "OFS" else "OFS (별도)"
+    st.markdown(
+        insight(
+            f"{fs_div} 데이터가 없어 {_alt} 데이터를 표시합니다. "
+            f"'{fs_div_code}' 데이터를 수집하려면 `kreports collect {stock}` 명령을 실행하세요.",
+            level="info",
+        ),
+        unsafe_allow_html=True,
+    )
 
 annual = df[df["분기"] == 4].copy()
 latest = annual.iloc[-1] if not annual.empty else df.iloc[-1]

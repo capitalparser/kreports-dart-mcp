@@ -81,6 +81,17 @@ latest = df.iloc[-1]
 prev = df.iloc[-2] if len(df) >= 2 else None
 
 # ── KPI 카드 ───────────────────────────────────────────────────────────────
+# PER/PBR 등 시장 배수 — 주가 데이터는 DART 미제공. 네이버 금융 참조.
+_naver_val_url = f"https://finance.naver.com/item/main.naver?code={stock}"
+st.markdown(
+    f'<div style="background:#EEF2FF;border:1px solid {BORDER};border-left:4px solid {PRIMARY};'
+    f'border-radius:6px;padding:0.6rem 1rem;font-size:0.8rem;color:{TEXT_DARK};margin-bottom:0.8rem;">'
+    f'PER · PBR · EV/EBITDA 등 시장 배수는 실시간 주가 기반으로 계산됩니다. '
+    f'<a href="{_naver_val_url}" target="_blank" style="color:{PRIMARY};font-weight:600;">'
+    f'네이버 금융에서 최신 밸류에이션 확인</a></div>',
+    unsafe_allow_html=True,
+)
+
 st.markdown(section_title("핵심 가치 지표"), unsafe_allow_html=True)
 c1, c2, c3, c4 = st.columns(4)
 

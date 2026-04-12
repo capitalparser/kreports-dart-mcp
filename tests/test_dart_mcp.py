@@ -25,9 +25,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 8  # search, get_financial_snapshot, score_going_concern,
+EXPECTED_TOOL_COUNT = 9  # search, get_financial_snapshot, score_going_concern,
                          # detect_restatement, get_accounting_policy,
-                         # get_audit_history, get_subsidiary_auditors, compare_to_industry
+                         # get_audit_history, get_subsidiary_auditors, compare_to_industry,
+                         # get_business_overview
 
 
 class TestToolRegistryConsistency:

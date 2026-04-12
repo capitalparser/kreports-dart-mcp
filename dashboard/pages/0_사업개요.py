@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import streamlit as st
 from dashboard.db import get_company, get_business_report_sections, get_years_with_business_report
 from dashboard.styles import (
-    CSS, page_header, kpi_card, section_title, no_data,
+    CSS, page_header, kpi_card, section_title, insight, no_data,
     PRIMARY, NAVY, GREEN, ORANGE, TEXT_DARK, TEXT_MID, WHITE, BORDER,
 )
 
@@ -99,6 +99,125 @@ k3.markdown(kpi_card(
     "본문 분량", f"{total_chars:,}자",
     "추출된 텍스트 총량", "ok",
 ), unsafe_allow_html=True)
+
+st.markdown("<div style='margin:0.8rem 0'></div>", unsafe_allow_html=True)
+
+# ── 외부 리소스 링크 ──────────────────────────────────────────────────────
+st.markdown(section_title("외부 리소스"), unsafe_allow_html=True)
+
+# 회사 홈페이지/IR 페이지를 DART에서 가져오기
+_hm_url = ""
+_ir_url_dart = ""
+try:
+    from kreports.collector.fetcher import fetch_company_info as _fci_full
+    from kreports.collector.fetcher import _get_client, _check_api_key, DART_BASE
+    from kreports.config import settings
+    _check_api_key()
+    _params = {"crtfc_key": settings.dart_api_key, "corp_code": corp_code}
+    with _get_client() as _client:
+        _resp = _client.get(f"{DART_BASE}/company.json", params=_params)
+        _cdata = _resp.json()
+        if _cdata.get("status") == "000":
+            _hm_url = (_cdata.get("hm_url") or "").strip()
+            _ir_url_dart = (_cdata.get("ir_url") or "").strip()
+            if _hm_url and not _hm_url.startswith("http"):
+                _hm_url = f"https://{_hm_url}"
+            if _ir_url_dart and not _ir_url_dart.startswith("http"):
+                _ir_url_dart = f"https://{_ir_url_dart}"
+except Exception:
+    pass
+
+# 실질적 외부 링크
+_analyst_url = f"https://finance.naver.com/research/company_list.naver?searchType=itemCode&itemCode={stock}"
+_ir_url = _ir_url_dart or (_hm_url + "/ir" if _hm_url else "")
+_dart_url = f"https://dart.fss.or.kr/dsab007/detailSearch.do?textCrpNm={corp_name}"
+
+def _link_btn(label, url, desc=""):
+    if not url:
+        return (
+            f'<div style="text-align:center;padding:0.5rem;background:#F0F0F0;'
+            f'border:1px solid {BORDER};border-radius:6px;color:#999;font-size:0.78rem;">'
+            f'{label}<br><span style="font-size:0.65rem;">(미등록)</span></div>'
+        )
+    return (
+        f'<a href="{url}" target="_blank" style="display:block;text-align:center;'
+        f'padding:0.5rem;background:{WHITE};border:1px solid {BORDER};border-radius:6px;'
+        f'color:{PRIMARY};font-size:0.78rem;font-weight:600;text-decoration:none;">'
+        f'{label}'
+        + (f'<br><span style="font-size:0.62rem;color:{TEXT_MID};font-weight:400;">{desc}</span>' if desc else "")
+        + '</a>'
+    )
+
+_link_cols = st.columns(4)
+_link_cols[0].markdown(_link_btn("애널리스트 보고서", _analyst_url, "네이버 리서치"), unsafe_allow_html=True)
+_link_cols[1].markdown(_link_btn("회사 IR", _ir_url or _hm_url, _hm_url.replace("https://","").replace("http://","")[:25] if _hm_url else ""), unsafe_allow_html=True)
+_link_cols[2].markdown(_link_btn("DART 공시", _dart_url, "전체 공시 검색"), unsafe_allow_html=True)
+_link_cols[3].markdown(_link_btn("네이버 컨센서스", f"https://finance.naver.com/item/coinfo.naver?code={stock}&target=finsum_more", "목표주가/투자의견"), unsafe_allow_html=True)
+
+# ── 자동 인사이트 ──────────────────────────────────────────────────────────
+from kreports.analysis.business_insights import generate_business_insights
+
+_insights = generate_business_insights(sections, induty_code=company.get("induty_code", ""))
+if _insights:
+    st.markdown(section_title("핵심 인사이트"), unsafe_allow_html=True)
+
+    # 감사 포인트 / 투자 포인트 분리
+    _audit_insights = [i for i in _insights if i["audience"] in ("auditor", "both")]
+    _invest_insights = [i for i in _insights if i["audience"] in ("investor", "both")]
+
+    _tab_audit, _tab_invest = st.tabs(["감사 포인트", "투자 포인트"])
+
+    def _render_insight_card(col, ins):
+        detail = ins.get("detail", "")
+        # detail이 60자 초과면 sub에 요약만, tooltip에 전문
+        if len(detail) > 60:
+            sub = detail[:55] + "..."
+            tooltip = detail
+        else:
+            sub = detail
+            tooltip = ""
+        col.markdown(
+            kpi_card(ins["title"], ins["value"], sub, ins["risk_level"], tooltip=tooltip),
+            unsafe_allow_html=True,
+        )
+
+    with _tab_audit:
+        if _audit_insights:
+            _a_cols = st.columns(min(len(_audit_insights), 4))
+            for i, ins in enumerate(_audit_insights):
+                _render_insight_card(_a_cols[i % len(_a_cols)], ins)
+        else:
+            st.caption("추출된 감사 관련 인사이트가 없습니다.")
+
+    with _tab_invest:
+        if _invest_insights:
+            _i_cols = st.columns(min(len(_invest_insights), 4))
+            for i, ins in enumerate(_invest_insights):
+                _render_insight_card(_i_cols[i % len(_i_cols)], ins)
+        else:
+            st.caption("추출된 투자 관련 인사이트가 없습니다.")
+
+    # 위험 분포 차트 (bar)
+    from kreports.analysis.business_insights import extract_risk_distribution
+    _risk_dist = extract_risk_distribution(sections)
+    if _risk_dist and len(_risk_dist["categories"]) >= 2:
+        import plotly.graph_objects as go
+        _fig = go.Figure(go.Bar(
+            x=[c["name"] for c in _risk_dist["categories"]],
+            y=[c["count"] for c in _risk_dist["categories"]],
+            marker_color=PRIMARY,
+            text=[f'{c["pct"]}%' for c in _risk_dist["categories"]],
+            textposition="outside",
+        ))
+        _fig.update_layout(
+            title="위험 유형별 언급 빈도",
+            height=280,
+            margin=dict(t=40, b=20, l=30, r=10),
+            plot_bgcolor="white", paper_bgcolor="white",
+            font=dict(color=TEXT_DARK, size=11),
+            yaxis_title="언급 횟수",
+        )
+        st.plotly_chart(_fig, use_container_width=True)
 
 st.markdown("<div style='margin:0.8rem 0'></div>", unsafe_allow_html=True)
 

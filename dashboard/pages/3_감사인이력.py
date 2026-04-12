@@ -237,12 +237,21 @@ if st.session_state.get("show_affiliates"):
             for it in group_items:
                 name = it["name"]
                 pct = f"{it['ownership_pct']:.1f}%" if it.get("ownership_pct") is not None else "-"
+                import re as _re
                 mkt_map = {"Y": "KOSPI", "K": "KOSDAQ", "N": "KONEX"}
-                # '상장' 판정은 오직 stock_code(국내 KOSPI/KOSDAQ/KONEX)로만.
-                # listed_yn=Y는 DART 사업보고서 XML 상 '상장' 표기지만 해외 상장일 수도 있으므로,
-                # 국내 미매칭 + listed_yn=Y 인 경우 "해외상장(추정)"으로 구분한다.
-                if it.get("stock_code"):
+                # 해외 법인 판정: 이름에 영문/외국어 패턴 (Inc., Ltd., GmbH, Pte. 등)
+                _is_overseas = bool(_re.search(
+                    r'(?:Inc\.|Ltd\.|GmbH|Pte\.|Corp\.|LLC|Co\.|S\.A\.|B\.V\.|AG\b|S\.r\.l\.|'
+                    r'[A-Z][a-z]+ [A-Z][a-z]+)',  # 영문 이름 패턴
+                    name,
+                ))
+                if it.get("stock_code") and it.get("market") in ("KOSPI", "KOSDAQ", "KONEX"):
                     market_label = mkt_map.get(it.get("market") or "", "상장")
+                elif _is_overseas:
+                    if it.get("listed_yn") == "Y":
+                        market_label = "해외상장"
+                    else:
+                        market_label = "해외법인"
                 elif it.get("listed_yn") == "Y":
                     market_label = "해외상장(추정)"
                 elif it.get("corp_code"):
@@ -307,7 +316,7 @@ if st.session_state.get("show_affiliates"):
 
         # CSV 다운로드
         def _build_csv(rows: list[dict]) -> bytes:
-            import csv, io
+            import csv, io, re as _re
             cols = ["관계", "회사명", "지분율", "시장구분", "감사인", "감사의견", "감사연도", "모회사대비"]
             buf = io.StringIO()
             w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
@@ -315,8 +324,15 @@ if st.session_state.get("show_affiliates"):
             mkt_map = {"Y": "KOSPI", "K": "KOSDAQ", "N": "KONEX"}
             for it in rows:
                 aud = it.get("auditor")
-                if it.get("stock_code"):
+                _name = it.get("name", "")
+                _overseas = bool(_re.search(
+                    r'(?:Inc\.|Ltd\.|GmbH|Pte\.|Corp\.|LLC|Co\.|S\.A\.|B\.V\.|AG\b)',
+                    _name,
+                ))
+                if it.get("stock_code") and it.get("market") in ("KOSPI", "KOSDAQ", "KONEX"):
                     mkt = mkt_map.get(it.get("market") or "", "상장")
+                elif _overseas:
+                    mkt = "해외상장" if it.get("listed_yn") == "Y" else "해외법인"
                 elif it.get("listed_yn") == "Y":
                     mkt = "해외상장(추정)"
                 elif it.get("corp_code"):
