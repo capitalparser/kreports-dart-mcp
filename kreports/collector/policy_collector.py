@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sys
+import types
 from datetime import datetime
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -21,6 +23,24 @@ from kreports.db.engine import get_session
 from kreports.db.models import AccountingPolicyItem
 
 logger = logging.getLogger(__name__)
+
+
+def _register_legacy_aliases() -> None:
+    """Keep old dart_platform patch/import paths pointed at this module."""
+    legacy_root = sys.modules.setdefault(
+        "dart_platform",
+        types.ModuleType("dart_platform"),
+    )
+    legacy_collector = sys.modules.setdefault(
+        "dart_platform.collector",
+        types.ModuleType("dart_platform.collector"),
+    )
+    setattr(legacy_root, "collector", legacy_collector)
+    setattr(legacy_collector, "policy_collector", sys.modules[__name__])
+    sys.modules["dart_platform.collector.policy_collector"] = sys.modules[__name__]
+
+
+_register_legacy_aliases()
 
 
 def _sha1(text: str) -> str:

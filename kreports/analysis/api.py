@@ -124,6 +124,13 @@ def resolve_corp_code(identifier: str) -> Optional[str]:
     return hits[0]["corp_code"] if hits else None
 
 
+def _resolve_company_identifier(identifier: str) -> Optional[str]:
+    """
+    public API에서 corp_code / stock_code / 회사명을 모두 허용하기 위한 helper.
+    """
+    return resolve_corp_code(identifier)
+
+
 # ---------------------------------------------------------------------------
 # 재무 스냅샷 (연도별 핵심 지표 + 자본배분)
 # ---------------------------------------------------------------------------
@@ -142,7 +149,7 @@ _ANNUAL_FIELDS = [
 
 
 def get_financial_snapshot(
-    corp_code: str,
+    company: str,
     fs_div: str = "CFS",
     years: Optional[int] = None,
     annual_only: bool = True,
@@ -151,7 +158,7 @@ def get_financial_snapshot(
     연도별 핵심 재무지표 + 자본배분 지표. 단위: 억원.
 
     Args:
-        corp_code: 8자리 DART corp_code
+        company: corp_code / stock_code / 회사명
         fs_div: CFS(연결) / OFS(별도). CFS 없으면 OFS 자동 폴백.
         years: 최근 N개 연도만 반환 (None=전체)
         annual_only: True면 Q4(연간)만, False면 분기 포함.
@@ -165,6 +172,17 @@ def get_financial_snapshot(
           "row_count": int,
         }
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "fs_div": fs_div,
+            "unit": "억원",
+            "rows": [],
+            "row_count": 0,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
     df = _queries.get_financials_extended(corp_code, fs_div=fs_div)
     if df.empty and fs_div == "CFS":
         df = _queries.get_financials_extended(corp_code, fs_div="OFS")
@@ -200,7 +218,7 @@ def get_financial_snapshot(
 # 계속기업 스코어
 # ---------------------------------------------------------------------------
 
-def score_going_concern(corp_code: str) -> dict:
+def score_going_concern(company: str) -> dict:
     """
     6인자 계속기업 위험 스코어카드 (100점 감점방식).
 
@@ -212,6 +230,18 @@ def score_going_concern(corp_code: str) -> dict:
           "has_data": bool,
         }
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "score": 0,
+            "grade": "-",
+            "risk": "ok",
+            "factors": [],
+            "has_data": False,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
     result = _queries.get_going_concern_score(corp_code)
     result["corp_code"] = corp_code
     return _clean_dict(result)
@@ -222,7 +252,7 @@ def score_going_concern(corp_code: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def detect_restatement(
-    corp_code: str,
+    company: str,
     threshold_pct: float = 1.0,
     top_n: int = 10,
 ) -> dict:
@@ -239,6 +269,17 @@ def detect_restatement(
           "count": int,
         }
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "threshold_pct": threshold_pct,
+            "top_n": top_n,
+            "restatements": [],
+            "count": 0,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
     df = _queries.get_restatement_delta(
         corp_code, threshold_pct=threshold_pct, top_n=top_n
     )
@@ -257,7 +298,7 @@ def detect_restatement(
 # ---------------------------------------------------------------------------
 
 def get_accounting_policy(
-    corp_code: str,
+    company: str,
     bsns_year: int,
     fs_div: str = "CFS",
 ) -> Optional[dict]:
@@ -271,6 +312,17 @@ def get_accounting_policy(
           "item_count": int,
         } or None (수집된 사업보고서 없음)
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "bsns_year": bsns_year,
+            "fs_div": fs_div,
+            "items": {},
+            "item_count": 0,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
     data = _queries.get_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
     if data is None:
         return None
@@ -288,7 +340,7 @@ def get_accounting_policy(
 # 감사인 이력
 # ---------------------------------------------------------------------------
 
-def get_audit_history(corp_code: str) -> dict:
+def get_audit_history(company: str) -> dict:
     """
     연도별 감사인·의견·연속연수 이력.
 
@@ -302,6 +354,15 @@ def get_audit_history(corp_code: str) -> dict:
           "count": int,
         }
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "history": [],
+            "count": 0,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
     df = _queries.get_auditors(corp_code)
     records = _df_to_records(df)
     return {
@@ -379,6 +440,8 @@ def get_industry_aggregates(
     prefix_len: int = 2,
     include_peers: bool = True,
     peer_limit: int = 50,
+    subject_corp_code: str | None = None,
+    subject_name: str | None = None,
 ) -> dict:
     """
     같은 업종(induty_code prefix 매칭) 내 기업들의 metric 분포.
@@ -394,6 +457,8 @@ def get_industry_aggregates(
         prefix_len: induty_code 앞에서 몇 자리로 매칭할지. 기본 2.
         include_peers: True면 peer 기업 리스트 반환. False면 통계만.
         peer_limit: peer 리스트 최대 개수.
+        subject_corp_code: 특정 회사의 위치를 전체 peer set 기준으로 계산할 때 사용.
+        subject_name: subject_corp_code의 표시명.
 
     Returns:
         {
@@ -536,7 +601,33 @@ def get_industry_aggregates(
 
     peers_out = peers_all[:peer_limit] if include_peers else []
 
-    return {
+    subject = None
+    if subject_corp_code:
+        subject_peer = next(
+            (p for p in peers_all if p["corp_code"] == subject_corp_code),
+            None,
+        )
+        subject = {
+            "corp_code": subject_corp_code,
+            "corp_name": subject_name,
+            "value": subject_peer["value"] if subject_peer else None,
+            "found_in_peers": subject_peer is not None,
+            "found_in_returned_peers": any(
+                p["corp_code"] == subject_corp_code for p in peers_out
+            ),
+        }
+        if subject_peer and n > 1:
+            all_values = sorted(
+                [p["value"] for p in peers_all if p["value"] is not None]
+            )
+            rank = sum(1 for v in all_values if v < subject_peer["value"])
+            subject["percentile"] = round(
+                100.0 * rank / max(len(all_values) - 1, 1), 1
+            )
+        else:
+            subject["percentile"] = None
+
+    result = {
         "induty_code": induty_code,
         "match_prefix": match_prefix,
         "industry_name": industry_name,
@@ -554,6 +645,83 @@ def get_industry_aggregates(
         "truncated": include_peers and len(peers_all) > peer_limit,
         "note": note,
     }
+    if subject is not None:
+        result["subject"] = subject
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 업종 비교 (회사 기준 wrapper)
+# ---------------------------------------------------------------------------
+
+def compare_to_industry(
+    company: str | None = None,
+    induty_code: str | None = None,
+    metric: str = "영업이익률",
+    year: Optional[int] = None,
+    fs_div: str = "CFS",
+    prefix_len: int = 2,
+    include_peers: bool = True,
+    peer_limit: int = 50,
+) -> dict:
+    """
+    회사 또는 업종코드를 기준으로 동종업종 내 상대 위치를 반환한다.
+
+    Args:
+        company: corp_code / stock_code / 회사명
+        induty_code: 회사 대신 직접 KSIC 코드 지정
+        metric: 비교 지표
+        year: 사업연도 (Q4 기준)
+        fs_div: CFS / OFS
+        prefix_len: induty_code prefix 길이
+        include_peers: peer 리스트 포함 여부
+        peer_limit: peer 리스트 최대 개수
+
+    Returns:
+        get_industry_aggregates 반환값 + subject 정보
+    """
+    if company:
+        corp_code = resolve_corp_code(company)
+        if corp_code is None:
+            return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
+
+        with get_session() as session:
+            row = session.query(Company).filter_by(corp_code=corp_code).first()
+            if row is None:
+                return {"error": f"corp_code '{corp_code}'를 찾을 수 없습니다."}
+            if not row.induty_code:
+                return {
+                    "error": (
+                        f"'{row.corp_name}'에 induty_code가 없습니다. "
+                        "kreports enrich-market으로 업종코드를 보완하세요."
+                    )
+                }
+            resolved_induty = row.induty_code
+            subject_name = row.corp_name
+            subject_corp_code = corp_code
+    elif induty_code:
+        resolved_induty = str(induty_code).strip()
+        subject_name = None
+        subject_corp_code = None
+    else:
+        return {"error": "company 또는 induty_code 중 하나를 제공해야 합니다."}
+
+    result = get_industry_aggregates(
+        induty_code=resolved_induty,
+        metric=metric,
+        year=year,
+        fs_div=fs_div,
+        prefix_len=prefix_len,
+        include_peers=include_peers,
+        peer_limit=peer_limit,
+        subject_corp_code=subject_corp_code,
+        subject_name=subject_name,
+    )
+
+    if "error" in result:
+        return result
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +729,7 @@ def get_industry_aggregates(
 # ---------------------------------------------------------------------------
 
 def get_business_overview(
-    corp_code: str,
+    company: str,
     bsns_year: Optional[int] = None,
 ) -> dict:
     """
@@ -569,7 +737,7 @@ def get_business_overview(
     Claude가 MCP로 호출하여 업종별 심층 분석에 활용.
 
     Args:
-        corp_code: 8자리 DART corp_code
+        company: corp_code / stock_code / 회사명
         bsns_year: 사업연도 (None이면 최신)
 
     Returns:
@@ -581,6 +749,10 @@ def get_business_overview(
           "total_chars": int,
         }
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
+
     # 기업 정보
     with get_session() as session:
         row = session.query(Company).filter_by(corp_code=corp_code).first()
@@ -611,8 +783,9 @@ def get_business_overview(
     # 섹션 추출 — dashboard.db에만 있는 함수 (queries.py에 미포함)
     import os as _os
     _os.environ.setdefault("DART_HEADLESS", "1")
-    from dashboard.db import get_business_report_sections as _get_brs
-    raw = _get_brs(corp_code, bsns_year)
+    from dashboard.db import get_business_report_package as _get_brp
+    package = _get_brp(corp_code, bsns_year)
+    raw = (package or {}).get("sections")
 
     if not raw or not isinstance(raw, dict):
         return {
@@ -652,8 +825,12 @@ def get_business_overview(
         "induty_code": induty_code,
         "industry_name": industry_name,
         "bsns_year": bsns_year,
+        "report_meta": (package or {}).get("meta", {}),
         "sections": sections_clean,
         "insights": insights,
+        "audit_focus": (package or {}).get("audit_focus", []),
+        "investment_focus": (package or {}).get("investment_focus", []),
+        "risk_distribution": (package or {}).get("risk_distribution"),
         "total_chars": total_chars,
         "section_count": len(sections_clean),
     })
@@ -666,7 +843,7 @@ _SUBSIDIARY_SLIM_FIELDS = (
 
 
 def get_subsidiary_auditors(
-    corp_code: str,
+    company: str,
     limit: Optional[int] = 100,
     only_with_auditor: bool = False,
     slim: bool = True,
@@ -678,7 +855,7 @@ def get_subsidiary_auditors(
     기본값은 감사인 있는 항목 우선 + 상위 100개 + 핵심 필드만 (slim 모드).
 
     Args:
-        corp_code: 모회사 corp_code
+        company: corp_code / stock_code / 회사명
         limit: 반환 최대 종속회사 수. None이면 전체.
         only_with_auditor: True면 감사인 있는 항목만.
         slim: True면 핵심 8개 필드만 반환 (name, relation, ownership_pct, listed_yn,
@@ -693,6 +870,19 @@ def get_subsidiary_auditors(
           "truncated": bool,
         }
     """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "parent_rcept_no": None,
+            "bsns_year": None,
+            "subsidiaries": [],
+            "count": 0,
+            "total": 0,
+            "truncated": False,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
     data = _queries.get_subsidiaries_with_auditors(corp_code)
     if not data:
         return {

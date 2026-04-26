@@ -368,6 +368,8 @@ def get_disclosures(corp_code: str, limit: int = 300) -> pd.DataFrame:
 
 
 def get_auditors(corp_code: str) -> pd.DataFrame:
+    from kreports.processor.audit_parser import is_valid_auditor_name
+
     with get_session() as session:
         rows = (
             session.query(Auditor)
@@ -387,8 +389,39 @@ def get_auditors(corp_code: str) -> pd.DataFrame:
                 "연속연수": r.consecutive_years or 1,
             }
             for r in rows
+            if is_valid_auditor_name(r.auditor_nm)
         ]
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    if df.empty:
+        return df
+
+    df["_fs_rank"] = df["구분"].map({"CFS": 0, "OFS": 1}).fillna(9)
+    df = (
+        df.sort_values(["회계연도", "_fs_rank"])
+        .groupby("회계연도", as_index=False)
+        .first()
+        .sort_values("회계연도")
+        .drop(columns=["_fs_rank"])
+        .reset_index(drop=True)
+    )
+
+    prev_auditor = None
+    tenure = 0
+    for idx, row in df.iterrows():
+        auditor = row["감사인"]
+        if prev_auditor is None:
+            df.at[idx, "교체여부"] = "최초"
+            tenure = 1
+        elif auditor == prev_auditor:
+            df.at[idx, "교체여부"] = "유지"
+            tenure += 1
+        else:
+            df.at[idx, "교체여부"] = "교체"
+            tenure = 1
+        df.at[idx, "연속연수"] = tenure
+        prev_auditor = auditor
+
+    return df
 
 
 def get_companies_by_corp_codes(corp_codes: list[str]) -> dict[str, dict]:
@@ -414,6 +447,8 @@ def get_auditors_for_corp_codes(corp_codes: list[str]) -> pd.DataFrame:
     """
     if not corp_codes:
         return pd.DataFrame()
+    from kreports.processor.audit_parser import is_valid_auditor_name
+
     with get_session() as session:
         rows = (
             session.query(Auditor)
@@ -435,6 +470,7 @@ def get_auditors_for_corp_codes(corp_codes: list[str]) -> pd.DataFrame:
                 "연속연수": r.consecutive_years or 1,
             }
             for r in rows
+            if is_valid_auditor_name(r.auditor_nm)
         ]
     return pd.DataFrame(data)
 

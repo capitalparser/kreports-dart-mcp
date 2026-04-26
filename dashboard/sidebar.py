@@ -1,6 +1,6 @@
 """모든 페이지에서 공유하는 사이드바 종목 검색 컴포넌트."""
 import streamlit as st
-from dashboard.db import search_companies
+from dashboard.db import search_companies, get_bootstrap_status
 from dashboard.styles import CSS
 
 
@@ -9,6 +9,9 @@ def render_sidebar() -> None:
     사이드바에 종목 검색 위젯을 렌더링한다.
     모든 페이지에서 호출하여 어느 탭에서든 종목 변경이 가능하게 한다.
     """
+    bootstrap = get_bootstrap_status()
+    master_data_ready = bootstrap["has_company_master"]
+
     with st.sidebar:
         st.markdown(CSS, unsafe_allow_html=True)
         st.markdown("""
@@ -19,10 +22,17 @@ def render_sidebar() -> None:
         """, unsafe_allow_html=True)
         st.divider()
 
+        if not master_data_ready:
+            if bootstrap["api_key_set"]:
+                st.caption("회사 목록이 비어 있습니다. `kreports sync-companies` 실행이 필요합니다.")
+            else:
+                st.caption("`.env`에 `DART_API_KEY`를 넣고 `kreports sync-companies`를 실행해야 검색할 수 있습니다.")
+
         search_input = st.text_input(
             "종목 검색",
             placeholder="회사명 또는 종목코드",
             key="sidebar_search_global",
+            disabled=not master_data_ready,
         )
         if search_input:
             candidates = search_companies(search_input, limit=10)

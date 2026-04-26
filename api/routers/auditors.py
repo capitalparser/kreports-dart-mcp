@@ -1,8 +1,8 @@
 """감사인 이력 · 감사보수 라우터."""
 from fastapi import APIRouter, HTTPException
 
-from dart_platform.db.engine import get_session
-from dart_platform.db.models import Company, Auditor, AuditFee
+from kreports.db.engine import get_session
+from kreports.db.models import Company, Auditor, AuditFee
 from api.schemas import AuditorOut, AuditFeeOut
 
 router = APIRouter(prefix="/auditors", tags=["auditors"])

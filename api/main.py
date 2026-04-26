@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     """서버 시작/종료 시 스케줄러 생명주기를 관리한다."""
     global _scheduler
     if os.getenv("DART_SCHEDULER", "").strip() == "1":
-        from dart_platform.collector.scheduler import start_scheduler
+        from kreports.collector.scheduler import start_scheduler
         _scheduler = start_scheduler()
         logger.info("일별 증분 수집 스케줄러 활성화")
     yield
@@ -82,8 +82,8 @@ def root():
 @app.get("/health", tags=["health"])
 def health():
     """DB 연결 상태 확인."""
-    from dart_platform.db.engine import get_session
-    from dart_platform.db.models import Company
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
     try:
         with get_session() as session:
             count = session.query(Company).count()
@@ -97,5 +97,5 @@ def get_scheduler_jobs():
     """등록된 스케줄 작업 목록을 반환한다. DART_SCHEDULER=1 환경에서만 유효."""
     if _scheduler is None:
         return {"active": False, "jobs": []}
-    from dart_platform.collector.scheduler import list_jobs
+    from kreports.collector.scheduler import list_jobs
     return {"active": True, "jobs": list_jobs(_scheduler)}

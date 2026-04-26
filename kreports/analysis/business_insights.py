@@ -9,6 +9,156 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from kreports.processor.report_section_parser import SECTION_LABELS
+
+
+def _clean_text(text: str) -> str:
+    return re.sub(r'\s+', ' ', text or '').strip()
+
+
+def _section_body(sections: dict, section_key: str) -> str:
+    sec = sections.get(section_key) or {}
+    if not isinstance(sec, dict):
+        return ""
+    return sec.get("body_text", "") or ""
+
+
+def _full_text(sections: dict) -> str:
+    return _clean_text(" ".join(
+        s.get("body_text", "") for s in sections.values() if isinstance(s, dict)
+    ))
+
+
+def _unique_keys(preferred_keys: list[str] | tuple[str, ...] | None, sections: dict) -> list[str]:
+    keys: list[str] = []
+    for key in preferred_keys or []:
+        if key in sections and key not in keys:
+            keys.append(key)
+    for key in sections:
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _count_keywords(text: str, keywords: list[str]) -> int:
+    text_clean = _clean_text(text)
+    text_lower = text_clean.lower()
+    count = 0
+    for kw in keywords:
+        if not kw:
+            continue
+        needle = kw.lower() if re.search(r'[A-Za-z]', kw) else kw
+        haystack = text_lower if re.search(r'[A-Za-z]', kw) else text_clean
+        count += haystack.count(needle)
+    return count
+
+
+def _matched_keywords(text: str, keywords: list[str], limit: int = 3) -> list[str]:
+    text_clean = _clean_text(text)
+    text_lower = text_clean.lower()
+    found: list[str] = []
+    for kw in keywords:
+        haystack = text_lower if re.search(r'[A-Za-z]', kw) else text_clean
+        needle = kw.lower() if re.search(r'[A-Za-z]', kw) else kw
+        if needle in haystack and kw not in found:
+            found.append(kw)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _snippet(text: str, pos: int, window: int = 90) -> str:
+    start = max(0, pos - window)
+    end = min(len(text), pos + window)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
+def _find_evidence(
+    sections: dict,
+    keywords: list[str],
+    preferred_keys: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, str]:
+    """키워드가 처음 확인되는 섹션과 주변 원문 스니펫을 반환한다."""
+    for section_key in _unique_keys(preferred_keys, sections):
+        body = _clean_text(_section_body(sections, section_key))
+        if not body:
+            continue
+        body_lower = body.lower()
+        for kw in keywords:
+            haystack = body_lower if re.search(r'[A-Za-z]', kw) else body
+            needle = kw.lower() if re.search(r'[A-Za-z]', kw) else kw
+            pos = haystack.find(needle)
+            if pos >= 0:
+                return section_key, _snippet(body, pos)
+
+    for section_key in _unique_keys(preferred_keys, sections):
+        body = _clean_text(_section_body(sections, section_key))
+        if body:
+            return section_key, body[:180] + ("..." if len(body) > 180 else "")
+
+    return "", ""
+
+
+def _make_card(
+    *,
+    title: str,
+    value: str,
+    detail: str,
+    audience: str,
+    risk_level: str,
+    source_section: str = "",
+    evidence: str = "",
+    accounts: str = "",
+    assertions: str = "",
+) -> dict:
+    return {
+        "title": title,
+        "value": value,
+        "detail": detail,
+        "audience": audience,
+        "risk_level": risk_level,
+        "source_section": source_section,
+        "source_label": SECTION_LABELS.get(source_section, source_section) if source_section else "",
+        "evidence": evidence,
+        "accounts": accounts,
+        "assertions": assertions,
+    }
+
+
+def _keyword_card(
+    sections: dict,
+    *,
+    title: str,
+    keywords: list[str],
+    preferred_keys: list[str],
+    detail: str,
+    audience: str,
+    risk_level: str = "ok",
+    accounts: str = "",
+    assertions: str = "",
+) -> Optional[dict]:
+    text = " ".join(_section_body(sections, key) for key in _unique_keys(preferred_keys, sections))
+    count = _count_keywords(text, keywords)
+    if count <= 0:
+        return None
+    matched = _matched_keywords(text, keywords)
+    source, evidence = _find_evidence(sections, keywords, preferred_keys)
+    value = ", ".join(matched) if matched else f"{count}회 언급"
+    sub = f"{detail} 관련 표현 {count}회 확인"
+    return _make_card(
+        title=title,
+        value=value,
+        detail=sub,
+        audience=audience,
+        risk_level=risk_level,
+        source_section=source,
+        evidence=evidence,
+        accounts=accounts,
+        assertions=assertions,
+    )
+
 
 # ---------------------------------------------------------------------------
 # R&D 비율 추출 (연구개발활동 섹션 테이블 파싱)
@@ -290,25 +440,242 @@ def _extract_industry_insights(sections: dict, induty_code: str) -> list[dict]:
         if count == 0:
             continue
 
-        # 첫 매칭 문맥 추출 (키워드 주변 80자)
-        context = ""
-        for kw in tmpl["keywords"]:
-            pos = full_text_clean.find(kw)
-            if pos >= 0:
-                start = max(0, pos - 20)
-                end = min(len(full_text_clean), pos + 60)
-                context = full_text_clean[start:end].strip()
-                break
-
-        insights.append({
-            "title": tmpl["label"],
-            "value": f"{count}회 언급",
-            "detail": context[:80] + "..." if len(context) > 80 else context,
-            "audience": tmpl["audience"],
-            "risk_level": "ok",
-        })
+        source, evidence = _find_evidence(sections, tmpl["keywords"])
+        insights.append(_make_card(
+            title=tmpl["label"],
+            value=f"{count}회 언급",
+            detail=evidence[:90] + ("..." if len(evidence) > 90 else ""),
+            audience=tmpl["audience"],
+            risk_level="ok",
+            source_section=source,
+            evidence=evidence,
+        ))
 
     return insights
+
+
+# ---------------------------------------------------------------------------
+# 감사/투자 관점 포커스 생성
+# ---------------------------------------------------------------------------
+
+def generate_audit_focus(sections: dict) -> list[dict]:
+    """감사 계획 수립 관점의 사업보고서 포커스 카드."""
+    focus: list[dict] = []
+
+    templates = [
+        {
+            "title": "매출인식 검토 후보",
+            "keywords": ["매출인식", "수익인식", "고객과의 계약", "수주", "계약자산", "계약부채", "진행률", "납품", "검수"],
+            "preferred_keys": ["business_description", "key_contracts"],
+            "detail": "수익 인식 시점과 계약 조건",
+            "risk_level": "warn",
+            "accounts": "매출, 계약자산, 계약부채, 매출채권",
+            "assertions": "발생, 기간귀속, 완전성, 평가",
+        },
+        {
+            "title": "재고·손상 검토 후보",
+            "keywords": ["재고", "재고자산", "평가손실", "순실현가능가치", "손상", "진부화", "저가법"],
+            "preferred_keys": ["business_description", "risk_management"],
+            "detail": "재고 평가와 손상 징후",
+            "risk_level": "warn",
+            "accounts": "재고자산, 매출원가, 손상차손",
+            "assertions": "평가, 실재성, 권리와 의무",
+        },
+        {
+            "title": "R&D 자본화 검토 후보",
+            "keywords": ["개발비", "연구개발", "연구개발비", "자본화", "무형자산", "임상", "기술개발"],
+            "preferred_keys": ["rd_activities", "business_description"],
+            "detail": "개발비 자본화와 손상",
+            "risk_level": "warn",
+            "accounts": "무형자산, 연구개발비, 손상차손",
+            "assertions": "평가, 분류, 완전성",
+        },
+        {
+            "title": "유동성·자금조달 위험",
+            "keywords": ["유동성", "자금조달", "차입금", "만기", "계속기업", "운전자본", "차환"],
+            "preferred_keys": ["risk_management", "management_plan"],
+            "detail": "계속기업과 차입금 만기 구조",
+            "risk_level": "bad",
+            "accounts": "차입금, 현금흐름, 금융부채",
+            "assertions": "분류, 완전성, 공시",
+        },
+        {
+            "title": "파생상품·환위험",
+            "keywords": ["파생", "스왑", "옵션", "헤지", "환율", "외환", "외화", "환위험"],
+            "preferred_keys": ["risk_management"],
+            "detail": "금융상품 평가와 위험회피회계",
+            "risk_level": "warn",
+            "accounts": "파생상품자산/부채, 금융손익, 기타포괄손익",
+            "assertions": "평가, 표시와 공시, 완전성",
+        },
+        {
+            "title": "주요 계약 검토 후보",
+            "keywords": ["주요 계약", "주요계약", "계약상대방", "라이선스", "공급계약", "판매계약", "기술이전"],
+            "preferred_keys": ["key_contracts", "business_description"],
+            "detail": "계약 조건, 우발의무, 수익 인식",
+            "risk_level": "warn",
+            "accounts": "매출, 선수금, 충당부채, 우발부채",
+            "assertions": "발생, 완전성, 공시",
+        },
+        {
+            "title": "고객·매출 집중도 후보",
+            "keywords": ["주요 고객", "매출처", "고객사", "특정 고객", "거래처", "매출 비중", "의존"],
+            "preferred_keys": ["business_description"],
+            "detail": "주요 고객 의존도와 회수가능성",
+            "risk_level": "warn",
+            "accounts": "매출, 매출채권, 대손충당금",
+            "assertions": "평가, 완전성, 기간귀속",
+        },
+    ]
+
+    for tmpl in templates:
+        card = _keyword_card(sections, audience="auditor", **tmpl)
+        if card:
+            focus.append(card)
+
+    risk_dist = extract_risk_distribution(sections)
+    if risk_dist and risk_dist["top_risk"]:
+        top = risk_dist["top_risk"]
+        source, evidence = _find_evidence(sections, _RISK_CATEGORIES.get(top, [top]), ["risk_management"])
+        focus.insert(0, _make_card(
+            title="사업보고서상 최다 위험",
+            value=top,
+            detail=f"위험관리 섹션 내 관련 표현 {risk_dist['total_mentions']}회 중 {risk_dist['categories'][0]['pct']}%",
+            audience="auditor",
+            risk_level="warn" if top in ("유동성", "신용", "파생상품") else "ok",
+            source_section=source,
+            evidence=evidence,
+            accounts="금융상품, 차입금, 매출채권",
+            assertions="평가, 완전성, 공시",
+        ))
+
+    overview = sections.get("business_overview")
+    if overview and overview.get("length", 0) < 200:
+        source, evidence = _find_evidence(sections, ["사업"], ["business_overview"])
+        focus.append(_make_card(
+            title="사업이해 원문 밀도",
+            value="낮음",
+            detail=f"사업의 개요가 {overview.get('length', 0)}자 수준입니다. 사업의 내용과 주석을 함께 확인하세요.",
+            audience="auditor",
+            risk_level="warn",
+            source_section=source,
+            evidence=evidence,
+            accounts="전반감사계획",
+            assertions="위험평가",
+        ))
+
+    return focus
+
+
+def generate_investment_focus(sections: dict) -> list[dict]:
+    """투자 분석 관점의 사업보고서 포커스 카드."""
+    focus: list[dict] = []
+
+    rd = extract_rd_ratio(sections)
+    if rd and rd["ratios"]:
+        latest = rd["ratios"][0]
+        ratio = latest["ratio_pct"]
+        trend_label = {"increasing": "증가 추세", "decreasing": "감소 추세",
+                       "stable": "안정", "unknown": "-"}.get(rd["trend"], "-")
+        risk = "warn" if ratio > 15 else ("ok" if ratio > 3 else "bad")
+        source, evidence = _find_evidence(sections, ["연구개발비", "매출액", "연구개발"], ["rd_activities"])
+        focus.append(_make_card(
+            title="R&D / 매출 비율",
+            value=f"{ratio}%",
+            detail=f"{len(rd['ratios'])}개년 추세: {trend_label}",
+            audience="both",
+            risk_level=risk,
+            source_section=source,
+            evidence=evidence,
+        ))
+
+    templates = [
+        {
+            "title": "비즈니스 모델 키워드",
+            "keywords": ["제품", "서비스", "플랫폼", "구독", "라이선스", "솔루션", "사업부문", "고객"],
+            "preferred_keys": ["business_overview", "business_description"],
+            "detail": "제품·서비스와 수익 구조",
+            "risk_level": "ok",
+        },
+        {
+            "title": "성장동력 후보",
+            "keywords": ["성장", "확대", "신규", "해외", "글로벌", "증설", "투자", "수요", "시장진출"],
+            "preferred_keys": ["business_description", "management_plan"],
+            "detail": "시장 확대와 투자 계획",
+            "risk_level": "ok",
+        },
+        {
+            "title": "수주·계약 모멘텀",
+            "keywords": ["수주", "수주잔고", "백로그", "공급계약", "판매계약", "장기계약", "계약"],
+            "preferred_keys": ["business_description", "key_contracts"],
+            "detail": "수주잔고와 주요 계약",
+            "risk_level": "ok",
+        },
+        {
+            "title": "시장·경쟁 환경",
+            "keywords": ["시장", "경쟁", "점유율", "가격", "규제", "기술", "진입장벽", "수요"],
+            "preferred_keys": ["business_description", "risk_management"],
+            "detail": "경쟁 강도와 시장 리스크",
+            "risk_level": "warn",
+        },
+        {
+            "title": "규제·기술 리스크",
+            "keywords": ["규제", "인허가", "법규", "특허", "기술", "보안", "환경", "공급망"],
+            "preferred_keys": ["risk_management", "business_description"],
+            "detail": "사업 지속성과 밸류에이션 할인 요인",
+            "risk_level": "warn",
+        },
+    ]
+
+    for tmpl in templates:
+        card = _keyword_card(sections, audience="investor", **tmpl)
+        if card:
+            focus.append(card)
+
+    highlight = extract_top_risk_highlight(sections)
+    if highlight:
+        risk_keywords = ["외환", "환율", "이자율", "금리", "유동성", "신용", "가격",
+                         "규제", "경쟁", "기술", "인력", "공급망", "지정학", "환경"]
+        found_risks = [kw for kw in risk_keywords if kw in highlight[:100]]
+        summary = ", ".join(found_risks[:3]) if found_risks else "복합 위험"
+        source, evidence = _find_evidence(sections, found_risks or risk_keywords, ["risk_management"])
+        focus.append(_make_card(
+            title="경영진 최우선 리스크",
+            value=summary,
+            detail=highlight,
+            audience="both",
+            risk_level="ok",
+            source_section=source,
+            evidence=evidence,
+        ))
+
+    contracts = extract_key_contracts_summary(sections)
+    if contracts and contracts["party_count"] > 0:
+        source, evidence = _find_evidence(sections, ["계약상대방", "거래상대방", "계약"], ["key_contracts"])
+        focus.append(_make_card(
+            title="주요 계약 상대방",
+            value=f"{contracts['party_count']}개사",
+            detail=", ".join(contracts["parties"][:3]),
+            audience="investor",
+            risk_level="ok",
+            source_section=source,
+            evidence=evidence,
+        ))
+
+    return focus
+
+
+def build_business_report_focus(sections: dict, induty_code: str = "") -> dict:
+    """대시보드/API 공통 사업보고서 분석 패키지."""
+    audit_focus = generate_audit_focus(sections)
+    investment_focus = generate_investment_focus(sections)
+    industry_insights = _extract_industry_insights(sections, induty_code) if induty_code else []
+    return {
+        "audit_focus": audit_focus,
+        "investment_focus": investment_focus,
+        "industry_insights": industry_insights,
+        "risk_distribution": extract_risk_distribution(sections),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -321,81 +688,22 @@ def generate_business_insights(sections: dict, induty_code: str = "") -> list[di
     induty_code가 있으면 업종 특화 인사이트도 포함.
 
     Returns:
-        [{"title", "value", "detail", "audience", "risk_level"}]
+        [{"title", "value", "detail", "audience", "risk_level",
+          "source_section", "evidence"}]
     """
-    insights = []
+    package = build_business_report_focus(sections, induty_code=induty_code)
+    insights: list[dict] = []
+    insights.extend(package["industry_insights"])
+    insights.extend(package["audit_focus"])
+    insights.extend(package["investment_focus"])
 
-    # 0. 업종 특화 인사이트 (최상단)
-    if induty_code:
-        industry_insights = _extract_industry_insights(sections, induty_code)
-        insights.extend(industry_insights)
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in insights:
+        key = (item.get("title", ""), item.get("audience", ""), item.get("source_section", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
 
-    # 1. R&D 비율
-    rd = extract_rd_ratio(sections)
-    if rd and rd["ratios"]:
-        latest = rd["ratios"][0]
-        ratio = latest["ratio_pct"]
-        trend_label = {"increasing": "증가 추세", "decreasing": "감소 추세",
-                       "stable": "안정", "unknown": "-"}.get(rd["trend"], "-")
-        risk = "warn" if ratio > 15 else ("ok" if ratio > 3 else "bad")
-        insights.append({
-            "title": "R&D / 매출 비율",
-            "value": f"{ratio}%",
-            "detail": f"{len(rd['ratios'])}개년 추세: {trend_label}",
-            "audience": "both",
-            "risk_level": risk,
-        })
-
-    # 2. 위험 분포
-    risk_dist = extract_risk_distribution(sections)
-    if risk_dist and risk_dist["top_risk"]:
-        top = risk_dist["top_risk"]
-        insights.append({
-            "title": "최대 위험 유형",
-            "value": top,
-            "detail": f"총 {risk_dist['total_mentions']}회 언급 중 {risk_dist['categories'][0]['pct']}%",
-            "audience": "auditor",
-            "risk_level": "warn" if top in ("유동성", "신용") else "ok",
-        })
-
-    # 3. 핵심 리스크 하이라이트
-    highlight = extract_top_risk_highlight(sections)
-    if highlight:
-        # 핵심 키워드 추출 (첫 문장에서 위험 유형 식별)
-        risk_keywords = ["외환", "환율", "이자율", "금리", "유동성", "신용", "가격",
-                         "규제", "경쟁", "기술", "인력", "공급망", "지정학", "환경"]
-        found_risks = [kw for kw in risk_keywords if kw in highlight[:100]]
-        summary = ", ".join(found_risks[:3]) if found_risks else "복합 위험"
-        insights.append({
-            "title": "경영진 최우선 리스크",
-            "value": summary,
-            "detail": highlight,  # 전문 텍스트 — 대시보드에서 툴팁으로 표시
-            "audience": "both",
-            "risk_level": "ok",
-        })
-
-    # 4. 주요계약 요약
-    contracts = extract_key_contracts_summary(sections)
-    if contracts and contracts["party_count"] > 0:
-        insights.append({
-            "title": "주요 계약 상대방",
-            "value": f"{contracts['party_count']}개사",
-            "detail": ", ".join(contracts["parties"][:3]),
-            "audience": "investor",
-            "risk_level": "ok",
-        })
-
-    # 5. 사업 개요 길이 (정보 밀도 프록시)
-    overview = sections.get("business_overview")
-    if overview:
-        length = overview.get("length", 0)
-        if length < 200:
-            insights.append({
-                "title": "사업개요 정보 밀도",
-                "value": "부족",
-                "detail": f"{length}자 — 실질 정보가 적음. 사업내용 섹션 참조 필요.",
-                "audience": "auditor",
-                "risk_level": "warn",
-            })
-
-    return insights
+    return deduped

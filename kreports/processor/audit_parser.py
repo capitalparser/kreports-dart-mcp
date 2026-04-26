@@ -32,6 +32,20 @@ _AUDITOR_ALIASES: dict[str, str] = {
     "세일": "세일회계법인",
 }
 
+_INVALID_AUDITOR_VALUES = {
+    "",
+    "-",
+    "–",
+    "—",
+    "없음",
+    "해당없음",
+    "해당사항없음",
+    "해당사항 없음",
+    "미해당",
+    "n/a",
+    "na",
+}
+
 
 def is_audit_report(report_nm: str) -> bool:
     """공시 제목이 감사보고서인지 판별한다."""
@@ -49,6 +63,17 @@ def normalize_auditor_name(raw_nm: str) -> str:
     cleaned = re.sub(r'&[a-z]+;|\s+', '', raw_nm).strip()
     key = cleaned.lower()
     return _AUDITOR_ALIASES.get(key, cleaned)
+
+
+def is_valid_auditor_name(raw_nm: str | None) -> bool:
+    """Return whether a parsed auditor name is an actual auditor, not a placeholder."""
+    if raw_nm is None:
+        return False
+    cleaned = re.sub(r'&[a-z]+;|\s+', '', str(raw_nm)).strip()
+    if cleaned.lower() in _INVALID_AUDITOR_VALUES:
+        return False
+    # Guard against labels or table residue being mistaken for a name.
+    return "회계법인" in cleaned or cleaned.lower() in _AUDITOR_ALIASES
 
 
 def parse_bsns_year(report_nm: str, rcept_dt: str) -> int | None:
@@ -129,7 +154,7 @@ def parse_auditor_from_doc_xml(content: str) -> list[dict]:
     for m in _AUD_NM_NEW_RE.finditer(table):
         suffix, nm = m.group(1), m.group(2).strip()
         fs_div = "CFS" if suffix == "C" else "OFS"
-        if nm and fs_div not in auditors_new:
+        if is_valid_auditor_name(nm) and fs_div not in auditors_new:
             auditors_new[fs_div] = normalize_auditor_name(nm)
 
     if auditors_new:
@@ -151,7 +176,10 @@ def parse_auditor_from_doc_xml(content: str) -> list[dict]:
     if not nm_matches:
         return results
 
-    auditor_nm = normalize_auditor_name(nm_matches[0].group(1).strip())
+    auditor_raw = nm_matches[0].group(1).strip()
+    if not is_valid_auditor_name(auditor_raw):
+        return results
+    auditor_nm = normalize_auditor_name(auditor_raw)
     opinion: str | None = None
     op_matches = list(_AUD_OPINION_OLD_RE.finditer(table))
     if op_matches:

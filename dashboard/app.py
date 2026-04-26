@@ -3,7 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
-from dashboard.db import search_companies, get_financials, get_auditors, get_risk_summary, get_data_freshness
+from dashboard.db import search_companies, get_financials, get_auditors, get_risk_summary, get_data_freshness, get_bootstrap_status
 from dashboard.styles import CSS, page_header, kpi_card, section_title, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE, TEXT_MID
 
 st.set_page_config(
@@ -13,6 +13,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 st.markdown(CSS, unsafe_allow_html=True)
+bootstrap = get_bootstrap_status()
+master_data_ready = bootstrap["has_company_master"]
+
+if not master_data_ready:
+    if bootstrap["api_key_set"]:
+        st.warning("회사 목록이 비어 있습니다. 터미널에서 `kreports sync-companies`와 `kreports enrich-market`를 먼저 실행하세요.")
+    else:
+        st.warning("회사 목록이 비어 있습니다. `.env`에 `DART_API_KEY=...`를 넣은 뒤 `kreports sync-companies`를 실행해야 검색할 수 있습니다.")
 
 # 사이드바 — 종목 선택
 with st.sidebar:
@@ -24,7 +32,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.divider()
 
-    search_input = st.text_input("종목 검색", placeholder="회사명 또는 종목코드", key="sidebar_search")
+    search_input = st.text_input("종목 검색", placeholder="회사명 또는 종목코드", key="sidebar_search", disabled=not master_data_ready)
     if not search_input and "selected_stock" not in st.session_state:
         st.caption("또는 메인 화면에서 검색하세요")
     if search_input:
@@ -78,7 +86,7 @@ st.markdown(page_header(
 # 검색창
 col_search, col_btn = st.columns([5, 1])
 with col_search:
-    query = st.text_input(" ", placeholder="회사명 또는 종목코드 입력 (예: SK하이닉스, 000660)", label_visibility="collapsed")
+    query = st.text_input(" ", placeholder="회사명 또는 종목코드 입력 (예: SK하이닉스, 000660)", label_visibility="collapsed", disabled=not master_data_ready)
 with col_btn:
     st.markdown("<div style='margin-top:0.4rem'></div>", unsafe_allow_html=True)
 

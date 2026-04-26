@@ -17,34 +17,62 @@ SECTION_KEYWORDS: dict[str, list[str]] = {
         "사업의 개요",
         "사업개요",
         "회사의 개요",
+        "회사 개요",
+        "회사의 현황",
     ],
     "business_description": [
         "사업의 내용",
         "사업내용",
         "주요 제품 및 서비스",
+        "주요 제품",
+        "주요제품",
+        "제품 및 서비스",
+        "매출 및 수주상황",
+        "매출 및 수주 상황",
+        "매출에 관한 사항",
+        "수주상황",
+        "영업의 개황",
         "주요 사업 내용",
     ],
     "risk_management": [
         "위험관리 및 파생상품",
+        "시장위험과 위험관리",
+        "시장위험과위험관리",
+        "시장위험 및 위험관리",
         "위험관리",
+        "재무위험관리",
         "사업위험",
         "파생상품 및 풋백옵션",
+        "파생상품",
     ],
     "management_plan": [
         "경영진의 경영계획",
+        "경영진단 및 분석의견",
+        "이사의 경영진단",
         "향후 추진계획",
+        "향후 추진 계획",
         "경영방침",
         "중장기 전략",
+        "전략 및 전망",
     ],
     "rd_activities": [
         "연구개발활동",
         "연구개발 활동",
         "연구 및 개발활동",
+        "연구개발비용",
+        "연구개발비",
+        "연구개발 실적",
+        "연구개발 담당조직",
         "기술개발",
     ],
     "key_contracts": [
+        "경영상의 주요계약",
+        "경영상의 주요 계약",
         "주요 계약",
         "주요계약",
+        "중요한 계약",
+        "주요한 계약",
+        "라이선스",
         "핵심 계약",
     ],
 }
@@ -62,8 +90,27 @@ SECTION_LABELS: dict[str, str] = {
 _TITLE_RE = re.compile(r'<TITLE[^>]*>([^<]{1,300})</TITLE>', re.IGNORECASE)
 
 # 본문 XML 파일 식별 키워드 — 주석/감사보고서가 아닌 본문
-_MAIN_BODY_KEYWORDS = ["사업의 개요", "사업개요", "사업의 내용", "사업내용"]
+_MAIN_BODY_KEYWORDS = [
+    "사업의 개요",
+    "사업개요",
+    "사업의 내용",
+    "사업내용",
+    "주요 제품 및 서비스",
+    "매출 및 수주상황",
+]
 _EXCLUDE_KEYWORDS = ["주석", "감사보고서", "내부회계관리"]
+_MAIN_BOUNDARY_KEYWORDS = [
+    "재무에 관한 사항",
+    "이사의 경영진단",
+    "회계감사인의 감사의견",
+    "회계감사인",
+    "주주에 관한 사항",
+    "임원 및 직원",
+    "계열회사",
+    "타법인출자",
+    "그 밖에 투자자",
+]
+_UNICODE_ROMAN = "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ"
 
 
 def _xml_to_text(xml_content: str) -> str:
@@ -115,6 +162,75 @@ def _xml_to_html(xml_content: str) -> str:
     return html
 
 
+def _clean_title(title_text: str) -> str:
+    """TITLE 텍스트의 공백과 장식 문자를 정규화한다."""
+    text = re.sub(r'\s+', ' ', title_text or '').strip()
+    return text.strip("-ㆍ·. ")
+
+
+def _title_level(title_text: str) -> int:
+    """
+    DART TITLE의 대략적인 목차 깊이를 추정한다.
+
+    값이 작을수록 상위 제목이다. 제목 표기가 없는 경우 99를 반환해
+    기존의 "다음 TITLE까지" 동작과 호환되도록 한다.
+    """
+    text = _clean_title(title_text)
+    if not text:
+        return 99
+    if re.match(rf'^[{_UNICODE_ROMAN}]+\s*[.\)]', text):
+        return 1
+    if re.match(r'^[IVXLC]+\s*[.\)]', text, re.IGNORECASE):
+        return 1
+    if re.match(r'^제\s*\d+\s*[장절편]', text):
+        return 1
+    if re.match(r'^\d+\s*[.\)]', text):
+        return 2
+    if re.match(r'^\(\s*\d+\s*\)', text):
+        return 3
+    if re.match(r'^[가-힣]\s*[.\)]', text):
+        return 3
+    return 99
+
+
+def _is_broad_section_title(section_key: str, title_text: str) -> bool:
+    """하위 TITLE 전체를 포괄해야 하는 상위 성격의 제목인지 판단한다."""
+    title = _clean_title(title_text)
+    broad_keywords = {
+        "business_description": ("사업의 내용", "사업내용"),
+        "risk_management": ("위험관리", "시장위험과 위험관리", "시장위험 및 위험관리"),
+        "management_plan": ("경영진의 경영계획", "경영진단 및 분석의견", "이사의 경영진단"),
+        "rd_activities": ("연구개발활동", "연구개발 활동", "연구 및 개발활동"),
+    }
+    return any(kw in title for kw in broad_keywords.get(section_key, ()))
+
+
+def _section_end_index(
+    title_positions: list[tuple[int, int, str, int]],
+    matched_idx: int,
+    xml_len: int,
+    section_key: str,
+) -> int:
+    """현재 TITLE이 대표하는 섹션의 끝 위치를 계산한다."""
+    sec_start, _, title_text, level = title_positions[matched_idx]
+    max_end = min(xml_len, sec_start + 100_000)
+
+    if level == 99 and not _is_broad_section_title(section_key, title_text):
+        if matched_idx + 1 < len(title_positions):
+            return min(title_positions[matched_idx + 1][0], max_end)
+        return max_end
+
+    for start, _, next_title, next_level in title_positions[matched_idx + 1:]:
+        if start >= max_end:
+            break
+        if any(kw in next_title for kw in _MAIN_BOUNDARY_KEYWORDS):
+            return start
+        if level != 99 and next_level <= level:
+            return start
+
+    return max_end
+
+
 def select_main_body_file(all_files: dict[str, str]) -> Optional[str]:
     """
     사업보고서 ZIP 내 XML 파일들 중 본문 파일을 선택한다.
@@ -157,9 +273,10 @@ def extract_report_sections(xml_content: str) -> dict[str, dict]:
     result: dict[str, dict] = {}
 
     # 모든 TITLE 위치 인덱싱
-    title_positions: list[tuple[int, int, str]] = []
+    title_positions: list[tuple[int, int, str, int]] = []
     for m in _TITLE_RE.finditer(xml_content):
-        title_positions.append((m.start(), m.end(), m.group(1).strip()))
+        title_text = m.group(1).strip()
+        title_positions.append((m.start(), m.end(), title_text, _title_level(title_text)))
 
     if not title_positions:
         return result
@@ -168,7 +285,7 @@ def extract_report_sections(xml_content: str) -> dict[str, dict]:
         matched_idx: Optional[int] = None
 
         for kw in keywords:
-            for i, (start, end, title_text) in enumerate(title_positions):
+            for i, (start, end, title_text, level) in enumerate(title_positions):
                 if kw in title_text:
                     matched_idx = i
                     break
@@ -178,15 +295,10 @@ def extract_report_sections(xml_content: str) -> dict[str, dict]:
         if matched_idx is None:
             continue
 
-        # 섹션 범위: 현재 TITLE ~ 다음 TITLE
+        # 섹션 범위: 현재 TITLE ~ 다음 같은/상위 TITLE.
+        # 상위 섹션 바로 다음 하위 제목에서 본문이 잘리는 문제를 방지한다.
         sec_start = title_positions[matched_idx][0]
-        if matched_idx + 1 < len(title_positions):
-            sec_end = title_positions[matched_idx + 1][0]
-        else:
-            sec_end = min(len(xml_content), sec_start + 100_000)
-
-        # 최대 100,000자 제한
-        sec_end = min(sec_end, sec_start + 100_000)
+        sec_end = _section_end_index(title_positions, matched_idx, len(xml_content), section_key)
 
         section_xml = xml_content[sec_start:sec_end]
         title_text = title_positions[matched_idx][2]

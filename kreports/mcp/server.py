@@ -6,11 +6,12 @@ Claude Desktop / Claude Code 등 MCP 클라이언트에 stdio로 연결된다.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import Tool
 
 from kreports.mcp.tools import ALL_TOOLS, call_tool
 
@@ -30,11 +31,13 @@ async def list_tools() -> list[Tool]:
 
 
 @server.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """도구 실행. 결과는 TextContent JSON으로 반환."""
+async def handle_call_tool(name: str, arguments: dict) -> dict:
+    """도구 실행. 결과는 structured content로 반환."""
     logger.info("call_tool: %s args=%s", name, arguments)
     result_json = call_tool(name, arguments)
-    return [TextContent(type="text", text=result_json)]
+    logger.info("call_tool_done: %s bytes=%d", name, len(result_json))
+    result = json.loads(result_json)
+    return result
 
 
 async def run() -> None:

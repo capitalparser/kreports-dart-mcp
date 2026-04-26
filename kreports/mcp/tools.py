@@ -6,7 +6,7 @@ dart_mcp.tools — MCP 도구 정의.
   2. handler — 실제 호출 함수 (dart_analyst에 위임)
   3. description — Claude가 도구 선택에 쓰는 자연어 설명
 
-도구 목록 (7개):
+도구 목록 (9개):
   search_company           회사명/종목코드 → corp_code 탐색
   get_financial_snapshot   연도별 재무요약 + 자본배분 지표
   score_going_concern      6인자 계속기업 스코어카드
@@ -14,15 +14,280 @@ dart_mcp.tools — MCP 도구 정의.
   get_accounting_policy    회계정책 주석 추출
   get_audit_history        감사인·의견 이력
   get_subsidiary_auditors  종속/관계회사 감사인 매트릭스
+  compare_to_industry      업종 벤치마킹
+  get_business_overview    사업보고서 핵심 섹션
 """
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from mcp.types import Tool
+from sqlalchemy import func
 
-import kreports
+from kreports.analysis.api import (
+    compare_to_industry,
+    detect_restatement,
+    get_accounting_policy,
+    get_audit_history,
+    get_business_overview,
+    get_financial_snapshot,
+    get_subsidiary_auditors,
+    resolve_corp_code,
+    score_going_concern,
+    search_company,
+)
+from kreports.db.engine import get_session
+from kreports.db.models import (
+    AccountingPolicyItem,
+    AuditFee,
+    Auditor,
+    Company,
+    Disclosure,
+    Financial,
+    FinancialFact,
+)
+
+
+_FS_DIVS = {"CFS", "OFS"}
+_COMPARE_METRICS = [
+    "영업이익률",
+    "순이익률",
+    "부채비율",
+    "ROE",
+    "ROA",
+    "자기자본비율",
+    "매출성장률",
+    "Beneish_M",
+]
+
+
+# ---------------------------------------------------------------------------
+# 입력 검증 / 응답 메타데이터
+# ---------------------------------------------------------------------------
+
+def _require_string(args: dict, name: str) -> str:
+    value = args.get(name)
+    if value is None:
+        raise ValueError(f"'{name}' 값이 필요합니다.")
+    value = str(value).strip()
+    if not value:
+        raise ValueError(f"'{name}' 값은 비어 있을 수 없습니다.")
+    return value
+
+
+def _optional_string(args: dict, name: str) -> str | None:
+    if name not in args or args.get(name) is None:
+        return None
+    value = str(args.get(name)).strip()
+    return value or None
+
+
+def _optional_int(
+    args: dict,
+    name: str,
+    default: int | None = None,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+    allow_none: bool = False,
+) -> int | None:
+    if name not in args:
+        return default
+    value = args.get(name)
+    if value is None:
+        if allow_none:
+            return None
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"'{name}' 값은 정수여야 합니다.")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"'{name}' 값은 정수여야 합니다.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"'{name}' 값은 정수여야 합니다.") from exc
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"'{name}' 값은 {min_value} 이상이어야 합니다.")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"'{name}' 값은 {max_value} 이하이어야 합니다.")
+    return parsed
+
+
+def _required_int(
+    args: dict,
+    name: str,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    if name not in args or args.get(name) is None:
+        raise ValueError(f"'{name}' 값이 필요합니다.")
+    parsed = _optional_int(
+        args,
+        name,
+        min_value=min_value,
+        max_value=max_value,
+    )
+    assert parsed is not None
+    return parsed
+
+
+def _optional_float(
+    args: dict,
+    name: str,
+    default: float,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    if name not in args or args.get(name) is None:
+        return default
+    value = args.get(name)
+    if isinstance(value, bool):
+        raise ValueError(f"'{name}' 값은 숫자여야 합니다.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"'{name}' 값은 숫자여야 합니다.") from exc
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"'{name}' 값은 {min_value} 이상이어야 합니다.")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"'{name}' 값은 {max_value} 이하이어야 합니다.")
+    return parsed
+
+
+def _optional_bool(args: dict, name: str, default: bool) -> bool:
+    if name not in args or args.get(name) is None:
+        return default
+    value = args.get(name)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"'{name}' 값은 boolean이어야 합니다.")
+
+
+def _optional_enum(
+    args: dict,
+    name: str,
+    allowed: set[str] | list[str],
+    default: str,
+) -> str:
+    value = args.get(name, default)
+    if value is None:
+        value = default
+    value = str(value).strip()
+    if value not in allowed:
+        raise ValueError(f"'{name}' 값은 {', '.join(allowed)} 중 하나여야 합니다.")
+    return value
+
+
+def _format_candidates(candidates: list[dict]) -> str:
+    labels = []
+    for row in candidates[:5]:
+        labels.append(
+            f"{row.get('corp_name')}({row.get('stock_code') or '-'}, "
+            f"{row.get('corp_code')})"
+        )
+    suffix = "" if len(candidates) <= 5 else f" 외 {len(candidates) - 5}건"
+    return ", ".join(labels) + suffix
+
+
+def _to_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _extract_result_corp_code(result: dict) -> str | None:
+    corp_code = result.get("corp_code")
+    if isinstance(corp_code, str) and corp_code:
+        return corp_code
+    subject = result.get("subject")
+    if isinstance(subject, dict):
+        corp_code = subject.get("corp_code")
+        if isinstance(corp_code, str) and corp_code:
+            return corp_code
+    return None
+
+
+def _company_meta(corp_code: str) -> dict | None:
+    with get_session() as session:
+        row = session.query(Company).filter_by(corp_code=corp_code).first()
+        if row is None:
+            return None
+        return {
+            "corp_code": row.corp_code,
+            "corp_name": row.corp_name,
+            "stock_code": row.stock_code,
+            "market": row.market,
+            "induty_code": row.induty_code or row.sector,
+        }
+
+
+def _data_freshness(corp_code: str) -> dict:
+    table_map = {
+        "financial": Financial,
+        "financial_fact": FinancialFact,
+        "disclosure": Disclosure,
+        "auditor": Auditor,
+        "audit_fee": AuditFee,
+        "accounting_policy": AccountingPolicyItem,
+    }
+    with get_session() as session:
+        return {
+            key: _to_iso(
+                session.query(func.max(model.fetched_at))
+                .filter(model.corp_code == corp_code)
+                .scalar()
+            )
+            for key, model in table_map.items()
+        }
+
+
+def _attach_meta(name: str, result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+
+    enriched = dict(result)
+    meta = dict(enriched.get("_meta") or {})
+    meta.update({
+        "tool": name,
+        "source": "local_kreports_db",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "limitations": [
+            "MCP 응답은 로컬 kreports.db에 수집된 DART/OpenDART 기반 캐시입니다.",
+            "중요 판단 전 data_freshness와 원 공시 접수번호를 확인하세요.",
+        ],
+    })
+
+    corp_code = _extract_result_corp_code(enriched)
+    if corp_code:
+        try:
+            meta["company"] = _company_meta(corp_code)
+            meta["data_freshness"] = _data_freshness(corp_code)
+        except Exception as exc:
+            meta["meta_error"] = f"{type(exc).__name__}: {exc}"
+
+    if enriched.get("parent_rcept_no"):
+        meta["source_rcept_no"] = enriched.get("parent_rcept_no")
+    if enriched.get("bsns_year") is not None:
+        meta["bsns_year"] = enriched.get("bsns_year")
+    if name == "search_company":
+        meta["result_count"] = enriched.get("count", 0)
+
+    enriched["_meta"] = meta
+    return enriched
 
 
 # ---------------------------------------------------------------------------
@@ -30,14 +295,35 @@ import kreports
 # ---------------------------------------------------------------------------
 
 def _resolve_or_error(identifier: str) -> str:
-    """식별자를 corp_code로 변환. 실패 시 ValueError."""
-    cc = kreports.resolve_corp_code(identifier)
-    if cc is None:
+    """식별자를 corp_code로 변환. 회사명 다건 매칭은 명시적으로 거절한다."""
+    raw = "" if identifier is None else str(identifier).strip()
+    if not raw:
+        raise ValueError("회사 식별자(company)가 필요합니다.")
+
+    if raw.isdigit() and len(raw) in (6, 8):
+        cc = resolve_corp_code(raw)
+        if cc is not None:
+            return cc
         raise ValueError(
-            f"'{identifier}'에 해당하는 기업을 찾을 수 없습니다. "
+            f"'{raw}'에 해당하는 기업을 찾을 수 없습니다. "
             "corp_code(8자리), 종목코드(6자리) 또는 정확한 회사명을 입력하세요."
         )
-    return cc
+
+    hits = search_company(raw, limit=10)
+    exact = [row for row in hits if row.get("corp_name") == raw]
+    if len(exact) == 1:
+        return exact[0]["corp_code"]
+    if len(hits) == 1:
+        return hits[0]["corp_code"]
+    if len(hits) > 1:
+        raise ValueError(
+            f"'{raw}' 회사명이 모호합니다. 종목코드나 corp_code로 다시 호출하세요. "
+            f"후보: {_format_candidates(hits)}"
+        )
+    raise ValueError(
+        f"'{raw}'에 해당하는 기업을 찾을 수 없습니다. "
+        "corp_code(8자리), 종목코드(6자리) 또는 정확한 회사명을 입력하세요."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -45,9 +331,9 @@ def _resolve_or_error(identifier: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _handle_search_company(args: dict) -> dict:
-    query = args.get("query", "")
-    limit = int(args.get("limit", 20))
-    results = kreports.search_company(query, limit=limit)
+    query = _require_string(args, "query")
+    limit = _optional_int(args, "limit", 20, min_value=1, max_value=100)
+    results = search_company(query, limit=limit)
     return {
         "query": query,
         "count": len(results),
@@ -87,10 +373,10 @@ TOOL_SEARCH_COMPANY = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_get_financial_snapshot(args: dict) -> dict:
-    corp_code = _resolve_or_error(args["company"])
-    fs_div = args.get("fs_div", "CFS")
-    years = args.get("years")
-    return kreports.get_financial_snapshot(
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    fs_div = _optional_enum(args, "fs_div", _FS_DIVS, "CFS")
+    years = _optional_int(args, "years", None, min_value=1, max_value=20)
+    return get_financial_snapshot(
         corp_code,
         fs_div=fs_div,
         years=years,
@@ -136,8 +422,8 @@ TOOL_GET_FINANCIAL_SNAPSHOT = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_score_going_concern(args: dict) -> dict:
-    corp_code = _resolve_or_error(args["company"])
-    return kreports.score_going_concern(corp_code)
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    return score_going_concern(corp_code)
 
 
 TOOL_SCORE_GOING_CONCERN = Tool(
@@ -167,10 +453,10 @@ TOOL_SCORE_GOING_CONCERN = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_detect_restatement(args: dict) -> dict:
-    corp_code = _resolve_or_error(args["company"])
-    threshold = float(args.get("threshold_pct", 1.0))
-    top_n = int(args.get("top_n", 10))
-    return kreports.detect_restatement(
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    threshold = _optional_float(args, "threshold_pct", 1.0, min_value=0.1)
+    top_n = _optional_int(args, "top_n", 10, min_value=1, max_value=100)
+    return detect_restatement(
         corp_code, threshold_pct=threshold, top_n=top_n
     )
 
@@ -215,10 +501,10 @@ TOOL_DETECT_RESTATEMENT = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_get_accounting_policy(args: dict) -> dict | None:
-    corp_code = _resolve_or_error(args["company"])
-    bsns_year = int(args["bsns_year"])
-    fs_div = args.get("fs_div", "CFS")
-    result = kreports.get_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    bsns_year = _required_int(args, "bsns_year", min_value=2000, max_value=2100)
+    fs_div = _optional_enum(args, "fs_div", _FS_DIVS, "CFS")
+    result = get_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
     if result is None:
         return {
             "corp_code": corp_code,
@@ -269,8 +555,8 @@ TOOL_GET_ACCOUNTING_POLICY = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_get_audit_history(args: dict) -> dict:
-    corp_code = _resolve_or_error(args["company"])
-    return kreports.get_audit_history(corp_code)
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    return get_audit_history(corp_code)
 
 
 TOOL_GET_AUDIT_HISTORY = Tool(
@@ -299,15 +585,20 @@ TOOL_GET_AUDIT_HISTORY = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_get_subsidiary_auditors(args: dict) -> dict:
-    corp_code = _resolve_or_error(args["company"])
-    limit = args.get("limit", 100)
-    if limit is not None:
-        limit = int(limit)
-    return kreports.get_subsidiary_auditors(
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    limit = _optional_int(
+        args,
+        "limit",
+        100,
+        min_value=1,
+        max_value=1000,
+        allow_none=True,
+    )
+    return get_subsidiary_auditors(
         corp_code,
         limit=limit,
-        only_with_auditor=bool(args.get("only_with_auditor", False)),
-        slim=bool(args.get("slim", True)),
+        only_with_auditor=_optional_bool(args, "only_with_auditor", False),
+        slim=_optional_bool(args, "slim", True),
     )
 
 
@@ -358,67 +649,19 @@ TOOL_GET_SUBSIDIARY_AUDITORS = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_compare_to_industry(args: dict) -> dict:
-    company_arg = args.get("company")
-    induty_code_arg = args.get("induty_code")
-
-    # 기업 기준 호출: company → get_company → induty_code
-    if company_arg:
-        cc = _resolve_or_error(company_arg)
-        # get_company는 stock_code를 요구 → Company 테이블 직접 조회
-        from kreports.db.engine import get_session
-        from kreports.db.models import Company
-
-        with get_session() as session:
-            row = session.query(Company).filter_by(corp_code=cc).first()
-            if row is None:
-                raise ValueError(f"corp_code '{cc}'를 찾을 수 없습니다.")
-            if not row.induty_code:
-                raise ValueError(
-                    f"'{row.corp_name}'에 induty_code가 없습니다. "
-                    "dart enrich-market으로 업종코드를 보완하세요."
-                )
-            resolved_induty = row.induty_code
-            subject_name = row.corp_name
-            subject_corp_code = cc
-    elif induty_code_arg:
-        resolved_induty = str(induty_code_arg).strip()
-        subject_name = None
-        subject_corp_code = None
-    else:
-        raise ValueError("company 또는 induty_code 중 하나를 제공해야 합니다.")
-
-    result = kreports.get_industry_aggregates(
-        induty_code=resolved_induty,
-        metric=args.get("metric", "영업이익률"),
-        year=args.get("year"),
-        fs_div=args.get("fs_div", "CFS"),
-        prefix_len=int(args.get("prefix_len", 2)),
-        include_peers=bool(args.get("include_peers", True)),
-        peer_limit=int(args.get("peer_limit", 50)),
+    company = _optional_string(args, "company")
+    if company:
+        company = _resolve_or_error(company)
+    result = compare_to_industry(
+        company=company,
+        induty_code=_optional_string(args, "induty_code"),
+        metric=_optional_enum(args, "metric", _COMPARE_METRICS, "영업이익률"),
+        year=_optional_int(args, "year", None, min_value=2000, max_value=2100),
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+        prefix_len=_optional_int(args, "prefix_len", 2, min_value=1, max_value=5),
+        include_peers=_optional_bool(args, "include_peers", True),
+        peer_limit=_optional_int(args, "peer_limit", 50, min_value=1, max_value=500),
     )
-
-    # 기업 기준 호출 시 subject 표시 + 자신의 값과 percentile 계산
-    if subject_corp_code and "peers" in result:
-        subject = next(
-            (p for p in result["peers"] if p["corp_code"] == subject_corp_code),
-            None,
-        )
-        result["subject"] = {
-            "corp_code": subject_corp_code,
-            "corp_name": subject_name,
-            "value": subject["value"] if subject else None,
-            "found_in_peers": subject is not None,
-        }
-        # 백분위: subject 값이 해당 업종 내 몇 번째인지
-        if subject and result.get("n", 0) > 0:
-            all_values = sorted(
-                [p["value"] for p in result["peers"] if p["value"] is not None]
-            )
-            rank = sum(1 for v in all_values if v < subject["value"])
-            result["subject"]["percentile"] = round(
-                100.0 * rank / max(len(all_values) - 1, 1), 1
-            ) if len(all_values) > 1 else None
-
     return result
 
 
@@ -426,7 +669,7 @@ TOOL_COMPARE_TO_INDUSTRY = Tool(
     name="compare_to_industry",
     description=(
         "동종업종(KSIC induty_code prefix 매칭) 내 재무지표 분포와 특정 회사의 위치 비교. "
-        "지원 metric: 영업이익률, 순이익률, 부채비율, ROE, ROA. "
+        "지원 metric: 영업이익률, 순이익률, 부채비율, ROE, ROA, 자기자본비율, 매출성장률, Beneish_M. "
         "기본 prefix_len=2 (KSIC 대분류). 응답: P25/P50/P75 quantile + peers 리스트 + "
         "subject(입력 회사) 값과 percentile. "
         "n<3이면 P25/P75는 null이며 희소성 note를 포함한다. "
@@ -447,7 +690,7 @@ TOOL_COMPARE_TO_INDUSTRY = Tool(
             },
             "metric": {
                 "type": "string",
-                "enum": ["영업이익률", "순이익률", "부채비율", "ROE", "ROA"],
+                "enum": _COMPARE_METRICS,
                 "default": "영업이익률",
             },
             "year": {
@@ -489,11 +732,9 @@ TOOL_COMPARE_TO_INDUSTRY = Tool(
 # ---------------------------------------------------------------------------
 
 def _handle_get_business_overview(args: dict) -> dict:
-    corp_code = _resolve_or_error(args["company"])
-    bsns_year = args.get("bsns_year")
-    if bsns_year is not None:
-        bsns_year = int(bsns_year)
-    return kreports.get_business_overview(corp_code, bsns_year=bsns_year)
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    bsns_year = _optional_int(args, "bsns_year", None, min_value=2000, max_value=2100)
+    return get_business_overview(corp_code, bsns_year=bsns_year)
 
 
 TOOL_GET_BUSINESS_OVERVIEW = Tool(
@@ -562,7 +803,7 @@ def call_tool(name: str, arguments: dict) -> str:
     if handler is None:
         return json.dumps(
             {"error": f"Unknown tool: {name}", "available": list(HANDLERS.keys())},
-            ensure_ascii=False,
+            ensure_ascii=True,
         )
     try:
         result = handler(arguments or {})
@@ -573,4 +814,5 @@ def call_tool(name: str, arguments: dict) -> str:
             {"error": f"Internal error: {type(e).__name__}: {e}"},
             ensure_ascii=False,
         )
+    result = _attach_meta(name, result)
     return json.dumps(result, ensure_ascii=False, default=str)

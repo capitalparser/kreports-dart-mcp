@@ -8,7 +8,7 @@ from kreports.db.engine import get_session
 from kreports.db.models import Company, Auditor, FetchLog
 from kreports.processor.audit_parser import (
     is_audit_report, is_annual_report,
-    normalize_auditor_name, parse_bsns_year, parse_fs_div,
+    is_valid_auditor_name, normalize_auditor_name, parse_bsns_year, parse_fs_div,
     parse_auditor_from_doc_xml,
 )
 from kreports.judge.auditor_flags import compute_auditor_flags
@@ -53,7 +53,7 @@ def collect_auditors(
         if is_audit_report(report_nm):
             # 비상장사 경로: 감사인이 직접 제출한 감사보고서
             flr_nm = raw.get("flr_nm", "").strip()
-            if not flr_nm:
+            if not is_valid_auditor_name(flr_nm):
                 skipped += 1
                 continue
             bsns_year = parse_bsns_year(report_nm, rcept_dt)
@@ -107,6 +107,7 @@ def collect_auditors(
             skipped += 1
 
     if saved > 0:
+        _delete_invalid_auditor_rows(corp_code)
         compute_auditor_flags(corp_code)
 
     return {"saved": saved, "skipped": skipped}
@@ -159,3 +160,15 @@ def _upsert_auditor(data: dict) -> None:
             "rcept_no": data.get("rcept_no"),
             "fetched_at": datetime.utcnow().isoformat(),
         })
+
+
+def _delete_invalid_auditor_rows(corp_code: str) -> int:
+    """Remove placeholder auditor rows created from blank CFS/OFS table cells."""
+    with get_session() as session:
+        rows = session.query(Auditor).filter_by(corp_code=corp_code).all()
+        deleted = 0
+        for row in rows:
+            if not is_valid_auditor_name(row.auditor_nm):
+                session.delete(row)
+                deleted += 1
+        return deleted

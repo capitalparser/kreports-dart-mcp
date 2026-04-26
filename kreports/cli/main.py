@@ -1,7 +1,11 @@
 import logging
 import os
+import json
+import platform
+import shutil
 import sys
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 # CLI는 headless 환경
@@ -20,7 +24,7 @@ from kreports.db.models import (
 
 app = typer.Typer(
     name="kreports",
-    help="KReports — Korean Financial Intelligence CLI",
+    help="KReports - Korean Financial Intelligence CLI",
     no_args_is_help=True,
 )
 
@@ -29,6 +33,133 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+
+
+GOLDEN_STOCK_CODES = [
+    "005930",  # 삼성전자
+    "000660",  # SK하이닉스
+    "005380",  # 현대자동차
+    "035420",  # NAVER
+    "051910",  # LG화학
+    "068270",  # 셀트리온
+    "035720",  # 카카오
+    "012330",  # 현대모비스
+    "105560",  # KB금융
+    "207940",  # 삼성바이오로직스
+]
+
+
+def _parse_stock_codes(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    values = []
+    for token in raw.replace("\n", ",").split(","):
+        stock_code = token.strip()
+        if stock_code:
+            values.append(stock_code)
+    return values
+
+
+def _resolve_companies_by_stock(stock_codes: list[str]) -> list[dict]:
+    if not stock_codes:
+        return []
+
+    with get_session() as session:
+        rows = (
+            session.query(
+                Company.stock_code,
+                Company.corp_code,
+                Company.corp_name,
+                Company.market,
+                Company.induty_code,
+            )
+            .filter(Company.stock_code.in_(stock_codes))
+            .all()
+        )
+
+    by_stock = {
+        row.stock_code: {
+            "stock_code": row.stock_code,
+            "corp_code": row.corp_code,
+            "corp_name": row.corp_name,
+            "market": row.market,
+            "induty_code": row.induty_code,
+        }
+        for row in rows
+    }
+    missing = [code for code in stock_codes if code not in by_stock]
+    if missing:
+        typer.echo(f"오류: DB에 없는 종목코드가 있습니다: {', '.join(missing)}", err=True)
+        raise typer.Exit(1)
+
+    return [by_stock[code] for code in stock_codes]
+
+
+def _dataset_health_snapshot() -> dict:
+    from sqlalchemy import func
+
+    with get_session() as session:
+        total_companies = session.query(Company).filter(Company.stock_code.isnot(None)).count()
+        companies_with_market = (
+            session.query(Company)
+            .filter(Company.stock_code.isnot(None), Company.market.isnot(None))
+            .count()
+        )
+        companies_with_induty = (
+            session.query(Company)
+            .filter(Company.stock_code.isnot(None), Company.induty_code.isnot(None))
+            .count()
+        )
+        financial_company_count = session.query(func.count(func.distinct(Financial.corp_code))).scalar() or 0
+        disclosure_company_count = session.query(func.count(func.distinct(Disclosure.corp_code))).scalar() or 0
+        auditor_company_count = session.query(func.count(func.distinct(Auditor.corp_code))).scalar() or 0
+        audit_fee_company_count = session.query(func.count(func.distinct(AuditFee.corp_code))).scalar() or 0
+        policy_company_count = session.query(func.count(func.distinct(AccountingPolicyItem.corp_code))).scalar() or 0
+        auditors_orphan_rows = (
+            session.query(func.count(Auditor.id))
+            .outerjoin(Company, Auditor.corp_code == Company.corp_code)
+            .filter(Company.corp_code.is_(None))
+            .scalar()
+            or 0
+        )
+        latest_financial = session.query(func.max(Financial.fetched_at)).scalar()
+        latest_disclosure = session.query(func.max(Disclosure.fetched_at)).scalar()
+        latest_auditor = session.query(func.max(Auditor.fetched_at)).scalar()
+        latest_audit_fee = session.query(func.max(AuditFee.fetched_at)).scalar()
+        latest_policy = session.query(func.max(AccountingPolicyItem.fetched_at)).scalar()
+
+    golden_rows = []
+    for company in _resolve_companies_by_stock(GOLDEN_STOCK_CODES):
+        with get_session() as session:
+            golden_rows.append({
+                "stock_code": company["stock_code"],
+                "corp_name": company["corp_name"],
+                "market": company["market"] or "-",
+                "induty_code": company["induty_code"] or "-",
+                "financial_rows": session.query(Financial).filter_by(corp_code=company["corp_code"]).count(),
+                "disclosure_rows": session.query(Disclosure).filter_by(corp_code=company["corp_code"]).count(),
+                "auditor_rows": session.query(Auditor).filter_by(corp_code=company["corp_code"]).count(),
+                "audit_fee_rows": session.query(AuditFee).filter_by(corp_code=company["corp_code"]).count(),
+                "policy_rows": session.query(AccountingPolicyItem).filter_by(corp_code=company["corp_code"]).count(),
+            })
+
+    return {
+        "total_companies": total_companies,
+        "companies_with_market": companies_with_market,
+        "companies_with_induty": companies_with_induty,
+        "financial_company_count": financial_company_count,
+        "disclosure_company_count": disclosure_company_count,
+        "auditor_company_count": auditor_company_count,
+        "audit_fee_company_count": audit_fee_company_count,
+        "policy_company_count": policy_company_count,
+        "auditors_orphan_rows": auditors_orphan_rows,
+        "latest_financial": latest_financial,
+        "latest_disclosure": latest_disclosure,
+        "latest_auditor": latest_auditor,
+        "latest_audit_fee": latest_audit_fee,
+        "latest_policy": latest_policy,
+        "golden_rows": golden_rows,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +178,176 @@ def serve():
     """MCP stdio 서버를 실행한다. Claude Desktop / Claude Code에 연결."""
     from kreports.mcp.server import main as mcp_main
     mcp_main()
+
+
+@app.command("serve-http")
+def serve_http(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host"),
+    port: int = typer.Option(8765, "--port", help="Bind port"),
+    path: str = typer.Option("/mcp", "--path", help="MCP HTTP path"),
+    token: Optional[str] = typer.Option(
+        None,
+        "--token",
+        help="Bearer token. Defaults to KREPORTS_MCP_TOKEN when omitted.",
+    ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Allow requests without bearer authentication.",
+    ),
+    stateless: bool = typer.Option(False, "--stateless", help="Use stateless Streamable HTTP sessions."),
+    json_response: bool = typer.Option(False, "--json-response", help="Return JSON responses instead of SSE streams."),
+    allowed_hosts: Optional[str] = typer.Option(
+        None,
+        "--allowed-hosts",
+        help="Comma-separated Host allowlist for DNS rebinding protection.",
+    ),
+    allowed_origins: Optional[str] = typer.Option(
+        None,
+        "--allowed-origins",
+        help="Comma-separated Origin allowlist for DNS rebinding protection.",
+    ),
+):
+    """MCP Streamable HTTP 서버를 실행한다. Claude Web remote connector용."""
+    from kreports.mcp.http_server import run_http
+
+    run_http(
+        host=host,
+        port=port,
+        path=path,
+        token=token,
+        allow_unauthenticated=allow_unauthenticated,
+        stateless=stateless,
+        json_response=json_response,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _mcp_launcher_path() -> Path:
+    suffix = ".cmd" if os.name == "nt" else ".sh"
+    path = _project_root() / "scripts" / f"kreports-mcp{suffix}"
+    if path.exists():
+        return path
+    return _project_root() / "scripts" / "kreports-mcp.cmd"
+
+
+def _json_print(data: dict) -> None:
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+@app.command("mcp-config")
+def mcp_config(
+    target: str = typer.Option(
+        "vscode",
+        "--target",
+        "-t",
+        help="vscode / cursor / claude / code-cli",
+    ),
+):
+    """IDE/CLI MCP 클라이언트에 붙일 설정 JSON을 출력한다."""
+    root = _project_root()
+    launcher = _mcp_launcher_path()
+    env_file = root / ".env"
+    target_norm = target.lower().strip()
+
+    if target_norm == "vscode":
+        _json_print({
+            "servers": {
+                "kreports": {
+                    "type": "stdio",
+                    "command": str(launcher),
+                    "envFile": str(env_file),
+                }
+            }
+        })
+        return
+
+    if target_norm in ("cursor", "claude", "claude-desktop"):
+        _json_print({
+            "mcpServers": {
+                "kreports": {
+                    "command": str(launcher),
+                }
+            }
+        })
+        return
+
+    if target_norm in ("code-cli", "vscode-cli"):
+        payload = {
+            "name": "kreports",
+            "type": "stdio",
+            "command": str(launcher),
+            "envFile": str(env_file),
+        }
+        typer.echo(f"code --add-mcp {json.dumps(payload, ensure_ascii=False)}")
+        return
+
+    raise typer.BadParameter("target은 vscode / cursor / claude / code-cli 중 하나여야 합니다.")
+
+
+@app.command("mcp-doctor")
+def mcp_doctor(
+    json_output: bool = typer.Option(False, "--json", help="점검 결과를 JSON으로 출력"),
+):
+    """MCP 실행 환경을 점검한다. IDE 연결 전 빠른 smoke check 용도."""
+    from kreports.mcp.tools import ALL_TOOLS
+
+    root = _project_root()
+    launcher = _mcp_launcher_path()
+    env_file = root / ".env"
+    python_exe = shutil.which(os.environ.get("KREPORTS_PYTHON") or "python")
+
+    checks = {
+        "project_root": str(root),
+        "python": python_exe or "",
+        "python_version": platform.python_version(),
+        "launcher": str(launcher),
+        "launcher_exists": launcher.exists(),
+        "env_file": str(env_file),
+        "env_file_exists": env_file.exists(),
+        "dart_api_key_present": bool(settings.dart_api_key or os.environ.get("DART_API_KEY")),
+        "tool_count": len(ALL_TOOLS),
+        "tools": [tool.name for tool in ALL_TOOLS],
+    }
+
+    try:
+        from kreports.analysis.api import search_company
+        sample = search_company("삼성전자", limit=1)
+        checks["analysis_import_ok"] = True
+        checks["db_query_ok"] = True
+        checks["sample_company_found"] = bool(sample)
+    except Exception as exc:
+        checks["analysis_import_ok"] = False
+        checks["db_query_ok"] = False
+        checks["db_error"] = str(exc)
+
+    checks["ok"] = bool(
+        checks["python"]
+        and checks["launcher_exists"]
+        and checks["env_file_exists"]
+        and checks["dart_api_key_present"]
+        and checks.get("analysis_import_ok")
+        and checks.get("db_query_ok")
+    )
+
+    if json_output:
+        _json_print(checks)
+        return
+
+    typer.echo("KReports MCP doctor")
+    typer.echo(f"- project_root: {checks['project_root']}")
+    typer.echo(f"- python: {checks['python'] or 'NOT FOUND'} ({checks['python_version']})")
+    typer.echo(f"- launcher: {checks['launcher']} ({'ok' if checks['launcher_exists'] else 'missing'})")
+    typer.echo(f"- .env: {checks['env_file']} ({'ok' if checks['env_file_exists'] else 'missing'})")
+    typer.echo(f"- DART_API_KEY: {'ok' if checks['dart_api_key_present'] else 'missing'}")
+    typer.echo(f"- tools: {checks['tool_count']} ({', '.join(checks['tools'])})")
+    typer.echo(f"- db query: {'ok' if checks.get('db_query_ok') else checks.get('db_error', 'failed')}")
+    typer.echo(f"RESULT: {'OK' if checks['ok'] else 'CHECK REQUIRED'}")
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +395,7 @@ def collect_seed_cmd(
         progress_callback=_progress,
     )
     typer.echo(
-        f"\n완료 — {result['companies']:,}사 대상 | "
+        f"\n완료 - {result['companies']:,}사 대상 | "
         f"수집 {result['collected']:,} | 건너뜀 {result['skipped']:,} | "
         f"오류 {result['error']:,} | 업종 커버 {result['industries_covered']}개"
     )
@@ -128,39 +429,261 @@ def sync_companies(
 # ---------------------------------------------------------------------------
 
 @app.command("enrich-market")
-def enrich_market_cmd():
+def enrich_market_cmd(
+    stocks: Optional[str] = typer.Option(
+        None,
+        "--stocks",
+        help="쉼표 구분 종목코드. 지정 시 해당 기업만 보완.",
+    ),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        help="최대 처리 건수. 미지정 시 전체 대상 처리.",
+    ),
+    request_delay: Optional[float] = typer.Option(
+        None,
+        "--request-delay",
+        help="API 요청 간 대기 초. 미지정 시 settings.request_delay 사용.",
+    ),
+):
     """market 또는 induty_code가 NULL인 상장사의 시장구분·업종코드를 DART API로 보완한다."""
     if not settings.dart_api_key:
         typer.echo("오류: DART_API_KEY 미설정", err=True)
         raise typer.Exit(1)
 
-    from sqlalchemy import or_
+    selected_stocks = _parse_stock_codes(stocks)
+    corp_codes = None
 
-    with get_session() as session:
-        null_count = (
-            session.query(Company)
-            .filter(Company.stock_code.isnot(None))
-            .filter(or_(Company.market.is_(None), Company.induty_code.is_(None)))
-            .count()
+    if selected_stocks:
+        companies = _resolve_companies_by_stock(selected_stocks)
+        corp_codes = [c["corp_code"] for c in companies]
+        typer.echo(
+            f"시장·업종 보완 시작: 지정 종목 {len(companies)}개 "
+            f"({', '.join(c['stock_code'] for c in companies)})"
+        )
+    else:
+        from sqlalchemy import or_
+
+        with get_session() as session:
+            null_count = (
+                session.query(Company)
+                .filter(Company.stock_code.isnot(None))
+                .filter(or_(Company.market.is_(None), Company.induty_code.is_(None)))
+                .count()
+            )
+
+        if null_count == 0:
+            typer.echo("보완 대상이 없습니다 (market/induty_code 모두 채워짐).")
+            raise typer.Exit(0)
+
+        expected = limit or null_count
+        delay = settings.request_delay if request_delay is None else request_delay
+        typer.echo(
+            f"시장·업종 보완 시작: {expected:,}개사 대상 "
+            f"(request_delay={delay:.2f}s)"
         )
 
-    if null_count == 0:
-        typer.echo("보완 대상이 없습니다 (market/induty_code 모두 채워짐).")
-        raise typer.Exit(0)
-
-    typer.echo(f"시장·업종 보완 시작: {null_count:,}개사 (약 {null_count * 0.5 / 60:.0f}분 소요 예상)")
+    from sqlalchemy import or_
 
     from kreports.collector.corp_sync import enrich_market as _enrich
 
     def _progress(done, total, corp_code):
-        if done % 50 == 0 or done == total:
+        if done == 1 or done % 25 == 0 or done == total:
             typer.echo(f"\r[{done}/{total}] {corp_code}", nl=False)
 
-    result = _enrich(progress_callback=_progress)
+    result = _enrich(
+        progress_callback=_progress,
+        corp_codes=corp_codes,
+        limit=limit,
+        request_delay=request_delay,
+    )
     typer.echo(
-        f"\n완료 — 처리 {result['total']:,}개사 | "
-        f"KOSPI/KOSDAQ/KONEX {result['updated']:,} | 기타 {result['skipped']:,} | "
+        f"\n완료 - 처리 {result['total']:,}개사 | "
+        f"업데이트 {result['updated']:,} | 기타 {result['skipped']:,} | "
         f"오류 {result['error']:,} | induty 채움 {result['induty_filled']:,}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# dataset-health
+# ---------------------------------------------------------------------------
+
+@app.command("dataset-health")
+def dataset_health_cmd():
+    """실사용 데이터셋 준비 상태를 요약해 출력한다."""
+    snapshot = _dataset_health_snapshot()
+
+    total = snapshot["total_companies"] or 1
+    market_rate = snapshot["companies_with_market"] / total * 100
+    induty_rate = snapshot["companies_with_induty"] / total * 100
+
+    typer.echo("데이터셋 건강도")
+    typer.echo(f"  상장사 마스터: {snapshot['total_companies']:,}개사")
+    typer.echo(f"  market 채움:   {snapshot['companies_with_market']:,} ({market_rate:.1f}%)")
+    typer.echo(f"  induty 채움:   {snapshot['companies_with_induty']:,} ({induty_rate:.1f}%)")
+    typer.echo(f"  재무 커버:     {snapshot['financial_company_count']:,}개사")
+    typer.echo(f"  공시 커버:     {snapshot['disclosure_company_count']:,}개사")
+    typer.echo(f"  감사인 커버:   {snapshot['auditor_company_count']:,}개사")
+    typer.echo(f"  감사보수 커버: {snapshot['audit_fee_company_count']:,}개사")
+    typer.echo(f"  정책 커버:     {snapshot['policy_company_count']:,}개사")
+    typer.echo(f"  감사인 orphan: {snapshot['auditors_orphan_rows']:,}건")
+
+    typer.echo("\n최근 적재 시각")
+    typer.echo(f"  financials: {snapshot['latest_financial'] or '-'}")
+    typer.echo(f"  disclosures: {snapshot['latest_disclosure'] or '-'}")
+    typer.echo(f"  auditors: {snapshot['latest_auditor'] or '-'}")
+    typer.echo(f"  audit_fees: {snapshot['latest_audit_fee'] or '-'}")
+    typer.echo(f"  policy_items: {snapshot['latest_policy'] or '-'}")
+
+    golden_table = [
+        [
+            row["stock_code"],
+            row["corp_name"],
+            row["market"],
+            row["induty_code"],
+            row["financial_rows"],
+            row["disclosure_rows"],
+            row["auditor_rows"],
+            row["audit_fee_rows"],
+            row["policy_rows"],
+        ]
+        for row in snapshot["golden_rows"]
+    ]
+    typer.echo("\n골든셋 커버리지")
+    typer.echo(
+        tabulate(
+            golden_table,
+            headers=[
+                "종목코드", "회사", "시장", "업종", "재무", "공시", "감사인", "감사보수", "정책",
+            ],
+            tablefmt="github",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# collect-golden
+# ---------------------------------------------------------------------------
+
+@app.command("collect-golden")
+def collect_golden_cmd(
+    year_from: Optional[int] = typer.Option(
+        None, "--year-from", help="수집 시작 연도. 기본은 직전 2개 연도."
+    ),
+    year_to: Optional[int] = typer.Option(
+        None, "--year-to", help="수집 종료 연도. 기본은 직전 연도."
+    ),
+    stocks: Optional[str] = typer.Option(
+        None, "--stocks", help="쉼표 구분 종목코드. 기본은 내장 골든셋."
+    ),
+    enrich_master: bool = typer.Option(
+        True, "--enrich-master/--skip-enrich-master", help="수집 전 market/induty_code 보완"
+    ),
+    include_disclosures: bool = typer.Option(
+        True, "--disclosures/--no-disclosures", help="공시 목록 수집"
+    ),
+    include_auditors: bool = typer.Option(
+        True, "--auditors/--no-auditors", help="감사인 이력 수집"
+    ),
+    include_audit_fees: bool = typer.Option(
+        True, "--audit-fees/--no-audit-fees", help="감사보수 수집"
+    ),
+    include_policies: bool = typer.Option(
+        True, "--policies/--no-policies", help="회계정책 item 수집"
+    ),
+):
+    """MCP smoke test와 데모에 필요한 골든셋 기업 데이터를 우선 적재한다."""
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    current_year = date.today().year
+    y_to = year_to or (current_year - 1)
+    y_from = year_from or (y_to - 1)
+    selected_stocks = _parse_stock_codes(stocks) or GOLDEN_STOCK_CODES
+    companies = _resolve_companies_by_stock(selected_stocks)
+    corp_codes = [c["corp_code"] for c in companies]
+    start_date = f"{y_from}0101"
+    end_date = date.today().strftime("%Y%m%d")
+
+    typer.echo(
+        f"골든셋 수집 시작: {len(companies)}개사 · "
+        f"{y_from}~{y_to}년 · "
+        f"{', '.join(c['stock_code'] for c in companies)}"
+    )
+
+    if enrich_master:
+        from kreports.collector.corp_sync import enrich_market as _enrich
+
+        typer.echo("  master 보완 중...")
+        _enrich(corp_codes=corp_codes)
+
+    from kreports.collector.fin_collector import collect_financial_range
+    from kreports.collector.disc_collector import collect_disclosures
+    from kreports.collector.audit_collector import collect_auditors
+    from kreports.collector.audit_fee_collector import collect_audit_fees
+    from kreports.collector.policy_collector import collect_policies_batch
+
+    totals = {
+        "financial_success": 0,
+        "financial_no_data": 0,
+        "financial_error": 0,
+        "disclosures_saved": 0,
+        "disclosures_error": 0,
+        "auditors_saved": 0,
+        "audit_fees_saved": 0,
+        "audit_fees_error": 0,
+        "policy_ok": 0,
+        "policy_failed": 0,
+        "policy_items_total": 0,
+    }
+
+    for idx, company in enumerate(companies, 1):
+        stock_code = company["stock_code"]
+        corp_code = company["corp_code"]
+        corp_name = company["corp_name"]
+        typer.echo(f"[{idx}/{len(companies)}] {corp_name} ({stock_code})")
+
+        financial_result = collect_financial_range(stock_code, year_from=y_from, year_to=y_to)
+        totals["financial_success"] += financial_result["success"]
+        totals["financial_no_data"] += financial_result["no_data"]
+        totals["financial_error"] += financial_result["error"]
+
+        if include_disclosures:
+            disclosure_result = collect_disclosures(
+                corp_code, start_date=start_date, end_date=end_date
+            )
+            totals["disclosures_saved"] += disclosure_result["saved"]
+            totals["disclosures_error"] += disclosure_result["error"]
+
+        if include_auditors:
+            auditor_result = collect_auditors(
+                corp_code, start_date=start_date, end_date=end_date
+            )
+            totals["auditors_saved"] += auditor_result["saved"]
+
+        if include_audit_fees:
+            fee_result = collect_audit_fees(corp_code, year_from=y_from, year_to=y_to)
+            totals["audit_fees_saved"] += fee_result["saved"]
+            totals["audit_fees_error"] += fee_result["error"]
+
+        if include_policies:
+            policy_targets = [(corp_code, year, "CFS") for year in range(y_from, y_to + 1)]
+            policy_result = collect_policies_batch(policy_targets)
+            totals["policy_ok"] += policy_result["ok"]
+            totals["policy_failed"] += policy_result["failed"]
+            totals["policy_items_total"] += policy_result["items_total"]
+
+    typer.echo(
+        "\n완료 - "
+        f"financial success {totals['financial_success']}, "
+        f"no_data {totals['financial_no_data']}, "
+        f"error {totals['financial_error']} | "
+        f"disclosures {totals['disclosures_saved']} (error {totals['disclosures_error']}) | "
+        f"auditors {totals['auditors_saved']} | "
+        f"audit_fees {totals['audit_fees_saved']} (error {totals['audit_fees_error']}) | "
+        f"policies ok {totals['policy_ok']} failed {totals['policy_failed']} "
+        f"items {totals['policy_items_total']}"
     )
 
 
@@ -244,7 +767,7 @@ def collect_policies_cmd(
     agg = collect_policies_batch(targets, progress_callback=_progress)
 
     typer.echo(
-        f"\n완료 — 처리 {agg['total']} | 성공 {agg['ok']} | 실패 {agg['failed']} | "
+        f"\n완료 - 처리 {agg['total']} | 성공 {agg['ok']} | 실패 {agg['failed']} | "
         f"items {agg['items_total']} (신규 {agg['items_new']} · 변경 {agg['items_changed']})"
     )
 
@@ -278,7 +801,7 @@ def collect(
     typer.echo(f"수집 시작: {stock} ({y_from}~{y_to}년)")
     from kreports.collector.fin_collector import collect_financial_range
     result = collect_financial_range(stock, year_from=y_from, year_to=y_to)
-    typer.echo(f"완료 — 성공: {result['success']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
+    typer.echo(f"완료 - 성공: {result['success']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +825,7 @@ def collect_all(
 
     typer.echo("전체 재무 배치 수집 시작...")
     result = collect_all_companies(year_from, year_to, progress_callback=_progress)
-    typer.echo(f"\n완료 — 성공: {result['success']:,}, 데이터없음: {result['no_data']:,}, 오류: {result['error']:,}")
+    typer.echo(f"\n완료 - 성공: {result['success']:,}, 데이터없음: {result['no_data']:,}, 오류: {result['error']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +849,7 @@ def collect_disclosures_cmd(
             typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
             raise typer.Exit(1)
         result = collect_disclosures(corp_code)
-        typer.echo(f"완료 — 저장: {result['saved']}, 스킵: {result['skipped']}")
+        typer.echo(f"완료 - 저장: {result['saved']}, 스킵: {result['skipped']}")
     else:
         from kreports.collector.disc_collector import collect_all_disclosures
 
@@ -335,7 +858,7 @@ def collect_disclosures_cmd(
 
         typer.echo("전체 공시 배치 수집 시작...")
         result = collect_all_disclosures(progress_callback=_progress)
-        typer.echo(f"\n완료 — 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
+        typer.echo(f"\n완료 - 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +884,7 @@ def collect_auditors_cmd(
             raise typer.Exit(1)
         result = collect_auditors(corp_code)
         compute_auditor_flags(corp_code)
-        typer.echo(f"완료 — 저장: {result['saved']}, 스킵: {result['skipped']}")
+        typer.echo(f"완료 - 저장: {result['saved']}, 스킵: {result['skipped']}")
     else:
         from kreports.collector.audit_collector import collect_all_auditors
         from kreports.judge.auditor_flags import compute_all_auditor_flags
@@ -373,7 +896,7 @@ def collect_auditors_cmd(
         result = collect_all_auditors(progress_callback=_progress)
         typer.echo(f"\n플래그 계산 중...")
         compute_all_auditor_flags()
-        typer.echo(f"완료 — 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
+        typer.echo(f"완료 - 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +922,7 @@ def collect_audit_fees_cmd(
             typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
             raise typer.Exit(1)
         result = collect_audit_fees(corp_code, year_from, year_to)
-        typer.echo(f"완료 — 저장: {result['saved']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
+        typer.echo(f"완료 - 저장: {result['saved']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
     else:
         from kreports.collector.audit_fee_collector import collect_all_audit_fees
 
@@ -410,7 +933,7 @@ def collect_audit_fees_cmd(
         typer.echo("전체 감사보수 배치 수집 시작...")
         result = collect_all_audit_fees(year_from, year_to, progress_callback=_progress)
         typer.echo(
-            f"\n완료 — 저장: {result['saved']:,}, "
+            f"\n완료 - 저장: {result['saved']:,}, "
             f"데이터없음: {result['no_data']:,}, 오류: {result['error']:,}"
         )
 
@@ -443,7 +966,7 @@ def compute_flags_cmd(
             raise typer.Exit(1)
         r = _run_all(corp_code)
         typer.echo(
-            f"완료 — gap: {r['gap']}기간, trend+CF: {r['trend']}기간, "
+            f"완료 - gap: {r['gap']}기간, trend+CF: {r['trend']}기간, "
             f"Beneish: {r['beneish']}연도"
         )
     else:
@@ -460,7 +983,7 @@ def compute_flags_cmd(
             for k in totals:
                 totals[k] += r[k]
         typer.echo(
-            f"\n완료 — gap: {totals['gap']:,}기간, "
+            f"\n완료 - gap: {totals['gap']:,}기간, "
             f"trend+CF: {totals['trend']:,}기간, "
             f"Beneish: {totals['beneish']:,}연도"
         )
@@ -531,7 +1054,7 @@ def show(
         ])
 
     typer.echo(f"\n종목: {corp_name} ({stock}) | 시장: {market}")
-    typer.echo(tabulate(table, headers=headers, tablefmt="rounded_outline", numalign="right"))
+    typer.echo(tabulate(table, headers=headers, tablefmt="github", numalign="right"))
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +1089,7 @@ def show_disclosures(
 
     headers = ["공시일", "유형", "공시명", "제출인"]
     typer.echo(f"\n종목: {corp_name} ({stock})")
-    typer.echo(tabulate(rows, headers=headers, tablefmt="rounded_outline"))
+    typer.echo(tabulate(rows, headers=headers, tablefmt="github"))
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +1130,7 @@ def show_auditors(
 
     headers = ["회계연도", "구분", "감사인", "감사의견", "교체여부", "연속연수"]
     typer.echo(f"\n종목: {corp_name} ({stock})")
-    typer.echo(tabulate(data, headers=headers, tablefmt="rounded_outline"))
+    typer.echo(tabulate(data, headers=headers, tablefmt="github"))
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +1151,7 @@ def schedule_start():
     sched = start_scheduler()
     typer.echo("스케줄러 실행 중...")
     for job in list_jobs(sched):
-        typer.echo(f"  [{job['id']}] {job['name']} — 다음 실행: {job['next_run']}")
+        typer.echo(f"  [{job['id']}] {job['name']} - 다음 실행: {job['next_run']}")
     typer.echo("Ctrl+C로 종료하세요.")
 
     def _shutdown(signum, frame):

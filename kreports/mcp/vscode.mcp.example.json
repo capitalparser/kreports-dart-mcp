@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "kreports": {
+      "type": "stdio",
+      "command": "${workspaceFolder}\\scripts\\kreports-mcp.cmd",
+      "envFile": "${workspaceFolder}\\.env"
+    }
+  }
+}

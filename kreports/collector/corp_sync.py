@@ -77,11 +77,16 @@ def _fetch_company_info_with_retry(corp_code: str, max_attempts: int = 2) -> dic
     return None
 
 
-def enrich_market(progress_callback=None) -> dict:
+def enrich_market(
+    progress_callback=None,
+    corp_codes: list[str] | None = None,
+    limit: int | None = None,
+    request_delay: float | None = None,
+) -> dict:
     """
     market 또는 induty_code가 NULL인 상장사에 대해 DART company.json으로
     시장구분(market)과 업종코드(induty_code)를 보완한다.
-    재실행 시 이미 채워진 레코드는 건너뛴다 (idempotent).
+    corp_codes를 지정하면 해당 기업만 대상으로 재실행할 수 있다.
 
     Returns:
         {"updated": int, "skipped": int, "error": int, "total": int,
@@ -90,24 +95,26 @@ def enrich_market(progress_callback=None) -> dict:
     from sqlalchemy import or_
 
     with get_session() as session:
-        targets = (
-            session.query(Company.corp_code)
-            .filter(Company.stock_code.isnot(None))
-            .filter(or_(Company.market.is_(None), Company.induty_code.is_(None)))
-            .all()
-        )
-        corp_codes = [r[0] for r in targets]
+        query = session.query(Company.corp_code).filter(Company.stock_code.isnot(None))
+        if corp_codes:
+            query = query.filter(Company.corp_code.in_(corp_codes))
+        else:
+            query = query.filter(or_(Company.market.is_(None), Company.induty_code.is_(None)))
+        if limit is not None:
+            query = query.limit(limit)
+        target_codes = [r[0] for r in query.order_by(Company.corp_code).all()]
 
-    total = len(corp_codes)
+    total = len(target_codes)
     updated = skipped = error = 0
     induty_filled = 0
+    delay = settings.request_delay if request_delay is None else request_delay
 
-    for idx, corp_code in enumerate(corp_codes, 1):
+    for idx, corp_code in enumerate(target_codes, 1):
         if progress_callback:
             progress_callback(idx, total, corp_code)
 
         info = _fetch_company_info_with_retry(corp_code)
-        time.sleep(settings.request_delay)
+        time.sleep(delay)
 
         if info is None:
             error += 1
@@ -116,18 +123,21 @@ def enrich_market(progress_callback=None) -> dict:
         market = info.get("market")              # KOSPI / KOSDAQ / KONEX / None(기타)
         induty_code = info.get("induty_code")    # KSIC 업종코드 (5자리)
 
-        update_fields = {"market": market}
+        update_fields: dict[str, str] = {}
+        if market:
+            update_fields["market"] = market
         if induty_code:
             update_fields["induty_code"] = induty_code[:5]
             induty_filled += 1
 
+        if not update_fields:
+            skipped += 1
+            continue
+
         with get_session() as session:
             session.query(Company).filter_by(corp_code=corp_code).update(update_fields)
 
-        if market:
-            updated += 1
-        else:
-            skipped += 1  # corp_cls=E (기타/비상장)
+        updated += 1
 
     logger.info(
         "시장구분·업종코드 보완 완료: 업데이트 %d, 기타 %d, 오류 %d, induty 채움 %d",

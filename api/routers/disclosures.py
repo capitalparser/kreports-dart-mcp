@@ -2,8 +2,8 @@
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
-from dart_platform.db.engine import get_session
-from dart_platform.db.models import Company, Disclosure
+from kreports.db.engine import get_session
+from kreports.db.models import Company, Disclosure
 from api.schemas import DisclosureOut
 
 router = APIRouter(prefix="/disclosures", tags=["disclosures"])

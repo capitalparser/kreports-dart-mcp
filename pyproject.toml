@@ -54,6 +54,8 @@ dev = [
 
 [project.scripts]
 kreports = "kreports.cli.main:app"
+kreports-mcp = "kreports.mcp.server:main"
+kreports-mcp-http = "kreports.mcp.http_server:main"
 
 [project.urls]
 Homepage = "https://github.com/capitalparser/kreports"

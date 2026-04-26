@@ -473,7 +473,7 @@ if not df.empty and "Beneish_M" in df.columns:
 
             # 실제 DB에서 상세 인덱스 가져오기
             from dashboard.db import get_session
-            from dart_platform.db.models import Financial, Company
+            from kreports.db.models import Financial, Company
             with get_session() as _sess:
                 _corp_code = company["corp_code"]
                 _fin_rows = _sess.query(Financial).filter_by(

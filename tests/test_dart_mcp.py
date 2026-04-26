@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
+import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -68,6 +72,14 @@ class TestCallToolErrors:
         assert "error" in result
         assert "찾을 수 없습니다" in result["error"]
 
+    def test_invalid_limit_returns_user_error(self):
+        result = json.loads(call_tool(
+            "search_company",
+            {"query": "삼성전자", "limit": 0},
+        ))
+        assert "error" in result
+        assert "limit" in result["error"]
+
 
 class TestCallToolRealData:
     """삼성전자 데이터가 DB에 있는 경우의 실제 호출."""
@@ -83,6 +95,8 @@ class TestCallToolRealData:
         if result["count"] == 0:
             pytest.skip("삼성전자 DB 미등록")
         assert any("삼성전자" in r["corp_name"] for r in result["results"])
+        assert result["_meta"]["source"] == "local_kreports_db"
+        assert result["_meta"]["tool"] == "search_company"
 
     def test_get_financial_snapshot_by_stock_code(self):
         samsung = self._samsung_cc()
@@ -95,6 +109,8 @@ class TestCallToolRealData:
         assert result["corp_code"] == samsung
         assert result["unit"] == "억원"
         assert result["row_count"] >= 1
+        assert result["_meta"]["company"]["corp_code"] == samsung
+        assert "financial" in result["_meta"]["data_freshness"]
 
     def test_get_financial_snapshot_by_name(self):
         samsung = self._samsung_cc()
@@ -105,6 +121,18 @@ class TestCallToolRealData:
             {"company": "삼성전자", "years": 2},
         ))
         assert result["corp_code"] == samsung
+
+    def test_ambiguous_company_name_returns_candidates(self):
+        hits = json.loads(call_tool("search_company", {"query": "삼성", "limit": 2}))
+        if hits["count"] < 2:
+            pytest.skip("ambiguous 삼성 candidates unavailable")
+        result = json.loads(call_tool(
+            "score_going_concern",
+            {"company": "삼성"},
+        ))
+        assert "error" in result
+        assert "모호" in result["error"]
+        assert "후보" in result["error"]
 
     def test_score_going_concern(self):
         samsung = self._samsung_cc()
@@ -211,6 +239,41 @@ async def _e2e_stdio_call_tool(name: str, args: dict) -> str:
             return result.content[0].text
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_health(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
+    deadline = time.time() + timeout
+    url = f"http://127.0.0.1:{port}/healthz"
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise RuntimeError(f"HTTP MCP server exited early: {stderr}")
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:
+                if response.status == 200:
+                    return
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.25)
+    raise RuntimeError(f"HTTP MCP server did not become healthy: {last_error}")
+
+
+async def _e2e_http_tools_list(port: int) -> list[str]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async with streamable_http_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return [t.name for t in result.tools]
+
+
 class TestStdioE2E:
     """subprocess로 실제 MCP 서버를 띄우고 JSON-RPC 왕복."""
 
@@ -239,3 +302,60 @@ class TestStdioE2E:
         parsed = json.loads(text)
         assert parsed["has_data"] is True
         assert parsed["grade"] in ("안정", "주의", "경고", "위험")
+
+
+class TestStreamableHttpE2E:
+    """Streamable HTTP transport for remote MCP clients."""
+
+    def test_http_app_factory_routes(self):
+        from kreports.mcp.http_server import create_app
+
+        app = create_app(path="/mcp")
+        route_paths = {getattr(route, "path", None) for route in app.routes}
+        assert {"/", "/healthz", "/mcp"}.issubset(route_paths)
+
+    def test_http_bearer_token_rejects_missing_auth(self):
+        from starlette.testclient import TestClient
+
+        from kreports.mcp.http_server import create_app
+
+        app = create_app(path="/mcp", token="secret-token")
+        with TestClient(app) as client:
+            response = client.post("/mcp", json={})
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+    def test_streamable_http_tools_list(self):
+        pytest.importorskip("uvicorn")
+        port = _free_port()
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "kreports.mcp.http_server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--allow-unauthenticated",
+                "--log-level",
+                "warning",
+            ],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _wait_for_health(port, proc)
+            names = asyncio.run(_e2e_http_tools_list(port))
+            assert len(names) == EXPECTED_TOOL_COUNT
+            assert "search_company" in names
+            assert "get_business_overview" in names
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)

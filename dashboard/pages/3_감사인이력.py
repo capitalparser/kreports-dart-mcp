@@ -34,23 +34,15 @@ if df.empty:
     st.markdown(no_data("감사인 이력이 없습니다."), unsafe_allow_html=True)
     if st.button("감사인 이력 수집", type="primary", use_container_width=True):
         with st.spinner("감사인 이력 수집 중..."):
-            from dart_platform.collector.audit_collector import collect_auditors
+            from kreports.collector.audit_collector import collect_auditors
             result = collect_auditors(company["corp_code"])
         st.success(f"완료: 저장 {result['saved']}건, 스킵 {result['skipped']}건")
         st.rerun()
     st.stop()
 
-# CFS 우선, 없으면 OFS — 감사인은 연결/별도 구분 없이 동일하게 선임됨
-if "구분" in df.columns:
-    cfs = df[df["구분"] == "CFS"]
-    sub = cfs if not cfs.empty else df[df["구분"] == "OFS"]
-    # 그래도 비어있으면 전체 사용
-    if sub.empty:
-        sub = df
-else:
-    sub = df
-
-sub = sub.sort_values("회계연도").copy()
+# get_auditors() already returns one preferred row per year:
+# CFS when populated, otherwise OFS, with tenure recalculated across years.
+sub = df.sort_values("회계연도").copy()
 
 # KPI
 col1, col2, col3 = st.columns(3)
@@ -372,7 +364,7 @@ if st.session_state.get("show_affiliates"):
                 unsafe_allow_html=True,
             )
             if st.button(f"미수집 감사인 일괄 수집 ({len(uncollected)}개)", use_container_width=True):
-                from dart_platform.collector.audit_collector import collect_auditors
+                from kreports.collector.audit_collector import collect_auditors
                 results = []
                 prog = st.progress(0)
                 for i, it in enumerate(uncollected):
@@ -400,7 +392,7 @@ if st.session_state.get("show_affiliates"):
 with st.expander("감사인 이력 재수집"):
     if st.button("감사인 이력 재수집 (덮어쓰기)", use_container_width=True):
         with st.spinner("수집 중..."):
-            from dart_platform.collector.audit_collector import collect_auditors
+            from kreports.collector.audit_collector import collect_auditors
             result = collect_auditors(company["corp_code"])
         st.success(f"완료: 저장 {result['saved']}건, 스킵 {result['skipped']}건")
         st.rerun()

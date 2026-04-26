@@ -62,6 +62,15 @@ kreports collect-seed --size small
 kreports serve
 ```
 
+For VS Code/Cursor/Claude Desktop/CLI setup using the local stdio server, see
+[`docs/mcp-setup.md`](docs/mcp-setup.md). You can also run:
+
+```bash
+kreports mcp-doctor
+kreports mcp-config --target vscode
+kreports serve-http --host 127.0.0.1 --port 8765  # remote MCP over HTTP
+```
+
 ### Claude Desktop Setup
 
 Add to `~/.claude/claude_desktop_config.json`:
@@ -102,7 +111,7 @@ print(f"Industry: {bench['industry_name']}")
 print(f"Median: {bench['quantiles']['p50']}%")
 ```
 
-### MCP Tools (8)
+### MCP Tools (9)
 
 | Tool | Input | Description |
 |------|-------|-------------|
@@ -114,8 +123,18 @@ print(f"Median: {bench['quantiles']['p50']}%")
 | `get_audit_history` | company | Auditor name, opinion, change, consecutive years |
 | `get_subsidiary_auditors` | company | Subsidiary/associate auditor matrix |
 | `compare_to_industry` | company, metric | KSIC industry benchmarking (P25/P50/P75) |
+| `get_business_overview` | company, year | Business report narrative sections and industry insights |
 
-All tools accept company name, stock code (6-digit), or corp_code (8-digit DART ID).
+Company tools accept exact or unique company name, stock code (6-digit), or
+corp_code (8-digit DART ID). Ambiguous company names return candidates instead
+of silently choosing the first match. Successful MCP responses include `_meta`
+with `source=local_kreports_db`, generated timestamp, company identity, and
+per-table `data_freshness` when a company is resolved.
+
+Claude Web and other remote MCP clients connect over HTTP rather than local
+stdio. Run `kreports serve-http --host 127.0.0.1 --port 8765 --path /mcp` and
+expose it through an HTTPS tunnel or deployed ASGI host, then use
+`https://<host>/mcp` as the connector URL.
 
 ### Data Update Schedule
 
@@ -194,7 +213,7 @@ kreports/                   # pip package
 ├── analysis/               # Public API (dict returns, JSON-safe)
 │   ├── api.py              # 10 analysis functions
 │   └── queries.py          # DB query layer (no Streamlit dependency)
-├── mcp/                    # MCP stdio server (8 tools)
+├── mcp/                    # MCP stdio server (9 tools)
 ├── cli/                    # Typer CLI (17 commands)
 ├── db/                     # SQLAlchemy models (8 tables)
 ├── collector/              # DART API collectors (9 modules)

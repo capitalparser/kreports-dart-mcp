@@ -38,10 +38,34 @@ else:
 
 import pandas as pd
 from sqlalchemy import func as sa_func
-from dart_platform.db.engine import get_session
-from dart_platform.db.models import Company, Financial, FinancialFact, Disclosure, Auditor, AuditFee
+from kreports.config import settings
+from kreports.db.engine import get_session, init_db
+from kreports.db.models import Company, Financial, FinancialFact, Disclosure, Auditor, AuditFee
 
 _UNIT = 1e8  # 억원
+
+_DB_READY = False
+
+
+def ensure_db_ready() -> None:
+    global _DB_READY
+    if not _DB_READY:
+        init_db()
+        _DB_READY = True
+
+
+ensure_db_ready()
+
+
+def get_bootstrap_status() -> dict:
+    ensure_db_ready()
+    with get_session() as session:
+        company_count = session.query(sa_func.count(Company.corp_code)).scalar() or 0
+    return {
+        "company_count": int(company_count),
+        "has_company_master": bool(company_count),
+        "api_key_set": bool(settings.dart_api_key),
+    }
 
 
 def get_data_freshness(corp_code: str) -> dict:
@@ -56,7 +80,7 @@ def get_data_freshness(corp_code: str) -> dict:
 def has_been_collected(corp_code: str, task_type: str) -> bool:
     """해당 기업의 데이터가 한 번이라도 수집된 적 있는지 확인한다."""
     try:
-        from dart_platform.db.models import FetchLog
+        from kreports.db.models import FetchLog
         with get_session() as session:
             return session.query(FetchLog).filter(
                 FetchLog.corp_code == corp_code,
@@ -780,6 +804,8 @@ def get_disclosures(corp_code: str, limit: int = 300) -> pd.DataFrame:
 
 
 def get_auditors(corp_code: str) -> pd.DataFrame:
+    from kreports.processor.audit_parser import is_valid_auditor_name
+
     with get_session() as session:
         rows = (
             session.query(Auditor)
@@ -799,8 +825,42 @@ def get_auditors(corp_code: str) -> pd.DataFrame:
                 "연속연수": r.consecutive_years or 1,
             }
             for r in rows
+            if is_valid_auditor_name(r.auditor_nm)
         ]
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    if df.empty:
+        return df
+
+    # One business year can have both CFS and OFS rows. Prefer CFS when it has
+    # a real auditor; otherwise use OFS. Then recalculate tenure across the
+    # selected annual history so CFS/OFS fallback does not reset continuity.
+    df["_fs_rank"] = df["구분"].map({"CFS": 0, "OFS": 1}).fillna(9)
+    df = (
+        df.sort_values(["회계연도", "_fs_rank"])
+        .groupby("회계연도", as_index=False)
+        .first()
+        .sort_values("회계연도")
+        .drop(columns=["_fs_rank"])
+        .reset_index(drop=True)
+    )
+
+    prev_auditor = None
+    tenure = 0
+    for idx, row in df.iterrows():
+        auditor = row["감사인"]
+        if prev_auditor is None:
+            df.at[idx, "교체여부"] = "최초"
+            tenure = 1
+        elif auditor == prev_auditor:
+            df.at[idx, "교체여부"] = "유지"
+            tenure += 1
+        else:
+            df.at[idx, "교체여부"] = "교체"
+            tenure = 1
+        df.at[idx, "연속연수"] = tenure
+        prev_auditor = auditor
+
+    return df
 
 
 def get_companies_by_corp_codes(corp_codes: list[str]) -> dict[str, dict]:
@@ -826,6 +886,8 @@ def get_auditors_for_corp_codes(corp_codes: list[str]) -> pd.DataFrame:
     """
     if not corp_codes:
         return pd.DataFrame()
+    from kreports.processor.audit_parser import is_valid_auditor_name
+
     with get_session() as session:
         rows = (
             session.query(Auditor)
@@ -847,6 +909,7 @@ def get_auditors_for_corp_codes(corp_codes: list[str]) -> pd.DataFrame:
                 "연속연수": r.consecutive_years or 1,
             }
             for r in rows
+            if is_valid_auditor_name(r.auditor_nm)
         ]
     return pd.DataFrame(data)
 
@@ -1350,7 +1413,7 @@ def get_audit_fee_history(corp_code: str) -> pd.DataFrame:
     if not disclosures:
         return pd.DataFrame()
 
-    from dart_platform.collector.fetcher import fetch_document_xml
+    from kreports.collector.fetcher import fetch_document_xml
 
     records = []
     for rcept_no, disc_date, report_nm in disclosures:
@@ -1402,7 +1465,7 @@ def get_audit_fee_history(corp_code: str) -> pd.DataFrame:
 @st.cache_data(ttl=3600)
 def _fetch_note_files_cached(rcept_no: str) -> dict:
     """document.xml ZIP의 별첨 재무제표 파일들을 캐시 (1시간)."""
-    from dart_platform.collector.fetcher import fetch_document_zip_files
+    from kreports.collector.fetcher import fetch_document_zip_files
     return fetch_document_zip_files(rcept_no)
 
 
@@ -1917,7 +1980,7 @@ def get_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "CFS") -
         또는 None (데이터 없음)
     """
     import re
-    from dart_platform.processor.policy_parser import extract_policy_section, extract_policy_items
+    from kreports.processor.policy_parser import extract_policy_section, extract_policy_items
 
     # 사업보고서 rcept_no 조회 — 사업연도 N의 사업보고서는 N+1년 1~12월에 공시
     with get_session() as session:
@@ -2087,20 +2150,19 @@ def _extract_topic_chapter_items(note_section: str) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_business_report_sections(corp_code: str, bsns_year: int) -> dict | None:
+def _load_business_report_payload(corp_code: str, bsns_year: int) -> dict | None:
     """
-    사업보고서 본문 XML에서 핵심 경영 정보 섹션(사업의 개요, 사업의 내용 등)을 추출한다.
+    사업보고서 메타와 본문 섹션을 함께 로드한다.
 
     Returns:
-        {section_key: {"title": str, "body_text": str, "body_html": str, "length": int}}
-        또는 None (데이터 없음)
+        {"meta": dict, "sections": dict, "induty_code": str} 또는 None
     """
     from kreports.processor.report_section_parser import select_main_body_file, extract_report_sections
 
     # 사업보고서 rcept_no 조회 — 사업연도 N의 사업보고서는 N+1년 1~12월에 공시
     with get_session() as session:
         row = (
-            session.query(Disclosure.rcept_no)
+            session.query(Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm)
             .filter_by(corp_code=corp_code)
             .filter(Disclosure.report_nm.like("%사업보고서%"))
             .filter(Disclosure.disc_date >= f"{bsns_year + 1}-01-01")
@@ -2111,6 +2173,8 @@ def get_business_report_sections(corp_code: str, bsns_year: int) -> dict | None:
         if row is None:
             return None
         rcept_no = row.rcept_no
+        company = session.query(Company.induty_code).filter_by(corp_code=corp_code).first()
+        induty_code = (company.induty_code or "") if company else ""
 
     all_files = _fetch_note_files_cached(rcept_no)
     if not all_files:
@@ -2121,10 +2185,510 @@ def get_business_report_sections(corp_code: str, bsns_year: int) -> dict | None:
         return None
 
     sections = extract_report_sections(main_body)
-    if not sections:
+    disc_date = row.disc_date.isoformat() if row.disc_date else None
+    return {
+        "meta": {
+            "rcept_no": rcept_no,
+            "report_nm": row.report_nm,
+            "disc_date": disc_date,
+            "bsns_year": bsns_year,
+        },
+        "sections": sections or {},
+        "induty_code": induty_code,
+    }
+
+
+@st.cache_data(ttl=3600)
+def get_business_report_sections(corp_code: str, bsns_year: int) -> dict | None:
+    """
+    사업보고서 본문 XML에서 핵심 경영 정보 섹션(사업의 개요, 사업의 내용 등)을 추출한다.
+
+    Returns:
+        {section_key: {"title": str, "body_text": str, "body_html": str, "length": int}}
+        또는 None (데이터 없음)
+    """
+    payload = _load_business_report_payload(corp_code, bsns_year)
+    if not payload or not payload.get("sections"):
+        return None
+    return payload["sections"]
+
+
+@st.cache_data(ttl=3600)
+def get_business_report_package(corp_code: str, bsns_year: int) -> dict | None:
+    """
+    사업보고서 대시보드용 분석 패키지.
+
+    기존 섹션 추출 결과에 보고서 메타, 커버리지, 감사/투자 포커스,
+    위험 분포를 더해 반환한다.
+    """
+    payload = _load_business_report_payload(corp_code, bsns_year)
+    if not payload:
         return None
 
-    return sections
+    from kreports.analysis.business_insights import build_business_report_focus
+    from kreports.processor.report_section_parser import SECTION_LABELS
+
+    sections = payload.get("sections") or {}
+    expected_keys = list(SECTION_LABELS.keys())
+    found_keys = [key for key in expected_keys if key in sections]
+    missing_keys = [key for key in expected_keys if key not in sections]
+    total_chars = sum(sec.get("length", 0) for sec in sections.values() if isinstance(sec, dict))
+    focus = build_business_report_focus(sections, induty_code=payload.get("induty_code", ""))
+
+    return {
+        "meta": payload["meta"],
+        "sections": sections,
+        "coverage": {
+            "expected_count": len(expected_keys),
+            "found_count": len(found_keys),
+            "coverage_pct": round(100 * len(found_keys) / len(expected_keys), 1) if expected_keys else 0,
+            "found_sections": found_keys,
+            "missing_sections": missing_keys,
+            "missing_labels": [SECTION_LABELS.get(key, key) for key in missing_keys],
+            "total_chars": total_chars,
+        },
+        "audit_focus": focus["audit_focus"],
+        "investment_focus": focus["investment_focus"],
+        "industry_insights": focus["industry_insights"],
+        "risk_distribution": focus["risk_distribution"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 감사제안 프로필
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_latest_business_report_meta(corp_code: str) -> dict | None:
+    with get_session() as session:
+        row = (
+            session.query(Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm)
+            .filter_by(corp_code=corp_code)
+            .filter(Disclosure.report_nm.like("%사업보고서%"))
+            .order_by(Disclosure.disc_date.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        bsns_year = row.disc_date.year - 1 if row.disc_date else None
+        return {
+            "rcept_no": row.rcept_no,
+            "disc_date": row.disc_date,
+            "report_nm": row.report_nm,
+            "bsns_year": bsns_year,
+        }
+
+
+def _clean_xml_value(raw: str | None) -> str | None:
+    import html
+    import re
+
+    if raw is None:
+        return None
+    text = re.sub(r"<[^>]+>", " ", raw)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or text == "-":
+        return None
+    return text
+
+
+def _parse_int_like(value: str | int | float | None) -> int | None:
+    if value is None:
+        return None
+    s = str(value).replace(",", "").strip()
+    if s in ("", "-", "N/A", "해당사항 없음"):
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_table_group(content: str, aclass: str) -> str | None:
+    import re
+
+    m = re.search(rf'ACLASS="{re.escape(aclass)}"', content)
+    if not m:
+        return None
+    end = content.find("</TABLE-GROUP>", m.start())
+    if end == -1:
+        return None
+    return content[m.start():end + len("</TABLE-GROUP>")]
+
+
+def _extract_first_tag_value(row_html: str, attr_name: str, attr_value_pattern: str) -> str | None:
+    import re
+
+    m = re.search(
+        rf'{attr_name}="{attr_value_pattern}"[^>]*>(.*?)</T[EDHU]>',
+        row_html,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    return _clean_xml_value(m.group(1))
+
+
+def _normalize_yyyymmdd(value: str | None) -> str | None:
+    import re
+
+    if not value:
+        return None
+    digits = re.sub(r"[^0-9]", "", value)
+    if len(digits) == 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    return _clean_xml_value(value)
+
+
+def _resolve_relative_year(label: str | None, bsns_year: int | None) -> int | None:
+    if not label or bsns_year is None:
+        return None
+    if "당기" in label:
+        return bsns_year
+    if "전전기" in label:
+        return bsns_year - 2
+    if "전기" in label:
+        return bsns_year - 1
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_external_audit_execution(corp_code: str) -> pd.DataFrame:
+    """
+    최신 사업보고서 AUD_SIGK 테이블에서 감사계약/실제수행 내역을 파싱한다.
+    """
+    import re
+    from kreports.collector.fetcher import fetch_document_xml
+
+    meta = _get_latest_business_report_meta(corp_code)
+    if not meta:
+        return pd.DataFrame()
+
+    content = fetch_document_xml(meta["rcept_no"])
+    if not content:
+        return pd.DataFrame()
+
+    table = _extract_table_group(content, "AUD_SIGK")
+    if not table:
+        return pd.DataFrame()
+
+    rows = re.findall(r"<TR[^>]*>.*?</TR>", table, re.DOTALL)
+    records: list[dict] = []
+
+    for row_html in rows:
+        year_label = _extract_first_tag_value(row_html, "ACODE", r"SIGK_YEAR\d+")
+        if not year_label:
+            continue
+
+        auditor_nm = _extract_first_tag_value(row_html, "ACODE", r"SIGK_AUR\d+")
+        details = _extract_first_tag_value(row_html, "ACODE", r"SIGK_CNT\d+")
+        contract_fee = _parse_int_like(_extract_first_tag_value(row_html, "ACODE", r"SIGK_CPAY\d+"))
+        contract_hours = _parse_int_like(_extract_first_tag_value(row_html, "ACODE", r"SIGK_CTIM\d+"))
+        actual_fee = _parse_int_like(_extract_first_tag_value(row_html, "ACODE", r"SIGK_FPAY\d+"))
+        actual_hours = _parse_int_like(_extract_first_tag_value(row_html, "ACODE", r"SIGK_FTIM\d+"))
+
+        if not any([auditor_nm, details, contract_fee, contract_hours, actual_fee, actual_hours]):
+            continue
+
+        records.append({
+            "표시연도": year_label,
+            "회계연도": _resolve_relative_year(year_label, meta.get("bsns_year")),
+            "감사인": auditor_nm or "-",
+            "내용": details or "-",
+            "계약보수(백만원)": contract_fee,
+            "계약시간": contract_hours,
+            "실제보수(백만원)": actual_fee,
+            "실제시간": actual_hours,
+            "보수차이(백만원)": (
+                actual_fee - contract_fee
+                if actual_fee is not None and contract_fee is not None else None
+            ),
+            "시간차이": (
+                actual_hours - contract_hours
+                if actual_hours is not None and contract_hours is not None else None
+            ),
+            "rcept_no": meta["rcept_no"],
+        })
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    if "회계연도" in df.columns:
+        df = df.sort_values(["회계연도", "표시연도"], ascending=[False, False], na_position="last")
+    return df.reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_governance_communications(corp_code: str) -> pd.DataFrame:
+    """
+    최신 사업보고서 DIS_CUS 테이블에서 내부감사기구-회계감사인 논의 내용을 파싱한다.
+    """
+    import re
+    from kreports.collector.fetcher import fetch_document_xml
+
+    meta = _get_latest_business_report_meta(corp_code)
+    if not meta:
+        return pd.DataFrame()
+
+    content = fetch_document_xml(meta["rcept_no"])
+    if not content:
+        return pd.DataFrame()
+
+    table = _extract_table_group(content, "DIS_CUS")
+    if not table:
+        return pd.DataFrame()
+
+    rows = re.findall(r"<TR[^>]*>.*?</TR>", table, re.DOTALL)
+    records: list[dict] = []
+
+    for row_html in rows:
+        seq = _extract_first_tag_value(row_html, "ACODE", "DIS_DIV")
+        date_value = _extract_first_tag_value(row_html, "AUNIT", "DIS_DATE")
+        attendees = _extract_first_tag_value(row_html, "ACODE", "DIS_ATT")
+        method = _extract_first_tag_value(row_html, "ACODE", "DIS_WAY")
+        details = _extract_first_tag_value(row_html, "ACODE", "DIS_CONT")
+
+        # AUNITVALUE가 있으면 inner text보다 우선 사용
+        m_date = re.search(r'AUNIT="DIS_DATE"[^>]*AUNITVALUE="([^"]+)"', row_html)
+        if m_date:
+            date_value = _normalize_yyyymmdd(m_date.group(1))
+        else:
+            date_value = _normalize_yyyymmdd(date_value)
+
+        if not any([seq, date_value, attendees, method, details]):
+            continue
+
+        records.append({
+            "순번": _parse_int_like(seq) or seq,
+            "일자": date_value or "-",
+            "참석자": attendees or "-",
+            "방식": method or "-",
+            "주요 논의 내용": details or "-",
+            "rcept_no": meta["rcept_no"],
+            "사업연도": meta.get("bsns_year"),
+        })
+
+    if not records:
+        return pd.DataFrame()
+
+    return pd.DataFrame(records).sort_values(["일자", "순번"], ascending=[False, False]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_internal_control_profile(corp_code: str) -> dict:
+    """
+    감사보고서/사업보고서에서 내부회계관리제도 관련 상태를 요약한다.
+    """
+    import re
+    from kreports.collector.fetcher import fetch_document_xml
+
+    result = {
+        "scope": "판단 보류",
+        "scope_detail": None,
+        "audit_report_value": None,
+        "management_evaluation": None,
+        "consolidated_management_evaluation": None,
+        "significant_weakness": None,
+        "corrective_plan": None,
+        "source_rcept_no": None,
+    }
+
+    with get_session() as session:
+        audit_row = (
+            session.query(Disclosure.rcept_no)
+            .filter_by(corp_code=corp_code)
+            .filter(Disclosure.report_nm.like("%감사보고서%"))
+            .order_by(Disclosure.disc_date.desc())
+            .first()
+        )
+
+    if audit_row is not None:
+        audit_xml = fetch_document_xml(audit_row.rcept_no)
+        result["source_rcept_no"] = audit_row.rcept_no
+        if audit_xml:
+            row_match = re.search(
+                r"내부회계관리제도 감사\(검토\)의견 비적정 등 여부.*?</tr>",
+                audit_xml,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if row_match:
+                values = [
+                    _clean_xml_value(v)
+                    for v in re.findall(
+                        r'<span class="xforms_input"[^>]*>(.*?)</span>',
+                        row_match.group(0),
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                ]
+                values = [v for v in values if v]
+                if values:
+                    result["audit_report_value"] = values[0]
+                    if "미해당" in values[0]:
+                        result["scope"] = "비대상"
+                        result["scope_detail"] = "최신 감사보고서 기준 미해당"
+                    else:
+                        result["scope"] = "감사/검토 대상"
+                        result["scope_detail"] = f"최신 감사보고서 값: {values[0]}"
+
+    meta = _get_latest_business_report_meta(corp_code)
+    if not meta:
+        return result
+
+    content = fetch_document_xml(meta["rcept_no"])
+    if not content:
+        return result
+
+    table = _extract_table_group(content, "IAM_TBL1")
+    if not table:
+        return result
+
+    current_eval = _extract_first_tag_value(table, "AUNIT", "IAMT1_CON1_A")
+    current_consolidated = _extract_first_tag_value(table, "AUNIT", "IAMT1_CON1_C")
+    weakness = _extract_first_tag_value(table, "ACODE", "IAMT1_FRG1_A")
+    corrective_plan = _extract_first_tag_value(table, "ACODE", "IAMT1_PLN1_A")
+
+    result["management_evaluation"] = current_eval
+    result["consolidated_management_evaluation"] = current_consolidated
+    result["significant_weakness"] = weakness
+    result["corrective_plan"] = corrective_plan
+
+    if result["scope"] == "판단 보류" and current_eval:
+        result["scope"] = "적용 대상"
+        result["scope_detail"] = "사업보고서 내부회계관리제도 운영실태 평가 존재"
+
+    return result
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_disclosure_flags(corp_code: str) -> dict:
+    with get_session() as session:
+        rows = session.query(Disclosure.report_nm).filter_by(corp_code=corp_code).all()
+        names = [r.report_nm or "" for r in rows]
+
+    return {
+        "has_business_report": any("사업보고서" in nm for nm in names),
+        "has_semiannual_report": any("반기보고서" in nm for nm in names),
+        "has_quarterly_report": any("분기보고서" in nm for nm in names),
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_audit_proposal_profile(corp_code: str, fs_div: str = "CFS") -> dict:
+    """
+    감사제안 관점에서 필요한 핵심 회사/재무/공시 구분자를 요약한다.
+    """
+    from kreports.collector.fetcher import fetch_company_info
+
+    with get_session() as session:
+        company_row = session.query(Company).filter_by(corp_code=corp_code).first()
+        if company_row is None:
+            company = None
+        else:
+            company = {
+                "corp_code": company_row.corp_code,
+                "corp_name": company_row.corp_name,
+                "stock_code": company_row.stock_code,
+                "market": company_row.market,
+                "induty_code": company_row.induty_code or company_row.sector,
+                "sector": company_row.sector,
+            }
+
+    if company is None:
+        return {"has_data": False}
+
+    market = company["market"] or "-"
+    induty_code = company["induty_code"]
+
+    if market in (None, "-", "") or not induty_code:
+        info = fetch_company_info(corp_code)
+        if info:
+            market = info.get("market") or market
+            induty_code = info.get("induty_code") or induty_code
+
+    fin_df = get_financials(corp_code, fs_div)
+    annual = fin_df[fin_df["분기"] == 4].sort_values("연도").copy() if not fin_df.empty else pd.DataFrame()
+    if annual.empty and not fin_df.empty:
+        annual = fin_df.sort_values(["연도", "분기"]).copy()
+    latest = annual.iloc[-1].to_dict() if not annual.empty else {}
+
+    disclosure_flags = _get_disclosure_flags(corp_code)
+    internal_control = get_internal_control_profile(corp_code)
+    execution_df = get_external_audit_execution(corp_code)
+    governance_df = get_governance_communications(corp_code)
+    audit_fee_df = get_audit_fees(corp_code)
+
+    is_equity_listed = market in ("KOSPI", "KOSDAQ", "KONEX")
+    is_financial_company = None
+    if induty_code:
+        is_financial_company = str(induty_code).startswith(("64", "65", "66"))
+
+    if market == "KOSPI":
+        primary_class = "주권상장회사 (KOSPI)"
+    elif market == "KOSDAQ":
+        primary_class = "주권상장회사 (KOSDAQ)"
+    elif market == "KONEX":
+        primary_class = "주권상장회사 (KONEX)"
+    elif company["stock_code"]:
+        primary_class = "상장회사"
+    else:
+        primary_class = "비상장 / DART 등록회사"
+
+    latest_budget = execution_df.iloc[0].to_dict() if not execution_df.empty else {}
+    if not latest_budget and not audit_fee_df.empty:
+        latest_budget = audit_fee_df.sort_values("회계연도", ascending=False).iloc[0].to_dict()
+
+    return {
+        "has_data": True,
+        "company": {
+            "corp_code": corp_code,
+            "corp_name": company["corp_name"],
+            "stock_code": company["stock_code"],
+            "market": market or "-",
+            "induty_code": induty_code,
+            "primary_classification": primary_class,
+            "is_equity_listed": is_equity_listed,
+            "is_financial_company": is_financial_company,
+        },
+        "latest_financials": {
+            "year": latest.get("연도"),
+            "total_assets": latest.get("자산총계"),
+            "revenue": latest.get("매출액"),
+            "net_income": latest.get("당기순이익"),
+        },
+        "disclosure_flags": disclosure_flags,
+        "classification_flags": [
+            {"label": "주권상장회사", "value": "예" if is_equity_listed else "아니오"},
+            {"label": "채권상장회사", "value": "판단 보류"},
+            {"label": "대형비상장사", "value": "판단 보류"},
+            {"label": "중소형비상장사", "value": "판단 보류"},
+            {
+                "label": "금융회사",
+                "value": (
+                    "예" if is_financial_company is True
+                    else "아니오" if is_financial_company is False
+                    else "미확인"
+                ),
+            },
+            {"label": "반기공시", "value": "예" if disclosure_flags["has_semiannual_report"] else "아니오"},
+            {"label": "분기공시", "value": "예" if disclosure_flags["has_quarterly_report"] else "아니오"},
+            {"label": "내부회계관리제도", "value": internal_control["scope"]},
+        ],
+        "internal_control": internal_control,
+        "latest_budget": latest_budget,
+        "meeting_count": int(len(governance_df)),
+        "execution_rows": int(len(execution_df)),
+        "data_coverage": {
+            "financial_years": (
+                sorted(annual["연도"].dropna().astype(int).unique().tolist(), reverse=True)
+                if not annual.empty and "연도" in annual.columns else []
+            ),
+            "business_report_year": (_get_latest_business_report_meta(corp_code) or {}).get("bsns_year"),
+            "has_execution_data": not execution_df.empty,
+            "has_governance_communications": not governance_df.empty,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2154,7 +2718,7 @@ def _all_dart_corps_normalized() -> dict[str, dict]:
     DART corpCode.xml 전체 로드 → 정규화 이름 → {corp_code, corp_name, stock_code} 매핑.
     비상장 포함. 24시간 캐시.
     """
-    from dart_platform.collector.fetcher import fetch_corp_code_xml
+    from kreports.collector.fetcher import fetch_corp_code_xml
     corps = fetch_corp_code_xml()
     out: dict[str, dict] = {}
     for c in corps:
@@ -2217,8 +2781,8 @@ def get_subsidiaries_with_auditors(corp_code: str) -> dict:
     }
     """
     import re as _re
-    from dart_platform.collector.fetcher import fetch_document_xml
-    from dart_platform.processor.subsidiary_parser import extract_affiliates_from_report
+    from kreports.collector.fetcher import fetch_document_xml
+    from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 
     result: dict = {"rcept_no": "", "bsns_year": None, "items": [], "parse_errors": []}
 

@@ -235,6 +235,21 @@ class TestCompareToIndustryTool:
         assert pct is not None
         assert 0 <= pct <= 100
 
+    def test_subject_calculated_when_peers_omitted(self):
+        """peer 리스트를 생략해도 subject 위치는 전체 peer set 기준으로 계산되어야 한다."""
+        if not _samsung_available():
+            pytest.skip("Samsung DB 미등록")
+        result = json.loads(call_tool(
+            "compare_to_industry",
+            {"company": "삼성전자", "metric": "영업이익률", "include_peers": False},
+        ))
+        if result["n"] < 2:
+            pytest.skip("peer 1개 이하")
+        assert result["peers"] == []
+        assert result["subject"]["found_in_peers"] is True
+        assert result["subject"]["found_in_returned_peers"] is False
+        assert result["subject"]["percentile"] is not None
+
     def test_prefix_len_3(self):
         """prefix_len=3 지정 시 match_prefix 3자리."""
         if not _samsung_available():

@@ -17,7 +17,7 @@ render_sidebar()
 # ---------------------------------------------------------------------------
 # 업종 매핑 임포트
 # ---------------------------------------------------------------------------
-from dart_platform.processor.sector_policy_map import (
+from kreports.processor.sector_policy_map import (
     get_sector_for_induty_code,
     get_induty_name,
     get_critical_items,
@@ -284,8 +284,8 @@ for item_key, item_label, priority, item_desc in critical_items:
 st.markdown("<div style='margin:1rem 0'></div>", unsafe_allow_html=True)
 st.markdown(section_title("정책 변화 (연도 비교)"), unsafe_allow_html=True)
 
-from dart_platform.db.engine import get_session as _gs
-from dart_platform.db.models import AccountingPolicyItem as _APItem
+from kreports.db.engine import get_session as _gs
+from kreports.db.models import AccountingPolicyItem as _APItem
 
 with _gs() as _session:
     _history_rows = (
