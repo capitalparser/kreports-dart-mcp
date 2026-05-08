@@ -1,4 +1,4 @@
-# kreports-dart AGENTS.md
+# kreports-dart CLAUDE.md
 
 ## Project Identity
 
