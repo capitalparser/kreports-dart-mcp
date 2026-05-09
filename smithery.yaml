@@ -6,21 +6,19 @@ startCommand:
   type: stdio
   configSchema:
     type: object
-    required:
-      - dartApiKey
     properties:
-      dartApiKey:
-        type: string
-        description: DART OpenAPI key (free at opendart.fss.or.kr)
       dbUrl:
         type: string
-        description: SQLite DB path (optional, defaults to ~/Library/Application Support/kreports/kreports.db on macOS)
+        description: "SQLite DB path (self-hosted only). Omit if using the hosted service. Example: sqlite:////path/to/kreports.db"
+      dartApiKey:
+        type: string
+        description: "DART OpenAPI key — only needed if you want to self-host and collect your own data. Not required to query the hosted service."
   commandFunction: |-
     (config) => ({
       command: "uvx",
       args: ["--from", "kreports", "kreports-mcp"],
       env: {
-        DART_API_KEY: config.dartApiKey,
-        ...(config.dbUrl ? { DB_URL: config.dbUrl } : {})
+        ...(config.dbUrl ? { DB_URL: config.dbUrl } : {}),
+        ...(config.dartApiKey ? { DART_API_KEY: config.dartApiKey } : {})
       }
     })

@@ -40,29 +40,50 @@ KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the
 | "NAS ratio (non-audit fees / audit fees)" | ✗ | ✓ |
 | "Industry P25/P50/P75 for operating margin (KSIC)" | ✗ | ✓ |
 
-### One-line setup
+### Setup
 
-No Python environment needed. `uvx` handles everything:
+Two modes — pick one.
 
+---
+
+#### Option A: Hosted service (no API key needed)
+
+Connect to the pre-built database. No DART key. No data collection. Just add the MCP endpoint.
+
+**Claude Code:**
 ```bash
-# Claude Code
-claude mcp add kreports -e DART_API_KEY=your_key -- uvx --from kreports kreports-mcp
+claude mcp add kreports -- uvx --from kreports kreports-mcp
 ```
 
-Or add to `~/Library/Application Support/Claude/claude_desktop_config.json` for Claude Desktop:
-
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
     "kreports": {
       "command": "uvx",
-      "args": ["--from", "kreports", "kreports-mcp"],
-      "env": {
-        "DART_API_KEY": "your_key_here"
-      }
+      "args": ["--from", "kreports", "kreports-mcp"]
     }
   }
 }
+```
+
+> Hosted endpoint coming soon. Follow the repo for the release.
+
+---
+
+#### Option B: Self-hosted (bring your own data)
+
+Build and own your local database. Requires a free DART API key.
+
+```bash
+pip install kreports
+echo "DART_API_KEY=your_key" > .env
+
+kreports init
+kreports sync-companies
+kreports collect-seed --size small   # ~350 companies, ~20 min
+
+kreports serve
 ```
 
 Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
@@ -247,29 +268,50 @@ KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이�
 | "비감사보수 비율 (NAS ratio)" | ✗ | ✓ |
 | "동종업종 영업이익률 P25/P50/P75" | ✗ | ✓ |
 
-### 한 줄 설치
+### 설치
 
-Python 환경 설정 불필요. `uvx`가 모든 것을 처리합니다:
+두 가지 방법 중 선택하세요.
 
+---
+
+#### 방법 A: 호스팅 서비스 (API 키 불필요)
+
+사전 구축된 데이터베이스에 연결합니다. DART 키도, 데이터 수집도 필요 없습니다.
+
+**Claude Code:**
 ```bash
-# Claude Code
-claude mcp add kreports -e DART_API_KEY=your_key -- uvx --from kreports kreports-mcp
+claude mcp add kreports -- uvx --from kreports kreports-mcp
 ```
 
-Claude Desktop은 `~/Library/Application Support/Claude/claude_desktop_config.json`에 추가:
-
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
     "kreports": {
       "command": "uvx",
-      "args": ["--from", "kreports", "kreports-mcp"],
-      "env": {
-        "DART_API_KEY": "발급받은_키"
-      }
+      "args": ["--from", "kreports", "kreports-mcp"]
     }
   }
 }
+```
+
+> 호스팅 엔드포인트 준비 중. 레포를 팔로우하세요.
+
+---
+
+#### 방법 B: 직접 구축 (데이터를 직접 소유)
+
+로컬 데이터베이스를 직접 구축합니다. 무료 DART API 키가 필요합니다.
+
+```bash
+pip install kreports
+echo "DART_API_KEY=your_key" > .env
+
+kreports init
+kreports sync-companies
+kreports collect-seed --size small   # ~350개사, ~20분
+
+kreports serve
 ```
 
 DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 발급.

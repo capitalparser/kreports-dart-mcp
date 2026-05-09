@@ -3,9 +3,8 @@
     "kreports": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["kreports-mcp"],
+      "args": ["--from", "kreports", "kreports-mcp"],
       "env": {
-        "DART_API_KEY": "your-dart-api-key-here",
         "DB_URL": "sqlite:////absolute/path/to/kreports.db"
       }
     }
