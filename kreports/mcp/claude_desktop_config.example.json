@@ -1,7 +1,12 @@
 {
   "mcpServers": {
     "kreports": {
-      "command": "C:\\path\\to\\kreports-dart\\scripts\\kreports-mcp.cmd"
+      "command": "uvx",
+      "args": ["kreports-mcp"],
+      "env": {
+        "DART_API_KEY": "your-dart-api-key-here",
+        "DB_URL": "sqlite:////absolute/path/to/kreports.db"
+      }
     }
   }
 }

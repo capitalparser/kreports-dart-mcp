@@ -2,8 +2,12 @@
   "servers": {
     "kreports": {
       "type": "stdio",
-      "command": "${workspaceFolder}\\scripts\\kreports-mcp.cmd",
-      "envFile": "${workspaceFolder}\\.env"
+      "command": "uvx",
+      "args": ["kreports-mcp"],
+      "env": {
+        "DART_API_KEY": "your-dart-api-key-here",
+        "DB_URL": "sqlite:////absolute/path/to/kreports.db"
+      }
     }
   }
 }

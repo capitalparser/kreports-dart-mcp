@@ -1,0 +1,26 @@
+name: kreports
+description: Korean financial intelligence MCP — DART filings, auditor history, going concern scores, and industry benchmarks for 3,900+ listed Korean companies. Built by a Big4 auditor.
+license: Apache-2.0
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - dartApiKey
+    properties:
+      dartApiKey:
+        type: string
+        description: DART OpenAPI key (free at opendart.fss.or.kr)
+      dbUrl:
+        type: string
+        description: SQLite DB path (optional, defaults to ~/Library/Application Support/kreports/kreports.db on macOS)
+  commandFunction: |-
+    (config) => ({
+      command: "uvx",
+      args: ["--from", "kreports", "kreports-mcp"],
+      env: {
+        DART_API_KEY: config.dartApiKey,
+        ...(config.dbUrl ? { DB_URL: config.dbUrl } : {})
+      }
+    })
