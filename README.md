@@ -34,9 +34,13 @@ KReports turns that raw disclosure pile into questions you can ask Claude:
 
 KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). It covers 3,900+ KOSPI/KOSDAQ/KONEX listed companies and converts filings into structured financial intelligence.
 
-### For investors
+### Two workflows
 
-You do not need to know accounting standards to start. Ask in plain language.
+KReports serves two audiences from the same DART source: investors who need fast judgment signals, and audit/accounting professionals who need evidence and risk coverage.
+
+#### Investors
+
+You do not need to know accounting standards to start. Ask in plain language and use KReports as a pre-buy or portfolio checkup.
 
 | Investor question | What KReports checks |
 |-------|-------|
@@ -47,6 +51,19 @@ You do not need to know accounting standards to start. Ask in plain language.
 | "Can I trust the numbers?" | DART original data, accounting policy footnotes, audit opinions, audit fees, subsidiary auditor matrix |
 
 The new `get_investor_signals` tool gives one compact first-pass read: quality profile, accounting/governance risk, recent investor-relevant disclosure events, and plain takeaways.
+
+#### Audit and accounting professionals
+
+KReports also preserves the audit lens it was born from. It helps turn scattered DART filings into risk leads that can be traced back to source filings.
+
+| Professional question | What KReports checks |
+|-------|-------|
+| "Is there a going-concern issue I should not miss?" | Capital impairment, two-year operating losses, high debt, weak interest coverage, negative operating cash flow, non-clean opinion |
+| "Did prior-year numbers move after the next annual report?" | Prior-period restatement candidates across annual filings |
+| "Did the auditor change, and how long has the current auditor served?" | Auditor, opinion, change flag, consecutive years |
+| "Is independence worth reviewing?" | Audit fee, non-audit fee, NAS ratio |
+| "What does the group audit perimeter look like?" | Subsidiary and affiliate auditor matrix |
+| "Which accounting policies matter for this company?" | Standard K-IFRS policy footnote extraction |
 
 ### Setup
 
@@ -99,29 +116,30 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 ### Then ask Claude
 
 ```
-"SK Hynix going concern risk — 6-factor scorecard"
+"Samsung Electronics investor signal summary — quality, accounting risk, recent disclosure events"
+"What recent disclosure events should I read before buying Kakao?"
 "Compare Samsung Electronics operating margin to semiconductor peers"
+"SK Hynix going concern risk — 6-factor scorecard"
 "Show auditor history for Kakao for the past 5 years"
 "Has Celltrion restated any prior period figures?"
 "Subsidiary auditor matrix for POSCO group"
 "Beneish M-Score for this company — earnings manipulation risk"
-"Samsung Electronics investor signal summary — quality, accounting risk, recent disclosure events"
 ```
 
 ### MCP Tools (10)
 
-| Tool | Input | What it returns |
-|------|-------|-----------------|
-| `search_company` | name / stock code | Corp code, market, stock code |
-| `get_financial_snapshot` | company, years | Revenue, OP, NI, FCF, ROIC, CCC by year |
-| `score_going_concern` | company | 6-factor 100-pt deduction scorecard + grade |
-| `detect_restatement` | company, threshold | Prior period adjustments across annual filings |
-| `get_accounting_policy` | company, year | 15 standard K-IFRS policy items from footnotes |
-| `get_audit_history` | company | Auditor, opinion, change flag, consecutive years |
-| `get_subsidiary_auditors` | company | Group audit matrix across subsidiaries |
-| `compare_to_industry` | company, metric | KSIC P25/P50/P75 vs. peers |
-| `get_business_overview` | company, year | Business report narrative (overview, risk, MD&A) |
-| `get_investor_signals` | company, years, window_days | Quality checks, accounting risk score, recent investor-relevant disclosure events |
+| Tool | Best for | What it returns |
+|------|----------|-----------------|
+| `search_company` | Everyone | Corp code, market, stock code |
+| `get_investor_signals` | Investors | Quality checks, accounting risk score, recent investor-relevant disclosure events |
+| `get_financial_snapshot` | Investors / analysts | Revenue, OP, NI, FCF, ROIC, CCC by year |
+| `compare_to_industry` | Investors / analysts | KSIC P25/P50/P75 vs. peers |
+| `get_business_overview` | Investors / auditors | Business report narrative (overview, risk, MD&A) |
+| `score_going_concern` | Audit / credit risk | 6-factor 100-pt deduction scorecard + grade |
+| `detect_restatement` | Audit / accounting risk | Prior period adjustments across annual filings |
+| `get_accounting_policy` | Accounting / audit planning | 15 standard K-IFRS policy items from footnotes |
+| `get_audit_history` | Audit / governance | Auditor, opinion, change flag, consecutive years |
+| `get_subsidiary_auditors` | Group audit / governance | Group audit matrix across subsidiaries |
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
@@ -276,9 +294,13 @@ KReports는 그 일을 Claude가 바로 물어볼 수 있는 형태로 바꿉니
 
 KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. KOSPI/KOSDAQ/KONEX 상장사 3,900여 개의 공시와 재무 데이터를 투자자가 질문하기 쉬운 인텔리전스로 제공합니다.
 
-### 투자자가 바로 얻는 것
+### 두 가지 관점
 
-회계나 개발을 몰라도 이렇게 물어보면 됩니다.
+KReports는 같은 DART 원천 데이터를 두 가지 관점으로 씁니다. 투자자는 빠르게 판단 신호를 보고, 감사/회계 실무자는 근거와 리스크 커버리지를 봅니다.
+
+#### 투자자 관점
+
+회계나 개발을 몰라도 이렇게 물어보면 됩니다. 매수 전 점검이나 보유종목 정기 체크에 맞춰져 있습니다.
 
 | 질문 | KReports가 보는 것 |
 |------|------|
@@ -289,6 +311,19 @@ KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이�
 | "사업보고서에서 핵심만 뽑아줘" | 사업개요, 위험요소, 경영계획, R&D, 주요계약 |
 
 `get_investor_signals`는 이 모든 것을 한 번에 훑는 첫 화면입니다. 퀄리티 체크, 회계/거버넌스 리스크 점수, 최근 투자자 관련 공시 이벤트, 핵심 takeaways를 한 번에 돌려줍니다.
+
+#### 감사/회계 실무 관점
+
+KReports는 감사 현장에서 출발한 도구입니다. 흩어진 DART 공시를 감사 리스크 단서와 원천 근거로 정리합니다.
+
+| 질문 | KReports가 보는 것 |
+|------|------|
+| "계속기업 이슈를 놓치고 있지 않나?" | 자본잠식, 2년 연속 영업손실, 과도한 부채, 이자보상배율, 영업CF, 비적정 의견 |
+| "전기 숫자가 다음 사업보고서에서 바뀌었나?" | 사업보고서 간 소급 재작성 후보 |
+| "감사인이 바뀌었고, 몇 년째 감사 중인가?" | 감사인, 감사의견, 교체 여부, 연속 감사연수 |
+| "독립성 검토가 필요한가?" | 감사보수, 비감사보수, NAS ratio |
+| "그룹 감사 범위는 어떻게 생겼나?" | 종속회사/관계회사 감사인 매트릭스 |
+| "이 회사의 중요한 회계정책은 무엇인가?" | K-IFRS 표준 항목별 주석 본문 |
 
 ### 설치
 
@@ -341,29 +376,30 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 ### Claude에게 이렇게 물어보세요
 
 ```
-"SK하이닉스 계속기업 위험 스코어 — 6인자 스코어카드로"
+"삼성전자 투자자 신호 요약 — 퀄리티, 회계 리스크, 최근 공시 이벤트"
+"카카오 사기 전에 최근 공시 이벤트 중 봐야 할 것 정리해줘"
 "삼성전자 영업이익률을 반도체 동종업종과 비교해줘"
+"SK하이닉스 계속기업 위험 스코어 — 6인자 스코어카드로"
 "카카오 최근 5년 감사인 이력 보여줘"
 "셀트리온 전기 소급 재작성 있어?"
 "POSCO 그룹 종속회사 감사인 매트릭스"
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
-"삼성전자 투자자 신호 요약 — 퀄리티, 회계 리스크, 최근 공시 이벤트"
 ```
 
 ### MCP 도구 (10개)
 
-| 도구 | 입력 | 반환 |
-|------|------|------|
-| `search_company` | 회사명 / 종목코드 | corp_code, 시장, 종목코드 |
-| `get_financial_snapshot` | company, years | 연도별 매출·영업이익·FCF·ROIC·CCC |
-| `score_going_concern` | company | 6인자 100점 감점 스코어카드 + 등급 |
-| `detect_restatement` | company, threshold | 사업보고서 간 전기 금액 변동 감지 |
-| `get_accounting_policy` | company, year | K-IFRS 표준 15개 항목 주석 발췌 |
-| `get_audit_history` | company | 감사인·의견·교체·연속연수 이력 |
-| `get_subsidiary_auditors` | company | 연결그룹 종속회사 감사인 매트릭스 |
-| `compare_to_industry` | company, metric | KSIC 업종 P25/P50/P75 비교 |
-| `get_business_overview` | company, year | 사업보고서 핵심 섹션 (사업개요·위험·경영계획) |
-| `get_investor_signals` | company, years, window_days | 퀄리티 체크·회계 리스크 점수·투자자 관련 최근 공시 이벤트 |
+| 도구 | 주 사용 관점 | 반환 |
+|------|-------------|------|
+| `search_company` | 공통 | corp_code, 시장, 종목코드 |
+| `get_investor_signals` | 투자자 | 퀄리티 체크·회계 리스크 점수·투자자 관련 최근 공시 이벤트 |
+| `get_financial_snapshot` | 투자자 / 애널리스트 | 연도별 매출·영업이익·FCF·ROIC·CCC |
+| `compare_to_industry` | 투자자 / 애널리스트 | KSIC 업종 P25/P50/P75 비교 |
+| `get_business_overview` | 투자자 / 감사인 | 사업보고서 핵심 섹션 (사업개요·위험·경영계획) |
+| `score_going_concern` | 감사 / 신용위험 | 6인자 100점 감점 스코어카드 + 등급 |
+| `detect_restatement` | 감사 / 회계위험 | 사업보고서 간 전기 금액 변동 감지 |
+| `get_accounting_policy` | 회계 / 감사계획 | K-IFRS 표준 15개 항목 주석 발췌 |
+| `get_audit_history` | 감사 / 지배구조 | 감사인·의견·교체·연속연수 이력 |
+| `get_subsidiary_auditors` | 그룹감사 / 지배구조 | 연결그룹 종속회사 감사인 매트릭스 |
 
 회사명, 종목코드(6자리), corp_code(8자리) 중 아무거나 입력 가능합니다.
 
