@@ -1,6 +1,6 @@
 # KReports
 
-**DART → Claude. Korean financial intelligence as an MCP server.**
+**Ask Korean filings like an analyst. KReports turns DART into investor-ready signals for Claude.**
 
 [English](#english) | [한국어](#한국어)
 
@@ -15,30 +15,38 @@
 
 ## English
 
-> Built by a Big4 auditor who spent too many hours manually combing through DART filings every audit season.
+> Built by a Big4 auditor for investors who want to read Korean filings without living inside DART.
 
-### The problem
+### Why KReports
 
-Every audit season, the same ritual: open DART, search company, click through filings, copy numbers to Excel, repeat for 30 subsidiaries. 3 hours of lookup for one going concern assessment.
+Korean listed companies already tell you a lot in DART filings: revenue, cash flow, auditor changes, restatements, subsidiary structures, audit fees, business risks, and shareholder events.
 
-KReports eliminates that loop. Ask Claude. Get the answer.
+The problem is not lack of data. The problem is that the data is buried across filings, tables, footnotes, and company codes.
+
+KReports turns that raw disclosure pile into questions you can ask Claude:
+
+- "Is this company financially healthy, or just optically cheap?"
+- "Did anything suspicious show up in accounting, cash flow, auditor history, or restatements?"
+- "How does this company compare with peers in the same Korean industry?"
+- "What recent disclosure events should I read before buying or holding?"
 
 ### What it does
 
-KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). Every listed Korean company — 3,900+ on KOSPI/KOSDAQ — available as structured financial intelligence.
+KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). It covers 3,900+ KOSPI/KOSDAQ/KONEX listed companies and converts filings into structured financial intelligence.
 
-**What web search can't do, KReports can:**
+### For investors
 
-| Query | Web Search | KReports |
-|-------|:----------:|:--------:|
-| "Samsung Electronics revenue 2024" | ✓ (news summary) | ✓ (DART original) |
-| "Compare all KOSDAQ biotech debt ratios" | ✗ | ✓ |
-| "Has this company changed auditors in 5 years?" | ✗ | ✓ |
-| "Going concern risk score — 6-factor K-IFRS audit standard" | ✗ | ✓ |
-| "Detect prior period restatements vs. prior annual report" | ✗ | ✓ |
-| "Subsidiary auditor matrix for the whole group" | ✗ | ✓ |
-| "NAS ratio (non-audit fees / audit fees)" | ✗ | ✓ |
-| "Industry P25/P50/P75 for operating margin (KSIC)" | ✗ | ✓ |
+You do not need to know accounting standards to start. Ask in plain language.
+
+| Investor question | What KReports checks |
+|-------|-------|
+| "Is Samsung Electronics still a high-quality business?" | ROE, operating margin, revenue growth, debt ratio, free cash flow, cash conversion |
+| "What should I worry about before buying Kakao?" | Restatements, amendments, Beneish M-Score, auditor changes, non-clean opinions, cash-flow gaps |
+| "Is this stock strong compared with peers?" | KSIC industry P25/P50/P75 and peer list |
+| "Did recent filings contain shareholder-friendly or dilution events?" | Treasury stock, capital raise, CB/BW/EB, merger/split, large contract, litigation, amendments |
+| "Can I trust the numbers?" | DART original data, accounting policy footnotes, audit opinions, audit fees, subsidiary auditor matrix |
+
+The new `get_investor_signals` tool gives one compact first-pass read: quality profile, accounting/governance risk, recent investor-relevant disclosure events, and plain takeaways.
 
 ### Setup
 
@@ -97,9 +105,10 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Has Celltrion restated any prior period figures?"
 "Subsidiary auditor matrix for POSCO group"
 "Beneish M-Score for this company — earnings manipulation risk"
+"Samsung Electronics investor signal summary — quality, accounting risk, recent disclosure events"
 ```
 
-### MCP Tools (9)
+### MCP Tools (10)
 
 | Tool | Input | What it returns |
 |------|-------|-----------------|
@@ -112,6 +121,7 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 | `get_subsidiary_auditors` | company | Group audit matrix across subsidiaries |
 | `compare_to_industry` | company, metric | KSIC P25/P50/P75 vs. peers |
 | `get_business_overview` | company, year | Business report narrative (overview, risk, MD&A) |
+| `get_investor_signals` | company, years, window_days | Quality checks, accounting risk score, recent investor-relevant disclosure events |
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
@@ -133,6 +143,9 @@ print(f"Score: {gc['score']}/100 ({gc['grade']})")
 
 # Industry benchmark
 bench = kreports.compare_to_industry("005930", metric="영업이익률")
+
+# Investor signal summary
+signals = kreports.get_investor_signals("005930")
 ```
 
 ### Full local setup (self-hosted)
@@ -189,13 +202,14 @@ Grades: **Stable** (80+) / **Caution** (60–79) / **Warning** (40–59) / **Dan
 | Audit fees | Audit + non-audit, NAS ratio |
 | Industry benchmarks | KSIC 2/3-digit, 8 metrics |
 | Accounting policies | 15 standard K-IFRS items |
+| Investor signals | Quality checks, accounting/governance risk, disclosure event categories |
 
 ### Architecture
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP servers (9 tools)
-├── analysis/    Public Python API (10 functions, JSON-safe)
+├── mcp/         MCP stdio + HTTP servers (10 tools)
+├── analysis/    Public Python API (11 functions, JSON-safe)
 ├── collector/   DART API collectors (9 modules)
 ├── processor/   XBRL/XML parsers
 ├── judge/       Risk flag engine (Beneish, Going Concern)
@@ -243,30 +257,38 @@ Apache 2.0
 
 ## 한국어
 
-> 감사 시즌마다 DART를 수작업으로 뒤지던 Big4 감사인이 만들었습니다.
+> DART 원문은 믿고 싶지만, 수백 쪽 사업보고서를 매번 직접 뒤질 수는 없는 투자자를 위해 만들었습니다.
 
-### 문제
+### 왜 필요한가
 
-감사 시즌마다 같은 반복: DART 열고, 회사 검색, 공시 클릭, 숫자 엑셀 복붙, 종속회사 30개 반복. 계속기업 검토 하나에 3시간.
+한국 상장사는 이미 DART에 많은 힌트를 남깁니다. 매출, 현금흐름, 감사의견, 감사인 교체, 정정공시, 전기 재작성, 종속회사, 비감사보수, 사업위험, 자사주, 증자, 전환사채까지 전부 공시 안에 있습니다.
 
-KReports는 그 루틴을 없앱니다. Claude에게 물어보면 됩니다.
+문제는 데이터가 없는 게 아니라, 너무 흩어져 있다는 점입니다. 공시 제목을 찾고, 보고서를 열고, 표를 보고, 주석을 읽고, 과거 보고서와 비교하는 일은 투자자가 매번 하기 어렵습니다.
+
+KReports는 그 일을 Claude가 바로 물어볼 수 있는 형태로 바꿉니다.
+
+- "이 회사 싸 보이는데, 숫자는 건강한가?"
+- "최근 회계나 지배구조에서 이상 신호가 있었나?"
+- "동종업계 안에서 이익률과 부채비율이 어느 정도 위치인가?"
+- "매수 전에 꼭 봐야 할 최근 공시는 무엇인가?"
 
 ### 무엇을 하나
 
-KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. KOSPI/KOSDAQ 상장사 3,900여 개의 재무 데이터를 구조화된 인텔리전스로 제공합니다.
+KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. KOSPI/KOSDAQ/KONEX 상장사 3,900여 개의 공시와 재무 데이터를 투자자가 질문하기 쉬운 인텔리전스로 제공합니다.
 
-**웹 검색이 못 하는 것, KReports는 합니다:**
+### 투자자가 바로 얻는 것
 
-| 질문 | 웹 검색 | KReports |
-|------|:-------:|:--------:|
-| "삼성전자 2024년 매출" | ✓ (언론 요약) | ✓ (DART 원문) |
-| "KOSDAQ 바이오 전체 부채비율 비교" | ✗ | ✓ |
-| "최근 5년 감사인 교체 이력" | ✗ | ✓ |
-| "계속기업 위험 — K-IFRS 6인자 스코어" | ✗ | ✓ |
-| "전기 소급 재작성 감지" | ✗ | ✓ |
-| "그룹 종속회사 감사인 매트릭스" | ✗ | ✓ |
-| "비감사보수 비율 (NAS ratio)" | ✗ | ✓ |
-| "동종업종 영업이익률 P25/P50/P75" | ✗ | ✓ |
+회계나 개발을 몰라도 이렇게 물어보면 됩니다.
+
+| 질문 | KReports가 보는 것 |
+|------|------|
+| "삼성전자는 아직 좋은 회사야?" | ROE, 영업이익률, 매출성장, 부채비율, FCF, 현금흐름 |
+| "카카오 사기 전에 위험한 신호 있어?" | 정정공시, 전기 재작성, Beneish M-Score, 감사인 교체, 감사의견 |
+| "이 종목은 동종업계에서 어느 정도야?" | KSIC 업종 기준 P25/P50/P75, 피어 목록 |
+| "최근 주주에게 좋은 공시나 희석 위험 있었어?" | 자기주식, 유상증자, CB/BW/EB, 합병/분할, 대규모 계약, 소송 |
+| "사업보고서에서 핵심만 뽑아줘" | 사업개요, 위험요소, 경영계획, R&D, 주요계약 |
+
+`get_investor_signals`는 이 모든 것을 한 번에 훑는 첫 화면입니다. 퀄리티 체크, 회계/거버넌스 리스크 점수, 최근 투자자 관련 공시 이벤트, 핵심 takeaways를 한 번에 돌려줍니다.
 
 ### 설치
 
@@ -325,9 +347,10 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "셀트리온 전기 소급 재작성 있어?"
 "POSCO 그룹 종속회사 감사인 매트릭스"
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
+"삼성전자 투자자 신호 요약 — 퀄리티, 회계 리스크, 최근 공시 이벤트"
 ```
 
-### MCP 도구 (9개)
+### MCP 도구 (10개)
 
 | 도구 | 입력 | 반환 |
 |------|------|------|
@@ -340,6 +363,7 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 | `get_subsidiary_auditors` | company | 연결그룹 종속회사 감사인 매트릭스 |
 | `compare_to_industry` | company, metric | KSIC 업종 P25/P50/P75 비교 |
 | `get_business_overview` | company, year | 사업보고서 핵심 섹션 (사업개요·위험·경영계획) |
+| `get_investor_signals` | company, years, window_days | 퀄리티 체크·회계 리스크 점수·투자자 관련 최근 공시 이벤트 |
 
 회사명, 종목코드(6자리), corp_code(8자리) 중 아무거나 입력 가능합니다.
 
@@ -355,6 +379,7 @@ import kreports
 snap = kreports.get_financial_snapshot("005930", years=3)
 gc = kreports.score_going_concern("005930")
 print(f"점수: {gc['score']}/100 ({gc['grade']})")
+signals = kreports.get_investor_signals("005930")
 ```
 
 ### 로컬 직접 구축 (셀프호스트)
@@ -403,13 +428,14 @@ K-IFRS 감사기준 기반 100점 감점 방식:
 | 감사보수 | 감사보수 + 비감사보수, NAS ratio |
 | 업종 벤치마킹 | KSIC 2/3자리, 8개 지표 |
 | 회계정책 | K-IFRS 표준 15개 항목 |
+| 투자자 신호 | 퀄리티 체크, 회계/거버넌스 리스크, 공시 이벤트 분류 |
 
 ### 아키텍처
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP 서버 (9개 도구)
-├── analysis/    Python 공개 API (10개 함수, JSON-safe)
+├── mcp/         MCP stdio + HTTP 서버 (10개 도구)
+├── analysis/    Python 공개 API (11개 함수, JSON-safe)
 ├── collector/   DART API 수집기 (9개 모듈)
 ├── processor/   XBRL/XML 파서
 ├── judge/       위험 플래그 엔진 (Beneish, Going Concern)

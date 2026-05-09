@@ -19,6 +19,7 @@ _PUBLIC_API = {
     "get_industry_aggregates": "kreports.analysis.api",
     "compare_to_industry": "kreports.analysis.api",
     "get_business_overview": "kreports.analysis.api",
+    "get_investor_signals": "kreports.analysis.api",
     "resolve_corp_code": "kreports.analysis.api",
 }
 

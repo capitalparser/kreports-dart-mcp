@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import math
 import statistics
+from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
 from sqlalchemy import text
 
 from kreports.db.engine import get_session, engine as _engine
-from kreports.db.models import Company
+from kreports.db.models import Company, Disclosure
 
 # dashboard.db는 streamlit optional import를 지원하므로 headless에서도 사용 가능
 from kreports.analysis import queries as _queries
@@ -211,6 +212,245 @@ def get_financial_snapshot(
         "unit": "억원",
         "rows": rows,
         "row_count": len(rows),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 투자자 신호 요약
+# ---------------------------------------------------------------------------
+
+_INVESTOR_EVENT_PRESETS = {
+    "treasury_buy": {
+        "label": "자기주식",
+        "keywords": ["자기주식", "자사주"],
+        "stance": "potentially_positive",
+    },
+    "capital_raise": {
+        "label": "유상증자",
+        "keywords": ["유상증자", "증자"],
+        "stance": "dilution_watch",
+    },
+    "convertible_bond": {
+        "label": "CB/BW/EB",
+        "keywords": ["전환사채", "신주인수권부사채", "교환사채", "CB", "BW", "EB"],
+        "stance": "dilution_watch",
+    },
+    "merger_split": {
+        "label": "합병/분할",
+        "keywords": ["합병", "분할"],
+        "stance": "structure_change",
+    },
+    "major_contract": {
+        "label": "대규모 계약",
+        "keywords": ["단일판매", "공급계약", "수주"],
+        "stance": "potentially_positive",
+    },
+    "litigation": {
+        "label": "소송/분쟁",
+        "keywords": ["소송", "분쟁", "중재"],
+        "stance": "risk_watch",
+    },
+    "amendment": {
+        "label": "정정공시",
+        "keywords": ["정정"],
+        "stance": "risk_watch",
+    },
+}
+
+
+def _as_float(value: Any) -> float | None:
+    value = _clean_value(value)
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
+
+
+def _avg(values: list[float | None]) -> float | None:
+    cleaned = [v for v in values if v is not None]
+    return statistics.fmean(cleaned) if cleaned else None
+
+
+def _classify_disclosure(report_nm: str) -> dict | None:
+    normalized = report_nm or ""
+    for key, preset in _INVESTOR_EVENT_PRESETS.items():
+        if any(keyword in normalized for keyword in preset["keywords"]):
+            return {
+                "category": key,
+                "label": preset["label"],
+                "stance": preset["stance"],
+            }
+    return None
+
+
+def _recent_investor_events(corp_code: str, window_days: int, limit: int) -> tuple[list[dict], dict]:
+    since = date.today() - timedelta(days=window_days)
+    with get_session() as session:
+        disclosure_rows = (
+            session.query(Disclosure)
+            .filter(Disclosure.corp_code == corp_code)
+            .filter(Disclosure.disc_date >= since)
+            .order_by(Disclosure.disc_date.desc())
+            .limit(max(limit * 5, limit))
+            .all()
+        )
+        rows = [
+            {
+                "disc_date": str(row.disc_date),
+                "rcept_no": row.rcept_no,
+                "report_nm": row.report_nm,
+                "flr_nm": row.flr_nm,
+            }
+            for row in disclosure_rows
+        ]
+
+    events: list[dict] = []
+    counts = {key: 0 for key in _INVESTOR_EVENT_PRESETS}
+    for row in rows:
+        classified = _classify_disclosure(row["report_nm"])
+        if classified is None:
+            continue
+        counts[classified["category"]] += 1
+        if len(events) < limit:
+            events.append({
+                "disc_date": row["disc_date"],
+                "rcept_no": row["rcept_no"],
+                "report_nm": row["report_nm"],
+                "flr_nm": row["flr_nm"],
+                **classified,
+            })
+    return events, counts
+
+
+def _risk_score_from_summary(summary: dict) -> tuple[int, str, list[dict]]:
+    weights = {
+        "non_clean_opinion_count": 25,
+        "equity_negative_count": 25,
+        "going_concern_count": 20,
+        "beneish_alert_count": 15,
+        "op_cf_divergence_count": 10,
+        "high_accrual_count": 10,
+        "amendment_heavy_count": 10,
+        "auditor_change_count": 5,
+        "nas_risk_count": 5,
+    }
+    factors = []
+    score = 0
+    for key, weight in weights.items():
+        count = int(summary.get(key) or 0)
+        if count <= 0:
+            continue
+        penalty = min(weight * count, weight * 2)
+        score += penalty
+        factors.append({"name": key, "count": count, "penalty": penalty})
+    score = min(score, 100)
+    if score >= 70:
+        verdict = "red_flag"
+    elif score >= 40:
+        verdict = "warning"
+    elif score >= 20:
+        verdict = "watch"
+    else:
+        verdict = "clean"
+    return score, verdict, factors
+
+
+def get_investor_signals(
+    company: str,
+    years: int = 5,
+    window_days: int = 365,
+    event_limit: int = 20,
+) -> dict:
+    """
+    투자자 관점의 품질·리스크·최근 공시 이벤트 요약.
+
+    DART 원문을 실시간으로 다시 긁기보다, 수집된 kreports DB 위에서
+    반복 투자 점검에 바로 쓸 수 있는 신호를 만든다.
+    """
+    corp_code = _resolve_company_identifier(company)
+    if corp_code is None:
+        return {
+            "corp_code": None,
+            "has_data": False,
+            "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
+        }
+
+    financial = get_financial_snapshot(corp_code, years=years, annual_only=True)
+    rows = financial.get("rows", [])
+    latest = rows[-1] if rows else {}
+
+    avg_roe = _avg([_as_float(row.get("ROE")) for row in rows])
+    avg_op_margin = _avg([_as_float(row.get("영업이익률")) for row in rows])
+    avg_revenue_growth = _avg([_as_float(row.get("매출성장률")) for row in rows])
+    latest_debt_ratio = _as_float(latest.get("부채비율"))
+    latest_fcf = _as_float(latest.get("FCF"))
+    latest_cfo_ni = _as_float(latest.get("CFO_NI"))
+
+    quality_checks = {
+        "positive_avg_roe": avg_roe is not None and avg_roe >= 10,
+        "positive_avg_op_margin": avg_op_margin is not None and avg_op_margin > 0,
+        "positive_revenue_growth": avg_revenue_growth is not None and avg_revenue_growth > 0,
+        "debt_ratio_under_100": latest_debt_ratio is not None and latest_debt_ratio <= 100,
+        "positive_latest_fcf": latest_fcf is not None and latest_fcf > 0,
+        "cfo_covers_net_income": latest_cfo_ni is not None and latest_cfo_ni >= 0.8,
+    }
+    passed = sum(1 for passed in quality_checks.values() if passed)
+
+    risk_summary = _queries.get_risk_summary(corp_code)
+    risk_score, risk_verdict, risk_factors = _risk_score_from_summary(risk_summary)
+    events, event_counts = _recent_investor_events(corp_code, window_days, event_limit)
+
+    takeaways = []
+    if passed >= 4:
+        takeaways.append("quality_profile_supportive")
+    elif rows:
+        takeaways.append("quality_profile_mixed")
+    else:
+        takeaways.append("financial_data_missing")
+    if risk_verdict in {"warning", "red_flag"}:
+        takeaways.append("accounting_or_governance_risk_needs_review")
+    if event_counts.get("capital_raise", 0) or event_counts.get("convertible_bond", 0):
+        takeaways.append("dilution_events_present")
+    if event_counts.get("treasury_buy", 0):
+        takeaways.append("shareholder_return_event_present")
+
+    return {
+        "corp_code": corp_code,
+        "has_data": bool(rows or events or risk_summary.get("has_data")),
+        "unit": "억원",
+        "years": years,
+        "window_days": window_days,
+        "quality_snapshot": {
+            "avg_roe": avg_roe,
+            "avg_operating_margin": avg_op_margin,
+            "avg_revenue_growth": avg_revenue_growth,
+            "latest_debt_ratio": latest_debt_ratio,
+            "latest_fcf": latest_fcf,
+            "latest_cfo_ni": latest_cfo_ni,
+            "checks": quality_checks,
+            "passed_checks": passed,
+            "total_checks": len(quality_checks),
+            "latest_year": latest.get("연도"),
+        },
+        "accounting_risk": {
+            "score": risk_score,
+            "verdict": risk_verdict,
+            "factors": risk_factors,
+            "raw_summary": _clean_dict(risk_summary),
+        },
+        "recent_events": events,
+        "event_counts": event_counts,
+        "takeaways": takeaways,
+        "limitations": [
+            "최근 공시 이벤트는 수집된 disclosures 테이블의 제목 기반 분류입니다.",
+            "내부자 지분 매매 원자료는 아직 별도 수집하지 않으므로 insider_signal은 포함하지 않습니다.",
+            "투자 판단 전 원 공시와 최신 수집 시각을 확인하세요.",
+        ],
     }
 
 

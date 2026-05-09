@@ -6,7 +6,7 @@ dart_mcp.tools — MCP 도구 정의.
   2. handler — 실제 호출 함수 (dart_analyst에 위임)
   3. description — Claude가 도구 선택에 쓰는 자연어 설명
 
-도구 목록 (9개):
+도구 목록 (10개):
   search_company           회사명/종목코드 → corp_code 탐색
   get_financial_snapshot   연도별 재무요약 + 자본배분 지표
   score_going_concern      6인자 계속기업 스코어카드
@@ -16,6 +16,7 @@ dart_mcp.tools — MCP 도구 정의.
   get_subsidiary_auditors  종속/관계회사 감사인 매트릭스
   compare_to_industry      업종 벤치마킹
   get_business_overview    사업보고서 핵심 섹션
+  get_investor_signals     투자자 품질·리스크·공시 이벤트 요약
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from kreports.analysis.api import (
     get_audit_history,
     get_business_overview,
     get_financial_snapshot,
+    get_investor_signals,
     get_subsidiary_auditors,
     resolve_corp_code,
     score_going_concern,
@@ -766,6 +768,66 @@ TOOL_GET_BUSINESS_OVERVIEW = Tool(
 
 
 # ---------------------------------------------------------------------------
+# 10. get_investor_signals
+# ---------------------------------------------------------------------------
+
+def _handle_get_investor_signals(args: dict) -> dict:
+    corp_code = _resolve_or_error(_require_string(args, "company"))
+    years = _optional_int(args, "years", 5, min_value=1, max_value=10)
+    window_days = _optional_int(args, "window_days", 365, min_value=1, max_value=3650)
+    event_limit = _optional_int(args, "event_limit", 20, min_value=1, max_value=100)
+    return get_investor_signals(
+        corp_code,
+        years=years or 5,
+        window_days=window_days or 365,
+        event_limit=event_limit or 20,
+    )
+
+
+TOOL_GET_INVESTOR_SIGNALS = Tool(
+    name="get_investor_signals",
+    description=(
+        "투자자 관점의 품질·회계리스크·최근 공시 이벤트 요약. "
+        "버핏식 퀄리티 체크(ROE, 영업이익률, 매출성장, 부채비율, FCF, CFO/NI), "
+        "회계/거버넌스 리스크 점수(Beneish, 정정공시, 감사의견, 감사인 교체, NAS 등), "
+        "최근 자기주식·유상증자·CB/BW/EB·합병/분할·대규모 계약·소송 공시 제목 신호를 묶어 반환한다. "
+        "보유종목 정기 점검, 신규 종목 1차 스크리닝, 리스크 플래그 확인에 사용."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {
+                "type": "string",
+                "description": "corp_code / 종목코드 / 회사명",
+            },
+            "years": {
+                "type": "integer",
+                "description": "퀄리티 체크에 사용할 최근 N개 연도. 기본 5.",
+                "default": 5,
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "window_days": {
+                "type": "integer",
+                "description": "최근 공시 이벤트 검색 기간. 기본 365일.",
+                "default": 365,
+                "minimum": 1,
+                "maximum": 3650,
+            },
+            "event_limit": {
+                "type": "integer",
+                "description": "반환할 최근 이벤트 최대 개수. 기본 20.",
+                "default": 20,
+                "minimum": 1,
+                "maximum": 100,
+            },
+        },
+        "required": ["company"],
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -779,6 +841,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_GET_SUBSIDIARY_AUDITORS,
     TOOL_COMPARE_TO_INDUSTRY,
     TOOL_GET_BUSINESS_OVERVIEW,
+    TOOL_GET_INVESTOR_SIGNALS,
 ]
 
 HANDLERS: dict[str, Callable[[dict], Any]] = {
@@ -791,6 +854,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "get_subsidiary_auditors": _handle_get_subsidiary_auditors,
     "compare_to_industry": _handle_compare_to_industry,
     "get_business_overview": _handle_get_business_overview,
+    "get_investor_signals": _handle_get_investor_signals,
 }
 
 

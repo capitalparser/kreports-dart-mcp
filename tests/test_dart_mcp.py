@@ -29,10 +29,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 9  # search, get_financial_snapshot, score_going_concern,
+EXPECTED_TOOL_COUNT = 10  # search, get_financial_snapshot, score_going_concern,
                          # detect_restatement, get_accounting_policy,
                          # get_audit_history, get_subsidiary_auditors, compare_to_industry,
-                         # get_business_overview
+                         # get_business_overview, get_investor_signals
 
 
 class TestToolRegistryConsistency:
@@ -79,6 +79,14 @@ class TestCallToolErrors:
         ))
         assert "error" in result
         assert "limit" in result["error"]
+
+    def test_investor_signals_unknown_company_returns_error(self):
+        result = json.loads(call_tool(
+            "get_investor_signals",
+            {"company": "절대로존재하지않는기업명XYZ"},
+        ))
+        assert "error" in result
+        assert "찾을 수 없습니다" in result["error"]
 
 
 class TestCallToolRealData:
@@ -150,6 +158,20 @@ class TestCallToolRealData:
         result = json.loads(call_tool("get_audit_history", {"company": samsung}))
         assert result["count"] >= 1
 
+    def test_get_investor_signals(self):
+        samsung = self._samsung_cc()
+        if samsung is None:
+            pytest.skip("삼성전자 DB 미등록")
+        result = json.loads(call_tool(
+            "get_investor_signals",
+            {"company": samsung, "years": 3, "window_days": 365},
+        ))
+        assert result["corp_code"] == samsung
+        assert "quality_snapshot" in result
+        assert "accounting_risk" in result
+        assert "event_counts" in result
+        assert result["_meta"]["tool"] == "get_investor_signals"
+
     def test_subsidiary_auditors_default_slim_100(self):
         """기본값: slim=True, limit=100."""
         samsung = self._samsung_cc()
@@ -182,6 +204,8 @@ class TestCallToolRealData:
             "get_subsidiary_auditors",
             {"company": samsung, "only_with_auditor": True, "limit": 500},
         ))
+        if "error" in result and "DART_API_KEY" in result["error"]:
+            pytest.skip("종속회사 데이터 수집에 DART_API_KEY 필요")
         for sub in result["subsidiaries"]:
             assert sub["auditor"] is not None
             assert sub["auditor"] != {}
