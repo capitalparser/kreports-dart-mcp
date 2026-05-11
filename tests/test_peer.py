@@ -90,3 +90,16 @@ def test_resolve_peers_unknown_corp_returns_empty():
     pr = resolve_peers("99999999")
     assert pr.n_peers == 0
     assert pr.peer_corp_codes == []
+
+
+def test_resolve_peers_size_bucket_reduces_pool():
+    """size_bucket_decade=1.0 적용 시 peer 풀이 줄어든다."""
+    pr_full = resolve_peers("00126380")
+    pr_bucketed = resolve_peers("00126380", size_bucket_decade=1.0)
+    assert pr_bucketed.size_bucket_applied == 1.0
+    assert pr_bucketed.n_peers <= pr_full.n_peers
+
+
+def test_resolve_peers_note_warns_when_low_n():
+    pr_low = resolve_peers("00126380", min_n=999_999)
+    assert "peer 수가 부족" in pr_low.note or pr_low.n_peers >= 5
