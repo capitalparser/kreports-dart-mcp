@@ -6,17 +6,19 @@ dart_mcp.tools — MCP 도구 정의.
   2. handler — 실제 호출 함수 (dart_analyst에 위임)
   3. description — Claude가 도구 선택에 쓰는 자연어 설명
 
-도구 목록 (10개):
-  search_company           회사명/종목코드 → corp_code 탐색
-  get_financial_snapshot   연도별 재무요약 + 자본배분 지표
-  score_going_concern      6인자 계속기업 스코어카드
-  detect_restatement       소급 재작성 감지
-  get_accounting_policy    회계정책 주석 추출
-  get_audit_history        감사인·의견 이력
-  get_subsidiary_auditors  종속/관계회사 감사인 매트릭스
-  compare_to_industry      업종 벤치마킹
-  get_business_overview    사업보고서 핵심 섹션
-  get_investor_signals     투자자 품질·리스크·공시 이벤트 요약
+도구 목록 (12개):
+  search_company                회사명/종목코드 → corp_code 탐색
+  get_financial_snapshot        연도별 재무요약 + 자본배분 지표
+  score_going_concern           6인자 계속기업 스코어카드
+  detect_restatement            소급 재작성 감지
+  get_accounting_policy         회계정책 주석 추출
+  get_audit_history             감사인·의견 이력
+  get_subsidiary_auditors       종속/관계회사 감사인 매트릭스
+  compare_to_industry           업종 벤치마킹 (단일 지표·단일 연도)
+  get_business_overview         사업보고서 핵심 섹션
+  get_investor_signals          투자자 품질·리스크·공시 이벤트 요약
+  compare_to_industry_multi     업종 벤치마킹 (다지표·다년도 matrix)
+  get_industry_audit_landscape  업종 내 감사인 시장 분석
 """
 from __future__ import annotations
 
@@ -29,11 +31,13 @@ from sqlalchemy import func
 
 from kreports.analysis.api import (
     compare_to_industry,
+    compare_to_industry_multi,
     detect_restatement,
     get_accounting_policy,
     get_audit_history,
     get_business_overview,
     get_financial_snapshot,
+    get_industry_audit_landscape,
     get_investor_signals,
     get_subsidiary_auditors,
     resolve_corp_code,
@@ -828,6 +832,219 @@ TOOL_GET_INVESTOR_SIGNALS = Tool(
 
 
 # ---------------------------------------------------------------------------
+# 11. compare_to_industry_multi
+# ---------------------------------------------------------------------------
+
+_ALL_MULTI_METRICS = [
+    "영업이익률",
+    "순이익률",
+    "부채비율",
+    "ROE",
+    "ROA",
+    "자기자본비율",
+    "매출성장률",
+    "Beneish_M",
+]
+
+
+def _optional_float_or_none(
+    args: dict,
+    name: str,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float | None:
+    """size_bucket_decade처럼 default가 None인 optional float용 헬퍼."""
+    if name not in args or args.get(name) is None:
+        return None
+    value = args.get(name)
+    if isinstance(value, bool):
+        raise ValueError(f"'{name}' 값은 숫자여야 합니다.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"'{name}' 값은 숫자여야 합니다.") from exc
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"'{name}' 값은 {min_value} 이상이어야 합니다.")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"'{name}' 값은 {max_value} 이하이어야 합니다.")
+    return parsed
+
+
+def _handle_compare_to_industry_multi(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    metrics_raw = args.get("metrics")
+    if metrics_raw is None:
+        metrics: list[str] | None = None
+    elif not isinstance(metrics_raw, list):
+        return {"error": "metrics는 array여야 합니다."}
+    else:
+        invalid = [m for m in metrics_raw if m not in _ALL_MULTI_METRICS]
+        if invalid:
+            return {
+                "error": f"지원하지 않는 metric: {invalid}. 지원: {_ALL_MULTI_METRICS}"
+            }
+        metrics = list(metrics_raw)
+    years_back = _optional_int(args, "years_back", 5, min_value=1, max_value=10) or 5
+    prefix_len_start = (
+        _optional_int(args, "prefix_len_start", 3, min_value=2, max_value=5) or 3
+    )
+    return compare_to_industry_multi(
+        company=company,
+        metrics=metrics,
+        years_back=years_back,
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+        prefix_len_start=prefix_len_start,
+        exclude_other_sectors=_optional_bool(args, "exclude_other_sectors", True),
+        size_bucket_decade=_optional_float_or_none(
+            args, "size_bucket_decade", min_value=0.5, max_value=3.0
+        ),
+    )
+
+
+TOOL_COMPARE_TO_INDUSTRY_MULTI = Tool(
+    name="compare_to_industry_multi",
+    description=(
+        "동종업종 내 다지표·다년도(기본 5년) 분포와 subject 회사 percentile을 한 번에 반환. "
+        "peer 매칭은 adaptive ladder(p3→p2) + sector mutual exclusion(금융/지주/부동산/일반) + "
+        "옵션 size bucket(자산 log10 ±decade). 응답은 {year: {metric: {p25, p50, p75, n, "
+        "subject_value, percentile, unit}}} 형태의 matrix와 meta(matched_prefix_len, "
+        "confidence, sector_group 등)를 포함. 단일 회사의 업종 내 상대 포지션을 다지표·다년도로 "
+        "한 번에 파악할 때 사용."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {
+                "type": "string",
+                "description": "기준 회사 (corp_code / 종목코드 / 회사명).",
+            },
+            "metrics": {
+                "type": "array",
+                "items": {"type": "string", "enum": _ALL_MULTI_METRICS},
+                "description": "비교 지표 리스트. 생략 시 8개 전체.",
+            },
+            "years_back": {
+                "type": "integer",
+                "description": "최근 N개 연도. 기본 5.",
+                "default": 5,
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "fs_div": {
+                "type": "string",
+                "enum": ["CFS", "OFS"],
+                "default": "CFS",
+            },
+            "prefix_len_start": {
+                "type": "integer",
+                "description": "KSIC ladder 시작 자리 수. 기본 3 (소분류). n<5면 2자리로 자동 fallback.",
+                "default": 3,
+                "minimum": 2,
+                "maximum": 5,
+            },
+            "exclude_other_sectors": {
+                "type": "boolean",
+                "description": "True면 금융/지주/부동산/일반 sector group 간 분리. 기본 True.",
+                "default": True,
+            },
+            "size_bucket_decade": {
+                "type": "number",
+                "description": "자산 log10 ±decade 필터 (예: 1.0=±10배). 생략 시 미적용.",
+                "minimum": 0.5,
+                "maximum": 3.0,
+            },
+        },
+        "required": ["company"],
+    },
+)
+
+
+# ---------------------------------------------------------------------------
+# 12. get_industry_audit_landscape
+# ---------------------------------------------------------------------------
+
+def _handle_get_industry_audit_landscape(args: dict) -> dict:
+    company = _optional_string(args, "company")
+    induty_code = _optional_string(args, "induty_code")
+    if not company and not induty_code:
+        return {"error": "company 또는 induty_code 중 하나 필요"}
+    if company:
+        company = _resolve_or_error(company)
+    years_back = _optional_int(args, "years_back", 5, min_value=1, max_value=10) or 5
+    prefix_len_start = (
+        _optional_int(args, "prefix_len_start", 3, min_value=2, max_value=5) or 3
+    )
+    top_n = _optional_int(args, "top_n", 10, min_value=1, max_value=50) or 10
+    return get_industry_audit_landscape(
+        company=company,
+        induty_code=induty_code,
+        years_back=years_back,
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+        prefix_len_start=prefix_len_start,
+        top_n=top_n,
+        exclude_other_sectors=_optional_bool(args, "exclude_other_sectors", True),
+    )
+
+
+TOOL_GET_INDUSTRY_AUDIT_LANDSCAPE = Tool(
+    name="get_industry_audit_landscape",
+    description=(
+        "업종 내 감사 시장 분석: 감사인 시장점유율(회사수·자산가중 top_n), Big4 점유율, "
+        "비적정 의견 발생율(years_back 누적), 평균 tenure(consecutive_years), "
+        "subject 회사의 감사인 정보. peer는 adaptive ladder + sector 분리 적용. "
+        "감사 리스크 평가, 동종업종 감사 시장 이해, 거버넌스 디스카운트 분석에 사용. "
+        "auditors 데이터가 부족하면 latest_year=None과 함께 graceful note."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {
+                "type": "string",
+                "description": "기준 회사 (corp_code / 종목코드 / 회사명).",
+            },
+            "induty_code": {
+                "type": "string",
+                "description": "company 대신 직접 KSIC 코드를 지정. company가 있으면 무시.",
+            },
+            "years_back": {
+                "type": "integer",
+                "default": 5,
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "fs_div": {
+                "type": "string",
+                "enum": ["CFS", "OFS"],
+                "default": "CFS",
+            },
+            "prefix_len_start": {
+                "type": "integer",
+                "default": 3,
+                "minimum": 2,
+                "maximum": 5,
+            },
+            "top_n": {
+                "type": "integer",
+                "description": "auditor_market_share 최대 항목 수.",
+                "default": 10,
+                "minimum": 1,
+                "maximum": 50,
+            },
+            "exclude_other_sectors": {
+                "type": "boolean",
+                "default": True,
+            },
+        },
+        "oneOf": [
+            {"required": ["company"]},
+            {"required": ["induty_code"]},
+        ],
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -842,6 +1059,8 @@ ALL_TOOLS: list[Tool] = [
     TOOL_COMPARE_TO_INDUSTRY,
     TOOL_GET_BUSINESS_OVERVIEW,
     TOOL_GET_INVESTOR_SIGNALS,
+    TOOL_COMPARE_TO_INDUSTRY_MULTI,
+    TOOL_GET_INDUSTRY_AUDIT_LANDSCAPE,
 ]
 
 HANDLERS: dict[str, Callable[[dict], Any]] = {
@@ -855,6 +1074,8 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "compare_to_industry": _handle_compare_to_industry,
     "get_business_overview": _handle_get_business_overview,
     "get_investor_signals": _handle_get_investor_signals,
+    "compare_to_industry_multi": _handle_compare_to_industry_multi,
+    "get_industry_audit_landscape": _handle_get_industry_audit_landscape,
 }
 
 
