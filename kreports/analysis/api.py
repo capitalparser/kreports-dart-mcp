@@ -1314,6 +1314,301 @@ def compare_to_industry_multi(
 
 
 # ---------------------------------------------------------------------------
+# 업종 감사 시장 분석 (get_industry_audit_landscape)
+# ---------------------------------------------------------------------------
+
+_BIG4_KEYWORDS = ("삼일", "삼정", "한영", "안진", "PwC", "KPMG", "EY", "Deloitte")
+
+
+def _is_big4(name: Optional[str]) -> bool:
+    """auditor_nm 내 Big4 키워드 포함 여부."""
+    if not name:
+        return False
+    return any(k in name for k in _BIG4_KEYWORDS)
+
+
+def _empty_audit_landscape(
+    subject_meta: dict,
+    pr: PeerResolution,
+    fs_div: str,
+    note: str,
+) -> dict:
+    """auditors 데이터 부족 시 graceful degradation shape."""
+    return {
+        "subject": subject_meta,
+        "sector_group": pr.sector_group.value,
+        "matched_prefix_len": pr.matched_prefix_len,
+        "n_peers": pr.n_peers,
+        "confidence": pr.confidence,
+        "excluded_categories": pr.excluded_categories,
+        "fs_div": fs_div,
+        "latest_year": None,
+        "years_window": None,
+        "auditor_market_share": [],
+        "big4_share_pct": None,
+        "non_qualified_opinion_rate_pct": None,
+        "avg_tenure_years": None,
+        "subject_auditor": None,
+        "note": note,
+    }
+
+
+def get_industry_audit_landscape(
+    company: Optional[str] = None,
+    induty_code: Optional[str] = None,
+    years_back: int = 5,
+    fs_div: str = "CFS",
+    prefix_len_start: int = 3,
+    top_n: int = 10,
+    exclude_other_sectors: bool = True,
+) -> dict:
+    """업종 내 감사 시장 분석.
+
+    Returns: subject 정보 + 감사인 시장점유율(회사수·자산가중) + Big4 share +
+    비적정 의견 발생율(5년 누적) + 평균 tenure + subject 본인 감사인.
+
+    Auditors 테이블 데이터가 부족하면 latest_year=None과 함께 자료 부족 note.
+    """
+    # 1. Subject corp_code 해석
+    if company:
+        corp_code = resolve_corp_code(company)
+        if corp_code is None:
+            return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
+    elif induty_code:
+        prefix = str(induty_code).strip()
+        if not prefix:
+            return {"error": "induty_code가 비어 있습니다."}
+        with _engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT corp_code FROM companies "
+                    "WHERE substr(induty_code, 1, :plen) = :prefix "
+                    "  AND stock_code IS NOT NULL "
+                    "ORDER BY corp_code LIMIT 1"
+                ),
+                {"plen": len(prefix), "prefix": prefix},
+            ).first()
+        if row is None:
+            return {"error": f"induty_code prefix '{prefix}'에 해당하는 기업이 없습니다."}
+        corp_code = row[0]
+    else:
+        return {"error": "company 또는 induty_code 중 하나 필요"}
+
+    # 2. Subject 메타
+    with _engine.connect() as conn:
+        subj_row = conn.execute(
+            text("SELECT corp_name, induty_code FROM companies WHERE corp_code = :cc"),
+            {"cc": corp_code},
+        ).first()
+    if subj_row is None:
+        return {"error": f"corp_code '{corp_code}' 미등록"}
+    subject_meta = {
+        "corp_code": corp_code,
+        "corp_name": subj_row[0],
+        "induty_code": subj_row[1],
+    }
+
+    # 3. Peer 풀
+    pr = resolve_peers(
+        corp_code=corp_code,
+        prefix_len_start=prefix_len_start,
+        min_n=5,
+        exclude_other_sectors=exclude_other_sectors,
+        size_bucket_decade=None,
+        fs_div=fs_div,
+    )
+
+    # 4. peer_set = peer + subject
+    peer_set = list(pr.peer_corp_codes) + [corp_code]
+
+    # 5. latest_year (auditors)
+    with _engine.connect() as conn:
+        stmt = text(
+            "SELECT MAX(bsns_year) FROM auditors "
+            "WHERE corp_code IN :ccs AND fs_div = :fs"
+        ).bindparams(bindparam("ccs", expanding=True))
+        latest = conn.execute(stmt, {"ccs": peer_set, "fs": fs_div}).scalar()
+
+    if latest is None:
+        return _empty_audit_landscape(
+            subject_meta,
+            pr,
+            fs_div,
+            note=(
+                (pr.note + " · " if pr.note else "")
+                + "auditors 데이터 부족 (collect-auditors 미실행 또는 데이터 없음)"
+            ),
+        )
+    latest_year = int(latest)
+
+    # 6. years window
+    y1 = latest_year
+    y0 = latest_year - years_back + 1
+
+    # 7. Auditor market share (latest year)
+    with _engine.connect() as conn:
+        # 7a. 회사수 기반 share + asset_weighted share (한 쿼리)
+        share_stmt = text(
+            """
+            SELECT a.auditor_nm,
+                   COUNT(DISTINCT a.corp_code) AS company_count,
+                   COALESCE(SUM(f.total_assets), 0) AS asset_sum
+            FROM auditors a
+            LEFT JOIN financials f
+              ON f.corp_code = a.corp_code
+             AND f.year = a.bsns_year
+             AND f.fs_div = a.fs_div
+             AND f.quarter = 4
+            WHERE a.corp_code IN :ccs
+              AND a.bsns_year = :y
+              AND a.fs_div = :fs
+            GROUP BY a.auditor_nm
+            ORDER BY company_count DESC
+            LIMIT :topn
+            """
+        ).bindparams(bindparam("ccs", expanding=True))
+        share_rows = conn.execute(
+            share_stmt,
+            {"ccs": peer_set, "y": latest_year, "fs": fs_div, "topn": top_n},
+        ).all()
+
+        # 7b. 전체 합산 (share_pct 계산 분모)
+        total_stmt = text(
+            """
+            SELECT COUNT(DISTINCT a.corp_code) AS company_total,
+                   COALESCE(SUM(f.total_assets), 0) AS asset_total
+            FROM auditors a
+            LEFT JOIN financials f
+              ON f.corp_code = a.corp_code
+             AND f.year = a.bsns_year
+             AND f.fs_div = a.fs_div
+             AND f.quarter = 4
+            WHERE a.corp_code IN :ccs
+              AND a.bsns_year = :y
+              AND a.fs_div = :fs
+            """
+        ).bindparams(bindparam("ccs", expanding=True))
+        total_row = conn.execute(
+            total_stmt,
+            {"ccs": peer_set, "y": latest_year, "fs": fs_div},
+        ).first()
+    company_total = int(total_row[0]) if total_row and total_row[0] else 0
+    asset_total = float(total_row[1]) if total_row and total_row[1] else 0.0
+
+    auditor_market_share = []
+    for nm, cnt, asum in share_rows:
+        cnt_i = int(cnt or 0)
+        asum_f = float(asum or 0)
+        comp_share = (
+            round(100.0 * cnt_i / company_total, 2) if company_total > 0 else None
+        )
+        asset_share = (
+            round(100.0 * asum_f / asset_total, 2) if asset_total > 0 else None
+        )
+        auditor_market_share.append(
+            {
+                "auditor_nm": nm,
+                "company_count": cnt_i,
+                "company_share_pct": comp_share,
+                "asset_weighted_share_pct": asset_share,
+                "is_big4": _is_big4(nm),
+            }
+        )
+
+    # 8. Big4 share (latest year)
+    with _engine.connect() as conn:
+        big4_stmt = text(
+            "SELECT auditor_nm, COUNT(DISTINCT corp_code) FROM auditors "
+            "WHERE corp_code IN :ccs AND bsns_year = :y AND fs_div = :fs "
+            "GROUP BY auditor_nm"
+        ).bindparams(bindparam("ccs", expanding=True))
+        all_rows = conn.execute(
+            big4_stmt, {"ccs": peer_set, "y": latest_year, "fs": fs_div}
+        ).all()
+    big4_corps = sum(int(c or 0) for nm, c in all_rows if _is_big4(nm))
+    any_corps = sum(int(c or 0) for _, c in all_rows)
+    big4_share_pct = (
+        round(100.0 * big4_corps / any_corps, 2) if any_corps > 0 else None
+    )
+
+    # 9. Non-qualified opinion rate (years window)
+    with _engine.connect() as conn:
+        op_stmt = text(
+            "SELECT audit_opinion, COUNT(*) FROM auditors "
+            "WHERE corp_code IN :ccs "
+            "  AND bsns_year BETWEEN :y0 AND :y1 "
+            "  AND fs_div = :fs "
+            "GROUP BY audit_opinion"
+        ).bindparams(bindparam("ccs", expanding=True))
+        op_rows = conn.execute(
+            op_stmt,
+            {"ccs": peer_set, "y0": y0, "y1": y1, "fs": fs_div},
+        ).all()
+    total_op = sum(int(c or 0) for _, c in op_rows)
+    non_qual = sum(
+        int(c or 0)
+        for op, c in op_rows
+        if op is not None and str(op).strip() != "적정"
+    )
+    non_qualified_opinion_rate_pct = (
+        round(100.0 * non_qual / total_op, 2) if total_op > 0 else None
+    )
+
+    # 10. Average tenure (latest year)
+    with _engine.connect() as conn:
+        ten_stmt = text(
+            "SELECT AVG(consecutive_years) FROM auditors "
+            "WHERE corp_code IN :ccs "
+            "  AND bsns_year = :y AND fs_div = :fs "
+            "  AND consecutive_years IS NOT NULL"
+        ).bindparams(bindparam("ccs", expanding=True))
+        avg_ten = conn.execute(
+            ten_stmt, {"ccs": peer_set, "y": latest_year, "fs": fs_div}
+        ).scalar()
+    avg_tenure_years = round(float(avg_ten), 2) if avg_ten is not None else None
+
+    # 11. Subject auditor (latest year)
+    with _engine.connect() as conn:
+        subj_aud = conn.execute(
+            text(
+                "SELECT auditor_nm, audit_opinion, consecutive_years "
+                "FROM auditors "
+                "WHERE corp_code = :cc AND bsns_year = :y AND fs_div = :fs"
+            ),
+            {"cc": corp_code, "y": latest_year, "fs": fs_div},
+        ).first()
+    if subj_aud is not None:
+        subject_auditor = {
+            "auditor_nm": subj_aud[0],
+            "audit_opinion": subj_aud[1],
+            "consecutive_years": (
+                int(subj_aud[2]) if subj_aud[2] is not None else None
+            ),
+            "is_big4": _is_big4(subj_aud[0]),
+        }
+    else:
+        subject_auditor = None
+
+    return {
+        "subject": subject_meta,
+        "sector_group": pr.sector_group.value,
+        "matched_prefix_len": pr.matched_prefix_len,
+        "n_peers": pr.n_peers,
+        "confidence": pr.confidence,
+        "excluded_categories": pr.excluded_categories,
+        "fs_div": fs_div,
+        "latest_year": latest_year,
+        "years_window": [y0, y1],
+        "auditor_market_share": auditor_market_share,
+        "big4_share_pct": big4_share_pct,
+        "non_qualified_opinion_rate_pct": non_qualified_opinion_rate_pct,
+        "avg_tenure_years": avg_tenure_years,
+        "subject_auditor": subject_auditor,
+        "note": pr.note,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 사업개요 (MCP용 — Claude가 업종 맥락 분석에 활용)
 # ---------------------------------------------------------------------------
 
