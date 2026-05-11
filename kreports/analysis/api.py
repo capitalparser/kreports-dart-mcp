@@ -1125,6 +1125,195 @@ def compare_to_industry(
 
 
 # ---------------------------------------------------------------------------
+# 업종 비교 — 다지표·다년도 (compare_to_industry_multi)
+# ---------------------------------------------------------------------------
+
+_ALL_METRICS = [
+    "영업이익률", "순이익률", "부채비율", "ROE", "ROA",
+    "자기자본비율", "매출성장률", "Beneish_M",
+]
+
+
+def compare_to_industry_multi(
+    company: str,
+    metrics: Optional[list[str]] = None,
+    years_back: int = 5,
+    fs_div: str = "CFS",
+    prefix_len_start: int = 3,
+    exclude_other_sectors: bool = True,
+    size_bucket_decade: Optional[float] = None,
+) -> dict:
+    """다지표·다년도 동종업종 분포 + subject percentile.
+
+    Peer 풀은 resolve_peers로 한 번만 산정한다 (subject 최신 Q4 연도 기준).
+    그 peer 풀 위에서 metric × year matrix를 만든다.
+
+    Args:
+        company: corp_code / stock_code / 회사명
+        metrics: 비교 지표 리스트. None이면 _ALL_METRICS 8개 사용.
+        years_back: 최근 N개 연도 (기본 5).
+        fs_div: CFS / OFS
+        prefix_len_start: KSIC prefix 시작 길이 (resolve_peers로 전달).
+        exclude_other_sectors: 금융/지주/부동산/일반 mutual exclusion 적용.
+        size_bucket_decade: 자산총계 log10 거리 한도 (opt-in).
+
+    Returns:
+        {
+          "subject": {"corp_code", "corp_name", "induty_code"},
+          "sector_group", "matched_prefix_len", "n_peers", "confidence",
+          "excluded_categories", "size_bucket_applied", "fs_div",
+          "years": [int, ...],
+          "metrics": [str, ...],
+          "results": {year: {metric: {"p25", "p50", "p75", "n",
+                                      "subject_value", "percentile", "unit"}}},
+          "note": str,
+        }
+    """
+    corp_code = resolve_corp_code(company)
+    if corp_code is None:
+        return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
+
+    if metrics is None:
+        metrics = list(_ALL_METRICS)
+    invalid = [m for m in metrics if m not in _METRIC_SQL]
+    if invalid:
+        return {
+            "error": f"지원하지 않는 metric: {invalid}. 지원: {list(_METRIC_SQL.keys())}"
+        }
+
+    # subject 메타
+    with _engine.connect() as conn:
+        subject_row = conn.execute(
+            text("SELECT corp_name, induty_code FROM companies WHERE corp_code = :cc"),
+            {"cc": corp_code},
+        ).first()
+    if subject_row is None:
+        return {"error": f"corp_code '{corp_code}' 미등록"}
+    subject_name, subject_induty = subject_row[0], subject_row[1]
+
+    # Peer 풀은 한 번만 결정 (subject의 최신 Q4 연도 기준)
+    pr = resolve_peers(
+        corp_code,
+        prefix_len_start=prefix_len_start,
+        min_n=5,
+        exclude_other_sectors=exclude_other_sectors,
+        size_bucket_decade=size_bucket_decade,
+        fs_div=fs_div,
+    )
+
+    subject_meta = {
+        "corp_code": corp_code,
+        "corp_name": subject_name,
+        "induty_code": subject_induty,
+    }
+
+    if pr.n_peers == 0:
+        return {
+            "subject": subject_meta,
+            "sector_group": pr.sector_group.value,
+            "matched_prefix_len": pr.matched_prefix_len,
+            "n_peers": 0,
+            "confidence": pr.confidence,
+            "excluded_categories": pr.excluded_categories,
+            "size_bucket_applied": pr.size_bucket_applied,
+            "fs_div": fs_div,
+            "years": [],
+            "metrics": metrics,
+            "results": {},
+            "note": pr.note,
+        }
+
+    # 최신 연도: resolve_peers가 산정한 결과 우선, 없으면 (peers + subject)에서 MAX
+    latest_year = pr.resolved_year
+    if latest_year is None:
+        with _engine.connect() as conn:
+            stmt = text(
+                "SELECT MAX(year) FROM financials "
+                "WHERE quarter = 4 AND fs_div = :fs AND corp_code IN :ccs"
+            ).bindparams(bindparam("ccs", expanding=True))
+            latest_row = conn.execute(
+                stmt,
+                {
+                    "fs": fs_div,
+                    "ccs": list(pr.peer_corp_codes) + [corp_code],
+                },
+            ).first()
+        latest_year = latest_row[0] if latest_row and latest_row[0] else None
+
+    if latest_year is None:
+        return {
+            "subject": subject_meta,
+            "sector_group": pr.sector_group.value,
+            "matched_prefix_len": pr.matched_prefix_len,
+            "n_peers": pr.n_peers,
+            "confidence": pr.confidence,
+            "excluded_categories": pr.excluded_categories,
+            "size_bucket_applied": pr.size_bucket_applied,
+            "fs_div": fs_div,
+            "years": [],
+            "metrics": metrics,
+            "results": {},
+            "note": (pr.note + " · " if pr.note else "") + "최신 Q4 재무 데이터 없음",
+        }
+
+    years = list(range(int(latest_year) - years_back + 1, int(latest_year) + 1))
+
+    results: dict[int, dict[str, dict]] = {}
+    with _engine.connect() as conn:
+        for y in years:
+            row_y: dict[str, dict] = {}
+            for metric in metrics:
+                expr = _METRIC_SQL[metric]
+                peer_rows = _fetch_metric_values(
+                    conn, pr.peer_corp_codes, expr, y, fs_div
+                )
+                vals = sorted(float(r[3]) for r in peer_rows if r[3] is not None)
+                subj_rows = _fetch_metric_values(
+                    conn, [corp_code], expr, y, fs_div
+                )
+                subj_val = (
+                    float(subj_rows[0][3]) if subj_rows and subj_rows[0][3] is not None
+                    else None
+                )
+
+                n = len(vals)
+                p50 = round(_quantile(vals, 0.50), 2) if n >= 1 else None
+                p25 = round(_quantile(vals, 0.25), 2) if n >= 5 else None
+                p75 = round(_quantile(vals, 0.75), 2) if n >= 5 else None
+
+                percentile = None
+                if subj_val is not None and n >= 1:
+                    below = sum(1 for v in vals if v < subj_val)
+                    percentile = round(100.0 * below / n, 1)
+
+                row_y[metric] = {
+                    "p25": p25,
+                    "p50": p50,
+                    "p75": p75,
+                    "n": n,
+                    "subject_value": round(subj_val, 2) if subj_val is not None else None,
+                    "percentile": percentile,
+                    "unit": _METRIC_UNIT.get(metric),
+                }
+            results[y] = row_y
+
+    return {
+        "subject": subject_meta,
+        "sector_group": pr.sector_group.value,
+        "matched_prefix_len": pr.matched_prefix_len,
+        "n_peers": pr.n_peers,
+        "confidence": pr.confidence,
+        "excluded_categories": pr.excluded_categories,
+        "size_bucket_applied": pr.size_bucket_applied,
+        "fs_div": fs_div,
+        "years": years,
+        "metrics": metrics,
+        "results": results,
+        "note": pr.note,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 사업개요 (MCP용 — Claude가 업종 맥락 분석에 활용)
 # ---------------------------------------------------------------------------
 
