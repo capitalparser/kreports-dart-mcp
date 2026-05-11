@@ -208,7 +208,7 @@ class TestCompareToIndustryTool:
         # subject 필드 존재
         assert "subject" in result
         assert result["subject"]["corp_name"] == "삼성전자"
-        assert result["subject"]["found_in_peers"] is True
+        assert result["subject"]["subject_has_metric"] is True
 
     def test_induty_code_direct(self):
         """company 없이 induty_code 직접 지정."""
@@ -246,7 +246,7 @@ class TestCompareToIndustryTool:
         if result["n"] < 2:
             pytest.skip("peer 1개 이하")
         assert result["peers"] == []
-        assert result["subject"]["found_in_peers"] is True
+        assert result["subject"]["subject_has_metric"] is True
         assert result["subject"]["found_in_returned_peers"] is False
         assert result["subject"]["percentile"] is not None
 

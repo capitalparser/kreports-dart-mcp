@@ -83,6 +83,7 @@ class PeerResolution:
         default_factory=lambda: ["financial", "holding", "real_estate"]
     )
     size_bucket_applied: Optional[float] = None
+    resolved_year: Optional[int] = None  # peer 풀이 산정된 실제 Q4 연도 (subject 기준)
     note: str = ""
 
     @property
@@ -128,6 +129,18 @@ def resolve_peers(
         subject_induty = subject_row[0]
         subject_sector = classify_sector(subject_induty)
 
+        # year 1회 해석 (ladder 양쪽 rung에서 동일하게 사용)
+        resolved_year = year
+        if resolved_year is None:
+            year_row = conn.execute(
+                text(
+                    "SELECT MAX(year) FROM financials "
+                    "WHERE quarter=4 AND fs_div=:fs AND corp_code=:cc"
+                ),
+                {"fs": fs_div, "cc": corp_code},
+            ).first()
+            resolved_year = year_row[0] if year_row and year_row[0] else None
+
         peers: list[str] = []
         matched_plen = prefix_len_start
         for plen in (prefix_len_start, 2):
@@ -140,7 +153,7 @@ def resolve_peers(
                 exclude_other_sectors=exclude_other_sectors,
                 size_bucket_decade=size_bucket_decade,
                 fs_div=fs_div,
-                year=year,
+                year=resolved_year,
             )
             matched_plen = plen
             if len(peers) >= min_n:
@@ -159,6 +172,7 @@ def resolve_peers(
         n_peers=len(peers),
         excluded_categories=excluded,
         size_bucket_applied=size_bucket_decade,
+        resolved_year=resolved_year,
         note=_build_note(
             matched_plen,
             len(peers),
@@ -182,16 +196,6 @@ def _query_peers(
     year: Optional[int],
 ) -> list[str]:
     prefix = subject_induty[:prefix_len]
-
-    if year is None:
-        year_row = conn.execute(
-            text(
-                "SELECT MAX(year) FROM financials "
-                "WHERE quarter=4 AND fs_div=:fs AND corp_code=:cc"
-            ),
-            {"fs": fs_div, "cc": subject_corp_code},
-        ).first()
-        year = year_row[0] if year_row and year_row[0] else None
 
     if year is None:
         return []
@@ -247,10 +251,12 @@ def _build_note(
     subject_sector: SectorGroup = SectorGroup.UNKNOWN,
     prefix_len_start: int = 3,
 ) -> str:
+    # n_peers는 의도적으로 노출하지 않음. 외부 호출자(api.py)가 NULL 필터 후 n을
+    # 별도로 갖고 있어 두 개의 count가 동시에 보이면 혼란을 준다. 여기는 resolution
+    # 속성(sector·prefix·fallback·size_bucket·warning)만 기록한다.
     parts = [
         f"sector={subject_sector.value}",
         f"KSIC prefix_len={matched_plen} 매칭",
-        f"n_peers={n}",
     ]
     if prefix_len_start > matched_plen:
         parts.append(f"⚠ p{prefix_len_start}→p{matched_plen} fallback")

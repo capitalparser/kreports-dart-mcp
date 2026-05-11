@@ -800,6 +800,10 @@ def get_industry_aggregates(
         excluded_categories = list(peer_resolution.excluded_categories)
         size_bucket_applied = peer_resolution.size_bucket_applied
         resolution_note = peer_resolution.note
+        # subject-기준 연도를 그대로 사용 (industry-wide MAX와 발산할 수 있는 늦은 제출
+        # 케이스 방지). year 미지정 시 resolve_peers가 산정한 결과를 신뢰한다.
+        if year is None and peer_resolution.resolved_year is not None:
+            year = peer_resolution.resolved_year
     else:
         # legacy prefix-only 경로: subject 없음 (induty_code 직접 지정)
         matched_prefix_len = prefix_len
@@ -880,7 +884,7 @@ def get_industry_aggregates(
         ]
 
         # subject 본인 metric 값도 별도 조회 (resolve_peers는 본인을 제외하므로,
-        # subject의 metric 값/induty_code도 필요하면 별도 fetch)
+        # subject의 metric 값이 필요하면 별도 fetch).
         if subject_corp_code:
             with _engine.connect() as conn:
                 subj_rows = _fetch_metric_values(
@@ -891,17 +895,14 @@ def get_industry_aggregates(
                     fs_div,
                 )
             if subj_rows:
-                cc, cn, ic, v = subj_rows[0]
+                _cc, _cn, _ic, v = subj_rows[0]
                 subject_value: Optional[float] = (
                     round(float(v), 2) if v is not None else None
                 )
-                subject_induty: Optional[str] = ic
             else:
                 subject_value = None
-                subject_induty = None
         else:
             subject_value = None
-            subject_induty = None
     else:
         # ---- legacy prefix-only 경로 ----
         sql = text(f"""
@@ -941,7 +942,6 @@ def get_industry_aggregates(
             if r[3] is not None
         ]
         subject_value = None
-        subject_induty = None
 
     values = [p["value"] for p in peers_all if p["value"] is not None]
     n = len(values)
@@ -1009,7 +1009,7 @@ def get_industry_aggregates(
             "corp_code": subject_corp_code,
             "corp_name": subject_name,
             "value": subject_value,
-            "found_in_peers": subject_value is not None,
+            "subject_has_metric": subject_value is not None,
             "found_in_returned_peers": subject_peer_in_returned,
         }
         if subject_value is not None and n >= 1:
@@ -1027,6 +1027,7 @@ def get_industry_aggregates(
         "industry_name": industry_name,
         "prefix_len": matched_prefix_len,
         "matched_prefix_len": matched_prefix_len,
+        "requested_prefix_len": prefix_len,
         "metric": metric,
         "unit": _METRIC_UNIT.get(metric),
         "year": year,
