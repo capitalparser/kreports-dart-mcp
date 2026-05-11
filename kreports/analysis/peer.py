@@ -10,6 +10,7 @@ Peer group 해석 공통 모듈.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -48,3 +49,38 @@ def classify_sector(induty_code: Optional[str]) -> SectorGroup:
     if p2 == "68":
         return SectorGroup.REAL_ESTATE
     return SectorGroup.GENERAL
+
+
+# 임계값 — 통계 신뢰도
+_N_HIGH = 20
+_N_MEDIUM = 10
+_N_LOW = 5
+
+
+def confidence_band(n: int) -> str:
+    """peer 수에 따른 통계 신뢰도 라벨."""
+    if n >= _N_HIGH:
+        return "high"
+    if n >= _N_MEDIUM:
+        return "medium"
+    if n >= _N_LOW:
+        return "low"
+    return "insufficient"
+
+
+@dataclass(frozen=True)
+class PeerResolution:
+    """resolve_peers의 응답 컨테이너."""
+    peer_corp_codes: list[str]
+    matched_prefix_len: int
+    sector_group: SectorGroup
+    n_peers: int
+    excluded_categories: list[str] = field(
+        default_factory=lambda: ["financial", "holding", "real_estate"]
+    )
+    size_bucket_applied: Optional[float] = None
+    note: str = ""
+
+    @property
+    def confidence(self) -> str:
+        return confidence_band(self.n_peers)
