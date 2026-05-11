@@ -126,20 +126,22 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Beneish M-Score for this company — earnings manipulation risk"
 ```
 
-### MCP Tools (10)
+### MCP Tools (12)
 
 | Tool | Best for | What it returns |
 |------|----------|-----------------|
 | `search_company` | Everyone | Corp code, market, stock code |
 | `get_investor_signals` | Investors | Quality checks, accounting risk score, recent investor-relevant disclosure events |
 | `get_financial_snapshot` | Investors / analysts | Revenue, OP, NI, FCF, ROIC, CCC by year |
-| `compare_to_industry` | Investors / analysts | KSIC P25/P50/P75 vs. peers |
+| `compare_to_industry` | Investors / analysts | KSIC P25/P50/P75 vs. peers (single metric) |
+| `compare_to_industry_multi` | Investors / analysts | Multi-metric × multi-year P25/P50/P75 matrix + subject percentile. Adaptive ladder (p3→p2) + sector mutual exclusion + opt-in size bucket |
 | `get_business_overview` | Investors / auditors | Business report narrative (overview, risk, MD&A) |
 | `score_going_concern` | Audit / credit risk | 6-factor 100-pt deduction scorecard + grade |
 | `detect_restatement` | Audit / accounting risk | Prior period adjustments across annual filings |
 | `get_accounting_policy` | Accounting / audit planning | 15 standard K-IFRS policy items from footnotes |
 | `get_audit_history` | Audit / governance | Auditor, opinion, change flag, consecutive years |
 | `get_subsidiary_auditors` | Group audit / governance | Group audit matrix across subsidiaries |
+| `get_industry_audit_landscape` | Audit / governance | Industry audit market: auditor share (count + asset-weighted), Big4 share, non-qualified opinion rate (N-yr), avg tenure, subject's auditor |
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
