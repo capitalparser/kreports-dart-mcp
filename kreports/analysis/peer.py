@@ -22,7 +22,7 @@ from kreports.db.engine import engine
 
 class SectorGroup(str, Enum):
     FINANCIAL = "financial"      # KSIC 64, 65, 66
-    HOLDING = "holding"          # KSIC 6420 (일반지주회사)
+    HOLDING = "holding"          # KSIC 64201(일반지주회사). 64202+ 미정의 코드는 FINANCIAL로 처리.
     REAL_ESTATE = "real_estate"  # KSIC 68
     GENERAL = "general"          # 그 외 제조·서비스·도소매 등
     UNKNOWN = "unknown"          # induty_code 없음/이상
@@ -43,9 +43,8 @@ def classify_sector(induty_code: Optional[str]) -> SectorGroup:
     code = induty_code.strip()
     if not code or not code[:2].isdigit():
         return SectorGroup.UNKNOWN
-    # 지주회사 우선 매칭
-    # - 4자리 입력 "6420" → 일반지주
-    # - 5자리 "64201" → 일반지주 (KSIC 표준)
+    # 지주 명시 매칭: KSIC 64201(일반지주회사)만 HOLDING.
+    # "6420" 4자리는 카테고리 명목값으로 HOLDING. 64202+ 미정의 642xx는 FINANCIAL.
     if code == "6420" or code.startswith("64201"):
         return SectorGroup.HOLDING
     p2 = code[:2]
@@ -160,7 +159,13 @@ def resolve_peers(
         n_peers=len(peers),
         excluded_categories=excluded,
         size_bucket_applied=size_bucket_decade,
-        note=_build_note(matched_plen, len(peers), size_bucket_decade),
+        note=_build_note(
+            matched_plen,
+            len(peers),
+            size_bucket_decade,
+            subject_sector=subject_sector,
+            prefix_len_start=prefix_len_start,
+        ),
     )
 
 
@@ -225,18 +230,30 @@ def _query_peers(
         if exclude_other_sectors:
             if classify_sector(induty) != subject_sector:
                 continue
-        if size_bucket_decade is not None and subject_assets and ta and ta > 0:
-            try:
-                if abs(math.log10(ta) - math.log10(subject_assets)) > size_bucket_decade:
-                    continue
-            except ValueError:
+        if size_bucket_decade is not None:
+            if not (subject_assets and subject_assets > 0 and ta and ta > 0):
+                continue  # 음수/0 자산은 size_bucket 비교 불가
+            if abs(math.log10(ta) - math.log10(subject_assets)) > size_bucket_decade:
                 continue
         out.append(cc)
     return out
 
 
-def _build_note(matched_plen: int, n: int, size_bucket: Optional[float]) -> str:
-    parts = [f"KSIC prefix_len={matched_plen} 매칭", f"n_peers={n}"]
+def _build_note(
+    matched_plen: int,
+    n: int,
+    size_bucket: Optional[float],
+    *,
+    subject_sector: SectorGroup = SectorGroup.UNKNOWN,
+    prefix_len_start: int = 3,
+) -> str:
+    parts = [
+        f"sector={subject_sector.value}",
+        f"KSIC prefix_len={matched_plen} 매칭",
+        f"n_peers={n}",
+    ]
+    if prefix_len_start > matched_plen:
+        parts.append(f"⚠ p{prefix_len_start}→p{matched_plen} fallback")
     if size_bucket is not None:
         parts.append(f"size_bucket=±{size_bucket} decade")
     if n < _N_LOW:

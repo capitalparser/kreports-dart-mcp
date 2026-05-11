@@ -12,13 +12,20 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from kreports.db.engine import get_session, engine as _engine
 from kreports.db.models import Company, Disclosure
 
 # dashboard.db는 streamlit optional import를 지원하므로 headless에서도 사용 가능
 from kreports.analysis import queries as _queries
+from kreports.analysis.peer import (
+    PeerResolution,
+    SectorGroup,
+    classify_sector,
+    confidence_band,
+    resolve_peers,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +679,37 @@ def _quantile(values: list[float], q: float) -> Optional[float]:
     return s[f] + (s[c] - s[f]) * (k - f)
 
 
+def _fetch_metric_values(
+    conn,
+    corp_codes: list[str],
+    metric_expr: str,
+    year: int,
+    fs_div: str,
+) -> list[tuple[str, str, Optional[str], Optional[float]]]:
+    """
+    주어진 corp_code 리스트에 대해 metric 값 + 회사명 + induty_code 를 일괄 조회.
+
+    반환: (corp_code, corp_name, induty_code, value) 튜플. value가 NULL인 행은 제외.
+    """
+    if not corp_codes:
+        return []
+    stmt = text(
+        f"SELECT f.corp_code, c.corp_name, c.induty_code, ({metric_expr}) AS v "
+        "FROM financials f JOIN companies c ON c.corp_code = f.corp_code "
+        "WHERE f.corp_code IN :ccs "
+        "  AND f.year = :y AND f.quarter = 4 AND f.fs_div = :fs"
+    ).bindparams(bindparam("ccs", expanding=True))
+    rows = conn.execute(
+        stmt,
+        {"ccs": list(corp_codes), "y": year, "fs": fs_div},
+    ).all()
+    return [
+        (r[0], r[1], r[2], r[3])
+        for r in rows
+        if r[3] is not None
+    ]
+
+
 def get_industry_aggregates(
     induty_code: str,
     metric: str = "영업이익률",
@@ -689,12 +727,16 @@ def get_industry_aggregates(
     동일 prefix를 공유하는 기업 중 연간 Q4 재무데이터가 있는 기업을 수집하여
     P25/P50/P75 quantile과 min/max/mean을 계산한다.
 
+    subject_corp_code가 제공되면 peer set 해석을 `peer.resolve_peers`에 위임하여
+    adaptive ladder(3자리→2자리 fallback) 및 sector mutual exclusion을 적용한다.
+
     Args:
         induty_code: 기준 기업의 induty_code (예: Samsung "264")
         metric: 집계 지표. 지원: 영업이익률·순이익률·부채비율·ROE·ROA.
         year: 사업연도 (예: 2024). None이면 해당 induty에서 데이터가 있는 가장 최근 연도.
         fs_div: CFS/OFS
-        prefix_len: induty_code 앞에서 몇 자리로 매칭할지. 기본 2.
+        prefix_len: induty_code 앞에서 몇 자리로 매칭할지 (resolve_peers의
+            prefix_len_start로 전달). 기본 2.
         include_peers: True면 peer 기업 리스트 반환. False면 통계만.
         peer_limit: peer 리스트 최대 개수.
         subject_corp_code: 특정 회사의 위치를 전체 peer set 기준으로 계산할 때 사용.
@@ -708,6 +750,8 @@ def get_industry_aggregates(
           "n",  # 통계에 포함된 기업 수
           "quantiles": {"p25", "p50", "p75", "min", "max", "mean"} or None,
           "peers": [{"corp_code", "corp_name", "induty_code", "value"}, ...],
+          "sector_group", "confidence", "excluded_categories",
+          "size_bucket_applied", "matched_prefix_len",
           "note": str,
         }
     """
@@ -724,10 +768,46 @@ def get_industry_aggregates(
     if prefix_len < 1 or prefix_len > 5:
         return {"error": "prefix_len은 1~5 사이여야 합니다."}
 
-    match_prefix = induty_code[:prefix_len]
     metric_expr = _METRIC_SQL[metric]
 
-    # 연도 결정: 미지정 시 해당 prefix 내에서 가장 최근의 Q4 연도
+    # ------------------------------------------------------------------
+    # Peer set 해석
+    # ------------------------------------------------------------------
+    # subject_corp_code가 있으면 peer.resolve_peers에 위임(어댑티브 ladder + sector
+    # mutual exclusion). 없으면 induty_code prefix-only 경로(legacy).
+    #
+    # 두 경로 모두 동일한 meta 키(sector_group/confidence/excluded_categories/
+    # size_bucket_applied/matched_prefix_len)를 반환해야 한다.
+    peer_resolution: Optional[PeerResolution] = None
+    sector_group_val: str = classify_sector(induty_code).value
+    excluded_categories: list[str] = []
+    size_bucket_applied: Optional[float] = None
+    resolution_note: str = ""
+
+    if subject_corp_code:
+        peer_resolution = resolve_peers(
+            corp_code=subject_corp_code,
+            prefix_len_start=prefix_len,
+            min_n=_MIN_PEERS_FOR_STATS,
+            exclude_other_sectors=True,
+            size_bucket_decade=None,
+            fs_div=fs_div,
+            year=year,
+        )
+        matched_prefix_len = peer_resolution.matched_prefix_len
+        match_prefix = induty_code[:matched_prefix_len]
+        sector_group_val = peer_resolution.sector_group.value
+        excluded_categories = list(peer_resolution.excluded_categories)
+        size_bucket_applied = peer_resolution.size_bucket_applied
+        resolution_note = peer_resolution.note
+    else:
+        # legacy prefix-only 경로: subject 없음 (induty_code 직접 지정)
+        matched_prefix_len = prefix_len
+        match_prefix = induty_code[:prefix_len]
+
+    # ------------------------------------------------------------------
+    # 연도 결정: 미지정 시 가장 최근 Q4 연도
+    # ------------------------------------------------------------------
     if year is None:
         with _engine.connect() as conn:
             latest = conn.execute(
@@ -739,15 +819,18 @@ def get_industry_aggregates(
                       AND f.fs_div = :fs_div
                       AND f.quarter = 4
                 """),
-                {"plen": prefix_len, "prefix": match_prefix, "fs_div": fs_div},
+                {"plen": matched_prefix_len, "prefix": match_prefix, "fs_div": fs_div},
             ).scalar()
         if latest is None:
-            industry_name = _get_industry_name(match_prefix) if prefix_len == 2 else match_prefix
+            industry_name = (
+                _get_industry_name(match_prefix) if matched_prefix_len == 2 else match_prefix
+            )
             return {
                 "induty_code": induty_code,
                 "match_prefix": match_prefix,
                 "industry_name": industry_name,
-                "prefix_len": prefix_len,
+                "prefix_len": matched_prefix_len,
+                "matched_prefix_len": matched_prefix_len,
                 "metric": metric,
                 "unit": _METRIC_UNIT.get(metric),
                 "year": None,
@@ -755,6 +838,10 @@ def get_industry_aggregates(
                 "n": 0,
                 "quantiles": None,
                 "peers": [],
+                "sector_group": sector_group_val,
+                "confidence": confidence_band(0),
+                "excluded_categories": excluded_categories,
+                "size_bucket_applied": size_bucket_applied,
                 "note": (
                     f"업종 prefix '{match_prefix}' 내에서 {fs_div} Q4 재무데이터를 가진 "
                     f"기업이 없습니다. 더 많은 기업을 수집하거나 prefix_len을 낮추세요."
@@ -762,38 +849,99 @@ def get_industry_aggregates(
             }
         year = int(latest)
 
-    # 메인 쿼리
-    sql = text(f"""
-        SELECT
-          c.corp_code,
-          c.corp_name,
-          c.induty_code,
-          ({metric_expr}) AS value
-        FROM financials f
-        JOIN companies c ON f.corp_code = c.corp_code
-        WHERE substr(c.induty_code, 1, :plen) = :prefix
-          AND f.fs_div = :fs_div
-          AND f.year = :year
-          AND f.quarter = 4
-          AND ({metric_expr}) IS NOT NULL
-        ORDER BY value DESC
-    """)
-    with _engine.connect() as conn:
-        rows = conn.execute(
-            sql,
-            {"plen": prefix_len, "prefix": match_prefix, "fs_div": fs_div, "year": year},
-        ).fetchall()
+    # ------------------------------------------------------------------
+    # Peer metric 값 수집
+    # ------------------------------------------------------------------
+    if peer_resolution is not None:
+        # resolve_peers가 이미 sector mutual exclusion 적용한 corp_code 목록을 줌.
+        # metric 값은 _fetch_metric_values로 일괄 조회.
+        with _engine.connect() as conn:
+            fetched = _fetch_metric_values(
+                conn,
+                peer_resolution.peer_corp_codes,
+                metric_expr,
+                year,
+                fs_div,
+            )
+        # 기존 응답 shape과 동일하게 정렬 (value desc)
+        fetched_sorted = sorted(
+            fetched,
+            key=lambda r: r[3] if r[3] is not None else float("-inf"),
+            reverse=True,
+        )
+        peers_all = [
+            {
+                "corp_code": cc,
+                "corp_name": cn,
+                "induty_code": ic,
+                "value": round(float(v), 2) if v is not None else None,
+            }
+            for cc, cn, ic, v in fetched_sorted
+        ]
 
-    peers_all = [
-        {
-            "corp_code": r[0],
-            "corp_name": r[1],
-            "induty_code": r[2],
-            "value": round(float(r[3]), 2) if r[3] is not None else None,
-        }
-        for r in rows
-        if r[3] is not None
-    ]
+        # subject 본인 metric 값도 별도 조회 (resolve_peers는 본인을 제외하므로,
+        # subject의 metric 값/induty_code도 필요하면 별도 fetch)
+        if subject_corp_code:
+            with _engine.connect() as conn:
+                subj_rows = _fetch_metric_values(
+                    conn,
+                    [subject_corp_code],
+                    metric_expr,
+                    year,
+                    fs_div,
+                )
+            if subj_rows:
+                cc, cn, ic, v = subj_rows[0]
+                subject_value: Optional[float] = (
+                    round(float(v), 2) if v is not None else None
+                )
+                subject_induty: Optional[str] = ic
+            else:
+                subject_value = None
+                subject_induty = None
+        else:
+            subject_value = None
+            subject_induty = None
+    else:
+        # ---- legacy prefix-only 경로 ----
+        sql = text(f"""
+            SELECT
+              c.corp_code,
+              c.corp_name,
+              c.induty_code,
+              ({metric_expr}) AS value
+            FROM financials f
+            JOIN companies c ON f.corp_code = c.corp_code
+            WHERE substr(c.induty_code, 1, :plen) = :prefix
+              AND f.fs_div = :fs_div
+              AND f.year = :year
+              AND f.quarter = 4
+              AND ({metric_expr}) IS NOT NULL
+            ORDER BY value DESC
+        """)
+        with _engine.connect() as conn:
+            rows = conn.execute(
+                sql,
+                {
+                    "plen": matched_prefix_len,
+                    "prefix": match_prefix,
+                    "fs_div": fs_div,
+                    "year": year,
+                },
+            ).fetchall()
+
+        peers_all = [
+            {
+                "corp_code": r[0],
+                "corp_name": r[1],
+                "induty_code": r[2],
+                "value": round(float(r[3]), 2) if r[3] is not None else None,
+            }
+            for r in rows
+            if r[3] is not None
+        ]
+        subject_value = None
+        subject_induty = None
 
     values = [p["value"] for p in peers_all if p["value"] is not None]
     n = len(values)
@@ -810,7 +958,9 @@ def get_industry_aggregates(
         }
 
     # 업종명
-    industry_name = _get_industry_name(match_prefix) if prefix_len == 2 else match_prefix
+    industry_name = (
+        _get_industry_name(match_prefix) if matched_prefix_len == 2 else match_prefix
+    )
 
     # 업종 내 전체 기업 수 vs 수집된 기업 수 (커버리지)
     with _engine.connect() as conn:
@@ -820,7 +970,7 @@ def get_industry_aggregates(
                 WHERE substr(induty_code, 1, :plen) = :prefix
                   AND stock_code IS NOT NULL
             """),
-            {"plen": prefix_len, "prefix": match_prefix},
+            {"plen": matched_prefix_len, "prefix": match_prefix},
         ).scalar() or 0
 
     coverage_pct = round(100.0 * n / total_in_industry, 1) if total_in_industry > 0 else 0
@@ -839,31 +989,35 @@ def get_industry_aggregates(
     else:
         note = f"peer {n}개 / 전체 {total_in_industry}개 ({coverage_pct}%). fs_div={fs_div}, year={year}."
 
+    # resolve_peers에서 받은 note(sector + fallback 마커)를 prefix로 합성.
+    # 기존 희소성 경고/커버리지 메시지는 보존한다.
+    if resolution_note:
+        note = f"{resolution_note} · {note}"
+
     peers_out = peers_all[:peer_limit] if include_peers else []
 
     subject = None
     if subject_corp_code:
-        subject_peer = next(
-            (p for p in peers_all if p["corp_code"] == subject_corp_code),
-            None,
+        # subject는 resolve_peers에서 제외되므로 peers_all에는 없음.
+        # subject_value를 별도 조회 결과로 사용한다 (peer_resolution 경로).
+        # legacy 경로(peer_resolution=None)에서는 subject_corp_code가 None이라
+        # 이 분기에 진입하지 않는다.
+        subject_peer_in_returned = any(
+            p["corp_code"] == subject_corp_code for p in peers_out
         )
         subject = {
             "corp_code": subject_corp_code,
             "corp_name": subject_name,
-            "value": subject_peer["value"] if subject_peer else None,
-            "found_in_peers": subject_peer is not None,
-            "found_in_returned_peers": any(
-                p["corp_code"] == subject_corp_code for p in peers_out
-            ),
+            "value": subject_value,
+            "found_in_peers": subject_value is not None,
+            "found_in_returned_peers": subject_peer_in_returned,
         }
-        if subject_peer and n > 1:
-            all_values = sorted(
-                [p["value"] for p in peers_all if p["value"] is not None]
-            )
-            rank = sum(1 for v in all_values if v < subject_peer["value"])
-            subject["percentile"] = round(
-                100.0 * rank / max(len(all_values) - 1, 1), 1
-            )
+        if subject_value is not None and n >= 1:
+            # subject를 포함한 전체 분포 기준 percentile
+            all_values = sorted(values + [subject_value])
+            rank = sum(1 for v in all_values if v < subject_value)
+            denom = max(len(all_values) - 1, 1)
+            subject["percentile"] = round(100.0 * rank / denom, 1)
         else:
             subject["percentile"] = None
 
@@ -871,7 +1025,8 @@ def get_industry_aggregates(
         "induty_code": induty_code,
         "match_prefix": match_prefix,
         "industry_name": industry_name,
-        "prefix_len": prefix_len,
+        "prefix_len": matched_prefix_len,
+        "matched_prefix_len": matched_prefix_len,
         "metric": metric,
         "unit": _METRIC_UNIT.get(metric),
         "year": year,
@@ -883,6 +1038,10 @@ def get_industry_aggregates(
         "peers": peers_out,
         "peer_limit": peer_limit,
         "truncated": include_peers and len(peers_all) > peer_limit,
+        "sector_group": sector_group_val,
+        "confidence": confidence_band(n),
+        "excluded_categories": excluded_categories,
+        "size_bucket_applied": size_bucket_applied,
         "note": note,
     }
     if subject is not None:
