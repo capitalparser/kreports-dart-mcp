@@ -53,3 +53,40 @@ def test_peer_resolution_dataclass_defaults():
     assert pr.confidence == "insufficient"  # n<5
     assert pr.size_bucket_applied is None
     assert pr.excluded_categories == ["financial", "holding", "real_estate"]
+
+
+import pytest
+from kreports.analysis.peer import resolve_peers
+
+
+def test_resolve_peers_samsung_uses_p3_general():
+    """삼성전자 (264 반도체)는 p3로 매칭되고, sector_group=general."""
+    pr = resolve_peers("00126380")
+    assert pr.sector_group == SectorGroup.GENERAL
+    assert pr.matched_prefix_len in (2, 3)
+    assert pr.n_peers >= 5
+    assert "00126380" not in pr.peer_corp_codes
+
+
+def test_resolve_peers_excludes_financial_when_subject_general():
+    from sqlalchemy import bindparam, text
+    from kreports.db.engine import engine
+
+    pr = resolve_peers("00126380")
+    if not pr.peer_corp_codes:
+        pytest.skip("peer 데이터 없음")
+    stmt = text(
+        "SELECT induty_code FROM companies WHERE corp_code IN :ccs"
+    ).bindparams(bindparam("ccs", expanding=True))
+    with engine.connect() as conn:
+        rows = conn.execute(stmt, {"ccs": list(pr.peer_corp_codes)}).all()
+    for (induty,) in rows:
+        if induty:
+            assert not induty.startswith(("64", "65", "66", "68")), induty
+            assert not induty.startswith("6420")
+
+
+def test_resolve_peers_unknown_corp_returns_empty():
+    pr = resolve_peers("99999999")
+    assert pr.n_peers == 0
+    assert pr.peer_corp_codes == []

@@ -10,9 +10,14 @@ Peer group 해석 공통 모듈.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+from sqlalchemy import text
+
+from kreports.db.engine import engine
 
 
 class SectorGroup(str, Enum):
@@ -84,3 +89,156 @@ class PeerResolution:
     @property
     def confidence(self) -> str:
         return confidence_band(self.n_peers)
+
+
+def resolve_peers(
+    corp_code: str,
+    prefix_len_start: int = 3,
+    min_n: int = 5,
+    exclude_other_sectors: bool = True,
+    size_bucket_decade: Optional[float] = None,
+    fs_div: str = "CFS",
+    year: Optional[int] = None,
+) -> PeerResolution:
+    """동종업종 비교를 위한 peer corp_code 목록을 해석한다.
+
+    Adaptive ladder: prefix_len_start(기본 3자리)로 매칭 → peer 수가 min_n 미만이면
+    2자리로 fallback. subject 본인은 항상 제외. exclude_other_sectors=True인 경우
+    subject와 다른 sector group(금융/지주/부동산/일반)은 제외한다.
+
+    size_bucket_decade가 주어지면 subject의 total_assets 대비 log10 거리가 해당 값
+    이하인 peer만 남긴다 (예: 1.0 → ±1 decade).
+
+    year=None이면 subject가 보유한 가장 최근 Q4/fs_div 연도를 사용한다.
+    """
+    with engine.connect() as conn:
+        subject_row = conn.execute(
+            text("SELECT induty_code FROM companies WHERE corp_code = :cc"),
+            {"cc": corp_code},
+        ).first()
+
+        if subject_row is None or not subject_row[0]:
+            return PeerResolution(
+                peer_corp_codes=[],
+                matched_prefix_len=prefix_len_start,
+                sector_group=SectorGroup.UNKNOWN,
+                n_peers=0,
+                note="subject corp_code 미등록 또는 induty_code 없음",
+            )
+
+        subject_induty = subject_row[0]
+        subject_sector = classify_sector(subject_induty)
+
+        peers: list[str] = []
+        matched_plen = prefix_len_start
+        for plen in (prefix_len_start, 2):
+            peers = _query_peers(
+                conn=conn,
+                subject_induty=subject_induty,
+                subject_corp_code=corp_code,
+                subject_sector=subject_sector,
+                prefix_len=plen,
+                exclude_other_sectors=exclude_other_sectors,
+                size_bucket_decade=size_bucket_decade,
+                fs_div=fs_div,
+                year=year,
+            )
+            matched_plen = plen
+            if len(peers) >= min_n:
+                break
+
+    excluded = (
+        [s.value for s in SectorGroup
+         if s != subject_sector and s != SectorGroup.UNKNOWN]
+        if exclude_other_sectors else []
+    )
+
+    return PeerResolution(
+        peer_corp_codes=peers,
+        matched_prefix_len=matched_plen,
+        sector_group=subject_sector,
+        n_peers=len(peers),
+        excluded_categories=excluded,
+        size_bucket_applied=size_bucket_decade,
+        note=_build_note(matched_plen, len(peers), size_bucket_decade),
+    )
+
+
+def _query_peers(
+    *,
+    conn,
+    subject_induty: str,
+    subject_corp_code: str,
+    subject_sector: SectorGroup,
+    prefix_len: int,
+    exclude_other_sectors: bool,
+    size_bucket_decade: Optional[float],
+    fs_div: str,
+    year: Optional[int],
+) -> list[str]:
+    prefix = subject_induty[:prefix_len]
+
+    if year is None:
+        year_row = conn.execute(
+            text(
+                "SELECT MAX(year) FROM financials "
+                "WHERE quarter=4 AND fs_div=:fs AND corp_code=:cc"
+            ),
+            {"fs": fs_div, "cc": subject_corp_code},
+        ).first()
+        year = year_row[0] if year_row and year_row[0] else None
+
+    if year is None:
+        return []
+
+    subject_assets = None
+    if size_bucket_decade is not None:
+        ta_row = conn.execute(
+            text(
+                "SELECT total_assets FROM financials "
+                "WHERE corp_code=:cc AND year=:y AND quarter=4 AND fs_div=:fs"
+            ),
+            {"cc": subject_corp_code, "y": year, "fs": fs_div},
+        ).first()
+        subject_assets = ta_row[0] if ta_row and ta_row[0] else None
+
+    rows = conn.execute(
+        text(
+            "SELECT DISTINCT c.corp_code, c.induty_code, f.total_assets "
+            "FROM companies c "
+            "JOIN financials f ON f.corp_code = c.corp_code "
+            "WHERE substr(c.induty_code,1,:plen) = :prefix "
+            "  AND c.corp_code != :subject_cc "
+            "  AND f.year = :year AND f.quarter = 4 AND f.fs_div = :fs"
+        ),
+        {
+            "plen": prefix_len,
+            "prefix": prefix,
+            "subject_cc": subject_corp_code,
+            "year": year,
+            "fs": fs_div,
+        },
+    ).all()
+
+    out: list[str] = []
+    for cc, induty, ta in rows:
+        if exclude_other_sectors:
+            if classify_sector(induty) != subject_sector:
+                continue
+        if size_bucket_decade is not None and subject_assets and ta and ta > 0:
+            try:
+                if abs(math.log10(ta) - math.log10(subject_assets)) > size_bucket_decade:
+                    continue
+            except ValueError:
+                continue
+        out.append(cc)
+    return out
+
+
+def _build_note(matched_plen: int, n: int, size_bucket: Optional[float]) -> str:
+    parts = [f"KSIC prefix_len={matched_plen} 매칭", f"n_peers={n}"]
+    if size_bucket is not None:
+        parts.append(f"size_bucket=±{size_bucket} decade")
+    if n < _N_LOW:
+        parts.append("⚠ peer 수가 부족합니다 (n<5 → P25/P75 신뢰도 낮음)")
+    return " · ".join(parts)
