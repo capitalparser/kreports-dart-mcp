@@ -61,6 +61,34 @@ _N_MEDIUM = 10
 _N_LOW = 5
 
 
+def resolve_fs_div_for_company(corp_code: str, year: int | None, fs_strategy: str = "auto") -> str:
+    strategy = (fs_strategy or "auto").upper()
+    if strategy in {"CFS", "OFS"}:
+        return strategy
+    if strategy != "AUTO":
+        return "CFS"
+    with engine.connect() as conn:
+        if year is None:
+            row = conn.execute(
+                text("SELECT MAX(year) FROM financials WHERE corp_code=:cc AND quarter=4"),
+                {"cc": corp_code},
+            ).first()
+            year = row[0] if row and row[0] else None
+        if year is None:
+            return "CFS"
+        cfs = conn.execute(
+            text("SELECT 1 FROM financials WHERE corp_code=:cc AND year=:y AND quarter=4 AND fs_div='CFS' LIMIT 1"),
+            {"cc": corp_code, "y": year},
+        ).first()
+        if cfs:
+            return "CFS"
+        ofs = conn.execute(
+            text("SELECT 1 FROM financials WHERE corp_code=:cc AND year=:y AND quarter=4 AND fs_div='OFS' LIMIT 1"),
+            {"cc": corp_code, "y": year},
+        ).first()
+        return "OFS" if ofs else "CFS"
+
+
 def confidence_band(n: int) -> str:
     """peer 수에 따른 통계 신뢰도 라벨."""
     if n >= _N_HIGH:

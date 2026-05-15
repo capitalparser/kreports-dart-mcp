@@ -52,15 +52,21 @@ def collect_disclosures(
     return {"saved": saved, "skipped": skipped, "error": 0}
 
 
-def collect_all_disclosures(progress_callback=None) -> dict:
+def collect_all_disclosures(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    market: str | None = None,
+    progress_callback=None,
+) -> dict:
     """전체 상장사 공시 목록을 배치 수집한다."""
     with get_session() as session:
-        companies = (
+        query = (
             session.query(Company.corp_code, Company.corp_name)
             .filter(Company.stock_code.isnot(None))
-            .order_by(Company.corp_name)
-            .all()
         )
+        if market:
+            query = query.filter(Company.market == market)
+        companies = query.order_by(Company.corp_name).all()
         companies = list(companies)
 
     total = len(companies)
@@ -69,7 +75,7 @@ def collect_all_disclosures(progress_callback=None) -> dict:
     for idx, (corp_code, corp_name) in enumerate(companies, 1):
         if progress_callback:
             progress_callback(idx, total, corp_name)
-        result = collect_disclosures(corp_code)
+        result = collect_disclosures(corp_code, start_date=start_date, end_date=end_date)
         for k, v in result.items():
             totals[k] += v
 

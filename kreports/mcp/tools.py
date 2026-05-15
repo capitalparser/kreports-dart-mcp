@@ -30,6 +30,8 @@ from mcp.types import Tool
 from sqlalchemy import func
 
 from kreports.analysis.api import (
+    compare_peer_audit_fees,
+    compare_peer_risk_profile,
     compare_to_industry,
     compare_to_industry_multi,
     detect_restatement,
@@ -41,6 +43,7 @@ from kreports.analysis.api import (
     get_investor_signals,
     get_subsidiary_auditors,
     resolve_corp_code,
+    select_peer_group,
     score_going_concern,
     search_company,
 )
@@ -57,6 +60,7 @@ from kreports.db.models import (
 
 
 _FS_DIVS = {"CFS", "OFS"}
+_FS_STRATEGIES = {"CFS", "OFS", "auto"}
 _COMPARE_METRICS = [
     "영업이익률",
     "순이익률",
@@ -894,6 +898,7 @@ def _handle_compare_to_industry_multi(args: dict) -> dict:
         metrics=metrics,
         years_back=years_back,
         fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
         prefix_len_start=prefix_len_start,
         exclude_other_sectors=_optional_bool(args, "exclude_other_sectors", True),
         size_bucket_decade=_optional_float_or_none(
@@ -936,6 +941,12 @@ TOOL_COMPARE_TO_INDUSTRY_MULTI = Tool(
                 "enum": ["CFS", "OFS"],
                 "default": "CFS",
             },
+            "fs_strategy": {
+                "type": "string",
+                "enum": ["CFS", "OFS", "auto"],
+                "default": "auto",
+                "description": "auto면 CFS 우선, 없으면 OFS로 비교한다.",
+            },
             "prefix_len_start": {
                 "type": "integer",
                 "description": "KSIC ladder 시작 자리 수. 기본 3 (소분류). n<5면 2자리로 자동 fallback.",
@@ -954,6 +965,104 @@ TOOL_COMPARE_TO_INDUSTRY_MULTI = Tool(
                 "minimum": 0.5,
                 "maximum": 3.0,
             },
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_select_peer_group(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    criteria = args.get("criteria")
+    if criteria is not None and not isinstance(criteria, list):
+        return {"error": "criteria는 array여야 합니다."}
+    return select_peer_group(
+        company=company,
+        criteria=criteria,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+        prefix_len_start=_optional_int(args, "prefix_len_start", 3, min_value=2, max_value=5) or 3,
+        size_bucket_decade=_optional_float_or_none(args, "size_bucket_decade", min_value=0.5, max_value=3.0),
+        exclude_other_sectors=_optional_bool(args, "exclude_other_sectors", True),
+    )
+
+
+TOOL_SELECT_PEER_GROUP = Tool(
+    name="select_peer_group",
+    description=(
+        "감사인 관점 peer group 선정 근거팩. KSIC 업종, sector 분리, 자산규모 bucket, "
+        "재무데이터/감사보수 coverage를 기준으로 peer 목록과 include_reasons를 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "criteria": {"type": "array", "items": {"type": "string"}},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+            "prefix_len_start": {"type": "integer", "default": 3, "minimum": 2, "maximum": 5},
+            "size_bucket_decade": {"type": "number", "minimum": 0.5, "maximum": 3.0},
+            "exclude_other_sectors": {"type": "boolean", "default": True},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_audit_fees(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_audit_fees(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+        size_bucket_decade=_optional_float_or_none(args, "size_bucket_decade", min_value=0.5, max_value=3.0),
+    )
+
+
+TOOL_COMPARE_PEER_AUDIT_FEES = Tool(
+    name="compare_peer_audit_fees",
+    description=(
+        "감사보수와 감사시간을 peer group 기준으로 벤치마크한다. 감사보수, 감사시간, "
+        "비감사보수 비율, 자산 대비 보수, 시간당 보수의 분위수와 subject percentile을 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+            "size_bucket_decade": {"type": "number", "minimum": 0.5, "maximum": 3.0},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_risk_profile(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_risk_profile(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_COMPARE_PEER_RISK_PROFILE = Tool(
+    name="compare_peer_risk_profile",
+    description=(
+        "감사인 관점 재무 위험 신호팩. peer group 기준 현금흐름/발생액/Beneish 신호와 "
+        "정정·주요사항 공시 카운트를 반환하며 감사 리스크 판단 자체는 수행하지 않는다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
         },
         "required": ["company"],
     },
@@ -1059,7 +1168,10 @@ ALL_TOOLS: list[Tool] = [
     TOOL_COMPARE_TO_INDUSTRY,
     TOOL_GET_BUSINESS_OVERVIEW,
     TOOL_GET_INVESTOR_SIGNALS,
+    TOOL_SELECT_PEER_GROUP,
     TOOL_COMPARE_TO_INDUSTRY_MULTI,
+    TOOL_COMPARE_PEER_AUDIT_FEES,
+    TOOL_COMPARE_PEER_RISK_PROFILE,
     TOOL_GET_INDUSTRY_AUDIT_LANDSCAPE,
 ]
 
@@ -1074,7 +1186,10 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "compare_to_industry": _handle_compare_to_industry,
     "get_business_overview": _handle_get_business_overview,
     "get_investor_signals": _handle_get_investor_signals,
+    "select_peer_group": _handle_select_peer_group,
     "compare_to_industry_multi": _handle_compare_to_industry_multi,
+    "compare_peer_audit_fees": _handle_compare_peer_audit_fees,
+    "compare_peer_risk_profile": _handle_compare_peer_risk_profile,
     "get_industry_audit_landscape": _handle_get_industry_audit_landscape,
 }
 

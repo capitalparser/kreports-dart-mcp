@@ -7,6 +7,8 @@
 import re
 from typing import Optional
 
+from kreports.processor.report_section_parser import _TITLE_RE, _title_level
+
 # ---------------------------------------------------------------------------
 # 회계정책 TITLE 검색 키워드
 # ---------------------------------------------------------------------------
@@ -130,33 +132,36 @@ def extract_policy_section(note_content: str) -> Optional[str]:
     Returns:
         회계정책 섹션 XML 문자열 또는 None
     """
-    _title_re = re.compile(r'<TITLE[^>]*>([^<]{1,200})</TITLE>')
+    title_positions: list[tuple[int, str, int]] = [
+        (m.start(), m.group(1).strip(), _title_level(m.group(1).strip()))
+        for m in _TITLE_RE.finditer(note_content)
+    ]
 
-    # 정책 TITLE 검색 — 우선순위 순
-    policy_title_pos: Optional[int] = None
+    # 정책 TITLE 검색 - 우선순위 순
+    matched_idx: Optional[int] = None
     for kw in _POLICY_TITLE_KEYWORDS:
-        for m in _title_re.finditer(note_content):
-            if kw in m.group(1):
-                policy_title_pos = m.start()
+        for i, (_, title_text, _) in enumerate(title_positions):
+            if kw in title_text:
+                matched_idx = i
                 break
-        if policy_title_pos is not None:
+        if matched_idx is not None:
             break
 
-    if policy_title_pos is None:
+    if matched_idx is None:
         return None
 
-    # 다음 번호 주석 TITLE (숫자 시작 or "3. xxx", "4. xxx" 패턴) 검색
-    # 회계정책 이후 첫 번째 TITLE을 블록 끝으로 사용
-    _next_title_re = re.compile(r'<TITLE[^>]*>[^<]{1,200}</TITLE>')
-    search_from = policy_title_pos + 100  # 정책 TITLE 자체 제외
-
-    next_title = _next_title_re.search(note_content, search_from)
-
-    # 회계정책 블록은 최대 80,000자 (대기업 주석 고려)
-    if next_title:
-        section_end = min(next_title.start(), policy_title_pos + 80_000)
+    policy_title_pos, _, policy_level = title_positions[matched_idx]
+    section_end = min(len(note_content), policy_title_pos + 80_000)
+    if policy_level == 99:
+        if matched_idx + 1 < len(title_positions):
+            section_end = min(title_positions[matched_idx + 1][0], section_end)
     else:
-        section_end = min(len(note_content), policy_title_pos + 80_000)
+        for start, _, next_level in title_positions[matched_idx + 1:]:
+            if start >= section_end:
+                break
+            if next_level <= policy_level:
+                section_end = start
+                break
 
     return note_content[policy_title_pos:section_end]
 

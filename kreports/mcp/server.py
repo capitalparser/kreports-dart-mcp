@@ -14,6 +14,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool
 
 from kreports.mcp.tools import ALL_TOOLS, call_tool
+from kreports.runtime import runtime_mode
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +34,12 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> dict:
     """도구 실행. 결과는 structured content로 반환."""
-    logger.info("call_tool: %s args=%s", name, arguments)
+    logger.info(
+        "call_tool: %s runtime_mode=%s arg_keys=%s",
+        name,
+        runtime_mode(),
+        sorted((arguments or {}).keys()),
+    )
     result_json = call_tool(name, arguments)
     logger.info("call_tool_done: %s bytes=%d", name, len(result_json))
     result = json.loads(result_json)

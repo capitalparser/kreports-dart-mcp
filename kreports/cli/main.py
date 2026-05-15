@@ -33,6 +33,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 GOLDEN_STOCK_CODES = [
@@ -314,6 +316,7 @@ def mcp_doctor(
         "tool_count": len(ALL_TOOLS),
         "tools": [tool.name for tool in ALL_TOOLS],
     }
+    checks["collection_ready"] = bool(checks["dart_api_key_present"])
 
     try:
         from kreports.analysis.api import search_company
@@ -329,10 +332,9 @@ def mcp_doctor(
     checks["ok"] = bool(
         checks["python"]
         and checks["launcher_exists"]
-        and checks["env_file_exists"]
-        and checks["dart_api_key_present"]
         and checks.get("analysis_import_ok")
         and checks.get("db_query_ok")
+        and checks.get("sample_company_found")
     )
 
     if json_output:
@@ -343,11 +345,42 @@ def mcp_doctor(
     typer.echo(f"- project_root: {checks['project_root']}")
     typer.echo(f"- python: {checks['python'] or 'NOT FOUND'} ({checks['python_version']})")
     typer.echo(f"- launcher: {checks['launcher']} ({'ok' if checks['launcher_exists'] else 'missing'})")
-    typer.echo(f"- .env: {checks['env_file']} ({'ok' if checks['env_file_exists'] else 'missing'})")
-    typer.echo(f"- DART_API_KEY: {'ok' if checks['dart_api_key_present'] else 'missing'}")
+    typer.echo(f"- .env: {checks['env_file']} ({'ok' if checks['env_file_exists'] else 'missing; optional for read-only MCP'})")
+    typer.echo(f"- DART_API_KEY: {'ok; collection ready' if checks['collection_ready'] else 'missing; read-only MCP ok'}")
     typer.echo(f"- tools: {checks['tool_count']} ({', '.join(checks['tools'])})")
     typer.echo(f"- db query: {'ok' if checks.get('db_query_ok') else checks.get('db_error', 'failed')}")
+    typer.echo(f"- sample company: {'ok' if checks.get('sample_company_found') else 'missing'}")
     typer.echo(f"RESULT: {'OK' if checks['ok'] else 'CHECK REQUIRED'}")
+
+
+@app.command("mcp-smoke")
+def mcp_smoke_cmd(
+    company: str = typer.Option("005930", "--company", help="스모크 테스트 기준 회사"),
+):
+    """DART key 없이 read-only MCP 주요 도구를 호출한다."""
+    from kreports.mcp.tools import call_tool
+
+    calls = [
+        ("search_company", {"query": company, "limit": 3}),
+        ("get_financial_snapshot", {"company": company}),
+        ("select_peer_group", {"company": company, "peer_limit": 5}),
+        ("compare_to_industry_multi", {"company": company, "years_back": 2, "fs_strategy": "auto"}),
+        ("compare_peer_audit_fees", {"company": company, "year": 2025}),
+        ("compare_peer_risk_profile", {"company": company, "year": 2025}),
+        ("get_accounting_policy", {"company": company, "bsns_year": 2025}),
+    ]
+    failures = []
+    for name, args in calls:
+        out = json.loads(call_tool(name, args))
+        if "error" in out and "pre-built DB" not in str(out.get("error")):
+            failures.append(f"{name}: {out['error']}")
+        typer.echo(f"- {name}: {'FAIL' if any(f.startswith(name + ':') for f in failures) else 'OK'}")
+    if failures:
+        typer.echo("RESULT: CHECK REQUIRED")
+        for item in failures:
+            typer.echo(item)
+        raise typer.Exit(1)
+    typer.echo("RESULT: OK")
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +594,38 @@ def dataset_health_cmd():
     )
 
 
+@app.command("dataset-auditor-readiness")
+def dataset_auditor_readiness_cmd(
+    year: int = typer.Option(2025, "--year", help="기준 사업연도"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """감사인 peer/MCP 배포용 데이터셋 readiness를 점검한다."""
+    from kreports.analysis.readiness import auditor_readiness_snapshot, pct, readiness_verdict
+
+    snapshot = auditor_readiness_snapshot(year)
+    verdict = readiness_verdict(snapshot)
+    payload = {**snapshot, **verdict}
+    if json_output:
+        _json_print(payload)
+        return
+
+    typer.echo(f"Auditor dataset readiness: {verdict['verdict']}")
+    for market, row in snapshot["markets"].items():
+        listed = int(row["listed"] or 0)
+        typer.echo(
+            f"- {market}: financial(any) {row['financial_any_2025']}/{listed} "
+            f"({pct(row['financial_any_2025'], listed)}%), "
+            f"CFS {row['financial_cfs_2025']}/{listed} "
+            f"({pct(row['financial_cfs_2025'], listed)}%), "
+            f"audit_fee {row['audit_fee_2025']}/{listed} "
+            f"({pct(row['audit_fee_2025'], listed)}%), "
+            f"disclosure {row['disclosure_recent']}/{listed} "
+            f"({pct(row['disclosure_recent'], listed)}%)"
+        )
+    typer.echo(f"required_gaps: {', '.join(verdict['required_gaps']) or '-'}")
+    typer.echo(f"recommended_gaps: {', '.join(verdict['recommended_gaps']) or '-'}")
+
+
 # ---------------------------------------------------------------------------
 # collect-golden
 # ---------------------------------------------------------------------------
@@ -691,6 +756,42 @@ def collect_golden_cmd(
 # collect-policies — 사업보고서 주석 회계정책 영속화
 # ---------------------------------------------------------------------------
 
+def _select_policy_targets(
+    *,
+    year: int,
+    fs_div: str,
+    market: str | None,
+    limit: int | None,
+    missing_only: bool,
+) -> list[tuple[str, int, str]]:
+    from sqlalchemy import text
+
+    stmt = (
+        "SELECT c.corp_code FROM companies c "
+        "WHERE c.stock_code IS NOT NULL "
+    )
+    params: dict[str, object] = {}
+    if market:
+        stmt += "AND c.market = :market "
+        params["market"] = market
+    if missing_only:
+        stmt += (
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM accounting_policy_items p "
+            "WHERE p.corp_code=c.corp_code AND p.bsns_year=:year AND p.fs_div=:fs_div"
+            ") "
+        )
+        params["year"] = year
+        params["fs_div"] = fs_div
+    stmt += "ORDER BY c.market, c.corp_code "
+    if limit:
+        stmt += "LIMIT :limit"
+        params["limit"] = limit
+    with get_session() as session:
+        rows = session.execute(text(stmt), params).all()
+    return [(row[0], year, fs_div) for row in rows]
+
+
 @app.command("collect-policies")
 def collect_policies_cmd(
     stock: Optional[str] = typer.Argument(
@@ -703,6 +804,9 @@ def collect_policies_cmd(
     all_corps: bool = typer.Option(
         False, "--all", help="AccountingPolicyItem에 이미 있는 기업 전체 재수집."
     ),
+    market: Optional[str] = typer.Option(None, "--market", help="KOSPI/KOSDAQ/KONEX 대상 일괄 수집"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 회사 수"),
+    missing_only: bool = typer.Option(True, "--missing-only/--include-existing", help="이미 캐시된 정책 제외"),
 ):
     """
     사업보고서 주석에서 회계정책 item들을 파싱하여 DB에 영속화한다.
@@ -712,12 +816,15 @@ def collect_policies_cmd(
       dart collect-policies 005930 --year 2024  # 삼성 2024 사업연도만
       dart collect-policies 005930 --fs-div OFS # 별도
     """
+    from kreports.runtime import require_collector_mode
+
+    require_collector_mode("collect-policies")
     if not settings.dart_api_key:
         typer.echo("오류: DART_API_KEY 미설정", err=True)
         raise typer.Exit(1)
 
-    if not stock and not all_corps:
-        typer.echo("종목코드 또는 --all 플래그 필요", err=True)
+    if not stock and not all_corps and not market:
+        typer.echo("종목코드 또는 --all/--market 플래그 필요", err=True)
         raise typer.Exit(1)
 
     from kreports.collector.policy_collector import (
@@ -755,6 +862,21 @@ def collect_policies_cmd(
             f"수집 시작: {corp_name} ({corp_code}) · "
             f"{len(targets)}개 (사업연도={','.join(str(t[1]) for t in targets)}) · fs_div={fs_div}"
         )
+
+    if market:
+        if year is None:
+            typer.echo("--market 사용 시 --year 필요", err=True)
+            raise typer.Exit(1)
+        targets.extend(
+            _select_policy_targets(
+                year=year,
+                fs_div=fs_div,
+                market=market,
+                limit=limit,
+                missing_only=missing_only,
+            )
+        )
+        typer.echo(f"정책 수집 대상: market={market} year={year} fs_div={fs_div} targets={len(targets)}")
 
     if not targets:
         typer.echo("대상 없음. 종료.")
@@ -835,6 +957,9 @@ def collect_all(
 @app.command("collect-disclosures")
 def collect_disclosures_cmd(
     stock: Optional[str] = typer.Option(None, help="단일 종목코드. 생략 시 전체 수집."),
+    start_date: Optional[str] = typer.Option(None, help="수집 시작일 YYYYMMDD"),
+    end_date: Optional[str] = typer.Option(None, help="수집 종료일 YYYYMMDD"),
+    market: Optional[str] = typer.Option(None, help="전체 수집 시 시장 필터: KOSPI/KOSDAQ/KONEX"),
 ):
     """공시 목록을 수집한다."""
     if not settings.dart_api_key:
@@ -848,7 +973,7 @@ def collect_disclosures_cmd(
         if not corp_code:
             typer.echo(f"오류: {stock} 종목을 찾을 수 없습니다.", err=True)
             raise typer.Exit(1)
-        result = collect_disclosures(corp_code)
+        result = collect_disclosures(corp_code, start_date=start_date, end_date=end_date)
         typer.echo(f"완료 - 저장: {result['saved']}, 스킵: {result['skipped']}")
     else:
         from kreports.collector.disc_collector import collect_all_disclosures
@@ -857,7 +982,12 @@ def collect_disclosures_cmd(
             typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
 
         typer.echo("전체 공시 배치 수집 시작...")
-        result = collect_all_disclosures(progress_callback=_progress)
+        result = collect_all_disclosures(
+            start_date=start_date,
+            end_date=end_date,
+            market=market,
+            progress_callback=_progress,
+        )
         typer.echo(f"\n완료 - 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
 
 
@@ -908,6 +1038,7 @@ def collect_audit_fees_cmd(
     stock: Optional[str] = typer.Option(None, help="단일 종목코드. 생략 시 전체 수집."),
     year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
     year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
+    market: Optional[str] = typer.Option(None, help="전체 수집 시 시장 필터: KOSPI/KOSDAQ/KONEX"),
 ):
     """DS002 감사보수/비감사보수를 수집하고 NAS ratio를 계산한다."""
     if not settings.dart_api_key:
@@ -931,7 +1062,7 @@ def collect_audit_fees_cmd(
                 typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
 
         typer.echo("전체 감사보수 배치 수집 시작...")
-        result = collect_all_audit_fees(year_from, year_to, progress_callback=_progress)
+        result = collect_all_audit_fees(year_from, year_to, market=market, progress_callback=_progress)
         typer.echo(
             f"\n완료 - 저장: {result['saved']:,}, "
             f"데이터없음: {result['no_data']:,}, 오류: {result['error']:,}"

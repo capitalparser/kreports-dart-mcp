@@ -62,6 +62,10 @@ class Financial(Base):
     beneish_tata = Column(Float, nullable=True)    # Total Accruals to Total Assets
     beneish_m_score = Column(Float, nullable=True) # M-Score (-4.84 기준)
     beneish_flag = Column(Boolean, nullable=True)  # M > -1.78 → 이익 조작 가능성
+    # 데이터 출처
+    # 'acntall' = fnlttSinglAcntAll (XBRL 풀 계정, financial_facts 동반)
+    # 'acnt'    = fnlttSinglAcnt 폴백 (6개 요약만, financial_facts 없음)
+    source = Column(String(20), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("corp_code", "year", "quarter", "fs_div", name="uq_financial"),

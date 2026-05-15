@@ -151,6 +151,63 @@ def fetch_financial_statements(
     return {"status": "ERR", "message": "최대 재시도 초과"}
 
 
+def fetch_financial_summary(
+    corp_code: str,
+    bsns_year: int,
+    reprt_code: str,
+    fs_div: str = "CFS",
+) -> dict:
+    """
+    DART 단일회사 주요계정 재무제표 API 호출 (fnlttSinglAcnt).
+
+    fnlttSinglAcntAll 대비 행수 적고 account_id 없으나, KOSDAQ 소형주 포함
+    더 넓은 커버리지를 제공한다. acntall 폴백 경로에서 사용.
+
+    Args:
+        corp_code: 8자리 기업코드
+        bsns_year: 사업연도
+        reprt_code: 11013/11012/11014/11011
+        fs_div: CFS / OFS
+
+    Returns:
+        DART API 응답 dict. status "000"이면 정상.
+    """
+    _check_api_key()
+
+    params = {
+        "crtfc_key": settings.dart_api_key,
+        "corp_code": corp_code,
+        "bsns_year": str(bsns_year),
+        "reprt_code": reprt_code,
+        "fs_div": fs_div,
+    }
+
+    for attempt in range(settings.max_retries):
+        try:
+            with _get_client() as client:
+                resp = client.get(f"{DART_BASE}/fnlttSinglAcnt.json", params=params)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            if attempt < settings.max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning("HTTP 오류 %s, %d초 후 재시도", e.response.status_code, wait)
+                time.sleep(wait)
+            else:
+                raise
+        except httpx.RequestError as e:
+            if attempt < settings.max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning("요청 오류 %s, %d초 후 재시도", e, wait)
+                time.sleep(wait)
+            else:
+                raise
+
+        time.sleep(settings.request_delay)
+
+    return {"status": "ERR", "message": "최대 재시도 초과"}
+
+
 # ---------------------------------------------------------------------------
 # XBRL 재무제표 다운로드
 # ---------------------------------------------------------------------------
@@ -358,7 +415,7 @@ def fetch_company_info(corp_code: str) -> dict | None:
 
 def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
     """
-    DART DS002 회계감사용역계약 체결현황 API 호출.
+    DART 정기보고서 주요정보의 감사용역/비감사용역 API 호출.
 
     Args:
         corp_code: 8자리 기업코드
@@ -366,11 +423,8 @@ def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
 
     Returns:
         DART API 응답 dict. status "000"이면 정상.
-        주요 응답 필드(list 항목):
-          adt_fee   - 감사보수 (백만원)
-          adt_time  - 감사시간 (시간)
-          nadt_fee  - 비감사보수 (백만원)
-          nadt_time - 비감사시간 (시간)
+        list는 adtServcCnclsSttus(감사용역), non_audit_list는
+        accnutAdtorNonAdtServcCnclsSttus(비감사용역) 원문 list.
     """
     _check_api_key()
     params = {
@@ -381,11 +435,31 @@ def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
     }
     try:
         with _get_client() as client:
-            resp = client.get(f"{DART_BASE}/hmvAuditFee.json", params=params)
-            resp.raise_for_status()
-            return resp.json()
+            audit_resp = client.get(f"{DART_BASE}/adtServcCnclsSttus.json", params=params)
+            audit_resp.raise_for_status()
+            audit_data = audit_resp.json()
+
+            non_audit_resp = client.get(
+                f"{DART_BASE}/accnutAdtorNonAdtServcCnclsSttus.json",
+                params=params,
+            )
+            non_audit_resp.raise_for_status()
+            non_audit_data = non_audit_resp.json()
+
+            if audit_data.get("status") != "000":
+                return audit_data
+
+            if non_audit_data.get("status") == "000":
+                audit_data["non_audit_list"] = non_audit_data.get("list", [])
+            elif non_audit_data.get("status") == "013":
+                audit_data["non_audit_list"] = []
+            else:
+                audit_data["non_audit_status"] = non_audit_data.get("status")
+                audit_data["non_audit_message"] = non_audit_data.get("message")
+
+            return audit_data
     except Exception as e:
-        logger.warning("hmvAuditFee 조회 실패 [%s %s]: %s", corp_code, bsns_year, e)
+        logger.warning("감사용역 API 조회 실패 [%s %s]: %s", corp_code, bsns_year, e)
         return {"status": "ERR", "message": str(e)}
 
 

@@ -58,6 +58,8 @@ def _migrate_existing_tables() -> None:
         ("financials", "beneish_tata REAL"),
         ("financials", "beneish_m_score REAL"),
         ("financials", "beneish_flag INTEGER"),
+        # 데이터 출처 (acntall|acnt)
+        ("financials", "source VARCHAR(20)"),
     ]
     with engine.connect() as conn:
         for table, col_def in new_columns:

@@ -1,0 +1,6 @@
+interface:
+  display_name: "DART Financial Parser"
+  short_description: "Parse Korean DART statements and notes"
+  default_prompt: "Use $dart-financial-parser to diagnose this DART financial statement or note parsing case for KReports."
+policy:
+  allow_implicit_invocation: true
