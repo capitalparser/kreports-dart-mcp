@@ -24,6 +24,7 @@ from kreports.analysis.peer import (
     SectorGroup,
     classify_sector,
     confidence_band,
+    resolve_fs_div_for_company,
     resolve_peers,
 )
 
@@ -570,9 +571,18 @@ def get_accounting_policy(
             "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
         }
 
-    data = _queries.get_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
+    data = _queries.get_cached_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
     if data is None:
-        return None
+        from kreports.runtime import readonly_cache_miss
+
+        return {
+            "corp_code": corp_code,
+            "bsns_year": bsns_year,
+            "fs_div": fs_div,
+            "items": {},
+            "item_count": 0,
+            "note": readonly_cache_miss("accounting_policy", corp_code, bsns_year),
+        }
     result = {
         "corp_code": corp_code,
         "bsns_year": bsns_year,
@@ -1139,6 +1149,7 @@ def compare_to_industry_multi(
     metrics: Optional[list[str]] = None,
     years_back: int = 5,
     fs_div: str = "CFS",
+    fs_strategy: str = "CFS",
     prefix_len_start: int = 3,
     exclude_other_sectors: bool = True,
     size_bucket_decade: Optional[float] = None,
@@ -1190,6 +1201,9 @@ def compare_to_industry_multi(
     if subject_row is None:
         return {"error": f"corp_code '{corp_code}' 미등록"}
     subject_name, subject_induty = subject_row[0], subject_row[1]
+    requested_fs_div = fs_div
+    if fs_strategy.lower() == "auto":
+        fs_div = resolve_fs_div_for_company(corp_code, None, "auto")
 
     # Peer 풀은 한 번만 결정 (subject의 최신 Q4 연도 기준)
     pr = resolve_peers(
@@ -1217,6 +1231,9 @@ def compare_to_industry_multi(
             "excluded_categories": pr.excluded_categories,
             "size_bucket_applied": pr.size_bucket_applied,
             "fs_div": fs_div,
+            "fs_strategy": fs_strategy,
+            "requested_fs_div": requested_fs_div,
+            "fs_div_used": fs_div,
             "years": [],
             "metrics": metrics,
             "results": {},
@@ -1250,6 +1267,9 @@ def compare_to_industry_multi(
             "excluded_categories": pr.excluded_categories,
             "size_bucket_applied": pr.size_bucket_applied,
             "fs_div": fs_div,
+            "fs_strategy": fs_strategy,
+            "requested_fs_div": requested_fs_div,
+            "fs_div_used": fs_div,
             "years": [],
             "metrics": metrics,
             "results": {},
@@ -1306,11 +1326,285 @@ def compare_to_industry_multi(
         "excluded_categories": pr.excluded_categories,
         "size_bucket_applied": pr.size_bucket_applied,
         "fs_div": fs_div,
+        "fs_strategy": fs_strategy,
+        "requested_fs_div": requested_fs_div,
+        "fs_div_used": fs_div,
         "years": years,
         "metrics": metrics,
         "results": results,
         "note": pr.note,
     }
+
+
+def select_peer_group(
+    company: str,
+    criteria: Optional[list[str]] = None,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+    prefix_len_start: int = 3,
+    size_bucket_decade: Optional[float] = None,
+    exclude_other_sectors: bool = True,
+) -> dict:
+    criteria = criteria or ["industry", "sector", "financial_data"]
+    corp_code = resolve_corp_code(company)
+    if corp_code is None:
+        return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
+
+    with _engine.connect() as conn:
+        subject_row = conn.execute(
+            text("SELECT corp_name, stock_code, market, induty_code FROM companies WHERE corp_code=:cc"),
+            {"cc": corp_code},
+        ).first()
+    if subject_row is None:
+        return {"error": f"corp_code '{corp_code}' 미등록"}
+
+    fs_div_used = resolve_fs_div_for_company(corp_code, None, fs_strategy)
+    pr = resolve_peers(
+        corp_code=corp_code,
+        prefix_len_start=prefix_len_start,
+        min_n=5,
+        exclude_other_sectors=exclude_other_sectors,
+        size_bucket_decade=size_bucket_decade,
+        fs_div=fs_div_used,
+    )
+
+    peers: list[dict] = []
+    if pr.peer_corp_codes:
+        stmt = text(
+            """
+            SELECT c.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   f.total_assets, f.revenue,
+                   af.audit_fee_m, af.audit_hours, af.nas_ratio
+            FROM companies c
+            LEFT JOIN financials f
+              ON f.corp_code=c.corp_code
+             AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
+            LEFT JOIN audit_fees af
+              ON af.corp_code=c.corp_code AND af.bsns_year=:year
+            WHERE c.corp_code IN :ccs
+            ORDER BY (f.total_assets IS NULL), f.total_assets DESC
+            LIMIT :limit
+            """
+        ).bindparams(bindparam("ccs", expanding=True))
+        with _engine.connect() as conn:
+            rows = conn.execute(
+                stmt,
+                {
+                    "ccs": pr.peer_corp_codes,
+                    "year": pr.resolved_year,
+                    "fs": fs_div_used,
+                    "limit": peer_limit,
+                },
+            ).mappings().all()
+        for row in rows:
+            reasons = ["same_ksic_prefix", f"sector_group:{pr.sector_group.value}"]
+            if size_bucket_decade is not None:
+                reasons.append("asset_size_bucket")
+            if row["audit_fee_m"] is not None:
+                reasons.append("audit_fee_available")
+            peers.append({**dict(row), "include_reasons": reasons})
+
+    return {
+        "subject": {
+            "corp_code": corp_code,
+            "stock_code": subject_row[1],
+            "corp_name": subject_row[0],
+            "market": subject_row[2],
+            "induty_code": subject_row[3],
+        },
+        "selection_policy": {
+            "criteria": criteria,
+            "prefix_len_start": prefix_len_start,
+            "matched_prefix_len": pr.matched_prefix_len,
+            "exclude_other_sectors": exclude_other_sectors,
+            "size_bucket_decade": size_bucket_decade,
+            "fs_strategy": fs_strategy,
+            "fs_div_used": fs_div_used,
+            "resolved_year": pr.resolved_year,
+        },
+        "peer_count": pr.n_peers,
+        "returned_peer_count": len(peers),
+        "confidence": pr.confidence,
+        "peers": peers,
+        "excluded_categories": pr.excluded_categories,
+        "note": pr.note,
+    }
+
+
+def _percentile(value: float | None, values: list[float]) -> float | None:
+    if value is None or not values:
+        return None
+    below = sum(1 for v in values if v < value)
+    return round(100.0 * below / len(values), 1)
+
+
+def _metric_quantiles(values: list[float]) -> dict:
+    vals = sorted(v for v in values if v is not None)
+    n = len(vals)
+    return {
+        "n": n,
+        "p25": round(_quantile(vals, 0.25), 2) if n >= 5 else None,
+        "p50": round(_quantile(vals, 0.50), 2) if n else None,
+        "p75": round(_quantile(vals, 0.75), 2) if n >= 5 else None,
+    }
+
+
+def compare_peer_audit_fees(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+    size_bucket_decade: Optional[float] = None,
+) -> dict:
+    base = select_peer_group(
+        company=company,
+        peer_limit=peer_limit,
+        fs_strategy=fs_strategy,
+        size_bucket_decade=size_bucket_decade,
+    )
+    if "error" in base:
+        return base
+    corp_code = base["subject"]["corp_code"]
+    fs_div = base["selection_policy"]["fs_div_used"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+
+    stmt = text(
+        """
+        SELECT c.corp_code, c.corp_name, f.total_assets,
+               af.audit_fee_m, af.audit_hours, af.non_audit_fee_m, af.nas_ratio,
+               CASE WHEN f.total_assets > 0 AND af.audit_fee_m IS NOT NULL
+                    THEN 10000.0 * af.audit_fee_m * 1000000.0 / f.total_assets END AS fee_assets_bps,
+               CASE WHEN af.audit_hours > 0 AND af.audit_fee_m IS NOT NULL
+                    THEN 1.0 * af.audit_fee_m / af.audit_hours END AS fee_per_hour_m
+        FROM companies c
+        LEFT JOIN financials f
+          ON f.corp_code=c.corp_code AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
+        LEFT JOIN audit_fees af
+          ON af.corp_code=c.corp_code AND af.bsns_year=:year
+        WHERE c.corp_code IN :ccs
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        rows = conn.execute(stmt, {"ccs": all_codes, "year": year, "fs": fs_div}).mappings().all()
+
+    by_cc = {row["corp_code"]: dict(row) for row in rows}
+    subject_row = by_cc.get(corp_code, {})
+    peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
+    metrics = {
+        "audit_fee_m": [r["audit_fee_m"] for r in peer_rows if r["audit_fee_m"] is not None],
+        "audit_hours": [r["audit_hours"] for r in peer_rows if r["audit_hours"] is not None],
+        "nas_ratio": [r["nas_ratio"] for r in peer_rows if r["nas_ratio"] is not None],
+        "audit_fee_to_assets_bps": [r["fee_assets_bps"] for r in peer_rows if r["fee_assets_bps"] is not None],
+        "audit_fee_per_hour_m": [r["fee_per_hour_m"] for r in peer_rows if r["fee_per_hour_m"] is not None],
+    }
+    benchmarks = {k: _metric_quantiles([float(v) for v in vals]) for k, vals in metrics.items()}
+    for key, vals in metrics.items():
+        subj_key = {
+            "audit_fee_to_assets_bps": "fee_assets_bps",
+            "audit_fee_per_hour_m": "fee_per_hour_m",
+        }.get(key, key)
+        subj_val = subject_row.get(subj_key)
+        benchmarks[key]["subject_percentile"] = _percentile(
+            float(subj_val) if subj_val is not None else None,
+            [float(v) for v in vals],
+        )
+
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "fs_div_used": fs_div,
+        "peer_count": len(peer_rows),
+        "subject_metrics": subject_row,
+        "benchmarks": benchmarks,
+        "peers": peer_rows[:peer_limit],
+        "selection_policy": base["selection_policy"],
+        "note": "DART audit fee contract/status data; audit judgment not performed.",
+    })
+
+
+def compare_peer_risk_profile(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in base:
+        return base
+    corp_code = base["subject"]["corp_code"]
+    fs_div = base["selection_policy"]["fs_div_used"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+
+    stmt = text(
+        """
+        SELECT f.corp_code, c.corp_name, f.revenue, f.total_assets,
+               f.operating_profit, f.net_income, f.operating_cf,
+               f.accrual_ratio, f.beneish_m_score,
+               f.op_cf_divergence_flag, f.going_concern_flag
+        FROM financials f
+        JOIN companies c ON c.corp_code=f.corp_code
+        WHERE f.corp_code IN :ccs AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    disc_stmt = text(
+        """
+        SELECT corp_code,
+               SUM(CASE WHEN report_nm LIKE '%정정%' THEN 1 ELSE 0 END) restatement_like,
+               SUM(CASE WHEN report_nm LIKE '%주요사항%' THEN 1 ELSE 0 END) major_event_like,
+               COUNT(*) total_disclosures
+        FROM disclosures
+        WHERE corp_code IN :ccs
+          AND disc_date >= :start_date
+          AND disc_date <= :end_date
+        GROUP BY corp_code
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(stmt, {"ccs": all_codes, "year": year, "fs": fs_div}).mappings().all()]
+        disc_rows = conn.execute(
+            disc_stmt,
+            {"ccs": all_codes, "start_date": f"{year}-01-01", "end_date": f"{year}-12-31"},
+        ).mappings().all()
+
+    disc_by_cc = {r["corp_code"]: dict(r) for r in disc_rows}
+    by_cc = {r["corp_code"]: r for r in rows}
+    subject_row = by_cc.get(corp_code, {})
+    peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
+
+    def ratio(row: dict, numerator: str, denominator: str) -> float | None:
+        n = row.get(numerator)
+        d = row.get(denominator)
+        if n is None or not d:
+            return None
+        return 100.0 * float(n) / float(d)
+
+    derived = {
+        "op_cf_to_operating_profit": [ratio(r, "operating_cf", "operating_profit") for r in peer_rows],
+        "accrual_ratio": [r.get("accrual_ratio") for r in peer_rows],
+        "beneish_m_score": [r.get("beneish_m_score") for r in peer_rows],
+        "receivables_to_revenue": [],
+        "inventory_to_revenue": [],
+    }
+    benchmarks = {
+        k: _metric_quantiles([float(v) for v in vals if v is not None])
+        for k, vals in derived.items()
+    }
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "fs_div_used": fs_div,
+        "peer_count": len(peer_rows),
+        "subject_metrics": subject_row,
+        "benchmarks": benchmarks,
+        "disclosure_event_counts": {
+            "subject": disc_by_cc.get(corp_code, {}),
+            "peers": {cc: disc_by_cc.get(cc, {}) for cc in peer_codes[:peer_limit]},
+        },
+        "selection_policy": base["selection_policy"],
+        "note": "Risk profile is a DART-based signal pack, not audit risk assessment.",
+    })
 
 
 # ---------------------------------------------------------------------------

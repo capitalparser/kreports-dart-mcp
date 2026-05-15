@@ -1,7 +1,7 @@
 """
-audit_fee_collector.py — DS002 회계감사용역계약 체결현황 수집.
+audit_fee_collector.py — 감사용역/비감사용역 보수 수집.
 
-DART hmvAuditFee.json API를 호출하여 감사보수·비감사보수를 수집하고
+DART 정기보고서 주요정보 API를 호출하여 감사보수·비감사보수를 수집하고
 NAS ratio(비감사보수/감사보수) 및 독립성 위험 플래그를 계산한다.
 """
 import logging
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # NAS ratio 임계값: 비감사보수가 감사보수를 초과하면 독립성 위험
 _NAS_RISK_THRESHOLD = 1.0
+_DART_NO_DATA_STATUS = "013"
 
 
 def _parse_fee(value: str | None) -> int | None:
@@ -35,10 +36,22 @@ def _parse_fee(value: str | None) -> int | None:
 def _extract_current_period(items: list[dict]) -> dict | None:
     """API 응답 list에서 당기(se='당기') 항목을 추출. 없으면 첫 번째 항목."""
     for item in items:
-        se = str(item.get("se", "")).strip()
+        se = str(item.get("se") or item.get("bsns_year") or "").strip()
         if "당기" in se:
             return item
     return items[0] if items else None
+
+
+def _sum_non_audit_fee(items: list[dict]) -> int | None:
+    total = 0
+    found = False
+    for item in items:
+        fee = _parse_fee(item.get("servc_mendng") or item.get("nadt_fee"))
+        if fee is None:
+            continue
+        total += fee
+        found = True
+    return total if found else None
 
 
 def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
@@ -55,7 +68,18 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
     for year in years:
         try:
             data = fetch_audit_fee(corp_code, year)
-            if data.get("status") != "000" or not data.get("list"):
+            status = data.get("status")
+            if status != "000":
+                if status == _DART_NO_DATA_STATUS:
+                    no_data += 1
+                else:
+                    logger.warning(
+                        "감사보수 API 오류 [%s %d]: status=%s message=%s",
+                        corp_code, year, status, data.get("message"),
+                    )
+                    error += 1
+                continue
+            if not data.get("list"):
                 no_data += 1
                 continue
 
@@ -64,10 +88,20 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                 no_data += 1
                 continue
 
-            auditor_nm = item.get("nm") or item.get("auditor_nm") or None
-            audit_fee_m = _parse_fee(item.get("adt_fee"))
-            audit_hours = _parse_fee(item.get("adt_time"))
-            non_audit_fee_m = _parse_fee(item.get("nadt_fee"))
+            auditor_nm = item.get("adtor") or item.get("nm") or item.get("auditor_nm") or None
+            audit_fee_m = _parse_fee(
+                item.get("real_exc_dtls_mendng")
+                or item.get("adt_cntrct_dtls_mendng")
+                or item.get("adt_fee")
+            )
+            audit_hours = _parse_fee(
+                item.get("real_exc_dtls_time")
+                or item.get("adt_cntrct_dtls_time")
+                or item.get("adt_time")
+            )
+            non_audit_fee_m = _sum_non_audit_fee(data.get("non_audit_list") or [])
+            if non_audit_fee_m is None:
+                non_audit_fee_m = _parse_fee(item.get("nadt_fee"))
             non_audit_hours = _parse_fee(item.get("nadt_time"))
 
             # NAS ratio 계산
@@ -134,16 +168,18 @@ def collect_audit_fees(corp_code: str, year_from: int | None = None, year_to: in
 def collect_all_audit_fees(
     year_from: int | None = None,
     year_to: int | None = None,
+    market: str | None = None,
     progress_callback=None,
 ) -> dict:
     """전체 상장사 감사보수 배치 수집."""
     with get_session() as session:
-        companies = (
+        query = (
             session.query(Company.corp_code, Company.corp_name)
             .filter(Company.stock_code.isnot(None))
-            .order_by(Company.corp_name)
-            .all()
         )
+        if market:
+            query = query.filter(Company.market == market)
+        companies = query.order_by(Company.corp_name).all()
 
     total = len(companies)
     totals = {"saved": 0, "no_data": 0, "error": 0}
