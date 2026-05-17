@@ -40,6 +40,37 @@ NOTE_KEYWORDS: dict[str, list[str]] = {
 }
 
 _TABLE_RE = re.compile(r"<TABLE\b[^>]*>.*?</TABLE>", re.IGNORECASE | re.DOTALL)
+_NOTE_TITLE_RE = re.compile(r"^\s*(?:주석\s*)?(\d{1,3})[.)]?\s+(.+?)\s*$")
+_TOC_LEADER_RE = re.compile(r"(?:\.{3,}|-{3,})\s*\d+\s*$")
+_AMOUNT_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\(\s*\d{1,3}(?:,\d{3})+\s*\)")
+_KNOWN_SHORT_NOTE_TITLES = {
+    "일반사항",
+    "일반 사항",
+    "회사의 개요",
+    "회사 개요",
+    "개요",
+    "중요한 회계정책",
+    "중요한회계정책",
+    "수익",
+    "매출",
+    "비용",
+    "법인세",
+    "주당이익",
+    "배당",
+    "리스",
+    "금융상품",
+    "특수관계자",
+    "우발부채",
+    "우발자산",
+    "약정사항",
+    "종속기업",
+    "관계기업",
+    "보고기간후 사건",
+    "후속사건",
+}
+_REFERENCE_PARTICLES = (
+    "을", "를", "은", "는", "에", "에서", "와", "과", "의", "로", "으로",
+)
 
 
 def extract_note_disclosures(
@@ -58,7 +89,7 @@ def extract_note_disclosures(
     TITLE 경계와 제목 깊이를 이용해 하위 제목을 포함하되 다음 peer note에서 멈춘다.
     """
     title_positions = [
-        (m.start(), m.end(), m.group(1).strip(), _title_level(m.group(1).strip()))
+        (m.start(), m.end(), m.group(1).strip(), _note_title_level(m.group(1).strip()))
         for m in _TITLE_RE.finditer(xml_content)
     ]
     if not title_positions:
@@ -118,6 +149,50 @@ def _match_note_key(text: str) -> str | None:
         if any(keyword in text for keyword in keywords):
             return note_key
     return None
+
+
+def _note_title_level(title_text: str) -> int:
+    """
+    Infer TITLE depth for note disclosures.
+
+    DART filings often render note headings as either "10. 금융상품" or
+    "주석 10 금융상품".  The shared section parser already handles the first
+    form, but not the second.  Treat only title-like "주석 N 제목" strings as
+    peer note headings, while leaving references such as "주석 18을 참고" as
+    ordinary low-confidence titles.
+    """
+    if _is_note_heading_title(title_text):
+        return 2
+    return _title_level(title_text)
+
+
+def _is_note_heading_title(title_text: str) -> bool:
+    title = re.sub(r"\s+", " ", title_text or "").strip()
+    if not title or _TOC_LEADER_RE.search(title):
+        return False
+    if _AMOUNT_RE.search(title):
+        return False
+    if len(title) > 90:
+        return False
+
+    match = _NOTE_TITLE_RE.match(title)
+    if not match:
+        return False
+
+    rest = (match.group(2) or "").strip()
+    if not rest:
+        return False
+    if rest[:1] in {"-", "–", "—", "(", ")", "[", "]"}:
+        return False
+
+    first_token = rest.split()[0]
+    if any(first_token.endswith(particle) for particle in _REFERENCE_PARTICLES):
+        return False
+    if rest in _KNOWN_SHORT_NOTE_TITLES:
+        return True
+
+    hangul = sum(1 for c in rest if "가" <= c <= "힣")
+    return hangul >= 2
 
 
 def _note_end_index(
