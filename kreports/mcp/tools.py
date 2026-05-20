@@ -81,7 +81,15 @@ from kreports.db.models import (
 
 _FS_DIVS = {"CFS", "OFS"}
 _FS_STRATEGIES = {"CFS", "OFS", "auto"}
-_SEARCH_DATASETS = {"report_sections", "accounting_policies", "disclosures", "audit_fees", "financials"}
+_SEARCH_DATASETS = {
+    "report_sections",
+    "accounting_policies",
+    "accounting_note_chapters",
+    "disclosures",
+    "audit_fees",
+    "financials",
+}
+_ACCOUNTING_NOTE_SECTION_TYPES = {"basis", "policy", "estimate_judgment", "other_note"}
 _REPORT_SOURCE_TYPES = {"audit_report", "business_report"}
 _COMPARE_METRICS = [
     "영업이익률",
@@ -1205,6 +1213,9 @@ def _handle_search_dataset(args: dict) -> dict:
         if args.get("source_type") is not None
         else None,
         section_keys=_optional_string_list(args, "section_keys"),
+        section_type=_optional_enum(args, "section_type", _ACCOUNTING_NOTE_SECTION_TYPES, None)
+        if args.get("section_type") is not None
+        else None,
         fs_div=_optional_enum(args, "fs_div", _FS_DIVS, None) if args.get("fs_div") is not None else None,
         quarter=_optional_int(args, "quarter", None, min_value=1, max_value=4),
         limit=_optional_int(args, "limit", 50, min_value=1, max_value=500) or 50,
@@ -1216,7 +1227,7 @@ TOOL_SEARCH_DATASET = Tool(
     name="search_dataset",
     description=(
         "주요 로컬 캐시 데이터셋을 회사, 연도, 시장, 업종, 키워드 기준으로 공통 검색한다. "
-        "감사보고서 섹션(KAM/강조/기타/계속기업), 회계정책, 공시목록, 감사보수·시간, 재무요약을 "
+        "감사보고서 섹션(KAM/강조/기타/계속기업), 회계정책, 주석 2/3/4번 챕터, 공시목록, 감사보수·시간, 재무요약을 "
         "동일한 응답 구조로 반환하여 '어느 회사/업종/연도에 해당 이슈가 있는가' 유형의 질문에 사용한다."
     ),
     inputSchema={
@@ -1224,7 +1235,14 @@ TOOL_SEARCH_DATASET = Tool(
         "properties": {
             "dataset": {
                 "type": "string",
-                "enum": ["report_sections", "accounting_policies", "disclosures", "audit_fees", "financials"],
+                "enum": [
+                    "report_sections",
+                    "accounting_policies",
+                    "accounting_note_chapters",
+                    "disclosures",
+                    "audit_fees",
+                    "financials",
+                ],
             },
             "company": {"type": "string", "description": "선택. corp_code/stock_code/company name"},
             "year": {"type": "integer", "minimum": 2000, "maximum": 2100},
@@ -1242,6 +1260,11 @@ TOOL_SEARCH_DATASET = Tool(
                 "description": "report_sections 검색 시 선택. 예: kam, emphasis, other_matter",
             },
             "fs_div": {"type": "string", "enum": ["CFS", "OFS"], "description": "재무/회계정책 검색 시 선택"},
+            "section_type": {
+                "type": "string",
+                "enum": ["basis", "policy", "estimate_judgment", "other_note"],
+                "description": "accounting_note_chapters 검색 시 선택",
+            },
             "quarter": {"type": "integer", "minimum": 1, "maximum": 4, "description": "financials 검색 시 선택"},
             "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
             "include_excerpt": {"type": "boolean", "default": True},

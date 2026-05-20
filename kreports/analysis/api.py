@@ -2470,6 +2470,7 @@ def search_audit_report_matters(
 _SEARCH_DATASETS = {
     "report_sections",
     "accounting_policies",
+    "accounting_note_chapters",
     "disclosures",
     "audit_fees",
     "financials",
@@ -2533,6 +2534,7 @@ def search_dataset(
     keyword: str | None = None,
     source_type: str | None = None,
     section_keys: list[str] | None = None,
+    section_type: str | None = None,
     fs_div: str | None = None,
     quarter: int | None = None,
     limit: int = 50,
@@ -2602,6 +2604,35 @@ def search_dataset(
             LIMIT :row_limit
         """
         source = "accounting_policy_items"
+    elif dataset == "accounting_note_chapters":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("anc.bsns_year=:year")
+            params["year"] = int(year)
+        if fs_div:
+            where.append("anc.fs_div=:fs_div")
+            params["fs_div"] = fs_div
+        if source_type:
+            where.append("anc.source_type=:source_type")
+            params["source_type"] = source_type
+        if section_type:
+            where.append("anc.section_type=:section_type")
+            params["section_type"] = section_type
+        if keyword:
+            where.append("(anc.note_title LIKE :kw OR anc.body LIKE :kw)")
+            params["kw"] = f"%{keyword}%"
+        sql = f"""
+            SELECT anc.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   anc.bsns_year AS year, anc.fs_div, anc.rcept_no, anc.dcm_no,
+                   anc.source_type, anc.note_no, anc.note_title, anc.section_type,
+                   anc.body, anc.body_length
+            FROM accounting_note_chapters anc
+            JOIN companies c ON c.corp_code=anc.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY anc.bsns_year DESC, c.market, c.corp_name, anc.note_no
+            LIMIT :row_limit
+        """
+        source = "accounting_note_chapters"
     elif dataset == "disclosures":
         where = ["1=1", *filters]
         if year is not None:
@@ -2690,6 +2721,7 @@ def search_dataset(
             "keyword": keyword,
             "source_type": source_type,
             "section_keys": section_keys,
+            "section_type": section_type,
             "fs_div": fs_div,
             "quarter": quarter,
             "limit": limit,

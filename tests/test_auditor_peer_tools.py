@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 from kreports.analysis.api import (
     build_audit_acceptance_pack,
@@ -11,6 +12,7 @@ from kreports.analysis.api import (
     search_dataset,
     search_audit_report_matters,
 )
+from kreports.db.models import AccountingNoteChapter, Company
 from kreports.mcp.tools import call_tool
 
 
@@ -163,6 +165,56 @@ def test_search_dataset_policy_and_structured_mcp_dispatch():
     assert fees["_meta"]["tool"] == "search_dataset"
     assert fees["query"]["dataset"] == "audit_fees"
     assert "companies" in fees
+
+
+def test_search_dataset_accounting_note_chapters(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="정책테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(AccountingNoteChapter(
+            corp_code="00000001",
+            bsns_year=2024,
+            fs_div="CFS",
+            rcept_no="20250311000001",
+            source_type="business_report",
+            note_no="3",
+            note_title="중요한 회계정책",
+            section_type="policy",
+            body="수익은 고객과의 계약에서 수행의무가 이행될 때 인식한다.",
+            body_hash="x",
+            body_length=34,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = json.loads(call_tool(
+        "search_dataset",
+        {
+            "dataset": "accounting_note_chapters",
+            "company": "000001",
+            "year": 2024,
+            "section_type": "policy",
+            "keyword": "수익",
+            "limit": 5,
+        },
+    ))
+
+    assert out["_meta"]["tool"] == "search_dataset"
+    assert out["query"]["dataset"] == "accounting_note_chapters"
+    assert out["query"]["section_type"] == "policy"
+    assert out["data_quality"]["source"] == "accounting_note_chapters"
+    assert out["companies"][0]["corp_code"] == "00000001"
+    record = out["companies"][0]["records"][0]
+    assert record["note_no"] == "3"
+    assert record["note_title"] == "중요한 회계정책"
+    assert record["section_type"] == "policy"
+    assert "수익" in record["body_excerpt"]
 
 
 def test_estimate_audit_hours_proxy_shape():
