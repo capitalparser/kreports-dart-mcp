@@ -62,6 +62,10 @@ class Financial(Base):
     beneish_tata = Column(Float, nullable=True)    # Total Accruals to Total Assets
     beneish_m_score = Column(Float, nullable=True) # M-Score (-4.84 기준)
     beneish_flag = Column(Boolean, nullable=True)  # M > -1.78 → 이익 조작 가능성
+    # 데이터 출처
+    # 'acntall' = fnlttSinglAcntAll (XBRL 풀 계정, financial_facts 동반)
+    # 'acnt'    = fnlttSinglAcnt 폴백 (6개 요약만, financial_facts 없음)
+    source = Column(String(20), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("corp_code", "year", "quarter", "fs_div", name="uq_financial"),
@@ -195,6 +199,132 @@ class AccountingPolicyItem(Base):
     )
 
 
+class ReportDocument(Base):
+    """Downloaded DART report document metadata.
+
+    This separates disclosure-list coverage from actual document body coverage.
+    A disclosure row means DART listed the filing; this row means we fetched and
+    parsed its document.xml payload.
+    """
+    __tablename__ = "report_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(14), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_type = Column(String(30), nullable=False)  # business_report / audit_report
+    report_nm = Column(String(300), nullable=False)
+    doc_hash = Column(String(40), nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("rcept_no", "source_type", name="uq_report_document"),
+        Index("idx_report_doc_corp_year", "corp_code", "bsns_year", "source_type"),
+    )
+
+
+class SourceDocument(Base):
+    """Raw disclosure document cache used as the source for extractors."""
+    __tablename__ = "source_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(80), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_type = Column(String(30), nullable=False)  # business_report / audit_report
+    report_nm = Column(String(300), nullable=False)
+    content_type = Column(String(30), nullable=False, default="xml")
+    raw_content = Column(Text, nullable=False)
+    doc_hash = Column(String(40), nullable=False)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("rcept_no", "source_type", name="uq_source_document"),
+        Index("idx_source_doc_corp_year", "corp_code", "bsns_year", "source_type"),
+        Index("idx_source_doc_hash", "doc_hash"),
+    )
+
+
+class ExtractionRun(Base):
+    """Extractor execution history for raw source documents."""
+    __tablename__ = "extraction_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_document_id = Column(Integer, nullable=True)
+    rcept_no = Column(String(80), nullable=False)
+    source_type = Column(String(30), nullable=False)
+    extractor_name = Column(String(80), nullable=False)
+    extractor_version = Column(String(30), nullable=False, default="v1")
+    source_doc_hash = Column(String(40), nullable=True)
+    status = Column(String(20), nullable=False)  # success / error / skipped
+    rows_written = Column(Integer, nullable=False, default=0)
+    error_msg = Column(Text, nullable=True)
+    extracted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_extraction_runs_doc", "rcept_no", "source_type"),
+        Index("idx_extraction_runs_extractor", "extractor_name", "status"),
+    )
+
+
+class ReportSection(Base):
+    """Normalized sections extracted from business/audit report bodies."""
+    __tablename__ = "report_sections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(14), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_type = Column(String(30), nullable=False)  # business_report / audit_report
+    section_key = Column(String(50), nullable=False)  # audit_opinion / kam / emphasis ...
+    section_title = Column(String(300), nullable=True)
+    body_text = Column(Text, nullable=False)
+    body_hash = Column(String(40), nullable=True)
+    body_length = Column(Integer, nullable=True)
+    ordinal = Column(SmallInteger, nullable=False, default=0)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("rcept_no", "source_type", "section_key", "ordinal", name="uq_report_section"),
+        Index("idx_report_section_corp_year", "corp_code", "bsns_year", "source_type"),
+        Index("idx_report_section_key", "source_type", "section_key"),
+    )
+
+
+class BusinessAffiliateAuditor(Base):
+    """Subsidiary/equity affiliate auditor matrix cached from business reports."""
+    __tablename__ = "subsidiary_auditor_matrix"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_corp_code = Column(String(8), nullable=False)
+    parent_rcept_no = Column(String(14), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    name = Column(String(300), nullable=False)
+    relation = Column(String(30), nullable=True)
+    ownership_pct = Column(Float, nullable=True)
+    listed_yn = Column(String(20), nullable=True)
+    business = Column(Text, nullable=True)
+    assets = Column(Text, nullable=True)
+    source = Column(String(50), nullable=True)
+    corp_code = Column(String(8), nullable=True)
+    stock_code = Column(String(6), nullable=True)
+    market = Column(String(10), nullable=True)
+    auditor_nm = Column(String(100), nullable=True)
+    audit_opinion = Column(String(20), nullable=True)
+    auditor_fs_div = Column(String(3), nullable=True)
+    auditor_year = Column(SmallInteger, nullable=True)
+    ordinal = Column(SmallInteger, nullable=False, default=0)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("parent_rcept_no", "name", name="uq_subsidiary_auditor_matrix"),
+        Index("idx_subsidiary_matrix_parent_year", "parent_corp_code", "bsns_year"),
+    )
+
+
 class FetchLog(Base):
     __tablename__ = "fetch_log"
 
@@ -209,4 +339,26 @@ class FetchLog(Base):
 
     __table_args__ = (
         Index("idx_fetchlog_status", "status", "fetched_at"),
+    )
+
+
+class BackfillRun(Base):
+    """Batch backfill execution ledger and concurrency guard."""
+    __tablename__ = "backfill_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_type = Column(String(50), nullable=False)
+    year = Column(SmallInteger, nullable=True)
+    market = Column(String(10), nullable=True)
+    status = Column(String(20), nullable=False)  # running / success / error
+    pid = Column(Integer, nullable=True)
+    params_json = Column(Text, nullable=True)
+    summary_json = Column(Text, nullable=True)
+    error_msg = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("idx_backfill_runs_key_status", "task_type", "year", "market", "status"),
+        Index("idx_backfill_runs_started", "started_at"),
     )

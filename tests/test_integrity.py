@@ -187,6 +187,15 @@ class TestAuditorIntegrity:
     def test_auditor_change_detected(self, samsung_corp_code):
         """삼성전자는 2023년 안진→삼정 교체가 감지되어야 한다."""
         with get_session() as session:
+            auditors = (
+                session.query(Auditor.bsns_year, Auditor.auditor_nm)
+                .filter_by(corp_code=samsung_corp_code, fs_div="CFS")
+                .order_by(Auditor.bsns_year)
+                .all()
+            )
+            distinct_auditors = {row.auditor_nm for row in auditors if row.auditor_nm}
+            if len(auditors) < 2 or len(distinct_auditors) < 2:
+                pytest.skip("감사인 교체 검증에 필요한 과거 감사인 이력 부족")
             changed = session.query(Auditor).filter_by(
                 corp_code=samsung_corp_code,
                 is_auditor_changed=True,

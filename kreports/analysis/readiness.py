@@ -1,0 +1,664 @@
+from __future__ import annotations
+
+from sqlalchemy import text
+
+from kreports.db.engine import engine
+
+CORE_MARKETS = ("KOSPI", "KOSDAQ")
+DEFAULT_YEARS_BACK = 5
+CORE_COVERAGE_THRESHOLD = 95.0
+COMPLETENESS_THRESHOLD = 95.0
+
+
+def pct(numerator: int | float | None, denominator: int | float | None) -> float:
+    return round(100.0 * float(numerator or 0) / float(denominator or 0), 1) if denominator else 0.0
+
+
+def required_years(year: int = 2025, years_back: int = DEFAULT_YEARS_BACK) -> list[int]:
+    return list(range(int(year) - int(years_back) + 1, int(year) + 1))
+
+
+def _empty_year_market_row(market: str, listed: int) -> dict:
+    return {
+        "market": market,
+        "listed": int(listed or 0),
+        "financial_any": 0,
+        "financial_cfs": 0,
+        "financial_ofs": 0,
+        "business_report": 0,
+        "audit_report": 0,
+        "audit_fee": 0,
+        "auditor": 0,
+        "policy": 0,
+    }
+
+
+def auditor_readiness_snapshot(year: int = 2025, years_back: int = DEFAULT_YEARS_BACK) -> dict:
+    years = required_years(year, years_back)
+    start_year = years[0]
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                WITH listed AS (
+                  SELECT corp_code, market
+                  FROM companies
+                  WHERE stock_code IS NOT NULL
+                    AND market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                ),
+                fin_any AS (
+                  SELECT DISTINCT corp_code FROM financials
+                  WHERE year=:year AND quarter=4
+                ),
+                fin_cfs AS (
+                  SELECT DISTINCT corp_code FROM financials
+                  WHERE year=:year AND quarter=4 AND fs_div='CFS'
+                ),
+                fin_ofs AS (
+                  SELECT DISTINCT corp_code FROM financials
+                  WHERE year=:year AND quarter=4 AND fs_div='OFS'
+                ),
+                fee AS (
+                  SELECT DISTINCT corp_code FROM audit_fees WHERE bsns_year=:year
+                ),
+                aud AS (
+                  SELECT DISTINCT corp_code FROM auditors
+                  WHERE bsns_year=:year AND fs_div='CFS'
+                ),
+                br AS (
+                  SELECT DISTINCT corp_code FROM disclosures
+                  WHERE report_nm LIKE '%사업보고서%'
+                    AND report_nm NOT LIKE '%제출기한연장%'
+                    AND report_nm NOT LIKE '%해외증권%'
+                    AND disc_date BETWEEN :report_start AND :report_end
+                ),
+                ar AS (
+                  SELECT DISTINCT corp_code FROM disclosures
+                  WHERE report_nm LIKE '%감사보고서%'
+                    AND disc_date BETWEEN :report_start AND :report_end
+                ),
+                disc AS (
+                  SELECT DISTINCT corp_code FROM disclosures
+                  WHERE disc_date >= :recent_start
+                ),
+                pol AS (
+                  SELECT DISTINCT corp_code FROM accounting_policy_items
+                  WHERE bsns_year=:year AND fs_div='CFS'
+                )
+                SELECT l.market,
+                       COUNT(*) listed,
+                       SUM(CASE WHEN l.corp_code IN fin_any THEN 1 ELSE 0 END) financial_any_2025,
+                       SUM(CASE WHEN l.corp_code IN fin_cfs THEN 1 ELSE 0 END) financial_cfs_2025,
+                       SUM(CASE WHEN l.corp_code IN fin_ofs THEN 1 ELSE 0 END) financial_ofs_2025,
+                       SUM(CASE WHEN l.corp_code IN br THEN 1 ELSE 0 END) business_report_2025,
+                       SUM(CASE WHEN l.corp_code IN ar THEN 1 ELSE 0 END) audit_report_2025,
+                       SUM(CASE WHEN l.corp_code IN fee THEN 1 ELSE 0 END) audit_fee_2025,
+                       SUM(CASE WHEN l.corp_code IN aud THEN 1 ELSE 0 END) auditor_2025,
+                       SUM(CASE WHEN l.corp_code IN disc THEN 1 ELSE 0 END) disclosure_recent,
+                       SUM(CASE WHEN l.corp_code IN pol THEN 1 ELSE 0 END) policy_2025
+                FROM listed l
+                GROUP BY l.market
+                ORDER BY l.market
+                """
+            ),
+            {
+                "year": year,
+                "recent_start": f"{year}-01-01",
+                "report_start": f"{year + 1}-01-01",
+                "report_end": f"{year + 1}-12-31",
+            },
+        ).mappings().all()
+        policy_corps = conn.execute(
+            text("SELECT COUNT(DISTINCT corp_code) FROM accounting_policy_items")
+        ).scalar() or 0
+        audit_fee_2025_corps = conn.execute(
+            text("SELECT COUNT(DISTINCT corp_code) FROM audit_fees WHERE bsns_year=:year"),
+            {"year": year},
+        ).scalar() or 0
+        listed_rows = conn.execute(
+            text(
+                """
+                SELECT market, COUNT(*) listed
+                FROM companies
+                WHERE stock_code IS NOT NULL
+                  AND market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                GROUP BY market
+                """
+            )
+        ).mappings().all()
+        fin_rows = conn.execute(
+            text(
+                """
+                SELECT c.market, f.year,
+                       COUNT(DISTINCT f.corp_code) financial_any,
+                       COUNT(DISTINCT CASE WHEN f.fs_div='CFS' THEN f.corp_code END) financial_cfs,
+                       COUNT(DISTINCT CASE WHEN f.fs_div='OFS' THEN f.corp_code END) financial_ofs
+                FROM companies c
+                JOIN financials f ON f.corp_code=c.corp_code
+                WHERE c.stock_code IS NOT NULL
+                  AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                  AND f.quarter=4
+                  AND f.year BETWEEN :start_year AND :year
+                GROUP BY c.market, f.year
+                """
+            ),
+            {"start_year": start_year, "year": year},
+        ).mappings().all()
+        fee_rows = conn.execute(
+            text(
+                """
+                SELECT c.market, af.bsns_year year,
+                       COUNT(DISTINCT af.corp_code) audit_fee
+                FROM companies c
+                JOIN audit_fees af ON af.corp_code=c.corp_code
+                WHERE c.stock_code IS NOT NULL
+                  AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                  AND af.bsns_year BETWEEN :start_year AND :year
+                GROUP BY c.market, af.bsns_year
+                """
+            ),
+            {"start_year": start_year, "year": year},
+        ).mappings().all()
+        aud_rows = conn.execute(
+            text(
+                """
+                SELECT c.market, a.bsns_year year,
+                       COUNT(DISTINCT a.corp_code) auditor
+                FROM companies c
+                JOIN auditors a ON a.corp_code=c.corp_code
+                WHERE c.stock_code IS NOT NULL
+                  AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                  AND a.bsns_year BETWEEN :start_year AND :year
+                GROUP BY c.market, a.bsns_year
+                """
+            ),
+            {"start_year": start_year, "year": year},
+        ).mappings().all()
+        business_report_rows = conn.execute(
+            text(
+                """
+                SELECT c.market, :report_year year,
+                       COUNT(DISTINCT d.corp_code) business_report
+                FROM companies c
+                JOIN disclosures d ON d.corp_code=c.corp_code
+                WHERE c.stock_code IS NOT NULL
+                  AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                  AND d.report_nm LIKE '%사업보고서%'
+                  AND d.report_nm NOT LIKE '%제출기한연장%'
+                  AND d.report_nm NOT LIKE '%해외증권%'
+                  AND d.disc_date BETWEEN :start_date AND :end_date
+                GROUP BY c.market
+                """
+            ),
+            {"report_year": year, "start_date": f"{year + 1}-01-01", "end_date": f"{year + 1}-12-31"},
+        ).mappings().all()
+        audit_report_rows = conn.execute(
+            text(
+                """
+                SELECT c.market, :report_year year,
+                       COUNT(DISTINCT d.corp_code) audit_report
+                FROM companies c
+                JOIN disclosures d ON d.corp_code=c.corp_code
+                WHERE c.stock_code IS NOT NULL
+                  AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                  AND d.report_nm LIKE '%감사보고서%'
+                  AND d.disc_date BETWEEN :start_date AND :end_date
+                GROUP BY c.market
+                """
+            ),
+            {"report_year": year, "start_date": f"{year + 1}-01-01", "end_date": f"{year + 1}-12-31"},
+        ).mappings().all()
+        report_rows = []
+        for report_year in years:
+            start_date = f"{report_year + 1}-01-01"
+            end_date = f"{report_year + 1}-12-31"
+            br_rows = conn.execute(
+                text(
+                    """
+                    SELECT c.market,
+                           COUNT(DISTINCT d.corp_code) business_report
+                    FROM companies c
+                    JOIN disclosures d ON d.corp_code=c.corp_code
+                    WHERE c.stock_code IS NOT NULL
+                      AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                      AND d.report_nm LIKE '%사업보고서%'
+                      AND d.report_nm NOT LIKE '%제출기한연장%'
+                      AND d.report_nm NOT LIKE '%해외증권%'
+                      AND d.disc_date BETWEEN :start_date AND :end_date
+                    GROUP BY c.market
+                    """
+                ),
+                {"start_date": start_date, "end_date": end_date},
+            ).mappings().all()
+            ar_rows = conn.execute(
+                text(
+                    """
+                    SELECT c.market,
+                           COUNT(DISTINCT d.corp_code) audit_report
+                    FROM companies c
+                    JOIN disclosures d ON d.corp_code=c.corp_code
+                    WHERE c.stock_code IS NOT NULL
+                      AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                      AND d.report_nm LIKE '%감사보고서%'
+                      AND d.disc_date BETWEEN :start_date AND :end_date
+                    GROUP BY c.market
+                    """
+                ),
+                {"start_date": start_date, "end_date": end_date},
+            ).mappings().all()
+            for row in br_rows:
+                report_rows.append({"year": report_year, "market": row["market"], "business_report": int(row["business_report"] or 0)})
+            for row in ar_rows:
+                report_rows.append({"year": report_year, "market": row["market"], "audit_report": int(row["audit_report"] or 0)})
+        pol_rows = conn.execute(
+            text(
+                """
+                SELECT c.market, p.bsns_year year,
+                       COUNT(DISTINCT p.corp_code) policy
+                FROM companies c
+                JOIN accounting_policy_items p ON p.corp_code=c.corp_code
+                WHERE c.stock_code IS NOT NULL
+                  AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
+                  AND p.bsns_year BETWEEN :start_year AND :year
+                  AND p.fs_div='CFS'
+                GROUP BY c.market, p.bsns_year
+                """
+            ),
+            {"start_year": start_year, "year": year},
+        ).mappings().all()
+
+    listed_by_market = {row["market"]: int(row["listed"] or 0) for row in listed_rows}
+    yearly_markets = {
+        y: {
+            market: _empty_year_market_row(market, listed_by_market.get(market, 0))
+            for market in listed_by_market
+        }
+        for y in years
+    }
+    for row in fin_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        target["financial_any"] = int(row["financial_any"] or 0)
+        target["financial_cfs"] = int(row["financial_cfs"] or 0)
+        target["financial_ofs"] = int(row["financial_ofs"] or 0)
+    for row in fee_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        target["audit_fee"] = int(row["audit_fee"] or 0)
+    for row in aud_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        target["auditor"] = int(row["auditor"] or 0)
+    for row in business_report_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        target["business_report"] = int(row["business_report"] or 0)
+    for row in audit_report_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        target["audit_report"] = int(row["audit_report"] or 0)
+    for row in report_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        if "business_report" in row:
+            target["business_report"] = int(row["business_report"] or 0)
+        if "audit_report" in row:
+            target["audit_report"] = int(row["audit_report"] or 0)
+    for row in pol_rows:
+        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
+            row["market"],
+            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
+        )
+        target["policy"] = int(row["policy"] or 0)
+
+    return {
+        "year": year,
+        "years_back": years_back,
+        "required_years": years,
+        "markets": {row["market"]: dict(row) for row in rows},
+        "yearly_markets": yearly_markets,
+        "policy_corps": int(policy_corps),
+        "audit_fee_2025_corps": int(audit_fee_2025_corps),
+    }
+
+
+def readiness_verdict(snapshot: dict) -> dict:
+    required_gaps: list[str] = []
+    recommended_gaps: list[str] = []
+    for market in CORE_MARKETS:
+        row = snapshot.get("markets", {}).get(market, {})
+        listed = int(row.get("listed") or 0)
+        if pct(row.get("financial_any_2025"), listed) < 95.0:
+            required_gaps.append("financial_any_2025")
+        if pct(row.get("business_report_2025"), listed) < CORE_COVERAGE_THRESHOLD:
+            required_gaps.append("business_report_2025")
+        if pct(row.get("audit_report_2025"), listed) < CORE_COVERAGE_THRESHOLD:
+            required_gaps.append("audit_report_2025")
+        if pct(row.get("auditor_2025"), listed) < CORE_COVERAGE_THRESHOLD:
+            required_gaps.append("auditor_2025")
+        if pct(row.get("disclosure_recent"), listed) < 95.0:
+            required_gaps.append("disclosure_recent")
+
+    yearly_markets = snapshot.get("yearly_markets") or {}
+    for y in snapshot.get("required_years") or []:
+        rows_for_year = yearly_markets.get(y) or yearly_markets.get(str(y)) or {}
+        for market in CORE_MARKETS:
+            row = rows_for_year.get(market, {})
+            listed = int(row.get("listed") or 0)
+            if pct(row.get("financial_any"), listed) < CORE_COVERAGE_THRESHOLD:
+                required_gaps.append(f"financial_any_{y}")
+            if pct(row.get("business_report"), listed) < CORE_COVERAGE_THRESHOLD:
+                required_gaps.append(f"business_report_{y}")
+            if pct(row.get("audit_report"), listed) < CORE_COVERAGE_THRESHOLD:
+                required_gaps.append(f"audit_report_{y}")
+            if pct(row.get("auditor"), listed) < CORE_COVERAGE_THRESHOLD:
+                required_gaps.append(f"auditor_{y}")
+
+    if int(snapshot.get("policy_corps") or 0) < 100:
+        recommended_gaps.append("accounting_policy")
+    if int(snapshot.get("audit_fee_2025_corps") or 0) < 1000:
+        recommended_gaps.append("audit_fee")
+
+    verdict = "pass"
+    if required_gaps:
+        verdict = "fail"
+    elif recommended_gaps:
+        verdict = "conditional_pass"
+    return {
+        "verdict": verdict,
+        "required_gaps": sorted(set(required_gaps)),
+        "recommended_gaps": sorted(set(recommended_gaps)),
+    }
+
+
+def _compact_year_ranges(years: list[int]) -> list[tuple[int, int]]:
+    unique_years = sorted(set(int(y) for y in years))
+    if not unique_years:
+        return []
+    ranges: list[tuple[int, int]] = []
+    start = prev = unique_years[0]
+    for year in unique_years[1:]:
+        if year == prev + 1:
+            prev = year
+            continue
+        ranges.append((start, prev))
+        start = prev = year
+    ranges.append((start, prev))
+    return ranges
+
+
+def backfill_plan(snapshot: dict) -> dict:
+    financial_gap_years: list[int] = []
+    disclosure_gap_years_by_market: dict[str, list[int]] = {m: [] for m in CORE_MARKETS}
+    needs_auditors = False
+
+    yearly_markets = snapshot.get("yearly_markets") or {}
+    for y in snapshot.get("required_years") or []:
+        rows_for_year = yearly_markets.get(y) or yearly_markets.get(str(y)) or {}
+        for market in CORE_MARKETS:
+            row = rows_for_year.get(market, {})
+            listed = int(row.get("listed") or 0)
+            if pct(row.get("financial_any"), listed) < CORE_COVERAGE_THRESHOLD:
+                financial_gap_years.append(int(y))
+            if (
+                pct(row.get("business_report"), listed) < CORE_COVERAGE_THRESHOLD
+                or pct(row.get("audit_report"), listed) < CORE_COVERAGE_THRESHOLD
+            ):
+                disclosure_gap_years_by_market[market].append(int(y))
+                needs_auditors = True
+            if pct(row.get("auditor"), listed) < CORE_COVERAGE_THRESHOLD:
+                needs_auditors = True
+
+    required_commands: list[str] = []
+    for start, end in _compact_year_ranges(financial_gap_years):
+        required_commands.append(
+            f".venv/bin/kreports collect-all --year-from {start} --year-to {end}"
+        )
+    for market in CORE_MARKETS:
+        for start, end in _compact_year_ranges(disclosure_gap_years_by_market[market]):
+            required_commands.append(
+                ".venv/bin/kreports collect-disclosures "
+                f"--market {market} --start-date {start + 1}0101 --end-date {end + 1}1231"
+            )
+    if needs_auditors:
+        required_commands.append(".venv/bin/kreports collect-auditors")
+
+    recommended_commands: list[str] = []
+    verdict = readiness_verdict(snapshot)
+    year = int(snapshot.get("year") or max(snapshot.get("required_years") or [2025]))
+    if "accounting_policy" in verdict["recommended_gaps"]:
+        for market in CORE_MARKETS:
+            recommended_commands.append(
+                f".venv/bin/kreports collect-policies --market {market} --year {year} --limit 100"
+            )
+    if "audit_fee" in verdict["recommended_gaps"]:
+        years = snapshot.get("required_years") or [year]
+        for market in CORE_MARKETS:
+            recommended_commands.append(
+                ".venv/bin/kreports collect-audit-fees "
+                f"--market {market} --year-from {min(years)} --year-to {max(years)}"
+            )
+
+    return {
+        "required_commands": required_commands,
+        "recommended_commands": recommended_commands,
+        "note": "Run only on a maintainer machine with DART_API_KEY in the shell environment.",
+    }
+
+
+def dataset_completeness_snapshot(
+    year: int = 2025,
+    years_back: int = DEFAULT_YEARS_BACK,
+    sample_size: int = 100,
+) -> dict:
+    """Strict MCP product-readiness view.
+
+    This is intentionally stricter than auditor_readiness_snapshot. Readiness can
+    say API jobs ran or broad tables exist; completeness asks whether a listed
+    company can actually show the data the MCP promises.
+    """
+    years = required_years(year, years_back)
+    start_year = years[0]
+    with engine.connect() as conn:
+        table_names = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            ).all()
+        }
+        has_kam_table = any(
+            name in table_names
+            for name in ("report_sections", "kam_topics", "key_audit_matters", "audit_key_matters")
+        )
+        kam_rows = 0
+        if "report_sections" in table_names:
+            kam_rows = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM report_sections "
+                    "WHERE source_type IN ('audit_report', 'business_report') AND section_key='kam'"
+                )
+            ).scalar() or 0
+        elif "kam_topics" in table_names:
+            kam_rows = conn.execute(text("SELECT COUNT(*) FROM kam_topics")).scalar() or 0
+        elif "key_audit_matters" in table_names:
+            kam_rows = conn.execute(text("SELECT COUNT(*) FROM key_audit_matters")).scalar() or 0
+        elif "audit_key_matters" in table_names:
+            kam_rows = conn.execute(text("SELECT COUNT(*) FROM audit_key_matters")).scalar() or 0
+
+        rows = conn.execute(
+            text(
+                """
+                WITH listed AS (
+                  SELECT corp_code, stock_code, corp_name, market, induty_code
+                  FROM companies
+                  WHERE stock_code IS NOT NULL
+                    AND market IN ('KOSPI', 'KOSDAQ')
+                ),
+                fin AS (
+                  SELECT corp_code, COUNT(DISTINCT year) years
+                  FROM financials
+                  WHERE quarter=4 AND year BETWEEN :start_year AND :year
+                  GROUP BY corp_code
+                ),
+                fee AS (
+                  SELECT corp_code,
+                         COUNT(DISTINCT bsns_year) years,
+                         COUNT(DISTINCT CASE WHEN audit_fee_m IS NOT NULL THEN bsns_year END) fee_value_years,
+                         COUNT(DISTINCT CASE WHEN audit_hours IS NOT NULL THEN bsns_year END) hour_value_years
+                  FROM audit_fees
+                  WHERE bsns_year BETWEEN :start_year AND :year
+                  GROUP BY corp_code
+                ),
+                aud AS (
+                  SELECT corp_code, COUNT(DISTINCT bsns_year) years
+                  FROM auditors
+                  WHERE bsns_year BETWEEN :start_year AND :year
+                  GROUP BY corp_code
+                ),
+                pol AS (
+                  SELECT corp_code, COUNT(DISTINCT item_key) items
+                  FROM accounting_policy_items
+                  WHERE bsns_year=:year
+                  GROUP BY corp_code
+                )
+                SELECT l.corp_code, l.stock_code, l.corp_name, l.market, l.induty_code,
+                       COALESCE(fin.years, 0) financial_years,
+                       COALESCE(fee.years, 0) audit_fee_years,
+                       COALESCE(fee.fee_value_years, 0) audit_fee_value_years,
+                       COALESCE(fee.hour_value_years, 0) audit_hour_value_years,
+                       COALESCE(aud.years, 0) auditor_years,
+                       COALESCE(pol.items, 0) policy_items
+                FROM listed l
+                LEFT JOIN fin ON fin.corp_code=l.corp_code
+                LEFT JOIN fee ON fee.corp_code=l.corp_code
+                LEFT JOIN aud ON aud.corp_code=l.corp_code
+                LEFT JOIN pol ON pol.corp_code=l.corp_code
+                """
+            ),
+            {"start_year": start_year, "year": year},
+        ).mappings().all()
+
+    listed = len(rows)
+    requirements = {
+        "financial_5y": 0,
+        "audit_fee_5y": 0,
+        "audit_fee_value_5y": 0,
+        "audit_hours_5y": 0,
+        "auditor_5y": 0,
+        "policy_current": 0,
+        "core_without_policy": 0,
+        "complete_company": 0,
+    }
+    incomplete_examples: list[dict] = []
+    required_count = len(years)
+    sample_rows = rows[: max(0, int(sample_size))]
+    sample_complete = 0
+
+    for idx, row in enumerate(rows):
+        financial_ok = int(row["financial_years"] or 0) >= required_count
+        fee_ok = int(row["audit_fee_years"] or 0) >= required_count
+        fee_value_ok = int(row["audit_fee_value_years"] or 0) >= required_count
+        hour_ok = int(row["audit_hour_value_years"] or 0) >= required_count
+        auditor_ok = int(row["auditor_years"] or 0) >= required_count
+        policy_ok = int(row["policy_items"] or 0) > 0
+        core_ok = financial_ok and fee_ok and auditor_ok
+        complete_ok = core_ok and fee_value_ok and hour_ok and policy_ok and has_kam_table and kam_rows > 0
+
+        requirements["financial_5y"] += int(financial_ok)
+        requirements["audit_fee_5y"] += int(fee_ok)
+        requirements["audit_fee_value_5y"] += int(fee_value_ok)
+        requirements["audit_hours_5y"] += int(hour_ok)
+        requirements["auditor_5y"] += int(auditor_ok)
+        requirements["policy_current"] += int(policy_ok)
+        requirements["core_without_policy"] += int(core_ok)
+        requirements["complete_company"] += int(complete_ok)
+
+        if idx < len(sample_rows):
+            sample_complete += int(complete_ok)
+
+        if not complete_ok and len(incomplete_examples) < 20:
+            missing = []
+            if not financial_ok:
+                missing.append("financial_5y")
+            if not fee_ok:
+                missing.append("audit_fee_5y")
+            if not fee_value_ok:
+                missing.append("audit_fee_value_5y")
+            if not hour_ok:
+                missing.append("audit_hours_5y")
+            if not auditor_ok:
+                missing.append("auditor_5y")
+            if not policy_ok:
+                missing.append("policy_current")
+            if not has_kam_table or kam_rows == 0:
+                missing.append("kam_body_topics")
+            incomplete_examples.append(
+                {
+                    "stock_code": row["stock_code"],
+                    "corp_name": row["corp_name"],
+                    "market": row["market"],
+                    "financial_years": int(row["financial_years"] or 0),
+                    "audit_fee_years": int(row["audit_fee_years"] or 0),
+                    "audit_fee_value_years": int(row["audit_fee_value_years"] or 0),
+                    "audit_hour_value_years": int(row["audit_hour_value_years"] or 0),
+                    "auditor_years": int(row["auditor_years"] or 0),
+                    "policy_items": int(row["policy_items"] or 0),
+                    "missing": missing,
+                }
+            )
+
+    rates = {key: pct(value, listed) for key, value in requirements.items()}
+    required_gaps = [
+        key
+        for key in (
+            "financial_5y",
+            "audit_fee_5y",
+            "audit_fee_value_5y",
+            "audit_hours_5y",
+            "auditor_5y",
+            "policy_current",
+            "complete_company",
+        )
+        if rates[key] < COMPLETENESS_THRESHOLD
+    ]
+    if not has_kam_table or kam_rows == 0:
+        required_gaps.append("kam_body_topics")
+
+    return {
+        "verdict": "pass" if not required_gaps else "fail",
+        "year": year,
+        "required_years": years,
+        "threshold_pct": COMPLETENESS_THRESHOLD,
+        "listed_companies": listed,
+        "counts": requirements,
+        "rates": rates,
+        "sample_size": len(sample_rows),
+        "sample_complete": sample_complete,
+        "sample_complete_rate": pct(sample_complete, len(sample_rows)),
+        "kam_body_topics": {
+            "table_present": has_kam_table,
+            "rows": int(kam_rows),
+            "status": "persisted" if has_kam_table and kam_rows > 0 else "missing",
+        },
+        "required_gaps": sorted(set(required_gaps)),
+        "incomplete_examples": incomplete_examples,
+        "backfill_priorities": [
+            "Persist accounting_policy_items for the full KOSPI/KOSDAQ target universe.",
+            "Add a KAM/key_audit_matters table and parser; event-only KAM screening is not complete.",
+            "Backfill auditors to 5-year coverage for listed companies.",
+            "Backfill or classify missing audit_fee_m/audit_hours values by DART no_data vs parser gap.",
+            "Fix financial 5-year denominator by listed-at-year/no_data status before claiming completeness.",
+        ],
+    }

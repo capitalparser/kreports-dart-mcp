@@ -25,6 +25,24 @@ def test_get_industry_audit_landscape_in_handlers():
     assert "get_industry_audit_landscape" in HANDLERS
 
 
+def test_compare_peer_audit_report_matters_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "compare_peer_audit_report_matters" in names
+    assert "compare_peer_audit_report_matters" in HANDLERS
+
+
+def test_search_audit_report_matters_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "search_audit_report_matters" in names
+    assert "search_audit_report_matters" in HANDLERS
+
+
+def test_search_dataset_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "search_dataset" in names
+    assert "search_dataset" in HANDLERS
+
+
 def test_compare_to_industry_multi_call_smoke():
     """smoke: dispatch by name, expect JSON-serializable result."""
     out_str = call_tool(

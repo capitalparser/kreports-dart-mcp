@@ -16,9 +16,14 @@ if _old_db.exists() and not _new_db.exists():
     _old_db.rename(_new_db)
     _logger.info("DB 파일 마이그레이션: dart_platform.db → kreports.db")
 
+_sqlite_connect_args = {
+    "check_same_thread": False,
+    "timeout": 60,
+}
+
 engine = create_engine(
     settings.db_url,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.db_url else {},
+    connect_args=_sqlite_connect_args if "sqlite" in settings.db_url else {},
     echo=False,
 )
 
@@ -58,8 +63,25 @@ def _migrate_existing_tables() -> None:
         ("financials", "beneish_tata REAL"),
         ("financials", "beneish_m_score REAL"),
         ("financials", "beneish_flag INTEGER"),
+        # 데이터 출처 (acntall|acnt)
+        ("financials", "source VARCHAR(20)"),
+        # 감사보고서제출 첨부문서 식별자
+        ("report_documents", "dcm_no VARCHAR(20)"),
+        ("report_sections", "dcm_no VARCHAR(20)"),
     ]
     with engine.connect() as conn:
+        if "sqlite" in settings.db_url:
+            for pragma_sql in [
+                "PRAGMA journal_mode=WAL",
+                "PRAGMA busy_timeout=60000",
+                "PRAGMA synchronous=NORMAL",
+            ]:
+                try:
+                    conn.execute(text(pragma_sql))
+                    conn.commit()
+                except Exception:
+                    pass
+
         for table, col_def in new_columns:
             try:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_def}"))
@@ -71,6 +93,13 @@ def _migrate_existing_tables() -> None:
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_fact_corp_year ON financial_facts(corp_code, bsns_year)",
             "CREATE INDEX IF NOT EXISTS idx_fact_sj ON financial_facts(corp_code, bsns_year, fs_div, sj_div)",
+            "CREATE INDEX IF NOT EXISTS idx_subsidiary_matrix_parent_year ON subsidiary_auditor_matrix(parent_corp_code, bsns_year)",
+            "CREATE INDEX IF NOT EXISTS idx_backfill_runs_key_status ON backfill_runs(task_type, year, market, status)",
+            "CREATE INDEX IF NOT EXISTS idx_backfill_runs_started ON backfill_runs(started_at)",
+            "CREATE INDEX IF NOT EXISTS idx_source_doc_corp_year ON source_documents(corp_code, bsns_year, source_type)",
+            "CREATE INDEX IF NOT EXISTS idx_source_doc_hash ON source_documents(doc_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_extraction_runs_doc ON extraction_runs(rcept_no, source_type)",
+            "CREATE INDEX IF NOT EXISTS idx_extraction_runs_extractor ON extraction_runs(extractor_name, status)",
         ]:
             try:
                 conn.execute(text(idx_sql))

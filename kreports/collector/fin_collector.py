@@ -13,7 +13,10 @@ import time
 from datetime import datetime
 
 from kreports.config import settings
-from kreports.collector.fetcher import fetch_financial_statements
+from kreports.collector.fetcher import (
+    fetch_financial_statements,
+    fetch_financial_summary,
+)
 from kreports.collector.corp_sync import get_corp_code
 from kreports.db.engine import get_session
 from kreports.db.models import Company, Financial, FinancialFact, FetchLog
@@ -21,6 +24,7 @@ from kreports.processor.fin_parser import (
     parse_all_accounts,
     compute_summary_from_facts,
     parse_financials,
+    parse_summary_response,
     REPRT_TO_QUARTER,
 )
 from kreports.judge.flags import (
@@ -33,6 +37,7 @@ logger = logging.getLogger(__name__)
 QUARTER_TO_REPRT = {v: k for k, v in REPRT_TO_QUARTER.items()}
 
 _LISTED_MARKETS = {"KOSPI", "KOSDAQ", "KONEX"}
+_DART_NO_DATA_STATUS = "013"
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +79,18 @@ def collect_financial(
             _log_fetch(corp_code, year, quarter, "error", str(e))
             return "error"
 
+    # acntall 양쪽 실패 시 acnt(주요계정 요약) 폴백 — KOSDAQ 소형주 갭 보완
     if response.get("status") != "000":
+        if response.get("status") not in (_DART_NO_DATA_STATUS, None):
+            _log_fetch(corp_code, year, quarter, "error", response.get("message"))
+            return "error"
+        status = _try_summary_fallback(corp_code, year, reprt_code, quarter)
+        if status == "success":
+            _log_fetch(corp_code, year, quarter, "success", None)
+            return "success"
+        if status == "error":
+            _log_fetch(corp_code, year, quarter, "error", None)
+            return "error"
         _log_fetch(corp_code, year, quarter, "no_data", None)
         return "no_data"
 
@@ -87,6 +103,48 @@ def collect_financial(
 
     _log_fetch(corp_code, year, quarter, status, None)
     return status
+
+
+def _try_summary_fallback(
+    corp_code: str, year: int, reprt_code: str, quarter: int,
+) -> str:
+    """
+    acntall(CFS/OFS) 모두 실패 시 acnt(주요계정) 엔드포인트 폴백.
+    CFS → OFS 순으로 시도. 성공 시 Financial만 저장 (financial_facts 없음).
+    """
+    saw_error = False
+    for fs_div in ("CFS", "OFS"):
+        try:
+            response = fetch_financial_summary(corp_code, year, reprt_code, fs_div)
+            time.sleep(settings.request_delay)
+        except Exception as e:
+            logger.warning("acnt 폴백 실패 [%s %s %s]: %s", corp_code, year, fs_div, e)
+            saw_error = True
+            continue
+
+        if response.get("status") not in ("000", _DART_NO_DATA_STATUS):
+            logger.warning(
+                "acnt 폴백 오류 [%s %s %s]: status=%s message=%s",
+                corp_code, year, fs_div, response.get("status"), response.get("message"),
+            )
+            saw_error = True
+            continue
+
+        parsed = parse_summary_response(response, corp_code, year, reprt_code, fs_div)
+        if parsed is None:
+            continue
+
+        flags = compute_record_flags(parsed)
+        _upsert_financial({**parsed, **flags})
+        compute_gap_flags(corp_code, year, quarter)
+        compute_trend_flags(corp_code, year, quarter, fs_div)
+        logger.info(
+            "acnt 폴백 성공 [%s %s Q%s %s]: confidence=%.2f",
+            corp_code, year, quarter, fs_div, parsed.get("account_map_confidence") or 0.0,
+        )
+        return "success"
+
+    return "error" if saw_error else "no_data"
 
 
 def collect_financial_range(
@@ -168,6 +226,7 @@ def _process_listed(
     )
 
     summary = compute_summary_from_facts(all_facts, corp_code, year, reprt_code, fs_div)
+    summary["source"] = "acntall"
     flags = compute_record_flags(summary)
     _upsert_financial({**summary, **flags})
 
@@ -193,6 +252,7 @@ def _process_unlisted(
     if parsed is None:
         return "no_data"
 
+    parsed["source"] = "acntall"
     flags = compute_record_flags(parsed)
     _upsert_financial({**parsed, **flags})
     compute_gap_flags(corp_code, year, quarter)
@@ -264,6 +324,7 @@ def _upsert_financial(data: dict) -> None:
              beneish_dsri, beneish_gmi, beneish_aqi, beneish_sgi,
              beneish_depi, beneish_sgai, beneish_lvgi, beneish_tata,
              beneish_m_score, beneish_flag,
+             source,
              fetched_at)
         VALUES
             (:corp_code, :year, :quarter, :fs_div,
@@ -277,6 +338,7 @@ def _upsert_financial(data: dict) -> None:
              :beneish_dsri, :beneish_gmi, :beneish_aqi, :beneish_sgi,
              :beneish_depi, :beneish_sgai, :beneish_lvgi, :beneish_tata,
              :beneish_m_score, :beneish_flag,
+             :source,
              :fetched_at)
         ON CONFLICT(corp_code, year, quarter, fs_div) DO UPDATE SET
             revenue                = excluded.revenue,
@@ -306,6 +368,7 @@ def _upsert_financial(data: dict) -> None:
             beneish_tata           = excluded.beneish_tata,
             beneish_m_score        = excluded.beneish_m_score,
             beneish_flag           = excluded.beneish_flag,
+            source                 = excluded.source,
             fetched_at             = excluded.fetched_at
     """)
     with get_session() as session:
@@ -341,6 +404,7 @@ def _upsert_financial(data: dict) -> None:
             "beneish_tata": data.get("beneish_tata"),
             "beneish_m_score": data.get("beneish_m_score"),
             "beneish_flag": data.get("beneish_flag"),
+            "source": data.get("source"),
             "fetched_at": datetime.utcnow().isoformat(),
         })
 

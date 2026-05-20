@@ -1,10 +1,13 @@
 import asyncio
+import html
 import logging
 import time
 import zipfile
 import io
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -13,6 +16,7 @@ from kreports.config import settings
 logger = logging.getLogger(__name__)
 
 DART_BASE = "https://opendart.fss.or.kr/api"
+DART_WEB_BASE = "https://dart.fss.or.kr"
 CORP_CODE_ZIP_URL = f"{DART_BASE}/corpCode.xml"  # zip 반환
 
 # 로컬 캐시 경로 (30일 유효)
@@ -23,6 +27,17 @@ _CACHE_MAX_AGE_DAYS = 30
 
 def _get_client() -> httpx.Client:
     return httpx.Client(timeout=30.0)
+
+
+def _decode_dart_text(content: bytes, fallback_encoding: str | None = None) -> str:
+    for enc in ("utf-8", fallback_encoding, "euc-kr", "cp949"):
+        if not enc:
+            continue
+        try:
+            return content.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return content.decode("utf-8", errors="replace")
 
 
 def _check_api_key() -> None:
@@ -129,6 +144,63 @@ def fetch_financial_statements(
         try:
             with _get_client() as client:
                 resp = client.get(f"{DART_BASE}/fnlttSinglAcntAll.json", params=params)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            if attempt < settings.max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning("HTTP 오류 %s, %d초 후 재시도", e.response.status_code, wait)
+                time.sleep(wait)
+            else:
+                raise
+        except httpx.RequestError as e:
+            if attempt < settings.max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning("요청 오류 %s, %d초 후 재시도", e, wait)
+                time.sleep(wait)
+            else:
+                raise
+
+        time.sleep(settings.request_delay)
+
+    return {"status": "ERR", "message": "최대 재시도 초과"}
+
+
+def fetch_financial_summary(
+    corp_code: str,
+    bsns_year: int,
+    reprt_code: str,
+    fs_div: str = "CFS",
+) -> dict:
+    """
+    DART 단일회사 주요계정 재무제표 API 호출 (fnlttSinglAcnt).
+
+    fnlttSinglAcntAll 대비 행수 적고 account_id 없으나, KOSDAQ 소형주 포함
+    더 넓은 커버리지를 제공한다. acntall 폴백 경로에서 사용.
+
+    Args:
+        corp_code: 8자리 기업코드
+        bsns_year: 사업연도
+        reprt_code: 11013/11012/11014/11011
+        fs_div: CFS / OFS
+
+    Returns:
+        DART API 응답 dict. status "000"이면 정상.
+    """
+    _check_api_key()
+
+    params = {
+        "crtfc_key": settings.dart_api_key,
+        "corp_code": corp_code,
+        "bsns_year": str(bsns_year),
+        "reprt_code": reprt_code,
+        "fs_div": fs_div,
+    }
+
+    for attempt in range(settings.max_retries):
+        try:
+            with _get_client() as client:
+                resp = client.get(f"{DART_BASE}/fnlttSinglAcnt.json", params=params)
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as e:
@@ -277,6 +349,66 @@ def fetch_document_xml(rcept_no: str) -> str | None:
         return None
 
 
+def fetch_dart_main_html(rcept_no: str) -> str | None:
+    """Fetch DART filing main page HTML, used to discover attached dcmNo values."""
+    try:
+        with _get_client() as client:
+            resp = client.get(
+                f"{DART_WEB_BASE}/dsaf001/main.do",
+                params={"rcpNo": rcept_no},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            return _decode_dart_text(resp.content, resp.encoding)
+    except Exception as e:
+        logger.warning("DART main HTML 수집 실패 [%s]: %s", rcept_no, e)
+        return None
+
+
+def parse_attachment_options(main_html: str) -> list[dict[str, str]]:
+    """Parse DART attachment <option> rows into rcept_no/dcm_no/title records."""
+    options: list[dict[str, str]] = []
+    for match in re.finditer(
+        r"<option\b[^>]*\bvalue=[\"']([^\"']+)[\"'][^>]*>(.*?)</option>",
+        main_html or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        raw_value = html.unescape(match.group(1)).strip()
+        title = re.sub(r"<[^>]+>", " ", match.group(2))
+        title = html.unescape(re.sub(r"\s+", " ", title)).strip()
+        if not raw_value or "dcmNo=" not in raw_value:
+            continue
+        params = parse_qs(raw_value, keep_blank_values=True)
+        rcept_no = (params.get("rcpNo") or params.get("rcept_no") or [""])[0]
+        dcm_no = (params.get("dcmNo") or [""])[0]
+        if rcept_no and dcm_no:
+            options.append({"rcept_no": rcept_no, "dcm_no": dcm_no, "title": title})
+    return options
+
+
+def fetch_viewer_html(rcept_no: str, dcm_no: str) -> str | None:
+    """Fetch a DART attachment viewer body by rcpNo/dcmNo."""
+    try:
+        with _get_client() as client:
+            resp = client.get(
+                f"{DART_WEB_BASE}/report/viewer.do",
+                params={
+                    "rcpNo": rcept_no,
+                    "dcmNo": dcm_no,
+                    "eleId": "0",
+                    "offset": "0",
+                    "length": "0",
+                    "dtd": "HTML",
+                },
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            return _decode_dart_text(resp.content, resp.encoding)
+    except Exception as e:
+        logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # 계열회사 목록 API
 # ---------------------------------------------------------------------------
@@ -358,7 +490,7 @@ def fetch_company_info(corp_code: str) -> dict | None:
 
 def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
     """
-    DART DS002 회계감사용역계약 체결현황 API 호출.
+    DART 정기보고서 주요정보의 감사용역/비감사용역 API 호출.
 
     Args:
         corp_code: 8자리 기업코드
@@ -366,11 +498,8 @@ def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
 
     Returns:
         DART API 응답 dict. status "000"이면 정상.
-        주요 응답 필드(list 항목):
-          adt_fee   - 감사보수 (백만원)
-          adt_time  - 감사시간 (시간)
-          nadt_fee  - 비감사보수 (백만원)
-          nadt_time - 비감사시간 (시간)
+        list는 adtServcCnclsSttus(감사용역), non_audit_list는
+        accnutAdtorNonAdtServcCnclsSttus(비감사용역) 원문 list.
     """
     _check_api_key()
     params = {
@@ -381,16 +510,36 @@ def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
     }
     try:
         with _get_client() as client:
-            resp = client.get(f"{DART_BASE}/hmvAuditFee.json", params=params)
-            resp.raise_for_status()
-            return resp.json()
+            audit_resp = client.get(f"{DART_BASE}/adtServcCnclsSttus.json", params=params)
+            audit_resp.raise_for_status()
+            audit_data = audit_resp.json()
+
+            non_audit_resp = client.get(
+                f"{DART_BASE}/accnutAdtorNonAdtServcCnclsSttus.json",
+                params=params,
+            )
+            non_audit_resp.raise_for_status()
+            non_audit_data = non_audit_resp.json()
+
+            if audit_data.get("status") != "000":
+                return audit_data
+
+            if non_audit_data.get("status") == "000":
+                audit_data["non_audit_list"] = non_audit_data.get("list", [])
+            elif non_audit_data.get("status") == "013":
+                audit_data["non_audit_list"] = []
+            else:
+                audit_data["non_audit_status"] = non_audit_data.get("status")
+                audit_data["non_audit_message"] = non_audit_data.get("message")
+
+            return audit_data
     except Exception as e:
-        logger.warning("hmvAuditFee 조회 실패 [%s %s]: %s", corp_code, bsns_year, e)
+        logger.warning("감사용역 API 조회 실패 [%s %s]: %s", corp_code, bsns_year, e)
         return {"status": "ERR", "message": str(e)}
 
 
 def fetch_disclosure_list(
-    corp_code: str,
+    corp_code: str | None,
     start_date: str,
     end_date: str,
     disc_type: str = "",
@@ -399,7 +548,7 @@ def fetch_disclosure_list(
     DART 공시 목록 API 호출 (페이징 자동 처리).
 
     Args:
-        corp_code: 8자리 기업코드
+        corp_code: 8자리 기업코드. None이면 기간 전체 공시 목록을 조회한다.
         start_date: 조회 시작일 (YYYYMMDD)
         end_date: 조회 종료일 (YYYYMMDD)
         disc_type: 공시유형 필터 (빈 문자열 = 전체)
@@ -416,12 +565,13 @@ def fetch_disclosure_list(
     while True:
         params = {
             "crtfc_key": settings.dart_api_key,
-            "corp_code": corp_code,
             "bgn_de": start_date,
             "end_de": end_date,
             "page_no": page,
             "page_count": page_count,
         }
+        if corp_code:
+            params["corp_code"] = corp_code
         if disc_type:
             params["pblntf_ty"] = disc_type
 
@@ -430,8 +580,12 @@ def fetch_disclosure_list(
             resp.raise_for_status()
             data = resp.json()
 
-        if data.get("status") != "000":
+        status = data.get("status")
+        if status == "013":
             break
+        if status != "000":
+            message = data.get("message") or "unknown error"
+            raise RuntimeError(f"DART list.json status={status}: {message}")
 
         items = data.get("list", [])
         results.extend(items)

@@ -233,3 +233,76 @@ def parse_financials(
         return None
 
     return summary
+
+
+# ---------------------------------------------------------------------------
+# fnlttSinglAcnt 폴백: 주요계정 요약 응답 파싱
+# ---------------------------------------------------------------------------
+
+_CORE_FIELDS = ("revenue", "operating_profit", "net_income",
+                "total_assets", "total_debt", "total_equity")
+_BS_FIELDS = {"total_assets", "total_debt", "total_equity"}
+_IS_FIELDS = {"revenue", "operating_profit", "net_income"}
+
+
+def parse_summary_response(
+    api_response: dict,
+    corp_code: str,
+    year: int,
+    reprt_code: str,
+    fs_div: str,
+) -> dict | None:
+    """
+    fnlttSinglAcnt (주요계정) 응답에서 핵심 6개 재무지표를 추출한다.
+
+    fnlttSinglAcntAll와 달리 account_id 없음 → account_nm 별칭 매칭만 사용.
+    sj_div로 BS/IS/CIS 구분하여 동명 계정 오매칭(예: '자본총계' IS행)을 방지.
+
+    Returns:
+        {corp_code, year, quarter, fs_div, revenue, ...,
+         account_map_confidence, source='acnt'} 또는 None
+    """
+    if api_response.get("status") != "000":
+        return None
+
+    rows = api_response.get("list", [])
+    if not rows:
+        return None
+
+    quarter = REPRT_TO_QUARTER.get(reprt_code, 0)
+    result: dict = {field: None for field in _CORE_FIELDS}
+    filled: set[str] = set()
+
+    for row in rows:
+        nm = (row.get("account_nm") or "").strip()
+        sj = (row.get("sj_div") or "").strip()
+        field = normalize_account(nm)
+        if not field or field in filled:
+            continue
+        # sj_div 일치 강제 (acnt 응답은 sj_div 비어있지 않음)
+        if field in _BS_FIELDS and sj not in ("BS", ""):
+            continue
+        if field in _IS_FIELDS and sj not in ("IS", "CIS", ""):
+            continue
+        amount = _parse_amount(row.get("thstrm_amount"))
+        if amount is not None:
+            result[field] = amount
+            filled.add(field)
+
+    if not filled:
+        return None
+
+    confidence = round(len(filled) / len(_CORE_FIELDS), 3)
+
+    return {
+        "corp_code": corp_code,
+        "year": year,
+        "quarter": quarter,
+        "fs_div": fs_div,
+        **result,
+        "account_map_confidence": confidence,
+        "cfs_ofs_gap_flag": None,
+        "accrual_ratio": None,
+        "op_cf_divergence_flag": None,
+        "source": "acnt",
+    }

@@ -21,7 +21,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
+from sqlalchemy import text
 
+from kreports.db.engine import get_session
 from kreports.mcp.server import server
 from kreports.mcp.tools import ALL_TOOLS
 
@@ -100,6 +102,35 @@ async def _health(_: Request) -> JSONResponse:
     )
 
 
+async def _ready(_: Request) -> JSONResponse:
+    try:
+        with get_session() as session:
+            company_count = int(session.execute(text("SELECT count(*) FROM companies")).scalar() or 0)
+            section_count = int(session.execute(text("SELECT count(*) FROM report_sections")).scalar() or 0)
+            financial_count = int(session.execute(text("SELECT count(*) FROM financials")).scalar() or 0)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": str(exc),
+            },
+            status_code=503,
+        )
+
+    ok = company_count > 0
+    return JSONResponse(
+        {
+            "ok": ok,
+            "db": {
+                "companies": company_count,
+                "financials": financial_count,
+                "report_sections": section_count,
+            },
+        },
+        status_code=200 if ok else 503,
+    )
+
+
 def create_app(
     *,
     path: str = DEFAULT_PATH,
@@ -130,6 +161,7 @@ def create_app(
                 "name": "kreports",
                 "mcp_path": path,
                 "health_path": "/healthz",
+                "ready_path": "/readyz",
                 "note": "Connect an MCP client to the configured mcp_path.",
             }
         )
@@ -143,6 +175,7 @@ def create_app(
         routes=[
             Route("/", endpoint=root, methods=["GET"]),
             Route("/healthz", endpoint=_health, methods=["GET"]),
+            Route("/readyz", endpoint=_ready, methods=["GET"]),
             Route(path, endpoint=mcp_app),
         ],
         lifespan=lifespan,
@@ -171,9 +204,10 @@ def run_http(
 
     auth_token = _effective_token(token)
     if not auth_token and not allow_unauthenticated:
-        logger.warning(
-            "KREPORTS_MCP_TOKEN is not set; server will accept unauthenticated "
-            "MCP requests. Use --token or set KREPORTS_MCP_TOKEN for bearer auth."
+        raise RuntimeError(
+            "KREPORTS_MCP_TOKEN is required for remote MCP. "
+            "Use --token, set KREPORTS_MCP_TOKEN, or pass --allow-unauthenticated "
+            "only for short-lived local/tunnel testing."
         )
 
     app = create_app(

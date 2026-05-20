@@ -12,6 +12,7 @@ from kreports.processor.fin_parser import (
     parse_all_accounts,
     compute_summary_from_facts,
     parse_financials,
+    parse_summary_response,
     _parse_amount,
     REPRT_TO_QUARTER,
 )
@@ -131,3 +132,90 @@ class TestReptCodeMapping:
     ])
     def test_reprt_to_quarter(self, reprt_code, quarter):
         assert REPRT_TO_QUARTER[reprt_code] == quarter
+
+
+class TestParseSummaryResponse:
+    """fnlttSinglAcnt 폴백 응답 파싱 검증."""
+
+    def test_returns_none_on_no_data(self, dart_response_no_data):
+        result = parse_summary_response(
+            dart_response_no_data, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result is None
+
+    def test_returns_none_on_empty_list(self):
+        result = parse_summary_response(
+            {"status": "000", "list": []}, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result is None
+
+    def test_all_six_fields_extracted(self, dart_response_acnt_summary):
+        result = parse_summary_response(
+            dart_response_acnt_summary, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result is not None
+        assert result["revenue"] == 75_000_000_000
+        assert result["operating_profit"] == 8_000_000_000
+        assert result["net_income"] == 6_000_000_000
+        assert result["total_assets"] == 150_000_000_000
+        assert result["total_debt"] == 40_000_000_000
+        assert result["total_equity"] == 110_000_000_000
+
+    def test_confidence_full(self, dart_response_acnt_summary):
+        result = parse_summary_response(
+            dart_response_acnt_summary, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result["account_map_confidence"] == 1.0
+
+    def test_source_tagged_acnt(self, dart_response_acnt_summary):
+        result = parse_summary_response(
+            dart_response_acnt_summary, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result["source"] == "acnt"
+
+    def test_metadata_propagated(self, dart_response_acnt_summary):
+        result = parse_summary_response(
+            dart_response_acnt_summary, CORP_CODE, YEAR, "11011", "OFS"
+        )
+        assert result["corp_code"] == CORP_CODE
+        assert result["year"] == YEAR
+        assert result["fs_div"] == "OFS"
+        assert result["quarter"] == 4
+
+    def test_partial_response_returns_partial(self, dart_response_acnt_partial):
+        result = parse_summary_response(
+            dart_response_acnt_partial, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result is not None
+        assert result["operating_profit"] == 1_000_000_000
+        assert result["revenue"] is None
+        assert result["total_assets"] is None
+        # 6필드 중 1개 → confidence 1/6 = 0.167
+        assert result["account_map_confidence"] == 0.167
+
+    def test_sj_div_filter_blocks_cross_section_match(self):
+        """자본총계가 IS로 잘못 들어온 경우 매칭 거부."""
+        bogus = {
+            "status": "000",
+            "list": [
+                {"sj_div": "IS", "account_nm": "자본총계",
+                 "thstrm_amount": "999,999,999,999", "ord": "1"},
+                {"sj_div": "IS", "account_nm": "매출액",
+                 "thstrm_amount": "1,000,000,000", "ord": "2"},
+            ],
+        }
+        result = parse_summary_response(bogus, CORP_CODE, YEAR, REPRT_CODE, FS_DIV)
+        assert result is not None
+        # IS에 들어온 자본총계는 무시되어야 함
+        assert result["total_equity"] is None
+        # 같은 IS의 매출액은 정상 매칭
+        assert result["revenue"] == 1_000_000_000
+
+    def test_acntall_response_also_parseable(self, dart_response_samsung_2024):
+        """acntall 응답에도 account_nm은 있으므로 동작은 해야 한다 (별도 사용 경로지만 회귀 안전성)."""
+        result = parse_summary_response(
+            dart_response_samsung_2024, CORP_CODE, YEAR, REPRT_CODE, FS_DIV
+        )
+        assert result is not None
+        assert result["revenue"] == 300_869_340_000_000
+        assert result["source"] == "acnt"

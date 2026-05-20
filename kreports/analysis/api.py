@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import bindparam, text
 
 from kreports.db.engine import get_session, engine as _engine
-from kreports.db.models import Company, Disclosure
+from kreports.db.models import BusinessAffiliateAuditor, Company, Disclosure, ReportSection
 
 # dashboard.db는 streamlit optional import를 지원하므로 headless에서도 사용 가능
 from kreports.analysis import queries as _queries
@@ -24,6 +24,7 @@ from kreports.analysis.peer import (
     SectorGroup,
     classify_sector,
     confidence_band,
+    resolve_fs_div_for_company,
     resolve_peers,
 )
 
@@ -85,6 +86,14 @@ def _clean_dict(d: dict) -> dict:
     return out
 
 
+def _display_text(value: str | None) -> str:
+    text_value = value or ""
+    text_value = text_value.replace("&cr;", "\n").replace("&#13;", "\n")
+    text_value = text_value.replace("&nbsp;", " ").replace("&#160;", " ")
+    text_value = text_value.replace("\r", "\n")
+    return text_value
+
+
 # ---------------------------------------------------------------------------
 # 기업 조회 / 식별
 # ---------------------------------------------------------------------------
@@ -137,6 +146,79 @@ def _resolve_company_identifier(identifier: str) -> Optional[str]:
     public API에서 corp_code / stock_code / 회사명을 모두 허용하기 위한 helper.
     """
     return resolve_corp_code(identifier)
+
+
+def _company_summary(corp_code: str) -> Optional[dict]:
+    with _engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT corp_code, stock_code, corp_name, market, induty_code FROM companies WHERE corp_code=:cc"),
+            {"cc": corp_code},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def _has_db_column(table_name: str, column_name: str) -> bool:
+    try:
+        with _engine.connect() as conn:
+            rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
+        return any(row.get("name") == column_name for row in rows)
+    except Exception:
+        return False
+
+
+def _cached_years_for_sections(corp_code: str, source_type: str, section_key: str | None = None) -> list[int]:
+    where = "corp_code=:corp_code AND source_type=:source_type"
+    params: dict[str, Any] = {"corp_code": corp_code, "source_type": source_type}
+    if section_key:
+        where += " AND section_key=:section_key"
+        params["section_key"] = section_key
+    with _engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT DISTINCT bsns_year
+                FROM report_sections
+                WHERE {where}
+                ORDER BY bsns_year DESC
+                """
+            ),
+            params,
+        ).scalars().all()
+    return [int(y) for y in rows]
+
+
+def _cache_quality_status(*, subject_count: int, peer_total: int = 0, peer_covered: int = 0) -> str:
+    if subject_count <= 0 and peer_covered <= 0:
+        return "missing"
+    if peer_total and peer_covered / peer_total < 0.5:
+        return "limited"
+    if subject_count <= 0:
+        return "subject_missing"
+    return "usable"
+
+
+def _kam_hint_coverage(rows: list[dict]) -> dict:
+    kam_rows = [row for row in rows if row.get("section_key") == "kam"]
+    with_reason = sum(
+        1 for row in kam_rows
+        if (row.get("kam_analysis") or {}).get("has_reason_hint")
+    )
+    with_procedure = sum(
+        1 for row in kam_rows
+        if (row.get("kam_analysis") or {}).get("has_procedure_hint")
+    )
+    total = len(kam_rows)
+    return {
+        "kam_body_count": total,
+        "reason": {
+            "with_reason_hint": with_reason,
+            "coverage_pct": round(with_reason * 100.0 / total, 1) if total else 0.0,
+        },
+        "procedure": {
+            "with_procedure_hint": with_procedure,
+            "coverage_pct": round(with_procedure * 100.0 / total, 1) if total else 0.0,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -570,9 +652,18 @@ def get_accounting_policy(
             "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
         }
 
-    data = _queries.get_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
+    data = _queries.get_cached_accounting_policy(corp_code, bsns_year, fs_div=fs_div)
     if data is None:
-        return None
+        from kreports.runtime import readonly_cache_miss
+
+        return {
+            "corp_code": corp_code,
+            "bsns_year": bsns_year,
+            "fs_div": fs_div,
+            "items": {},
+            "item_count": 0,
+            "note": readonly_cache_miss("accounting_policy", corp_code, bsns_year),
+        }
     result = {
         "corp_code": corp_code,
         "bsns_year": bsns_year,
@@ -1139,6 +1230,7 @@ def compare_to_industry_multi(
     metrics: Optional[list[str]] = None,
     years_back: int = 5,
     fs_div: str = "CFS",
+    fs_strategy: str = "CFS",
     prefix_len_start: int = 3,
     exclude_other_sectors: bool = True,
     size_bucket_decade: Optional[float] = None,
@@ -1190,6 +1282,9 @@ def compare_to_industry_multi(
     if subject_row is None:
         return {"error": f"corp_code '{corp_code}' 미등록"}
     subject_name, subject_induty = subject_row[0], subject_row[1]
+    requested_fs_div = fs_div
+    if fs_strategy.lower() == "auto":
+        fs_div = resolve_fs_div_for_company(corp_code, None, "auto")
 
     # Peer 풀은 한 번만 결정 (subject의 최신 Q4 연도 기준)
     pr = resolve_peers(
@@ -1217,6 +1312,9 @@ def compare_to_industry_multi(
             "excluded_categories": pr.excluded_categories,
             "size_bucket_applied": pr.size_bucket_applied,
             "fs_div": fs_div,
+            "fs_strategy": fs_strategy,
+            "requested_fs_div": requested_fs_div,
+            "fs_div_used": fs_div,
             "years": [],
             "metrics": metrics,
             "results": {},
@@ -1250,6 +1348,9 @@ def compare_to_industry_multi(
             "excluded_categories": pr.excluded_categories,
             "size_bucket_applied": pr.size_bucket_applied,
             "fs_div": fs_div,
+            "fs_strategy": fs_strategy,
+            "requested_fs_div": requested_fs_div,
+            "fs_div_used": fs_div,
             "years": [],
             "metrics": metrics,
             "results": {},
@@ -1306,11 +1407,1629 @@ def compare_to_industry_multi(
         "excluded_categories": pr.excluded_categories,
         "size_bucket_applied": pr.size_bucket_applied,
         "fs_div": fs_div,
+        "fs_strategy": fs_strategy,
+        "requested_fs_div": requested_fs_div,
+        "fs_div_used": fs_div,
         "years": years,
         "metrics": metrics,
         "results": results,
         "note": pr.note,
     }
+
+
+def select_peer_group(
+    company: str,
+    criteria: Optional[list[str]] = None,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+    prefix_len_start: int = 3,
+    size_bucket_decade: Optional[float] = None,
+    exclude_other_sectors: bool = True,
+) -> dict:
+    criteria = criteria or ["industry", "sector", "financial_data"]
+    corp_code = resolve_corp_code(company)
+    if corp_code is None:
+        return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
+
+    with _engine.connect() as conn:
+        subject_row = conn.execute(
+            text("SELECT corp_name, stock_code, market, induty_code FROM companies WHERE corp_code=:cc"),
+            {"cc": corp_code},
+        ).first()
+    if subject_row is None:
+        return {"error": f"corp_code '{corp_code}' 미등록"}
+
+    fs_div_used = resolve_fs_div_for_company(corp_code, None, fs_strategy)
+    pr = resolve_peers(
+        corp_code=corp_code,
+        prefix_len_start=prefix_len_start,
+        min_n=5,
+        exclude_other_sectors=exclude_other_sectors,
+        size_bucket_decade=size_bucket_decade,
+        fs_div=fs_div_used,
+    )
+
+    peers: list[dict] = []
+    if pr.peer_corp_codes:
+        stmt = text(
+            """
+            SELECT c.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   f.total_assets, f.revenue,
+                   af.audit_fee_m, af.audit_hours, af.nas_ratio
+            FROM companies c
+            LEFT JOIN financials f
+              ON f.corp_code=c.corp_code
+             AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
+            LEFT JOIN audit_fees af
+              ON af.corp_code=c.corp_code AND af.bsns_year=:year
+            WHERE c.corp_code IN :ccs
+            ORDER BY (f.total_assets IS NULL), f.total_assets DESC
+            LIMIT :limit
+            """
+        ).bindparams(bindparam("ccs", expanding=True))
+        with _engine.connect() as conn:
+            rows = conn.execute(
+                stmt,
+                {
+                    "ccs": pr.peer_corp_codes,
+                    "year": pr.resolved_year,
+                    "fs": fs_div_used,
+                    "limit": peer_limit,
+                },
+            ).mappings().all()
+        for row in rows:
+            reasons = ["same_ksic_prefix", f"sector_group:{pr.sector_group.value}"]
+            if size_bucket_decade is not None:
+                reasons.append("asset_size_bucket")
+            if row["audit_fee_m"] is not None:
+                reasons.append("audit_fee_available")
+            peers.append({**dict(row), "include_reasons": reasons})
+
+    return {
+        "subject": {
+            "corp_code": corp_code,
+            "stock_code": subject_row[1],
+            "corp_name": subject_row[0],
+            "market": subject_row[2],
+            "induty_code": subject_row[3],
+        },
+        "selection_policy": {
+            "criteria": criteria,
+            "prefix_len_start": prefix_len_start,
+            "matched_prefix_len": pr.matched_prefix_len,
+            "exclude_other_sectors": exclude_other_sectors,
+            "size_bucket_decade": size_bucket_decade,
+            "fs_strategy": fs_strategy,
+            "fs_div_used": fs_div_used,
+            "resolved_year": pr.resolved_year,
+        },
+        "peer_count": pr.n_peers,
+        "returned_peer_count": len(peers),
+        "confidence": pr.confidence,
+        "peers": peers,
+        "excluded_categories": pr.excluded_categories,
+        "note": pr.note,
+    }
+
+
+def _percentile(value: float | None, values: list[float]) -> float | None:
+    if value is None or not values:
+        return None
+    below = sum(1 for v in values if v < value)
+    return round(100.0 * below / len(values), 1)
+
+
+def _metric_quantiles(values: list[float]) -> dict:
+    vals = sorted(v for v in values if v is not None)
+    n = len(vals)
+    return {
+        "n": n,
+        "p25": round(_quantile(vals, 0.25), 2) if n >= 5 else None,
+        "p50": round(_quantile(vals, 0.50), 2) if n else None,
+        "p75": round(_quantile(vals, 0.75), 2) if n >= 5 else None,
+    }
+
+
+def compare_peer_audit_fees(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+    size_bucket_decade: Optional[float] = None,
+) -> dict:
+    base = select_peer_group(
+        company=company,
+        peer_limit=peer_limit,
+        fs_strategy=fs_strategy,
+        size_bucket_decade=size_bucket_decade,
+    )
+    if "error" in base:
+        return base
+    corp_code = base["subject"]["corp_code"]
+    fs_div = base["selection_policy"]["fs_div_used"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+
+    stmt = text(
+        """
+        SELECT c.corp_code, c.corp_name, f.total_assets,
+               af.audit_fee_m, af.audit_hours, af.non_audit_fee_m, af.nas_ratio,
+               CASE WHEN f.total_assets > 0 AND af.audit_fee_m IS NOT NULL
+                    THEN 10000.0 * af.audit_fee_m * 1000000.0 / f.total_assets END AS fee_assets_bps,
+               CASE WHEN af.audit_hours > 0 AND af.audit_fee_m IS NOT NULL
+                    THEN 1.0 * af.audit_fee_m / af.audit_hours END AS fee_per_hour_m
+        FROM companies c
+        LEFT JOIN financials f
+          ON f.corp_code=c.corp_code AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
+        LEFT JOIN audit_fees af
+          ON af.corp_code=c.corp_code AND af.bsns_year=:year
+        WHERE c.corp_code IN :ccs
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        rows = conn.execute(stmt, {"ccs": all_codes, "year": year, "fs": fs_div}).mappings().all()
+
+    by_cc = {row["corp_code"]: dict(row) for row in rows}
+    subject_row = by_cc.get(corp_code, {})
+    peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
+    metrics = {
+        "audit_fee_m": [r["audit_fee_m"] for r in peer_rows if r["audit_fee_m"] is not None],
+        "audit_hours": [r["audit_hours"] for r in peer_rows if r["audit_hours"] is not None],
+        "nas_ratio": [r["nas_ratio"] for r in peer_rows if r["nas_ratio"] is not None],
+        "audit_fee_to_assets_bps": [r["fee_assets_bps"] for r in peer_rows if r["fee_assets_bps"] is not None],
+        "audit_fee_per_hour_m": [r["fee_per_hour_m"] for r in peer_rows if r["fee_per_hour_m"] is not None],
+    }
+    benchmarks = {k: _metric_quantiles([float(v) for v in vals]) for k, vals in metrics.items()}
+    metric_coverage = {
+        key: {
+            "peer_count": len(peer_rows),
+            "available_n": len(vals),
+            "coverage_pct": round(100.0 * len(vals) / len(peer_rows), 1) if peer_rows else 0.0,
+            "status": "usable" if len(vals) >= 5 else "limited" if vals else "missing",
+        }
+        for key, vals in metrics.items()
+    }
+    for key, vals in metrics.items():
+        subj_key = {
+            "audit_fee_to_assets_bps": "fee_assets_bps",
+            "audit_fee_per_hour_m": "fee_per_hour_m",
+        }.get(key, key)
+        subj_val = subject_row.get(subj_key)
+        benchmarks[key]["subject_percentile"] = _percentile(
+            float(subj_val) if subj_val is not None else None,
+            [float(v) for v in vals],
+        )
+
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "fs_div_used": fs_div,
+        "peer_count": len(peer_rows),
+        "subject_metrics": subject_row,
+        "benchmarks": benchmarks,
+        "data_quality": {
+            "metric_coverage": metric_coverage,
+            "limited_metrics": [
+                key for key, info in metric_coverage.items()
+                if info["status"] != "usable"
+            ],
+        },
+        "peers": peer_rows[:peer_limit],
+        "selection_policy": base["selection_policy"],
+        "note": (
+            "DART audit fee contract/status data; audit judgment not performed. "
+            "Metrics with available_n < 5 are screening signals only."
+        ),
+    })
+
+
+def compare_peer_risk_profile(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in base:
+        return base
+    corp_code = base["subject"]["corp_code"]
+    fs_div = base["selection_policy"]["fs_div_used"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+
+    stmt = text(
+        """
+        SELECT f.corp_code, c.corp_name, f.revenue, f.total_assets,
+               f.operating_profit, f.net_income, f.operating_cf,
+               f.accrual_ratio, f.beneish_m_score,
+               f.op_cf_divergence_flag, f.going_concern_flag
+        FROM financials f
+        JOIN companies c ON c.corp_code=f.corp_code
+        WHERE f.corp_code IN :ccs AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    disc_stmt = text(
+        """
+        SELECT corp_code,
+               SUM(CASE WHEN report_nm LIKE '%정정%' THEN 1 ELSE 0 END) restatement_like,
+               SUM(CASE WHEN report_nm LIKE '%주요사항%' THEN 1 ELSE 0 END) major_event_like,
+               COUNT(*) total_disclosures
+        FROM disclosures
+        WHERE corp_code IN :ccs
+          AND disc_date >= :start_date
+          AND disc_date <= :end_date
+        GROUP BY corp_code
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(stmt, {"ccs": all_codes, "year": year, "fs": fs_div}).mappings().all()]
+        disc_rows = conn.execute(
+            disc_stmt,
+            {"ccs": all_codes, "start_date": f"{year}-01-01", "end_date": f"{year}-12-31"},
+        ).mappings().all()
+
+    disc_by_cc = {r["corp_code"]: dict(r) for r in disc_rows}
+    by_cc = {r["corp_code"]: r for r in rows}
+    subject_row = by_cc.get(corp_code, {})
+    peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
+
+    def ratio(row: dict, numerator: str, denominator: str) -> float | None:
+        n = row.get(numerator)
+        d = row.get(denominator)
+        if n is None or not d:
+            return None
+        return 100.0 * float(n) / float(d)
+
+    derived = {
+        "op_cf_to_operating_profit": [ratio(r, "operating_cf", "operating_profit") for r in peer_rows],
+        "accrual_ratio": [r.get("accrual_ratio") for r in peer_rows],
+        "beneish_m_score": [r.get("beneish_m_score") for r in peer_rows],
+        "receivables_to_revenue": [],
+        "inventory_to_revenue": [],
+    }
+    benchmarks = {
+        k: _metric_quantiles([float(v) for v in vals if v is not None])
+        for k, vals in derived.items()
+    }
+    metric_coverage = {
+        k: {
+            "peer_count": len(peer_rows),
+            "available_n": benchmarks[k]["n"],
+            "coverage_pct": round(100.0 * benchmarks[k]["n"] / len(peer_rows), 1) if peer_rows else 0.0,
+            "status": "usable" if benchmarks[k]["n"] >= 5 else "limited" if benchmarks[k]["n"] else "missing",
+        }
+        for k in benchmarks
+    }
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "fs_div_used": fs_div,
+        "peer_count": len(peer_rows),
+        "subject_metrics": subject_row,
+        "benchmarks": benchmarks,
+        "data_quality": {
+            "metric_coverage": metric_coverage,
+            "unavailable_metrics": [
+                key for key, info in metric_coverage.items()
+                if info["status"] == "missing"
+            ],
+            "limited_metrics": [
+                key for key, info in metric_coverage.items()
+                if info["status"] == "limited"
+            ],
+        },
+        "disclosure_event_counts": {
+            "subject": disc_by_cc.get(corp_code, {}),
+            "peers": {cc: disc_by_cc.get(cc, {}) for cc in peer_codes[:peer_limit]},
+        },
+        "selection_policy": base["selection_policy"],
+        "note": "Risk profile is a DART-based signal pack, not audit risk assessment. Missing metrics must not be interpreted as low risk.",
+    })
+
+
+def compare_peer_accounting_policies(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_div: str = "CFS",
+    fs_strategy: str = "auto",
+) -> dict:
+    """Compare cached accounting policy item coverage across selected peers.
+
+    This is intentionally cache-only. It does not fetch DART documents at MCP
+    runtime, so external users do not need a DART API key.
+    """
+    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in base:
+        return base
+
+    corp_code = base["subject"]["corp_code"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+    stmt = text(
+        """
+        SELECT p.corp_code, c.corp_name, p.item_key, p.heading, p.body_length, p.body_hash
+        FROM accounting_policy_items p
+        JOIN companies c ON c.corp_code = p.corp_code
+        WHERE p.corp_code IN :ccs
+          AND p.bsns_year = :year
+          AND p.fs_div = :fs
+        ORDER BY p.corp_code, p.item_key
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            stmt, {"ccs": all_codes, "year": year, "fs": fs_div}
+        ).mappings().all()]
+
+    by_corp: dict[str, list[dict]] = {}
+    for row in rows:
+        by_corp.setdefault(row["corp_code"], []).append(row)
+
+    subject_items = {
+        row["item_key"]: {
+            "heading": row["heading"],
+            "body_length": row["body_length"],
+            "body_hash": row["body_hash"],
+        }
+        for row in by_corp.get(corp_code, [])
+    }
+
+    item_keys = sorted({row["item_key"] for row in rows})
+    peer_item_coverage = {}
+    for key in item_keys:
+        covered = [
+            cc for cc in peer_codes
+            if any(row["item_key"] == key for row in by_corp.get(cc, []))
+        ]
+        peer_item_coverage[key] = {
+            "peer_count": len(peer_codes),
+            "covered_peers": len(covered),
+            "coverage_pct": round(100.0 * len(covered) / len(peer_codes), 1) if peer_codes else 0.0,
+            "subject_has_item": key in subject_items,
+        }
+
+    peer_summaries = []
+    for cc in peer_codes:
+        items = by_corp.get(cc, [])
+        if not items:
+            continue
+        peer_summaries.append({
+            "corp_code": cc,
+            "corp_name": items[0]["corp_name"],
+            "item_count": len(items),
+            "item_keys": sorted(row["item_key"] for row in items),
+        })
+
+    peer_coverage_pct = round(100.0 * len(peer_summaries) / len(peer_codes), 1) if peer_codes else 0.0
+    data_quality = {
+        "status": _cache_quality_status(
+            subject_count=len(subject_items),
+            peer_total=len(peer_codes),
+            peer_covered=len(peer_summaries),
+        ),
+        "source": "accounting_policy_items",
+        "requested_year": year,
+        "subject_policy_count": len(subject_items),
+        "peer_count": len(peer_codes),
+        "peers_with_policy": len(peer_summaries),
+        "peer_coverage_pct": peer_coverage_pct,
+        "interpretation": (
+            "Coverage measures local cache availability. Missing items must not be interpreted "
+            "as absence of accounting policy disclosure."
+        ),
+    }
+
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "fs_div": fs_div,
+        "subject_policy_count": len(subject_items),
+        "subject_items": subject_items,
+        "peer_count": len(peer_codes),
+        "peers_with_policy": len(peer_summaries),
+        "peer_item_coverage": peer_item_coverage,
+        "peer_summaries": peer_summaries[:peer_limit],
+        "selection_policy": base["selection_policy"],
+        "data_quality": data_quality,
+        "coverage_note": (
+            "Accounting policy comparison uses cached accounting_policy_items only; "
+            "low coverage means dataset refresh is required, not that peers lack policy disclosures."
+        ),
+    })
+
+
+_KAM_TOPIC_KEYWORDS: dict[str, list[str]] = {
+    "revenue_recognition": ["수익", "매출", "진행기준", "총액", "순액"],
+    "impairment": ["손상", "회수가능", "영업권", "현금창출단위"],
+    "inventory": ["재고", "평가충당", "순실현가능"],
+    "fair_value": ["공정가치", "금융상품", "파생"],
+    "provisions": ["충당부채", "우발", "소송"],
+    "development_cost": ["개발비", "무형자산"],
+    "tax": ["법인세", "이연법인세"],
+}
+
+
+def _topic_hits(text_value: str | None) -> list[str]:
+    text_value = text_value or ""
+    hits = []
+    for topic, keywords in _KAM_TOPIC_KEYWORDS.items():
+        if any(keyword in text_value for keyword in keywords):
+            hits.append(topic)
+    return hits
+
+
+def compare_peer_kam_topics(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    """Audit-report/KAM signal view from cached DART disclosures and sections."""
+    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in base:
+        return base
+
+    corp_code = base["subject"]["corp_code"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+    stmt = text(
+        """
+        SELECT d.corp_code, c.corp_name, d.rcept_no, d.disc_date, d.report_nm
+        FROM disclosures d
+        JOIN companies c ON c.corp_code = d.corp_code
+        WHERE d.corp_code IN :ccs
+          AND d.disc_date >= :start_date
+          AND d.disc_date <= :end_date
+          AND d.report_nm LIKE '%감사보고서%'
+        ORDER BY d.corp_code, d.disc_date DESC
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            stmt,
+            {"ccs": all_codes, "start_date": f"{year + 1}-01-01", "end_date": f"{year + 1}-12-31"},
+        ).mappings().all()]
+
+    events_by_corp: dict[str, list[dict]] = {}
+    topic_counts = {topic: 0 for topic in _KAM_TOPIC_KEYWORDS}
+    restated = delayed = 0
+    for row in rows:
+        row_topics = _topic_hits(row["report_nm"])
+        for topic in row_topics:
+            topic_counts[topic] += 1
+        name = row["report_nm"] or ""
+        if "정정" in name:
+            restated += 1
+        if "지연" in name:
+            delayed += 1
+        row["topic_hints"] = row_topics
+        events_by_corp.setdefault(row["corp_code"], []).append(row)
+
+    subject_events = events_by_corp.get(corp_code, [])
+    peer_events = {
+        cc: events_by_corp.get(cc, [])
+        for cc in peer_codes
+        if events_by_corp.get(cc)
+    }
+
+    dcm_select = "rs.dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
+    section_stmt = text(
+        f"""
+        SELECT rs.corp_code, c.corp_name, rs.rcept_no, {dcm_select}, rs.source_type, rs.section_key,
+               rs.section_title, rs.body_text, rs.body_length
+        FROM report_sections rs
+        JOIN companies c ON c.corp_code=rs.corp_code
+        WHERE rs.corp_code IN :ccs
+          AND rs.bsns_year=:year
+          AND rs.source_type='audit_report'
+          AND rs.section_key IN ('kam', 'audit_opinion', 'emphasis', 'going_concern')
+        ORDER BY rs.corp_code, rs.section_key, rs.ordinal
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        section_rows = [dict(r) for r in conn.execute(
+            section_stmt,
+            {"ccs": all_codes, "year": year},
+        ).mappings().all()]
+
+    from kreports.processor.audit_report_parser import classify_kam_topics, summarize_kam_body
+
+    sections_by_corp: dict[str, list[dict]] = {}
+    body_topic_counts: dict[str, int] = {}
+    for row in section_rows:
+        body = _display_text(row.get("body_text"))
+        row["body_excerpt"] = body[:1200]
+        row.pop("body_text", None)
+        kam_analysis = summarize_kam_body(body) if row.get("section_key") == "kam" else None
+        if kam_analysis:
+            row["kam_analysis"] = kam_analysis
+        topics = (kam_analysis or {}).get("topics") or (
+            classify_kam_topics(body) if row.get("section_key") == "kam" else []
+        )
+        row["topic_hints"] = topics
+        for topic in topics:
+            body_topic_counts[topic] = body_topic_counts.get(topic, 0) + 1
+        sections_by_corp.setdefault(row["corp_code"], []).append(row)
+
+    summary_stmt = text(
+        f"""
+        SELECT rs.corp_code, c.corp_name, rs.rcept_no, {dcm_select}, rs.source_type, rs.section_key,
+               rs.section_title, rs.body_text, rs.body_length
+        FROM report_sections rs
+        JOIN companies c ON c.corp_code=rs.corp_code
+        WHERE rs.corp_code IN :ccs
+          AND rs.bsns_year=:year
+          AND rs.source_type='business_report'
+          AND rs.section_key='kam'
+        ORDER BY rs.corp_code, rs.ordinal
+        """
+    ).bindparams(bindparam("ccs", expanding=True))
+    with _engine.connect() as conn:
+        summary_rows = [dict(r) for r in conn.execute(
+            summary_stmt,
+            {"ccs": all_codes, "year": year},
+        ).mappings().all()]
+    for row in summary_rows:
+        body = _display_text(row.get("body_text"))
+        row["body_excerpt"] = body[:1200]
+        row.pop("body_text", None)
+
+    business_summary_by_corp: dict[str, list[dict]] = {}
+    for row in summary_rows:
+        business_summary_by_corp.setdefault(row["corp_code"], []).append(row)
+
+    subject_sections = sections_by_corp.get(corp_code, [])
+    peer_sections = {
+        cc: sections_by_corp.get(cc, [])
+        for cc in peer_codes
+        if sections_by_corp.get(cc)
+    }
+    kam_body_rows = [r for r in section_rows if r.get("section_key") == "kam"]
+    kam_hint_coverage = _kam_hint_coverage([r for rows_for_corp in sections_by_corp.values() for r in rows_for_corp])
+    has_body = bool(kam_body_rows)
+    limitations = (
+        ["KAM paragraphs are based on cached audit_report body sections, not business-report summary tables."]
+        if has_body else [
+            "Detailed audit-report KAM paragraphs are not yet persisted for this peer set.",
+            "Business-report KAM summary, when present, is exposed separately and is not treated as the primary KAM body.",
+            "Topic hints are based on cached audit-report disclosure titles only.",
+            "Use as KAM coverage/event screening, not KAM determination.",
+        ]
+    )
+    if has_body and not peer_sections:
+        limitations.append(
+            "Peer audit-report KAM body coverage is currently zero for the selected peer group; do not infer peer topic absence."
+        )
+    elif has_body and len(peer_sections) < max(1, len(peer_codes) // 2):
+        limitations.append(
+            "Peer audit-report KAM body coverage is limited for the selected peer group; compare topics cautiously."
+        )
+
+    data_quality = {
+        "status": _cache_quality_status(
+            subject_count=len([r for r in subject_sections if r.get("section_key") == "kam"]),
+            peer_total=len(peer_codes),
+            peer_covered=len(peer_sections),
+        ),
+        "source": "report_sections.audit_report",
+        "requested_year": year,
+        "subject_kam_body_count": len([r for r in subject_sections if r.get("section_key") == "kam"]),
+        "peer_companies_with_sections": len(peer_sections),
+        "peer_count": len(peer_codes),
+        "total_audit_report_sections": len(section_rows),
+        "total_kam_body_count": len(kam_body_rows),
+        "kam_reason_coverage": kam_hint_coverage["reason"],
+        "kam_procedure_coverage": kam_hint_coverage["procedure"],
+        "business_report_summary_sections": len(summary_rows),
+        "available_subject_kam_years": _cached_years_for_sections(corp_code, "audit_report", "kam"),
+        "coverage_note": (
+            "KAM body comparison uses cached audit_report report_sections. "
+            "Disclosure events are not a substitute for KAM body/topic coverage."
+        ),
+    }
+
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "peer_count": len(peer_codes),
+        "audit_report_events": {
+            "subject_count": len(subject_events),
+            "peer_companies_with_events": len(peer_events),
+            "total_events": len(rows),
+            "restatement_like_events": restated,
+            "delayed_submission_like_events": delayed,
+        },
+        "subject_events": subject_events[:10],
+        "peer_event_samples": {
+            cc: events[:3] for cc, events in list(peer_events.items())[:peer_limit]
+        },
+        "kam_topics": body_topic_counts if has_body else {
+            topic: count for topic, count in topic_counts.items() if count > 0
+        },
+        "audit_report_sections": {
+            "subject_section_count": len(subject_sections),
+            "peer_companies_with_sections": len(peer_sections),
+            "total_sections": len(section_rows),
+            "kam_body_count": len(kam_body_rows),
+            "kam_reason_coverage": kam_hint_coverage["reason"],
+            "kam_procedure_coverage": kam_hint_coverage["procedure"],
+            "source": "audit_report_sections" if has_body else "disclosure_events_only",
+        },
+        "data_quality": data_quality,
+        "business_report_kam_summary": {
+            "subject_summary_count": len(business_summary_by_corp.get(corp_code, [])),
+            "peer_companies_with_summary": len([
+                cc for cc in peer_codes if business_summary_by_corp.get(cc)
+            ]),
+            "total_summary_sections": len(summary_rows),
+            "note": "사업보고서 KAM은 요약표/요약 문단으로만 취급하며, 상세 판단근거와 감사절차의 기준 소스는 audit_report입니다.",
+        },
+        "subject_business_report_kam_summary": business_summary_by_corp.get(corp_code, [])[:5],
+        "subject_sections": subject_sections[:10],
+        "peer_section_samples": {
+            cc: sections[:3] for cc, sections in list(peer_sections.items())[:peer_limit]
+        },
+        "selection_policy": base["selection_policy"],
+        "limitations": limitations,
+    })
+
+
+def get_audit_report_sections(
+    company: str,
+    year: int = 2025,
+    section_key: str | None = None,
+    source_type: str = "audit_report",
+    limit: int = 20,
+) -> dict:
+    """Return cached audit-report body sections for a company/year."""
+    corp_code = resolve_corp_code(company) or company
+    comp = _company_summary(corp_code)
+    if not comp:
+        return {"error": "company not found", "company": company}
+
+    if source_type not in {"audit_report", "business_report", "all"}:
+        return {"error": "source_type must be audit_report, business_report, or all", "source_type": source_type}
+    source_filter = ("audit_report", "business_report") if source_type == "all" else (source_type,)
+    dcm_select = "dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
+    stmt = text(
+        f"""
+        SELECT rcept_no, {dcm_select}, bsns_year, source_type, section_key, section_title,
+               body_text, body_length, fetched_at
+        FROM report_sections
+        WHERE corp_code=:corp_code
+          AND bsns_year=:year
+          AND source_type IN :source_types
+          AND (:section_key IS NULL OR section_key=:section_key)
+        ORDER BY section_key, ordinal
+        LIMIT :limit
+        """
+    ).bindparams(bindparam("source_types", expanding=True))
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            stmt,
+            {
+                "corp_code": corp_code,
+                "year": year,
+                "section_key": section_key,
+                "source_types": list(source_filter),
+                "limit": int(limit),
+            },
+        ).mappings().all()]
+
+    alternative_rows: list[dict] = []
+    alternative_year: int | None = None
+    if not rows:
+        years = _cached_years_for_sections(
+            corp_code,
+            "audit_report" if source_type == "audit_report" else "business_report",
+            section_key,
+        ) if source_type != "all" else sorted(set(
+            _cached_years_for_sections(corp_code, "audit_report", section_key)
+            + _cached_years_for_sections(corp_code, "business_report", section_key)
+        ), reverse=True)
+        alternative_year = years[0] if years else None
+        if alternative_year is not None:
+            with _engine.connect() as conn:
+                alternative_rows = [dict(r) for r in conn.execute(
+                    stmt,
+                    {
+                        "corp_code": corp_code,
+                        "year": alternative_year,
+                        "section_key": section_key,
+                        "source_types": list(source_filter),
+                        "limit": min(int(limit), 5),
+                    },
+                ).mappings().all()]
+
+    for row in rows:
+        body = _display_text(row.get("body_text"))
+        row["body_excerpt"] = body[:2000]
+        if row.get("section_key") == "kam":
+            from kreports.processor.audit_report_parser import summarize_kam_body
+            row["kam_analysis"] = summarize_kam_body(body)
+        row.pop("body_text", None)
+    for row in alternative_rows:
+        body = _display_text(row.get("body_text"))
+        row["body_excerpt"] = body[:1200]
+        if row.get("section_key") == "kam":
+            from kreports.processor.audit_report_parser import summarize_kam_body
+            row["kam_analysis"] = summarize_kam_body(body)
+        row.pop("body_text", None)
+    if rows:
+        coverage_note = (
+            "Cached audit_report report_sections."
+            if source_type == "audit_report"
+            else "Cached report_sections."
+        )
+    else:
+        coverage_note = (
+            "No cached sections. Run collect-audit-report-sections for detailed audit reports; "
+            "business_report is summary coverage only."
+        )
+    kam_hint_coverage = _kam_hint_coverage(rows)
+    section_quality = {
+        "status": "usable" if rows else "missing",
+        "source": "report_sections",
+        "requested_year": year,
+        "requested_source_type": source_type,
+        "requested_section_key": section_key,
+        "section_count": len(rows),
+        "kam_reason_coverage": kam_hint_coverage["reason"],
+        "kam_procedure_coverage": kam_hint_coverage["procedure"],
+        "available_audit_report_years": _cached_years_for_sections(corp_code, "audit_report", section_key),
+        "available_business_report_years": _cached_years_for_sections(corp_code, "business_report", section_key),
+        "latest_available_year": alternative_year if not rows else year,
+        "alternative_section_count": len(alternative_rows),
+        "interpretation": (
+            "No rows means the local cache lacks the requested section/year. "
+            "It does not prove the filing lacks that audit report section."
+        ),
+    }
+    return _clean_dict({
+        "subject": comp,
+        "year": year,
+        "section_key": section_key,
+        "source_type": source_type,
+        "section_count": len(rows),
+        "sections": rows,
+        "alternative_sections": alternative_rows,
+        "data_quality": section_quality,
+        "coverage_note": coverage_note,
+    })
+
+
+_AUDIT_MATTER_KEYS = ("other_matter", "emphasis", "going_concern", "basis_for_opinion")
+
+
+def compare_peer_audit_report_matters(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    """Compare non-KAM audit report matters across the selected peer group.
+
+    Emphasis of matter, other matter, going concern, and basis-for-opinion
+    paragraphs are not audit opinions by themselves. They are useful screening
+    evidence for acceptance/continuance and peer disclosure comparison.
+    """
+    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in base:
+        return base
+
+    corp_code = base["subject"]["corp_code"]
+    peer_codes = [p["corp_code"] for p in base["peers"]]
+    all_codes = [corp_code] + peer_codes
+    dcm_select = "rs.dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
+    stmt = text(
+        f"""
+        SELECT rs.corp_code, c.corp_name, rs.rcept_no, {dcm_select}, rs.source_type,
+               rs.section_key, rs.section_title, rs.body_text, rs.body_length, rs.ordinal
+        FROM report_sections rs
+        JOIN companies c ON c.corp_code=rs.corp_code
+        WHERE rs.corp_code IN :ccs
+          AND rs.bsns_year=:year
+          AND rs.source_type='audit_report'
+          AND rs.section_key IN :section_keys
+        ORDER BY rs.corp_code, rs.section_key, rs.ordinal
+        """
+    ).bindparams(
+        bindparam("ccs", expanding=True),
+        bindparam("section_keys", expanding=True),
+    )
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            stmt,
+            {"ccs": all_codes, "year": year, "section_keys": list(_AUDIT_MATTER_KEYS)},
+        ).mappings().all()]
+
+    counts = {
+        key: {
+            "subject_count": 0,
+            "peer_companies_with_section": 0,
+            "total_sections": 0,
+        }
+        for key in _AUDIT_MATTER_KEYS
+    }
+    by_corp: dict[str, list[dict]] = {}
+    peer_corp_by_key: dict[str, set[str]] = {key: set() for key in _AUDIT_MATTER_KEYS}
+    for row in rows:
+        key = row["section_key"]
+        body = _display_text(row.get("body_text"))
+        row["body_excerpt"] = body[:1200]
+        row.pop("body_text", None)
+        counts[key]["total_sections"] += 1
+        if row["corp_code"] == corp_code:
+            counts[key]["subject_count"] += 1
+        elif row["corp_code"] in peer_codes:
+            peer_corp_by_key[key].add(row["corp_code"])
+        by_corp.setdefault(row["corp_code"], []).append(row)
+
+    for key in _AUDIT_MATTER_KEYS:
+        counts[key]["peer_companies_with_section"] = len(peer_corp_by_key[key])
+        counts[key]["peer_coverage_pct"] = (
+            round(100.0 * len(peer_corp_by_key[key]) / len(peer_codes), 1)
+            if peer_codes else 0.0
+        )
+
+    subject_matters = by_corp.get(corp_code, [])
+    peer_sections_by_corp = {
+        cc: by_corp.get(cc, [])
+        for cc in peer_codes
+        if by_corp.get(cc)
+    }
+    subject_count = len(subject_matters)
+    peer_covered = len(peer_sections_by_corp)
+    data_quality = {
+        "status": _cache_quality_status(
+            subject_count=subject_count,
+            peer_total=len(peer_codes),
+            peer_covered=peer_covered,
+        ),
+        "source": "report_sections.audit_report",
+        "requested_year": year,
+        "section_keys": list(_AUDIT_MATTER_KEYS),
+        "subject_section_count": subject_count,
+        "peer_companies_with_sections": peer_covered,
+        "peer_count": len(peer_codes),
+        "total_sections": len(rows),
+        "available_subject_years": sorted(set(
+            year
+            for key in _AUDIT_MATTER_KEYS
+            for year in _cached_years_for_sections(corp_code, "audit_report", key)
+        ), reverse=True),
+        "interpretation": (
+            "Emphasis/other-matter/going-concern paragraphs are audit-report "
+            "screening evidence. Absence in cache does not prove absence in the filing."
+        ),
+    }
+
+    return _clean_dict({
+        "subject": base["subject"],
+        "year": year,
+        "peer_count": len(peer_codes),
+        "matter_counts": counts,
+        "subject_matters": subject_matters[:20],
+        "peer_matter_samples": {
+            cc: sections[:5] for cc, sections in list(peer_sections_by_corp.items())[:peer_limit]
+        },
+        "data_quality": data_quality,
+        "selection_policy": base["selection_policy"],
+        "limitations": [
+            "These paragraphs are screening evidence, not audit conclusions.",
+            "Going-concern emphasis in audit reports should be read together with the opinion and basis-for-opinion sections.",
+            "Peer comparisons depend on current local report_sections coverage.",
+        ],
+    })
+
+
+def search_audit_report_matters(
+    *,
+    company: str | None = None,
+    year: int | None = None,
+    market: str | None = None,
+    induty_prefix: str | None = None,
+    section_keys: list[str] | None = None,
+    limit: int = 50,
+    include_excerpt: bool = True,
+) -> dict:
+    """Search audit-report matters by company/year/industry filters.
+
+    This backs questions like:
+    - "Does company X have emphasis/other matter paragraphs?"
+    - "Which companies in industry Y had emphasis/other matters in year Z?"
+    """
+    allowed_keys = set(_AUDIT_MATTER_KEYS)
+    keys = section_keys or ["other_matter", "emphasis", "going_concern"]
+    invalid = [key for key in keys if key not in allowed_keys]
+    if invalid:
+        return {
+            "error": "invalid section_keys",
+            "invalid": invalid,
+            "allowed": sorted(allowed_keys),
+        }
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    corp_code = None
+    company_summary = None
+    if company:
+        corp_code = resolve_corp_code(company) or company
+        company_summary = _company_summary(corp_code)
+        if not company_summary:
+            return {"error": "company not found", "company": company}
+
+    where = [
+        "rs.source_type='audit_report'",
+        "rs.section_key IN :section_keys",
+    ]
+    params: dict[str, object] = {"section_keys": keys}
+    if corp_code:
+        where.append("rs.corp_code=:corp_code")
+        params["corp_code"] = corp_code
+    if year is not None:
+        where.append("rs.bsns_year=:year")
+        params["year"] = int(year)
+    if market:
+        where.append("c.market=:market")
+        params["market"] = market
+    if induty_prefix:
+        where.append("c.induty_code LIKE :induty_prefix")
+        params["induty_prefix"] = f"{induty_prefix}%"
+
+    dcm_select = "rs.dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
+    sql = text(
+        f"""
+        SELECT rs.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+               rs.bsns_year, rs.rcept_no, {dcm_select}, rs.section_key,
+               rs.section_title, rs.body_text, rs.body_length, rs.ordinal
+        FROM report_sections rs
+        JOIN companies c ON c.corp_code=rs.corp_code
+        WHERE {" AND ".join(where)}
+        ORDER BY rs.bsns_year DESC, c.market, c.induty_code, c.corp_name, rs.section_key, rs.ordinal
+        LIMIT :row_limit
+        """
+    ).bindparams(bindparam("section_keys", expanding=True))
+    params["row_limit"] = int(limit) * 10
+
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
+
+    companies: dict[str, dict] = {}
+    for row in rows:
+        cc = row["corp_code"]
+        item = companies.setdefault(cc, {
+            "corp_code": cc,
+            "stock_code": row.get("stock_code"),
+            "corp_name": row.get("corp_name"),
+            "market": row.get("market"),
+            "induty_code": row.get("induty_code"),
+            "industry_name": _get_industry_name((row.get("induty_code") or "")[:2]) if row.get("induty_code") else "",
+            "years": [],
+            "matter_counts": {key: 0 for key in keys},
+            "sections": [],
+        })
+        if row["bsns_year"] not in item["years"]:
+            item["years"].append(row["bsns_year"])
+        item["matter_counts"][row["section_key"]] = item["matter_counts"].get(row["section_key"], 0) + 1
+        section = {
+            "bsns_year": row["bsns_year"],
+            "rcept_no": row["rcept_no"],
+            "dcm_no": row.get("dcm_no"),
+            "section_key": row["section_key"],
+            "section_title": row.get("section_title"),
+            "body_length": row.get("body_length"),
+        }
+        if include_excerpt:
+            section["body_excerpt"] = _display_text(row.get("body_text"))[:1200]
+        item["sections"].append(section)
+
+    company_rows = list(companies.values())
+    for item in company_rows:
+        item["years"] = sorted([int(y) for y in item["years"]], reverse=True)
+        item["total_sections"] = sum(item["matter_counts"].values())
+        item["sections"] = item["sections"][:10]
+    company_rows.sort(
+        key=lambda item: (
+            -item["total_sections"],
+            item.get("market") or "",
+            item.get("corp_name") or "",
+        )
+    )
+    company_rows = company_rows[:limit]
+
+    return _clean_dict({
+        "query": {
+            "company": company,
+            "year": year,
+            "market": market,
+            "induty_prefix": induty_prefix,
+            "section_keys": keys,
+            "limit": limit,
+            "include_excerpt": include_excerpt,
+        },
+        "subject": company_summary,
+        "total_companies": len(company_rows),
+        "total_sections": sum(item["total_sections"] for item in company_rows),
+        "companies": company_rows,
+        "data_quality": {
+            "status": "usable" if company_rows else "missing",
+            "source": "report_sections.audit_report",
+            "interpretation": (
+                "Results are local cached audit-report sections. Empty results mean no cached matching section, "
+                "not proof that the filing has no such matter."
+            ),
+        },
+    })
+
+
+_SEARCH_DATASETS = {
+    "report_sections",
+    "accounting_policies",
+    "disclosures",
+    "audit_fees",
+    "financials",
+}
+
+
+def _company_filters(
+    *,
+    company: str | None,
+    market: str | None,
+    induty_prefix: str | None,
+    params: dict[str, object],
+    alias: str = "c",
+) -> tuple[list[str], dict | None]:
+    filters: list[str] = []
+    subject = None
+    if company:
+        corp_code = resolve_corp_code(company) or company
+        subject = _company_summary(corp_code)
+        if not subject:
+            return ["__company_not_found__"], None
+        filters.append(f"{alias}.corp_code=:corp_code")
+        params["corp_code"] = corp_code
+    if market:
+        filters.append(f"{alias}.market=:market")
+        params["market"] = market
+    if induty_prefix:
+        filters.append(f"{alias}.induty_code LIKE :induty_prefix")
+        params["induty_prefix"] = f"{induty_prefix}%"
+    return filters, subject
+
+
+def _group_company_records(rows: list[dict], *, limit: int) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        cc = row.pop("corp_code")
+        item = grouped.setdefault(cc, {
+            "corp_code": cc,
+            "stock_code": row.pop("stock_code", None),
+            "corp_name": row.pop("corp_name", None),
+            "market": row.pop("market", None),
+            "induty_code": row.pop("induty_code", None),
+            "records": [],
+        })
+        item["records"].append(row)
+    companies = list(grouped.values())
+    for item in companies:
+        item["record_count"] = len(item["records"])
+        item["records"] = item["records"][:10]
+    companies.sort(key=lambda item: (-item["record_count"], item.get("market") or "", item.get("corp_name") or ""))
+    return companies[:limit]
+
+
+def search_dataset(
+    *,
+    dataset: str,
+    company: str | None = None,
+    year: int | None = None,
+    market: str | None = None,
+    induty_prefix: str | None = None,
+    keyword: str | None = None,
+    source_type: str | None = None,
+    section_keys: list[str] | None = None,
+    fs_div: str | None = None,
+    quarter: int | None = None,
+    limit: int = 50,
+    include_excerpt: bool = True,
+) -> dict:
+    """Unified cache search over the main local dataset tables."""
+    if dataset not in _SEARCH_DATASETS:
+        return {"error": "invalid dataset", "dataset": dataset, "allowed": sorted(_SEARCH_DATASETS)}
+    limit = max(1, min(int(limit), 500))
+    params: dict[str, object] = {"row_limit": limit * 10}
+    filters, subject = _company_filters(
+        company=company,
+        market=market,
+        induty_prefix=induty_prefix,
+        params=params,
+    )
+    if "__company_not_found__" in filters:
+        return {"error": "company not found", "company": company}
+
+    bind_expanding = []
+    source = dataset
+    if dataset == "report_sections":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("rs.bsns_year=:year")
+            params["year"] = int(year)
+        if source_type:
+            where.append("rs.source_type=:source_type")
+            params["source_type"] = source_type
+        if section_keys:
+            where.append("rs.section_key IN :section_keys")
+            params["section_keys"] = section_keys
+            bind_expanding.append("section_keys")
+        if keyword:
+            where.append("(rs.section_title LIKE :kw OR rs.body_text LIKE :kw)")
+            params["kw"] = f"%{keyword}%"
+        dcm_select = "rs.dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
+        sql = f"""
+            SELECT rs.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   rs.bsns_year AS year, rs.rcept_no, {dcm_select}, rs.source_type,
+                   rs.section_key, rs.section_title, rs.body_text, rs.body_length
+            FROM report_sections rs
+            JOIN companies c ON c.corp_code=rs.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY rs.bsns_year DESC, c.market, c.corp_name, rs.section_key
+            LIMIT :row_limit
+        """
+    elif dataset == "accounting_policies":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("api.bsns_year=:year")
+            params["year"] = int(year)
+        if fs_div:
+            where.append("api.fs_div=:fs_div")
+            params["fs_div"] = fs_div
+        if keyword:
+            where.append("(api.item_key LIKE :kw OR api.heading LIKE :kw OR api.body LIKE :kw)")
+            params["kw"] = f"%{keyword}%"
+        sql = f"""
+            SELECT api.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   api.bsns_year AS year, api.fs_div, api.rcept_no, api.item_key,
+                   api.heading, api.body, api.body_length
+            FROM accounting_policy_items api
+            JOIN companies c ON c.corp_code=api.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY api.bsns_year DESC, c.market, c.corp_name, api.item_key
+            LIMIT :row_limit
+        """
+        source = "accounting_policy_items"
+    elif dataset == "disclosures":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("d.disc_date BETWEEN :start_date AND :end_date")
+            params["start_date"] = f"{int(year)}-01-01"
+            params["end_date"] = f"{int(year)}-12-31"
+        if keyword:
+            where.append("(d.report_nm LIKE :kw OR d.flr_nm LIKE :kw)")
+            params["kw"] = f"%{keyword}%"
+        sql = f"""
+            SELECT d.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   d.rcept_no, d.disc_date, d.disc_type, d.report_nm, d.flr_nm
+            FROM disclosures d
+            JOIN companies c ON c.corp_code=d.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY d.disc_date DESC, c.market, c.corp_name
+            LIMIT :row_limit
+        """
+    elif dataset == "audit_fees":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("af.bsns_year=:year")
+            params["year"] = int(year)
+        if keyword:
+            where.append("af.auditor_nm LIKE :kw")
+            params["kw"] = f"%{keyword}%"
+        sql = f"""
+            SELECT af.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   af.bsns_year AS year, af.auditor_nm, af.audit_fee_m,
+                   af.audit_hours, af.non_audit_fee_m, af.nas_ratio,
+                   af.independence_risk_flag
+            FROM audit_fees af
+            JOIN companies c ON c.corp_code=af.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY af.bsns_year DESC, c.market, c.corp_name
+            LIMIT :row_limit
+        """
+    else:
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("f.year=:year")
+            params["year"] = int(year)
+        if fs_div:
+            where.append("f.fs_div=:fs_div")
+            params["fs_div"] = fs_div
+        if quarter is not None:
+            where.append("f.quarter=:quarter")
+            params["quarter"] = int(quarter)
+        sql = f"""
+            SELECT f.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   f.year, f.quarter, f.fs_div, f.revenue, f.operating_profit,
+                   f.net_income, f.total_assets, f.total_debt, f.total_equity,
+                   f.operating_cf, f.going_concern_flag, f.op_cf_divergence_flag,
+                   f.beneish_m_score, f.source
+            FROM financials f
+            JOIN companies c ON c.corp_code=f.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY f.year DESC, f.quarter DESC, c.market, c.corp_name
+            LIMIT :row_limit
+        """
+
+    stmt = text(sql)
+    for key in bind_expanding:
+        stmt = stmt.bindparams(bindparam(key, expanding=True))
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(stmt, params).mappings().all()]
+
+    for row in rows:
+        if "body_text" in row:
+            body = _display_text(row.pop("body_text") or "")
+            if include_excerpt:
+                row["body_excerpt"] = body[:1200]
+        if "body" in row:
+            body = _display_text(row.pop("body") or "")
+            if include_excerpt:
+                row["body_excerpt"] = body[:1200]
+
+    companies = _group_company_records(rows, limit=limit)
+    return _clean_dict({
+        "query": {
+            "dataset": dataset,
+            "company": company,
+            "year": year,
+            "market": market,
+            "induty_prefix": induty_prefix,
+            "keyword": keyword,
+            "source_type": source_type,
+            "section_keys": section_keys,
+            "fs_div": fs_div,
+            "quarter": quarter,
+            "limit": limit,
+            "include_excerpt": include_excerpt,
+        },
+        "subject": subject,
+        "total_companies": len(companies),
+        "total_records": sum(item["record_count"] for item in companies),
+        "companies": companies,
+        "data_quality": {
+            "status": "usable" if companies else "missing",
+            "source": source,
+            "interpretation": "Search reads local cached tables only. Empty result means no cached matching row.",
+        },
+    })
+
+
+def estimate_audit_hours_proxy(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    """Estimate public-data audit complexity proxy for planning discussion."""
+    fee_pack = compare_peer_audit_fees(
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy
+    )
+    if "error" in fee_pack:
+        return fee_pack
+    risk_pack = compare_peer_risk_profile(
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy
+    )
+
+    subject_metrics = fee_pack.get("subject_metrics") or {}
+    risk_metrics = risk_pack.get("subject_metrics") or {}
+    benchmarks = fee_pack.get("benchmarks") or {}
+
+    drivers = []
+    score = 0
+
+    total_assets = subject_metrics.get("total_assets")
+    if total_assets:
+        score += 20
+        drivers.append({
+            "driver": "size",
+            "signal": "total_assets_available",
+            "points": 20,
+            "score_after": score,
+        })
+
+    audit_hours = subject_metrics.get("audit_hours")
+    if audit_hours:
+        pctl = (benchmarks.get("audit_hours") or {}).get("subject_percentile")
+        if pctl is not None and pctl >= 75:
+            points = 25
+            level = "high_vs_peers"
+        elif pctl is not None and pctl <= 25:
+            points = 5
+            level = "low_vs_peers"
+        else:
+            points = 15
+            level = "mid_vs_peers"
+        score += points
+        drivers.append({
+            "driver": "audit_hours",
+            "signal": level,
+            "points": points,
+            "score_after": score,
+        })
+
+    if risk_metrics.get("op_cf_divergence_flag"):
+        score += 15
+        drivers.append({
+            "driver": "cashflow_divergence",
+            "signal": "flagged",
+            "points": 15,
+            "score_after": score,
+        })
+    if risk_metrics.get("going_concern_flag"):
+        score += 20
+        drivers.append({
+            "driver": "going_concern",
+            "signal": "flagged",
+            "points": 20,
+            "score_after": score,
+        })
+    if risk_metrics.get("beneish_m_score") is not None and risk_metrics.get("beneish_m_score") > -1.78:
+        score += 10
+        drivers.append({
+            "driver": "beneish_m_score",
+            "signal": "above_screening_threshold",
+            "points": 10,
+            "score_after": score,
+        })
+
+    complexity_score = min(score, 100)
+    if complexity_score >= 70:
+        band = "high"
+    elif complexity_score >= 40:
+        band = "medium"
+    else:
+        band = "low"
+
+    return _clean_dict({
+        "subject": fee_pack["subject"],
+        "year": year,
+        "peer_count": fee_pack.get("peer_count"),
+        "complexity_score": complexity_score,
+        "complexity_band": band,
+        "drivers": drivers,
+        "peer_benchmarks": {
+            "audit_hours": benchmarks.get("audit_hours"),
+            "audit_fee_to_assets_bps": benchmarks.get("audit_fee_to_assets_bps"),
+            "audit_fee_per_hour_m": benchmarks.get("audit_fee_per_hour_m"),
+        },
+        "data_quality": {
+            "audit_fee_metrics": fee_pack.get("data_quality"),
+            "risk_metrics": risk_pack.get("data_quality"),
+        },
+        "subject_metrics": {
+            "audit_hours": audit_hours,
+            "audit_fee_m": subject_metrics.get("audit_fee_m"),
+            "total_assets": total_assets,
+            "op_cf_divergence_flag": risk_metrics.get("op_cf_divergence_flag"),
+            "going_concern_flag": risk_metrics.get("going_concern_flag"),
+            "beneish_m_score": risk_metrics.get("beneish_m_score"),
+        },
+        "selection_policy": fee_pack.get("selection_policy"),
+        "limitations": [
+            "This is not a standard audit hour calculation.",
+            "It is a public DART data proxy for planning discussion and peer comparison.",
+        ],
+    })
+
+
+def build_audit_acceptance_pack(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    """Build a compact DART evidence pack for acceptance/continuance screening."""
+    peer_group = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in peer_group:
+        return peer_group
+    fee_pack = compare_peer_audit_fees(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    risk_pack = compare_peer_risk_profile(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    hours_pack = estimate_audit_hours_proxy(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    policy_pack = compare_peer_accounting_policies(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    kam_pack = compare_peer_kam_topics(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    matter_pack = compare_peer_audit_report_matters(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+
+    acceptance_signals = []
+    subject_fee = fee_pack.get("subject_metrics") or {}
+    if subject_fee.get("nas_ratio") is not None and subject_fee.get("nas_ratio") > 1.0:
+        acceptance_signals.append({
+            "area": "independence",
+            "severity": "review",
+            "signal": "non_audit_fee_exceeds_audit_fee",
+        })
+    risk_subject = risk_pack.get("subject_metrics") or {}
+    if risk_subject.get("going_concern_flag"):
+        acceptance_signals.append({
+            "area": "going_concern",
+            "severity": "review",
+            "signal": "loss_based_going_concern_flag",
+        })
+    if risk_subject.get("op_cf_divergence_flag"):
+        acceptance_signals.append({
+            "area": "cashflow_quality",
+            "severity": "review",
+            "signal": "positive_operating_profit_negative_operating_cashflow",
+        })
+    if hours_pack.get("complexity_band") == "high":
+        acceptance_signals.append({
+            "area": "audit_effort",
+            "severity": "review",
+            "signal": "high_public_data_complexity_proxy",
+        })
+    matter_counts = matter_pack.get("matter_counts") or {}
+    if (matter_counts.get("emphasis") or {}).get("subject_count"):
+        acceptance_signals.append({
+            "area": "audit_report_matters",
+            "severity": "review",
+            "signal": "audit_report_emphasis_paragraph_present",
+        })
+    if (matter_counts.get("going_concern") or {}).get("subject_count"):
+        acceptance_signals.append({
+            "area": "going_concern",
+            "severity": "review",
+            "signal": "audit_report_going_concern_paragraph_present",
+        })
+    if (matter_counts.get("other_matter") or {}).get("subject_count"):
+        acceptance_signals.append({
+            "area": "audit_report_matters",
+            "severity": "info",
+            "signal": "audit_report_other_matter_paragraph_present",
+        })
+
+    policy_peer_count = policy_pack.get("peer_count") or 0
+    peers_with_policy = policy_pack.get("peers_with_policy") or 0
+    policy_coverage_pct = (
+        round(100.0 * peers_with_policy / policy_peer_count, 1)
+        if policy_peer_count else 0.0
+    )
+    kam_events = (kam_pack.get("audit_report_events") or {}).get("total_events") or 0
+    kam_section_quality = kam_pack.get("audit_report_sections") or {}
+    kam_body_count = kam_section_quality.get("kam_body_count") or 0
+    kam_reason_coverage = kam_section_quality.get("kam_reason_coverage") or {}
+    kam_procedure_coverage = kam_section_quality.get("kam_procedure_coverage") or {}
+    data_quality = {
+        "policy_cache": {
+            "subject_policy_count": policy_pack.get("subject_policy_count"),
+            "peers_with_policy": peers_with_policy,
+            "peer_count": policy_peer_count,
+            "peer_policy_coverage_pct": policy_coverage_pct,
+            "status": (policy_pack.get("data_quality") or {}).get(
+                "status",
+                "limited" if policy_coverage_pct < 50.0 else "usable",
+            ),
+            "coverage_note": policy_pack.get("coverage_note"),
+        },
+        "audit_report_events": {
+            "total_events": kam_events,
+            "status": "limited" if kam_events == 0 else "usable",
+        },
+        "kam_body": {
+            "kam_body_count": kam_body_count,
+            "peer_companies_with_sections": kam_section_quality.get("peer_companies_with_sections"),
+            "subject_section_count": kam_section_quality.get("subject_section_count"),
+            "kam_reason_coverage": kam_reason_coverage,
+            "kam_procedure_coverage": kam_procedure_coverage,
+            "source": kam_section_quality.get("source"),
+            "available_subject_kam_years": (kam_pack.get("data_quality") or {}).get("available_subject_kam_years"),
+            "status": (
+                "not_persisted"
+                if not kam_body_count
+                else "subject_missing"
+                if not (kam_section_quality.get("subject_section_count") or 0)
+                else "subject_only"
+                if not (kam_section_quality.get("peer_companies_with_sections") or 0)
+                else "usable"
+            ),
+        },
+        "audit_report_matters": {
+            "status": (matter_pack.get("data_quality") or {}).get("status"),
+            "subject_section_count": (matter_pack.get("data_quality") or {}).get("subject_section_count"),
+            "peer_companies_with_sections": (matter_pack.get("data_quality") or {}).get("peer_companies_with_sections"),
+            "matter_counts": matter_counts,
+        },
+    }
+
+    if data_quality["policy_cache"]["status"] == "limited":
+        acceptance_signals.append({
+            "area": "data_coverage",
+            "severity": "info",
+            "signal": "low_peer_accounting_policy_cache_coverage",
+        })
+    if data_quality["kam_body"]["status"] == "not_persisted":
+        acceptance_signals.append({
+            "area": "data_coverage",
+            "severity": "info",
+            "signal": "kam_body_not_persisted",
+        })
+    elif data_quality["kam_body"]["status"] == "subject_only":
+        acceptance_signals.append({
+            "area": "data_coverage",
+            "severity": "info",
+            "signal": "peer_kam_body_coverage_missing",
+        })
+    elif data_quality["kam_body"]["status"] == "subject_missing":
+        acceptance_signals.append({
+            "area": "data_coverage",
+            "severity": "info",
+            "signal": "subject_kam_body_missing_for_requested_year",
+        })
+
+    recommended_review_areas = sorted({
+        item["area"] for item in acceptance_signals
+    } | {
+        "peer_group_basis",
+        "audit_fee_and_hours",
+        "accounting_policy_coverage",
+        "audit_report_events",
+        "audit_report_matters",
+    })
+
+    return _clean_dict({
+        "subject": peer_group["subject"],
+        "year": year,
+        "scope": "external_dart_evidence_pack",
+        "acceptance_signals": acceptance_signals,
+        "data_quality": data_quality,
+        "recommended_review_areas": recommended_review_areas,
+        "peer_group": {
+            "peer_count": peer_group.get("peer_count"),
+            "confidence": peer_group.get("confidence"),
+            "selection_policy": peer_group.get("selection_policy"),
+            "sample_peers": peer_group.get("peers", [])[:10],
+        },
+        "audit_fee_summary": {
+            "subject_metrics": subject_fee,
+            "benchmarks": fee_pack.get("benchmarks"),
+        },
+        "risk_summary": {
+            "subject_metrics": risk_subject,
+            "benchmarks": risk_pack.get("benchmarks"),
+            "disclosure_event_counts": risk_pack.get("disclosure_event_counts"),
+        },
+        "audit_hours_proxy": {
+            "complexity_score": hours_pack.get("complexity_score"),
+            "complexity_band": hours_pack.get("complexity_band"),
+            "drivers": hours_pack.get("drivers"),
+        },
+        "policy_summary": {
+            "subject_policy_count": policy_pack.get("subject_policy_count"),
+            "peers_with_policy": policy_pack.get("peers_with_policy"),
+            "coverage_note": policy_pack.get("coverage_note"),
+        },
+        "kam_summary": {
+            "audit_report_events": kam_pack.get("audit_report_events"),
+            "kam_topics": kam_pack.get("kam_topics"),
+            "audit_report_sections": kam_pack.get("audit_report_sections"),
+            "subject_sections": (kam_pack.get("subject_sections") or [])[:3],
+            "subject_business_report_kam_summary": (
+                kam_pack.get("subject_business_report_kam_summary") or []
+            )[:3],
+            "limitations": kam_pack.get("limitations"),
+        },
+        "audit_report_matter_summary": {
+            "matter_counts": matter_counts,
+            "subject_matters": (matter_pack.get("subject_matters") or [])[:5],
+            "data_quality": matter_pack.get("data_quality"),
+            "limitations": matter_pack.get("limitations"),
+        },
+        "limitations": [
+            "This pack supports acceptance/continuance screening only.",
+            "It does not replace firm methodology, independence checks, client inquiry, or workpaper judgment.",
+        ],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1664,12 +3383,42 @@ def get_business_overview(
             }
         bsns_year = years[0]  # 가장 최근
 
-    # 섹션 추출 — dashboard.db에만 있는 함수 (queries.py에 미포함)
-    import os as _os
-    _os.environ.setdefault("DART_HEADLESS", "1")
-    from dashboard.db import get_business_report_package as _get_brp
-    package = _get_brp(corp_code, bsns_year)
-    raw = (package or {}).get("sections")
+    section_keys = {
+        "business_overview",
+        "business_description",
+        "risk_management",
+        "management_plan",
+        "rd_activities",
+        "key_contracts",
+    }
+    with _engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT section_key, section_title, body_text, body_length
+                FROM report_sections
+                WHERE corp_code=:corp_code
+                  AND bsns_year=:bsns_year
+                  AND source_type='business_report'
+                  AND section_key IN :section_keys
+                ORDER BY ordinal
+                """
+            ).bindparams(bindparam("section_keys", expanding=True)),
+            {
+                "corp_code": corp_code,
+                "bsns_year": bsns_year,
+                "section_keys": list(section_keys),
+            },
+        ).mappings().all()
+
+    raw = {
+        row["section_key"]: {
+            "title": row["section_title"],
+            "body_text": _display_text(row["body_text"]),
+            "length": row["body_length"],
+        }
+        for row in rows
+    }
 
     if not raw or not isinstance(raw, dict):
         return {
@@ -1679,7 +3428,22 @@ def get_business_overview(
             "sections": {},
             "insights": [],
             "total_chars": 0,
-            "note": f"{bsns_year}년 사업보고서 본문을 추출할 수 없습니다.",
+            "section_count": 0,
+            "data_quality": {
+                "status": "cache_missing",
+                "source": "local_report_sections",
+                "requested_year": bsns_year,
+                "available_business_report_years": _cached_years_for_sections(corp_code, "business_report"),
+                "missing_reason": "business_overview/business_description 등 경영정보 섹션이 아직 로컬 DB에 영속화되지 않았습니다.",
+                "interpretation": (
+                    "No rows means the local business-report section cache lacks the requested year. "
+                    "It does not prove the filing lacks management discussion sections."
+                ),
+            },
+            "note": (
+                f"{bsns_year}년 사업보고서 경영정보 본문 캐시가 없습니다. "
+                "외부 MCP 런타임에서는 DART API를 호출하지 않습니다."
+            ),
         }
 
     # 텍스트만 반환 (HTML 제거 — MCP 응답 크기 절약)
@@ -1709,14 +3473,20 @@ def get_business_overview(
         "induty_code": induty_code,
         "industry_name": industry_name,
         "bsns_year": bsns_year,
-        "report_meta": (package or {}).get("meta", {}),
+        "report_meta": {},
         "sections": sections_clean,
         "insights": insights,
-        "audit_focus": (package or {}).get("audit_focus", []),
-        "investment_focus": (package or {}).get("investment_focus", []),
-        "risk_distribution": (package or {}).get("risk_distribution"),
+        "audit_focus": [],
+        "investment_focus": [],
+        "risk_distribution": None,
         "total_chars": total_chars,
         "section_count": len(sections_clean),
+        "data_quality": {
+            "status": "usable",
+            "source": "local_report_sections",
+            "requested_year": bsns_year,
+            "available_business_report_years": _cached_years_for_sections(corp_code, "business_report"),
+        },
     })
 
 
@@ -1767,8 +3537,100 @@ def get_subsidiary_auditors(
             "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
         }
 
-    data = _queries.get_subsidiaries_with_auditors(corp_code)
-    if not data:
+    cached_rows = []
+    latest_year = None
+    if _has_db_column("subsidiary_auditor_matrix", "parent_corp_code"):
+        with get_session() as session:
+            cached_orm_rows = (
+                session.query(BusinessAffiliateAuditor)
+                .filter_by(parent_corp_code=corp_code)
+                .order_by(BusinessAffiliateAuditor.bsns_year.desc(), BusinessAffiliateAuditor.ordinal.asc())
+                .all()
+            )
+            latest_year = cached_orm_rows[0].bsns_year if cached_orm_rows else None
+            if latest_year is not None:
+                cached_orm_rows = [row for row in cached_orm_rows if row.bsns_year == latest_year]
+            cached_rows = [
+                {
+                    "parent_rcept_no": row.parent_rcept_no,
+                    "bsns_year": row.bsns_year,
+                    "name": row.name,
+                    "relation": row.relation,
+                    "ownership_pct": row.ownership_pct,
+                    "listed_yn": row.listed_yn,
+                    "business": row.business,
+                    "assets": row.assets,
+                    "source": row.source,
+                    "corp_code": row.corp_code,
+                    "stock_code": row.stock_code,
+                    "market": row.market,
+                    "auditor_nm": row.auditor_nm,
+                    "audit_opinion": row.audit_opinion,
+                    "auditor_fs_div": row.auditor_fs_div,
+                    "auditor_year": row.auditor_year,
+                }
+                for row in cached_orm_rows
+            ]
+    with get_session() as session:
+        row = (
+            session.query(Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm)
+            .filter_by(corp_code=corp_code)
+            .filter(Disclosure.report_nm.like("%사업보고서%"))
+            .order_by(Disclosure.disc_date.desc())
+            .first()
+        )
+    if cached_rows:
+        items = []
+        for cached in cached_rows:
+            auditor = None
+            if cached["auditor_nm"]:
+                auditor = {
+                    "auditor_nm": cached["auditor_nm"],
+                    "bsns_year": cached["auditor_year"],
+                    "audit_opinion": cached["audit_opinion"],
+                }
+            items.append({
+                "name": cached["name"],
+                "relation": cached["relation"],
+                "ownership_pct": cached["ownership_pct"],
+                "listed_yn": cached["listed_yn"],
+                "business": cached["business"],
+                "assets": cached["assets"],
+                "source": cached["source"],
+                "corp_code": cached["corp_code"],
+                "stock_code": cached["stock_code"],
+                "market": cached["market"],
+                "auditor": auditor,
+            })
+
+        total = len(items)
+        items_sorted = sorted(items, key=lambda x: 0 if x.get("auditor") else 1)
+        if only_with_auditor:
+            items_sorted = [x for x in items_sorted if x.get("auditor")]
+        truncated = False
+        if limit is not None and len(items_sorted) > limit:
+            items_sorted = items_sorted[:limit]
+            truncated = True
+        if slim:
+            items_sorted = [
+                {k: x.get(k) for k in _SUBSIDIARY_SLIM_FIELDS}
+                for x in items_sorted
+            ]
+
+        return _clean_dict({
+            "corp_code": corp_code,
+            "parent_rcept_no": cached_rows[0]["parent_rcept_no"],
+            "bsns_year": latest_year,
+            "subsidiaries": items_sorted,
+            "count": len(items_sorted),
+            "total": total,
+            "truncated": truncated,
+            "data_quality": {
+                "status": "usable",
+                "source": "local_subsidiary_auditor_matrix",
+            },
+        })
+    if row is None:
         return {
             "corp_code": corp_code,
             "parent_rcept_no": None,
@@ -1777,42 +3639,31 @@ def get_subsidiary_auditors(
             "count": 0,
             "total": 0,
             "truncated": False,
+            "data_quality": {
+                "status": "cache_missing",
+                "source": "local_subsidiary_auditor_matrix",
+            },
+            "note": "DB에 사업보고서 공시가 없습니다.",
         }
+    disc_date_str = str(row.disc_date)
+    try:
+        bsns_year = int(disc_date_str[:4]) - 1
+    except Exception:
+        bsns_year = None
 
-    # dashboard.db 반환 구조: {rcept_no, bsns_year, items: [...], parse_errors: [...]}
-    items = data.get("items", []) if isinstance(data, dict) else list(data)
-    total = len(items)
-
-    # 필터: 감사인 있는 항목 우선 정렬
-    def _has_auditor(x: dict) -> int:
-        a = x.get("auditor") if isinstance(x, dict) else None
-        return 0 if a else 1  # auditor 있는 것이 먼저
-
-    items_sorted = sorted(items, key=_has_auditor)
-
-    if only_with_auditor:
-        items_sorted = [x for x in items_sorted if x.get("auditor")]
-
-    # Limit 적용
-    truncated = False
-    if limit is not None and len(items_sorted) > limit:
-        items_sorted = items_sorted[:limit]
-        truncated = True
-
-    # Slim: 핵심 필드만
-    if slim:
-        items_sorted = [
-            {k: x.get(k) for k in _SUBSIDIARY_SLIM_FIELDS}
-            for x in items_sorted
-        ]
-
-    result = {
+    return {
         "corp_code": corp_code,
-        "parent_rcept_no": data.get("rcept_no") if isinstance(data, dict) else None,
-        "bsns_year": data.get("bsns_year") if isinstance(data, dict) else None,
-        "subsidiaries": items_sorted,
-        "count": len(items_sorted),
-        "total": total,
-        "truncated": truncated,
+        "parent_rcept_no": row.rcept_no,
+        "bsns_year": bsns_year,
+        "subsidiaries": [],
+        "count": 0,
+        "total": 0,
+        "truncated": False,
+        "parse_errors": [],
+            "data_quality": {
+                "status": "cache_missing",
+                "source": "local_subsidiary_auditor_matrix",
+                "missing_reason": "종속회사/관계회사 감사인 매트릭스는 아직 별도 캐시 테이블로 영속화되지 않았습니다.",
+            },
+        "note": "외부 MCP 런타임에서는 DART API를 호출하지 않습니다. 이 기능은 캐시 테이블 추가 전까지 데이터 없음으로 반환합니다.",
     }
-    return _clean_dict(result)

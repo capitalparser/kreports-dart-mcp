@@ -1,5 +1,7 @@
 # Database
 kreports.db
+kreports.db-shm
+kreports.db-wal
 dart_platform.db
 *.db-journal
 
@@ -50,3 +52,6 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Local backfill process markers
+*.pid

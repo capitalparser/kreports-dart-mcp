@@ -8,6 +8,30 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+
+@pytest.fixture
+def temp_engine(monkeypatch):
+    """Isolated in-memory DB for API/analysis tests."""
+    import kreports.db.engine as engine_module
+    from kreports.db.models import Base
+
+    test_engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=test_engine)
+    new_session_maker = sessionmaker(bind=test_engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(engine_module, "engine", test_engine)
+    monkeypatch.setattr(engine_module, "SessionLocal", new_session_maker)
+
+    import kreports.analysis.api as api_module
+    import kreports.analysis.peer as peer_module
+    import kreports.analysis.readiness as readiness_module
+
+    monkeypatch.setattr(api_module, "_engine", test_engine)
+    monkeypatch.setattr(peer_module, "engine", test_engine)
+    monkeypatch.setattr(readiness_module, "engine", test_engine)
+    return test_engine
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +96,62 @@ def dart_response_alias_accounts():
 def dart_response_no_data():
     """데이터 없음 응답 fixture."""
     return {"status": "013", "message": "조회된 데이터가 없습니다."}
+
+
+@pytest.fixture
+def dart_response_acnt_summary():
+    """fnlttSinglAcnt (주요계정 요약) 응답 fixture — KOSDAQ 소형주 표준 케이스.
+
+    account_id 없음 (요약 엔드포인트 특성). sj_div BS/IS만 사용.
+    숫자는 로보티즈 2024 추정치 수준 (검증용 더미).
+    """
+    return {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            # BS
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "유동자산",
+             "thstrm_amount": "80,000,000,000", "frmtrm_amount": "60,000,000,000", "ord": "1"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "비유동자산",
+             "thstrm_amount": "70,000,000,000", "frmtrm_amount": "55,000,000,000", "ord": "2"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "자산총계",
+             "thstrm_amount": "150,000,000,000", "frmtrm_amount": "115,000,000,000", "ord": "3"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "유동부채",
+             "thstrm_amount": "30,000,000,000", "ord": "4"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "비유동부채",
+             "thstrm_amount": "10,000,000,000", "ord": "5"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "부채총계",
+             "thstrm_amount": "40,000,000,000", "frmtrm_amount": "32,000,000,000", "ord": "6"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "자본금",
+             "thstrm_amount": "5,000,000,000", "ord": "7"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "이익잉여금",
+             "thstrm_amount": "50,000,000,000", "ord": "8"},
+            {"sj_div": "BS", "sj_nm": "재무상태표", "account_nm": "자본총계",
+             "thstrm_amount": "110,000,000,000", "frmtrm_amount": "83,000,000,000", "ord": "9"},
+            # IS
+            {"sj_div": "IS", "sj_nm": "손익계산서", "account_nm": "매출액",
+             "thstrm_amount": "75,000,000,000", "frmtrm_amount": "60,000,000,000", "ord": "1"},
+            {"sj_div": "IS", "sj_nm": "손익계산서", "account_nm": "영업이익",
+             "thstrm_amount": "8,000,000,000", "frmtrm_amount": "5,000,000,000", "ord": "2"},
+            {"sj_div": "IS", "sj_nm": "손익계산서", "account_nm": "법인세차감전순이익",
+             "thstrm_amount": "7,500,000,000", "ord": "3"},
+            {"sj_div": "IS", "sj_nm": "손익계산서", "account_nm": "당기순이익",
+             "thstrm_amount": "6,000,000,000", "frmtrm_amount": "4,000,000,000", "ord": "4"},
+        ],
+    }
+
+
+@pytest.fixture
+def dart_response_acnt_partial():
+    """일부 계정만 있는 acnt 응답 — 매핑 실패 케이스 (영업이익만)."""
+    return {
+        "status": "000",
+        "message": "정상",
+        "list": [
+            {"sj_div": "IS", "sj_nm": "손익계산서", "account_nm": "영업이익",
+             "thstrm_amount": "1,000,000,000", "ord": "1"},
+        ],
+    }
 
 
 @pytest.fixture

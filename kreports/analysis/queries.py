@@ -7,7 +7,15 @@ dashboard/db.py는 이 모듈을 import하여 @st.cache_data 래핑만 추가한
 """
 import pandas as pd
 from kreports.db.engine import get_session
-from kreports.db.models import Company, Financial, FinancialFact, Disclosure, Auditor, AuditFee
+from kreports.db.models import (
+    AccountingPolicyItem,
+    Company,
+    Financial,
+    FinancialFact,
+    Disclosure,
+    Auditor,
+    AuditFee,
+)
 
 _UNIT = 1e8  # 억원
 
@@ -1630,6 +1638,33 @@ def get_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "CFS") -
                 items[k] = v
 
     return {"raw_html": raw_html, "items": items, "rcept_no": rcept_no}
+
+
+def get_cached_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "CFS") -> dict | None:
+    with get_session() as session:
+        rows = (
+            session.query(AccountingPolicyItem)
+            .filter_by(corp_code=corp_code, bsns_year=bsns_year, fs_div=fs_div)
+            .order_by(AccountingPolicyItem.item_key.asc())
+            .all()
+        )
+        if not rows:
+            return None
+        return {
+            "corp_code": corp_code,
+            "bsns_year": bsns_year,
+            "fs_div": fs_div,
+            "rcept_no": rows[0].rcept_no,
+            "items": {
+                row.item_key: {
+                    "heading": row.heading,
+                    "body": row.body,
+                    "body_length": row.body_length,
+                    "body_hash": row.body_hash,
+                }
+                for row in rows
+            }
+        }
 
 
 # 토픽 chapter label → item_key 매핑. 포함 검사(in) 기준.

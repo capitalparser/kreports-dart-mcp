@@ -129,7 +129,7 @@ class TestRealDataSemiconductor:
         if not _samsung_available():
             pytest.skip("Samsung DB 미등록")
         r = kreports.get_industry_aggregates(
-            "264", metric="영업이익률", prefix_len=2
+            "264", metric="영업이익률", prefix_len=2, peer_limit=1000
         )
         if r["n"] == 0:
             pytest.skip("반도체 업종 재무데이터 없음")
@@ -140,7 +140,7 @@ class TestRealDataSemiconductor:
         if not _samsung_available():
             pytest.skip("Samsung DB 미등록")
         r = kreports.get_industry_aggregates(
-            "264", metric="영업이익률", prefix_len=2
+            "264", metric="영업이익률", prefix_len=2, peer_limit=1000
         )
         if r["n"] < 2:
             pytest.skip("peer 2개 미만")
@@ -151,7 +151,7 @@ class TestRealDataSemiconductor:
         if not _samsung_available():
             pytest.skip("Samsung DB 미등록")
         r = kreports.get_industry_aggregates(
-            "264", metric="영업이익률", prefix_len=2
+            "264", metric="영업이익률", prefix_len=2, peer_limit=1000
         )
         if r["n"] == 0:
             pytest.skip("데이터 없음")

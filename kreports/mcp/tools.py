@@ -6,7 +6,7 @@ dart_mcp.tools — MCP 도구 정의.
   2. handler — 실제 호출 함수 (dart_analyst에 위임)
   3. description — Claude가 도구 선택에 쓰는 자연어 설명
 
-도구 목록 (12개):
+도구 목록 (23개):
   search_company                회사명/종목코드 → corp_code 탐색
   get_financial_snapshot        연도별 재무요약 + 자본배분 지표
   score_going_concern           6인자 계속기업 스코어카드
@@ -18,6 +18,17 @@ dart_mcp.tools — MCP 도구 정의.
   get_business_overview         사업보고서 핵심 섹션
   get_investor_signals          투자자 품질·리스크·공시 이벤트 요약
   compare_to_industry_multi     업종 벤치마킹 (다지표·다년도 matrix)
+  select_peer_group             감사인 관점 peer group 선정
+  compare_peer_audit_fees       감사보수·감사시간 peer 비교
+  compare_peer_risk_profile     감사 위험 signal peer 비교
+  compare_peer_accounting_policies  회계정책 cache peer 비교
+  compare_peer_kam_topics       감사보고서/KAM event peer 비교
+  compare_peer_audit_report_matters 감사보고서 기타사항·강조사항 peer 비교
+  search_dataset                주요 로컬 데이터셋 공통 검색
+  search_audit_report_matters   회사/연도/업종별 감사보고서 matters 검색
+  get_audit_report_sections     감사보고서 본문 섹션 조회
+  estimate_audit_hours_proxy    표준감사시간 전단계 public proxy
+  build_audit_acceptance_pack   수임/유지 외부근거 pack
   get_industry_audit_landscape  업종 내 감사인 시장 분석
 """
 from __future__ import annotations
@@ -30,10 +41,18 @@ from mcp.types import Tool
 from sqlalchemy import func
 
 from kreports.analysis.api import (
+    build_audit_acceptance_pack,
+    compare_peer_accounting_policies,
+    compare_peer_audit_fees,
+    compare_peer_audit_report_matters,
+    compare_peer_kam_topics,
+    compare_peer_risk_profile,
     compare_to_industry,
     compare_to_industry_multi,
     detect_restatement,
+    estimate_audit_hours_proxy,
     get_accounting_policy,
+    get_audit_report_sections,
     get_audit_history,
     get_business_overview,
     get_financial_snapshot,
@@ -41,6 +60,9 @@ from kreports.analysis.api import (
     get_investor_signals,
     get_subsidiary_auditors,
     resolve_corp_code,
+    search_dataset,
+    search_audit_report_matters,
+    select_peer_group,
     score_going_concern,
     search_company,
 )
@@ -53,10 +75,14 @@ from kreports.db.models import (
     Disclosure,
     Financial,
     FinancialFact,
+    ReportSection,
 )
 
 
 _FS_DIVS = {"CFS", "OFS"}
+_FS_STRATEGIES = {"CFS", "OFS", "auto"}
+_SEARCH_DATASETS = {"report_sections", "accounting_policies", "disclosures", "audit_fees", "financials"}
+_REPORT_SOURCE_TYPES = {"audit_report", "business_report"}
 _COMPARE_METRICS = [
     "영업이익률",
     "순이익률",
@@ -894,6 +920,7 @@ def _handle_compare_to_industry_multi(args: dict) -> dict:
         metrics=metrics,
         years_back=years_back,
         fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
         prefix_len_start=prefix_len_start,
         exclude_other_sectors=_optional_bool(args, "exclude_other_sectors", True),
         size_bucket_decade=_optional_float_or_none(
@@ -936,6 +963,12 @@ TOOL_COMPARE_TO_INDUSTRY_MULTI = Tool(
                 "enum": ["CFS", "OFS"],
                 "default": "CFS",
             },
+            "fs_strategy": {
+                "type": "string",
+                "enum": ["CFS", "OFS", "auto"],
+                "default": "auto",
+                "description": "auto면 CFS 우선, 없으면 OFS로 비교한다.",
+            },
             "prefix_len_start": {
                 "type": "integer",
                 "description": "KSIC ladder 시작 자리 수. 기본 3 (소분류). n<5면 2자리로 자동 fallback.",
@@ -954,6 +987,430 @@ TOOL_COMPARE_TO_INDUSTRY_MULTI = Tool(
                 "minimum": 0.5,
                 "maximum": 3.0,
             },
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_select_peer_group(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    criteria = args.get("criteria")
+    if criteria is not None and not isinstance(criteria, list):
+        return {"error": "criteria는 array여야 합니다."}
+    return select_peer_group(
+        company=company,
+        criteria=criteria,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+        prefix_len_start=_optional_int(args, "prefix_len_start", 3, min_value=2, max_value=5) or 3,
+        size_bucket_decade=_optional_float_or_none(args, "size_bucket_decade", min_value=0.5, max_value=3.0),
+        exclude_other_sectors=_optional_bool(args, "exclude_other_sectors", True),
+    )
+
+
+TOOL_SELECT_PEER_GROUP = Tool(
+    name="select_peer_group",
+    description=(
+        "감사인 관점 peer group 선정 근거팩. KSIC 업종, sector 분리, 자산규모 bucket, "
+        "재무데이터/감사보수 coverage를 기준으로 peer 목록과 include_reasons를 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "criteria": {"type": "array", "items": {"type": "string"}},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+            "prefix_len_start": {"type": "integer", "default": 3, "minimum": 2, "maximum": 5},
+            "size_bucket_decade": {"type": "number", "minimum": 0.5, "maximum": 3.0},
+            "exclude_other_sectors": {"type": "boolean", "default": True},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_audit_fees(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_audit_fees(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+        size_bucket_decade=_optional_float_or_none(args, "size_bucket_decade", min_value=0.5, max_value=3.0),
+    )
+
+
+TOOL_COMPARE_PEER_AUDIT_FEES = Tool(
+    name="compare_peer_audit_fees",
+    description=(
+        "감사보수와 감사시간을 peer group 기준으로 벤치마크한다. 감사보수, 감사시간, "
+        "비감사보수 비율, 자산 대비 보수, 시간당 보수의 분위수와 subject percentile을 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+            "size_bucket_decade": {"type": "number", "minimum": 0.5, "maximum": 3.0},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_risk_profile(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_risk_profile(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_COMPARE_PEER_RISK_PROFILE = Tool(
+    name="compare_peer_risk_profile",
+    description=(
+        "감사인 관점 재무 위험 신호팩. peer group 기준 현금흐름/발생액/Beneish 신호와 "
+        "정정·주요사항 공시 카운트를 반환하며 감사 리스크 판단 자체는 수행하지 않는다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_accounting_policies(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_accounting_policies(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_COMPARE_PEER_ACCOUNTING_POLICIES = Tool(
+    name="compare_peer_accounting_policies",
+    description=(
+        "감사인 관점 회계정책 peer 비교. local DB에 캐시된 accounting_policy_items만 사용해 "
+        "subject item 보유 현황과 peer item_key coverage를 반환한다. DART key 없이 동작하며, "
+        "coverage가 낮으면 dataset refresh 필요성을 명시한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_div": {"type": "string", "enum": ["CFS", "OFS"], "default": "CFS"},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_kam_topics(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_kam_topics(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_COMPARE_PEER_KAM_TOPICS = Tool(
+    name="compare_peer_kam_topics",
+    description=(
+        "동종업종 감사보고서/KAM screening. 로컬 DB에 영속화된 독립감사보고서 본문 섹션이 있으면 "
+        "KAM 본문 topic hint, 핵심감사사항 선정 이유 hint, 감사절차/대응 절차 excerpt를 우선 반환하고, "
+        "사업보고서 KAM은 요약 정보로만 별도 표시한다. 본문 coverage가 부족하면 감사보고서 제출·정정·지연 "
+        "공시 기반 screening으로 graceful degradation한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_compare_peer_audit_report_matters(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_audit_report_matters(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_COMPARE_PEER_AUDIT_REPORT_MATTERS = Tool(
+    name="compare_peer_audit_report_matters",
+    description=(
+        "감사보고서의 기타사항, 강조사항, 계속기업 관련 문단, 감사의견 근거 문단을 peer group 기준으로 "
+        "비교한다. 수임/유지 검토와 감사보고서 이슈 screening용 evidence pack이며 감사의견 판단을 "
+        "대체하지 않는다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _optional_string_list(args: dict, name: str) -> list[str] | None:
+    value = args.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"'{name}' 값은 문자열 배열이어야 합니다.")
+    return [item.strip() for item in value if item.strip()]
+
+
+def _handle_search_dataset(args: dict) -> dict:
+    return search_dataset(
+        dataset=_optional_enum(args, "dataset", _SEARCH_DATASETS, ""),
+        company=_optional_string(args, "company"),
+        year=_optional_int(args, "year", None, min_value=2000, max_value=2100),
+        market=_optional_string(args, "market"),
+        induty_prefix=_optional_string(args, "induty_prefix"),
+        keyword=_optional_string(args, "keyword"),
+        source_type=_optional_enum(args, "source_type", _REPORT_SOURCE_TYPES, None)
+        if args.get("source_type") is not None
+        else None,
+        section_keys=_optional_string_list(args, "section_keys"),
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, None) if args.get("fs_div") is not None else None,
+        quarter=_optional_int(args, "quarter", None, min_value=1, max_value=4),
+        limit=_optional_int(args, "limit", 50, min_value=1, max_value=500) or 50,
+        include_excerpt=_optional_bool(args, "include_excerpt", True),
+    )
+
+
+TOOL_SEARCH_DATASET = Tool(
+    name="search_dataset",
+    description=(
+        "주요 로컬 캐시 데이터셋을 회사, 연도, 시장, 업종, 키워드 기준으로 공통 검색한다. "
+        "감사보고서 섹션(KAM/강조/기타/계속기업), 회계정책, 공시목록, 감사보수·시간, 재무요약을 "
+        "동일한 응답 구조로 반환하여 '어느 회사/업종/연도에 해당 이슈가 있는가' 유형의 질문에 사용한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "dataset": {
+                "type": "string",
+                "enum": ["report_sections", "accounting_policies", "disclosures", "audit_fees", "financials"],
+            },
+            "company": {"type": "string", "description": "선택. corp_code/stock_code/company name"},
+            "year": {"type": "integer", "minimum": 2000, "maximum": 2100},
+            "market": {"type": "string", "description": "선택. KOSPI/KOSDAQ/KONEX"},
+            "induty_prefix": {"type": "string", "description": "선택. KSIC/업종코드 prefix 예: 26"},
+            "keyword": {"type": "string", "description": "선택. 본문/제목/감사인명 등 데이터셋별 텍스트 검색어"},
+            "source_type": {
+                "type": "string",
+                "enum": ["audit_report", "business_report"],
+                "description": "report_sections 검색 시 선택",
+            },
+            "section_keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "report_sections 검색 시 선택. 예: kam, emphasis, other_matter",
+            },
+            "fs_div": {"type": "string", "enum": ["CFS", "OFS"], "description": "재무/회계정책 검색 시 선택"},
+            "quarter": {"type": "integer", "minimum": 1, "maximum": 4, "description": "financials 검색 시 선택"},
+            "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
+            "include_excerpt": {"type": "boolean", "default": True},
+        },
+        "required": ["dataset"],
+    },
+)
+
+
+def _handle_search_audit_report_matters(args: dict) -> dict:
+    company = args.get("company")
+    if company is not None and not isinstance(company, str):
+        raise ValueError("company must be string")
+    section_keys = args.get("section_keys")
+    if section_keys is not None:
+        if not isinstance(section_keys, list) or not all(isinstance(x, str) for x in section_keys):
+            raise ValueError("section_keys must be an array of strings")
+    market = args.get("market")
+    if market is not None and not isinstance(market, str):
+        raise ValueError("market must be string")
+    induty_prefix = args.get("induty_prefix")
+    if induty_prefix is not None and not isinstance(induty_prefix, str):
+        raise ValueError("induty_prefix must be string")
+    return search_audit_report_matters(
+        company=company,
+        year=_optional_int(args, "year", None, min_value=2000, max_value=2100),
+        market=market,
+        induty_prefix=induty_prefix,
+        section_keys=section_keys,
+        limit=_optional_int(args, "limit", 50, min_value=1, max_value=500) or 50,
+        include_excerpt=_optional_bool(args, "include_excerpt", True),
+    )
+
+
+TOOL_SEARCH_AUDIT_REPORT_MATTERS = Tool(
+    name="search_audit_report_matters",
+    description=(
+        "감사보고서 기타사항·강조사항·계속기업 문단을 회사, 특정연도, 시장, 업종코드 prefix 기준으로 검색한다. "
+        "'특정 회사에 강조/기타사항이 있어?'와 '특정 연도/업종에서 강조사항 있는 회사가 어디야?' 유형의 "
+        "질문에 회사별 count와 본문 excerpt를 정렬해 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string", "description": "선택. corp_code/stock_code/company name"},
+            "year": {"type": "integer", "minimum": 2000, "maximum": 2100},
+            "market": {"type": "string", "description": "선택. KOSPI/KOSDAQ/KONEX"},
+            "induty_prefix": {"type": "string", "description": "선택. KSIC/업종코드 prefix 예: 26"},
+            "section_keys": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["other_matter", "emphasis", "going_concern", "basis_for_opinion"],
+                },
+                "default": ["other_matter", "emphasis", "going_concern"],
+            },
+            "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
+            "include_excerpt": {"type": "boolean", "default": True},
+        },
+    },
+)
+
+
+def _handle_get_audit_report_sections(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    section_key = args.get("section_key")
+    if section_key is not None and not isinstance(section_key, str):
+        raise ValueError("section_key must be string")
+    return get_audit_report_sections(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        section_key=section_key,
+        source_type=_optional_enum(args, "source_type", {"audit_report", "business_report", "all"}, "audit_report"),
+        limit=_optional_int(args, "limit", 20, min_value=1, max_value=100) or 20,
+    )
+
+
+TOOL_GET_AUDIT_REPORT_SECTIONS = Tool(
+    name="get_audit_report_sections",
+    description=(
+        "로컬 DB에 저장된 감사보고서 본문 섹션 조회. collect-audit-report-sections로 영속화한 "
+        "감사의견, 핵심감사사항/KAM, 강조사항, 계속기업, 감사인의 책임 문단을 반환한다. KAM에는 topic, "
+        "선정 이유 hint, 감사절차 hint를 함께 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "section_key": {
+                "type": "string",
+                "enum": [
+                    "audit_opinion",
+                    "basis_for_opinion",
+                    "kam",
+                    "emphasis",
+                    "other_matter",
+                    "going_concern",
+                    "management_responsibility",
+                    "auditor_responsibility",
+                ],
+            },
+            "source_type": {
+                "type": "string",
+                "enum": ["audit_report", "business_report", "all"],
+                "default": "audit_report",
+                "description": "audit_report=상세 독립감사보고서 본문, business_report=사업보고서 요약 섹션",
+            },
+            "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_estimate_audit_hours_proxy(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return estimate_audit_hours_proxy(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_ESTIMATE_AUDIT_HOURS_PROXY = Tool(
+    name="estimate_audit_hours_proxy",
+    description=(
+        "표준감사시간 산정 전단계의 public-data 감사난이도 proxy. 자산규모, 감사시간 peer percentile, "
+        "현금흐름 괴리, 계속기업/Beneish signal을 종합해 complexity score를 제공한다. "
+        "표준감사시간 결론이나 법정 산정값은 아니다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+        },
+        "required": ["company"],
+    },
+)
+
+
+def _handle_build_audit_acceptance_pack(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return build_audit_acceptance_pack(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_BUILD_AUDIT_ACCEPTANCE_PACK = Tool(
+    name="build_audit_acceptance_pack",
+    description=(
+        "수임/유지 검토용 DART 외부근거 pack. peer 선정, 감사보수·감사시간, 재무 risk signal, "
+        "회계정책 cache coverage, 감사보고서 event를 한 번에 묶어 반환한다. "
+        "독립성 확인·수임승인·감사판단을 대체하지 않는다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
         },
         "required": ["company"],
     },
@@ -1059,7 +1516,18 @@ ALL_TOOLS: list[Tool] = [
     TOOL_COMPARE_TO_INDUSTRY,
     TOOL_GET_BUSINESS_OVERVIEW,
     TOOL_GET_INVESTOR_SIGNALS,
+    TOOL_SELECT_PEER_GROUP,
     TOOL_COMPARE_TO_INDUSTRY_MULTI,
+    TOOL_COMPARE_PEER_AUDIT_FEES,
+    TOOL_COMPARE_PEER_RISK_PROFILE,
+    TOOL_COMPARE_PEER_ACCOUNTING_POLICIES,
+    TOOL_COMPARE_PEER_KAM_TOPICS,
+    TOOL_COMPARE_PEER_AUDIT_REPORT_MATTERS,
+    TOOL_SEARCH_DATASET,
+    TOOL_SEARCH_AUDIT_REPORT_MATTERS,
+    TOOL_GET_AUDIT_REPORT_SECTIONS,
+    TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
+    TOOL_BUILD_AUDIT_ACCEPTANCE_PACK,
     TOOL_GET_INDUSTRY_AUDIT_LANDSCAPE,
 ]
 
@@ -1074,7 +1542,18 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "compare_to_industry": _handle_compare_to_industry,
     "get_business_overview": _handle_get_business_overview,
     "get_investor_signals": _handle_get_investor_signals,
+    "select_peer_group": _handle_select_peer_group,
     "compare_to_industry_multi": _handle_compare_to_industry_multi,
+    "compare_peer_audit_fees": _handle_compare_peer_audit_fees,
+    "compare_peer_risk_profile": _handle_compare_peer_risk_profile,
+    "compare_peer_accounting_policies": _handle_compare_peer_accounting_policies,
+    "compare_peer_kam_topics": _handle_compare_peer_kam_topics,
+    "compare_peer_audit_report_matters": _handle_compare_peer_audit_report_matters,
+    "search_dataset": _handle_search_dataset,
+    "search_audit_report_matters": _handle_search_audit_report_matters,
+    "get_audit_report_sections": _handle_get_audit_report_sections,
+    "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,
+    "build_audit_acceptance_pack": _handle_build_audit_acceptance_pack,
     "get_industry_audit_landscape": _handle_get_industry_audit_landscape,
 }
 
