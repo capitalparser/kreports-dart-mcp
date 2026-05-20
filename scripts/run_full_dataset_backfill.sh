@@ -39,6 +39,14 @@ done
 run_step "rerun document extractors from cached source documents" \
   .venv/bin/kreports run-document-extractors --source-type business_report
 
+for year in 2021 2022 2023 2024 2025; do
+  run_step "policies ${year} KOSPI" \
+    .venv/bin/kreports collect-policies --market KOSPI --year "$year" --limit 10000
+
+  run_step "policies ${year} KOSDAQ" \
+    .venv/bin/kreports collect-policies --market KOSDAQ --year "$year" --limit 10000
+done
+
 run_step "financials 2021-2024" \
   .venv/bin/kreports collect-all --year-from 2021 --year-to 2024
 
@@ -50,12 +58,6 @@ run_step "audit fees 2021-2025 KOSPI" \
 
 run_step "audit fees 2021-2025 KOSDAQ" \
   .venv/bin/kreports collect-audit-fees --year-from 2021 --year-to 2025 --market KOSDAQ
-
-run_step "policies 2025 KOSPI" \
-  .venv/bin/kreports collect-policies --market KOSPI --year 2025 --limit 10000
-
-run_step "policies 2025 KOSDAQ" \
-  .venv/bin/kreports collect-policies --market KOSDAQ --year 2025 --limit 10000
 
 run_step "dataset audit" \
   .venv/bin/kreports dataset-audit --top 20

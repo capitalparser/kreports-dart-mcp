@@ -3,6 +3,17 @@ from kreports.cli.main import _select_policy_targets
 from kreports.db.models import Company
 
 
+def test_full_backfill_runs_policies_before_financial_endpoint():
+    script = open("scripts/run_full_dataset_backfill.sh", encoding="utf-8").read()
+
+    business_pos = script.index("collect-business-report-sections")
+    extractor_pos = script.index("run-document-extractors --source-type business_report")
+    policy_pos = script.index("collect-policies --market KOSPI --year \"$year\"")
+    financial_pos = script.index("collect-all --year-from")
+
+    assert business_pos < extractor_pos < policy_pos < financial_pos
+
+
 def test_readiness_verdict_passes_core_thresholds():
     snapshot = {
         "markets": {
