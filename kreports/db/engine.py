@@ -100,6 +100,8 @@ def _migrate_existing_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_source_doc_hash ON source_documents(doc_hash)",
             "CREATE INDEX IF NOT EXISTS idx_extraction_runs_doc ON extraction_runs(rcept_no, source_type)",
             "CREATE INDEX IF NOT EXISTS idx_extraction_runs_extractor ON extraction_runs(extractor_name, status)",
+            "CREATE INDEX IF NOT EXISTS idx_note_chapter_corp_year ON accounting_note_chapters(corp_code, bsns_year, fs_div)",
+            "CREATE INDEX IF NOT EXISTS idx_note_chapter_section_type ON accounting_note_chapters(section_type)",
         ]:
             try:
                 conn.execute(text(idx_sql))

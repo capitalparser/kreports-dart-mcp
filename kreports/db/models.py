@@ -199,6 +199,40 @@ class AccountingPolicyItem(Base):
     )
 
 
+class AccountingNoteChapter(Base):
+    """Financial statement note chapters extracted from annual report packages.
+
+    This stores the chapter-level evidence around basis of preparation,
+    significant accounting policies, and significant estimates/judgments. Topic
+    level `AccountingPolicyItem` rows can be derived from this broader source.
+    """
+    __tablename__ = "accounting_note_chapters"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    fs_div = Column(String(3), nullable=False)          # CFS / OFS
+    rcept_no = Column(String(14), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    source_type = Column(String(30), nullable=False, default="business_report")
+    note_no = Column(String(20), nullable=False)        # "2", "3", "4", etc.
+    note_title = Column(String(500), nullable=True)
+    section_type = Column(String(40), nullable=False)   # basis / policy / estimate_judgment / other_note
+    body = Column(Text, nullable=False)
+    body_hash = Column(String(40), nullable=True)
+    body_length = Column(Integer, nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "corp_code", "bsns_year", "fs_div", "note_no", "section_type",
+            name="uq_accounting_note_chapter",
+        ),
+        Index("idx_note_chapter_corp_year", "corp_code", "bsns_year", "fs_div"),
+        Index("idx_note_chapter_section_type", "section_type"),
+    )
+
+
 class ReportDocument(Base):
     """Downloaded DART report document metadata.
 
