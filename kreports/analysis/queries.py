@@ -1354,6 +1354,67 @@ def _note_chapters(note_section: str) -> list[tuple[str, int, int]]:
     return chapters
 
 
+def _plain_text_from_xml(xml_snippet: str) -> str:
+    import re as _re
+
+    text_parts: list[str] = []
+    for m in _re.finditer(r'<P[^>]*>(.*?)</P>', xml_snippet, _re.DOTALL | _re.IGNORECASE):
+        inner = m.group(1)
+        plain = _re.sub(r'<[^>]+>', ' ', inner)
+        plain = _re.sub(r'\s+', ' ', plain).strip()
+        if plain:
+            text_parts.append(plain)
+    if text_parts:
+        return " ".join(text_parts)
+    plain = _re.sub(r'<[^>]+>', ' ', xml_snippet)
+    return _re.sub(r'\s+', ' ', plain).strip()
+
+
+def _classify_accounting_note_chapter(note_no: str, title: str) -> str | None:
+    normalized = " ".join((title or "").split())
+    if any(keyword in normalized for keyword in (
+        "회계추정", "회계적 추정", "중요한 판단", "유의적인 판단",
+        "추정 및 판단", "판단 및 추정",
+    )):
+        return "estimate_judgment"
+    if any(keyword in normalized for keyword in (
+        "중요한 회계정책", "유의적 회계정책", "유의적인 회계정책",
+        "회계처리방침", "회계정책",
+    )):
+        return "policy"
+    if any(keyword in normalized for keyword in (
+        "작성기준", "재무제표의 작성", "연결재무제표의 작성",
+        "준거 회계기준",
+    )):
+        return "basis"
+    return None
+
+
+def extract_accounting_note_chapters(note_section: str) -> list[dict]:
+    """Extract basis, policy, and estimate/judgment chapters from note XML."""
+    chapters = _note_chapters(note_section)
+    extracted: list[dict] = []
+    for label, start, end in chapters:
+        note_no, _, note_title = label.partition(".")
+        note_no = note_no.strip()
+        note_title = note_title.strip()
+        section_type = _classify_accounting_note_chapter(note_no, note_title)
+        if section_type is None:
+            continue
+        xml_block = note_section[start:end]
+        body = _plain_text_from_xml(xml_block)
+        if not body:
+            continue
+        extracted.append({
+            "note_no": note_no,
+            "note_title": note_title,
+            "section_type": section_type,
+            "body": body,
+            "body_length": len(body),
+        })
+    return extracted
+
+
 def _xml_to_html(xml_snippet: str) -> str:
     """DART XML 주석 섹션을 렌더링 가능한 HTML로 변환한다. 테이블 구조를 보존."""
     import re
