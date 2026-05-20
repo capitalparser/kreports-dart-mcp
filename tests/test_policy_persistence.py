@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from kreports.db import engine as engine_module
-from kreports.db.models import AccountingPolicyItem, Base
+from kreports.db.models import AccountingNoteChapter, AccountingPolicyItem, Base
 from kreports.collector import policy_collector
 from kreports.collector.policy_collector import (
     _sha1,
@@ -118,6 +118,22 @@ def mock_policy_data():
             },
         },
         "raw_html": "<div>...</div>",
+        "chapters": [
+            {
+                "note_no": "2",
+                "note_title": "재무제표 작성기준",
+                "section_type": "basis",
+                "body": "연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.",
+                "body_length": 35,
+            },
+            {
+                "note_no": "3",
+                "note_title": "중요한 회계정책",
+                "section_type": "policy",
+                "body": "수익은 고객과의 계약에서 수행의무가 이행될 때 인식합니다.",
+                "body_length": 36,
+            },
+        ],
     }
 
 
@@ -151,6 +167,30 @@ class TestCollectPoliciesForCompany:
             assert body == mock_policy_data["items"][item_key]["body"]
             assert body_hash == _sha1(body)
             assert body_length == len(body)
+
+    def test_persists_note_chapters_idempotently(self, temp_engine, mock_policy_data):
+        with patch("kreports.analysis.queries.get_accounting_policy", return_value=mock_policy_data):
+            r1 = collect_policies_for_company("00000001", 2024, "CFS")
+            r2 = collect_policies_for_company("00000001", 2024, "CFS")
+
+        assert r1["chapters_stored"] == 2
+        assert r2["chapters_stored"] == 2
+
+        with temp_engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT note_no, note_title, section_type, body, body_hash, body_length "
+                    "FROM accounting_note_chapters WHERE corp_code = '00000001' "
+                    "ORDER BY note_no"
+                )
+            ).fetchall()
+        assert len(rows) == 2
+        assert rows[0].note_no == "2"
+        assert rows[0].section_type == "basis"
+        assert rows[1].note_no == "3"
+        assert rows[1].section_type == "policy"
+        assert rows[1].body_hash == _sha1(rows[1].body)
+        assert rows[1].body_length == len(rows[1].body)
 
     def test_rerun_all_unchanged(self, temp_engine, mock_policy_data):
         """동일 데이터로 재실행 시 items_unchanged=3."""

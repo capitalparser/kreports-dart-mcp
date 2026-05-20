@@ -1698,7 +1698,14 @@ def get_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "CFS") -
             if k not in items:
                 items[k] = v
 
-    return {"raw_html": raw_html, "items": items, "rcept_no": rcept_no}
+    chapters = extract_accounting_note_chapters(note_section)
+
+    return {
+        "raw_html": raw_html,
+        "items": items,
+        "chapters": chapters,
+        "rcept_no": rcept_no,
+    }
 
 
 def get_cached_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "CFS") -> dict | None:

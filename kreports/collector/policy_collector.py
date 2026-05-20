@@ -20,7 +20,7 @@ from datetime import datetime
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from kreports.db.engine import get_session
-from kreports.db.models import AccountingPolicyItem
+from kreports.db.models import AccountingNoteChapter, AccountingPolicyItem
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ def collect_policies_for_company(
         "items_new": 0,
         "items_changed": 0,
         "items_unchanged": 0,
+        "chapters_stored": 0,
         "error": None,
     }
 
@@ -94,6 +95,7 @@ def collect_policies_for_company(
 
     rcept_no = policy_data.get("rcept_no")
     items = policy_data.get("items") or {}
+    chapters = policy_data.get("chapters") or []
     if not rcept_no or not items:
         result["error"] = "추출된 item이 없습니다."
         result["rcept_no"] = rcept_no
@@ -152,6 +154,31 @@ def collect_policies_for_company(
         result["error"] = "유효한 body가 있는 item이 없습니다."
         return result
 
+    chapter_rows: list[dict] = []
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        note_no = str(chapter.get("note_no") or "").strip()
+        section_type = str(chapter.get("section_type") or "").strip()
+        body = (chapter.get("body") or "").strip()
+        if not note_no or not section_type or not body:
+            continue
+        chapter_rows.append({
+            "corp_code": corp_code,
+            "bsns_year": bsns_year,
+            "fs_div": fs_div,
+            "rcept_no": rcept_no,
+            "dcm_no": chapter.get("dcm_no"),
+            "source_type": chapter.get("source_type") or "business_report",
+            "note_no": note_no[:20],
+            "note_title": (chapter.get("note_title") or "").strip()[:500] or None,
+            "section_type": section_type[:40],
+            "body": body,
+            "body_hash": _sha1(body),
+            "body_length": len(body),
+            "fetched_at": now,
+        })
+
     # Bulk upsert
     with get_session() as session:
         stmt = sqlite_insert(AccountingPolicyItem).values(upsert_rows)
@@ -167,8 +194,25 @@ def collect_policies_for_company(
             },
         )
         session.execute(stmt)
+        if chapter_rows:
+            chapter_stmt = sqlite_insert(AccountingNoteChapter).values(chapter_rows)
+            chapter_stmt = chapter_stmt.on_conflict_do_update(
+                index_elements=["corp_code", "bsns_year", "fs_div", "note_no", "section_type"],
+                set_={
+                    "rcept_no": chapter_stmt.excluded.rcept_no,
+                    "dcm_no": chapter_stmt.excluded.dcm_no,
+                    "source_type": chapter_stmt.excluded.source_type,
+                    "note_title": chapter_stmt.excluded.note_title,
+                    "body": chapter_stmt.excluded.body,
+                    "body_hash": chapter_stmt.excluded.body_hash,
+                    "body_length": chapter_stmt.excluded.body_length,
+                    "fetched_at": chapter_stmt.excluded.fetched_at,
+                },
+            )
+            session.execute(chapter_stmt)
 
     result["items_stored"] = len(upsert_rows)
+    result["chapters_stored"] = len(chapter_rows)
     logger.info(
         "policy upsert %s/%d %s: stored=%d new=%d changed=%d unchanged=%d",
         corp_code, bsns_year, fs_div,
