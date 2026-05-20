@@ -31,11 +31,22 @@ def _row(company: str, year: int) -> dict[str, Any]:
     fee = _call("compare_peer_audit_fees", {"company": company, "year": year})
     policy = _call("compare_peer_accounting_policies", {"company": company, "year": year})
     kam = _call("get_audit_report_sections", {"company": company, "year": year, "section_key": "kam"})
+    note_chapters = _call(
+        "search_dataset",
+        {
+            "dataset": "accounting_note_chapters",
+            "company": company,
+            "year": year,
+            "limit": 20,
+            "include_excerpt": False,
+        },
+    )
     overview = _call("get_business_overview", {"company": company, "year": year})
     pack = _call("build_audit_acceptance_pack", {"company": company, "year": year})
 
     policy_q = policy.get("data_quality") or {}
     kam_q = kam.get("data_quality") or {}
+    note_q = note_chapters.get("data_quality") or {}
     overview_q = overview.get("data_quality") or {}
     pack_q = pack.get("data_quality") or {}
     return {
@@ -48,6 +59,8 @@ def _row(company: str, year: int) -> dict[str, Any]:
         "policy_status": policy_q.get("status"),
         "policy_subject_items": policy.get("subject_policy_count"),
         "policy_peer_coverage_pct": policy_q.get("peer_coverage_pct"),
+        "note_chapter_status": note_q.get("status"),
+        "note_chapter_records": note_chapters.get("total_records"),
         "kam_status": kam_q.get("status"),
         "kam_section_count": kam.get("section_count"),
         "kam_available_years": kam_q.get("available_audit_report_years"),
@@ -64,7 +77,7 @@ def _row(company: str, year: int) -> dict[str, Any]:
 
 
 def main() -> None:
-    print("company\tyear\tfinancial\tpeer\taudit_fee_peer\tpolicy\tpolicy_items\tpolicy_peer_cov\tkam\tkam_sections\tkam_years\tkam_latest_year\tkam_alt_sections\tkam_reason_cov\tkam_procedure_cov\tbusiness_overview\tbusiness_sections\tbusiness_years\tacceptance_policy\tacceptance_kam")
+    print("company\tyear\tfinancial\tpeer\taudit_fee_peer\tpolicy\tpolicy_items\tpolicy_peer_cov\tnote_chapter_status\tnote_chapter_records\tkam\tkam_sections\tkam_years\tkam_latest_year\tkam_alt_sections\tkam_reason_cov\tkam_procedure_cov\tbusiness_overview\tbusiness_sections\tbusiness_years\tacceptance_policy\tacceptance_kam")
     for year in (2024, 2025):
         for company in DEFAULT_COMPANIES:
             row = _row(company, year)
@@ -80,6 +93,8 @@ def main() -> None:
                         "policy_status",
                         "policy_subject_items",
                         "policy_peer_coverage_pct",
+                        "note_chapter_status",
+                        "note_chapter_records",
                         "kam_status",
                         "kam_section_count",
                         "kam_available_years",

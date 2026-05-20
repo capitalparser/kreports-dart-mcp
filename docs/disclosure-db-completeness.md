@@ -88,4 +88,4 @@ Only after this passes should downstream completeness be judged for:
 - `auditors`
 - `audit_fees`
 - `accounting_policy_items`
-
+- `accounting_note_chapters` for note 2/3/4 basis, policy, and estimate/judgment evidence
