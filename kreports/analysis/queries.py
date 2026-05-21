@@ -1319,8 +1319,8 @@ def _note_chapters(note_section: str) -> list[tuple[str, int, int]]:
     import re as _re
     # <P> 시작 직후에 "숫자. " 으로 시작하는 패턴
     pattern = _re.compile(
-        r'<P[^>]*>\s*(\d{1,2})\.\s*([^<\n]{1,120})',
-        _re.DOTALL,
+        r'<P[^>]*>\s*(\d{1,2})\s*[\.．]\s*([^<\n]{1,120})',
+        _re.DOTALL | _re.IGNORECASE,
     )
     hits = []
     for m in pattern.finditer(note_section):

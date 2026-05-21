@@ -21,6 +21,7 @@ from kreports.collector.fetcher import (
 from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingNoteChapter,
+    AccountingPolicyItem,
     Auditor,
     BusinessAffiliateAuditor,
     Company,
@@ -33,6 +34,7 @@ from kreports.db.models import (
 )
 from kreports.processor.audit_parser import parse_auditor_from_doc_xml, parse_bsns_year
 from kreports.processor.audit_report_parser import extract_audit_report_sections
+from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
 from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 
@@ -475,17 +477,21 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
     auditor_count = 0
     affiliate_count = 0
     note_chapter_count = 0
+    policy_item_count = 0
     if meta.get("source_type") == "business_report":
         auditor_count = _persist_auditors_from_business_report(meta, content=content)
         affiliate_count = _persist_business_affiliate_auditors(meta, content=content)["count"]
-        note_chapter_count = _persist_accounting_note_chapters_from_business_report(meta, content=content)
+        note_result = _persist_accounting_note_chapters_from_business_report(meta, content=content)
+        note_chapter_count = note_result["chapters"]
+        policy_item_count = note_result["policy_items"]
 
     return {
         "sections": len(rows),
         "auditors": auditor_count,
         "affiliate_auditors": affiliate_count,
         "accounting_note_chapters": note_chapter_count,
-        "rows_written": len(rows) + auditor_count + affiliate_count + note_chapter_count,
+        "accounting_policy_items": policy_item_count,
+        "rows_written": len(rows) + auditor_count + affiliate_count + note_chapter_count + policy_item_count,
     }
 
 
@@ -548,10 +554,10 @@ def _note_blocks_by_fs_div(content: str) -> list[tuple[str, str]]:
     return blocks
 
 
-def _persist_accounting_note_chapters_from_business_report(meta: dict, *, content: str) -> int:
+def _persist_accounting_note_chapters_from_business_report(meta: dict, *, content: str) -> dict:
     """Persist note 2/3/4-style accounting chapters from cached business-report text."""
     if meta.get("source_type") != "business_report":
-        return 0
+        return {"chapters": 0, "policy_items": 0}
 
     now = datetime.utcnow()
     rows: list[dict] = []
@@ -582,7 +588,7 @@ def _persist_accounting_note_chapters_from_business_report(meta: dict, *, conten
             })
 
     if not rows:
-        return 0
+        return {"chapters": 0, "policy_items": 0}
 
     with get_session() as session:
         stmt = sqlite_insert(AccountingNoteChapter).values(rows)
@@ -600,7 +606,64 @@ def _persist_accounting_note_chapters_from_business_report(meta: dict, *, conten
             },
         )
         session.execute(stmt)
-    return len(rows)
+    policy_count = _persist_accounting_policy_items_from_note_rows(meta, rows)
+    return {"chapters": len(rows), "policy_items": policy_count}
+
+
+def _match_policy_item_key(text: str) -> str | None:
+    for item_key, keywords in POLICY_KEYWORDS.items():
+        if any(keyword in (text or "") for keyword in keywords):
+            return item_key
+    return None
+
+
+def _persist_accounting_policy_items_from_note_rows(meta: dict, rows: list[dict]) -> int:
+    """Derive searchable policy items from cached note chapters without DART calls."""
+    now = datetime.utcnow()
+    item_rows: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        body = (row.get("body") or "").strip()
+        heading = " ".join([
+            str(row.get("note_no") or "").strip(),
+            str(row.get("note_title") or "").strip(),
+        ]).strip()
+        item_key = _match_policy_item_key(f"{heading}\n{body}")
+        if not item_key:
+            continue
+        key = (str(row.get("fs_div") or "CFS"), item_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        item_rows.append({
+            "corp_code": meta["corp_code"],
+            "bsns_year": meta["bsns_year"],
+            "fs_div": row.get("fs_div") or "CFS",
+            "rcept_no": meta["rcept_no"],
+            "item_key": item_key,
+            "heading": heading[:500] or None,
+            "body": body[:2000] + ("…" if len(body) > 2000 else ""),
+            "body_hash": _sha1(body),
+            "body_length": len(body),
+            "fetched_at": now,
+        })
+    if not item_rows:
+        return 0
+    with get_session() as session:
+        stmt = sqlite_insert(AccountingPolicyItem).values(item_rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["corp_code", "bsns_year", "fs_div", "item_key"],
+            set_={
+                "rcept_no": stmt.excluded.rcept_no,
+                "heading": stmt.excluded.heading,
+                "body": stmt.excluded.body,
+                "body_hash": stmt.excluded.body_hash,
+                "body_length": stmt.excluded.body_length,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        session.execute(stmt)
+    return len(item_rows)
 
 
 def _log_extraction_run(

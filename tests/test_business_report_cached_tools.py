@@ -376,7 +376,7 @@ def test_document_extractors_rerun_from_raw_source_without_dart(temp_engine, mon
 def test_document_extractors_persist_accounting_note_chapters_from_raw_source(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
-    from kreports.db.models import AccountingNoteChapter
+    from kreports.db.models import AccountingNoteChapter, AccountingPolicyItem
 
     def fail_dart_call(*_args, **_kwargs):
         raise AssertionError("note chapter extraction must use cached source_documents only")
@@ -427,9 +427,75 @@ def test_document_extractors_persist_accounting_note_chapters_from_raw_source(te
             .order_by(AccountingNoteChapter.note_no)
             .all()
         )
+        policy_items = (
+            session.query(AccountingPolicyItem)
+            .with_entities(AccountingPolicyItem.item_key, AccountingPolicyItem.body)
+            .filter_by(corp_code="00000001", bsns_year=2024, fs_div="CFS")
+            .all()
+        )
     assert [row.note_no for row in rows] == ["2", "3", "4"]
     assert [row.section_type for row in rows] == ["basis", "policy", "estimate_judgment"]
     assert "수행의무" in rows[1].body
+    assert ("revenue_recognition", rows[1].body[:2000]) in policy_items
+
+
+def test_document_extractors_persist_accounting_notes_from_viewer_html_source(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, AccountingPolicyItem
+
+    def fail_dart_call(*_args, **_kwargs):
+        raise AssertionError("HTML note extraction must use cached source_documents only")
+
+    monkeypatch.setattr(collector_module, "fetch_document_zip_files", fail_dart_call)
+    monkeypatch.setattr(collector_module, "fetch_document_xml", fail_dart_call)
+    monkeypatch.setattr(collector_module, "fetch_dart_main_html", fail_dart_call)
+
+    raw_business_report = """
+    <html><body>
+      <h1>III. 재무에 관한 사항</h1>
+      <p>연결재무제표 주석</p>
+      <p>1. 일반사항</p><p>회사의 개요입니다.</p>
+      <p>2. 재무제표 작성기준</p><p>연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.</p>
+      <p>3. 중요한 회계정책</p><p>고객과의 계약에서 수행의무가 이행될 때 수익을 인식합니다.</p>
+      <p>4. 중요한 회계추정 및 판단</p><p>손상검사에는 회수가능액 추정과 경영진의 판단이 필요합니다.</p>
+      <p>5. 영업부문</p><p>다음 주석입니다.</p>
+    </body></html>
+    """
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서 (2024.12)",
+            content_type="html",
+            raw_content=raw_business_report,
+            doc_hash="cached-html-doc-hash",
+        ))
+
+    out = run_document_extractors(year=2024, source_type="business_report")
+
+    assert out["total"] == 1
+    assert out["ok"] == 1
+    with get_session() as session:
+        chapter_note_nos = {
+            row.note_no
+            for row in session.query(AccountingNoteChapter)
+            .with_entities(AccountingNoteChapter.note_no)
+            .filter_by(corp_code="00000001")
+            .all()
+        }
+        policy = session.query(AccountingPolicyItem).filter_by(
+            corp_code="00000001",
+            bsns_year=2024,
+            fs_div="CFS",
+            item_key="revenue_recognition",
+        ).one()
+        policy_body = policy.body
+    assert chapter_note_nos == {"2", "3", "4"}
+    assert "수행의무" in policy_body
 
 
 def test_get_business_overview_reads_cached_management_sections_without_dart(temp_engine, monkeypatch):
