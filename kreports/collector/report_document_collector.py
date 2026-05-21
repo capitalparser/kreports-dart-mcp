@@ -18,7 +18,7 @@ from kreports.collector.fetcher import (
     parse_attachment_options,
     parse_viewer_tree_nodes,
 )
-from kreports.db.engine import get_session
+from kreports.db.engine import engine, get_session
 from kreports.db.models import (
     AccountingNoteChapter,
     AccountingPolicyItem,
@@ -1123,7 +1123,8 @@ def run_document_extractors(
                 rows_written = _persist_business_affiliate_auditors(meta, content=content)["count"]
                 extractor_name = "subsidiaries"
             elif extractor == "note_chapters":
-                rows_written = _persist_accounting_note_chapters_from_business_report(meta, content=content)
+                note_result = _persist_accounting_note_chapters_from_business_report(meta, content=content)
+                rows_written = int(note_result.get("chapters") or 0) + int(note_result.get("policy_items") or 0)
                 extractor_name = "note_chapters"
             else:
                 extracted = extract_document_features_from_content(meta, content=content)
@@ -1153,6 +1154,56 @@ def run_document_extractors(
             totals["failed"] += 1
             if len(totals["errors"]) < 20:
                 totals["errors"].append({"rcept_no": rcept_no, "error": str(exc)})
+    return totals
+
+
+def index_audit_procedures_from_sections(
+    *,
+    year: int | None = None,
+    limit: int | None = None,
+    progress_callback=None,
+) -> dict:
+    """Build audit-procedure index from already persisted KAM sections."""
+    sql = """
+        SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type,
+               section_key, section_title, body_text, body_hash, body_length,
+               ordinal, fetched_at
+        FROM report_sections
+        WHERE source_type='audit_report'
+          AND section_key='kam'
+    """
+    params: dict[str, object] = {}
+    if year is not None:
+        sql += " AND bsns_year=:year"
+        params["year"] = year
+    sql += " ORDER BY bsns_year, rcept_no, ordinal"
+    if limit is not None:
+        sql += " LIMIT :limit"
+        params["limit"] = int(limit)
+
+    with engine.connect() as conn:
+        rows = [dict(row) for row in conn.execute(text(sql), params).mappings().all()]
+
+    totals = {"total": len(rows), "ok": 0, "failed": 0, "rows_written": 0, "errors": []}
+    for idx, row in enumerate(rows, 1):
+        if progress_callback:
+            progress_callback(idx, totals["total"], row["corp_code"], row["bsns_year"], row["rcept_no"])
+        meta = {
+            "rcept_no": row["rcept_no"],
+            "dcm_no": row.get("dcm_no"),
+            "corp_code": row["corp_code"],
+            "bsns_year": row["bsns_year"],
+            "source_type": row["source_type"],
+            "report_nm": "persisted_report_section",
+        }
+        try:
+            count = _persist_audit_procedure_items_from_sections(meta, [row])
+            totals["ok"] += 1
+            totals["rows_written"] += count
+        except Exception as exc:
+            totals["failed"] += 1
+            if len(totals["errors"]) < 20:
+                totals["errors"].append({"rcept_no": row["rcept_no"], "error": str(exc)})
     return totals
 
 

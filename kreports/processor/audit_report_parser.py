@@ -393,11 +393,11 @@ def extract_audit_procedure_items(kam_body: str) -> list[dict]:
     zone = _procedure_zone(kam_body)
     if not zone:
         return []
-    pieces = re.split(r"\n+|(?:^|\s)[·•\-]\s+|(?:^|\s)\(\d+\)\s*", zone)
+    pieces = re.split(r"\n+|(?:^|\s)[·•ㆍ\-]\s*|(?:^|\s)\(\d+\)\s*", zone)
     items: list[dict] = []
     seen: set[str] = set()
     for piece in pieces:
-        text = re.sub(r"\s+", " ", piece or "").strip(" ;·•-")
+        text = re.sub(r"\s+", " ", piece or "").strip(" ;·•ㆍ-")
         if len(text) < 12:
             continue
         if text in {
@@ -407,7 +407,13 @@ def extract_audit_procedure_items(kam_body: str) -> list[dict]:
             "감사절차",
         }:
             continue
-        if not any(hint in text for hint in _KAM_PROCEDURE_HINTS + ("내부통제", "문서검사", "재계산", "대사", "조회")):
+        if "다음을 포함한 감사절차" in text:
+            continue
+        if not any(
+            hint in text
+            for hint in _KAM_PROCEDURE_HINTS
+            + ("내부통제", "문서검사", "재계산", "대사", "조회", "평가", "검토", "확인", "테스트", "비교", "분석")
+        ):
             continue
         if text in seen:
             continue

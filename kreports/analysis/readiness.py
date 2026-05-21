@@ -561,6 +561,7 @@ def dataset_completeness_snapshot(
         "core_without_policy": 0,
         "complete_company": 0,
     }
+
     incomplete_examples: list[dict] = []
     required_count = len(years)
     sample_rows = rows[: max(0, int(sample_size))]
@@ -660,5 +661,243 @@ def dataset_completeness_snapshot(
             "Backfill auditors to 5-year coverage for listed companies.",
             "Backfill or classify missing audit_fee_m/audit_hours values by DART no_data vs parser gap.",
             "Fix financial 5-year denominator by listed-at-year/no_data status before claiming completeness.",
+        ],
+    }
+
+
+def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = None) -> dict:
+    """Feature-level readiness for auditor-facing MCP tools."""
+    params: dict[str, object] = {"year": year}
+    market_filter = ""
+    if market:
+        market_filter = " AND c.market=:market"
+        params["market"] = market
+    with engine.connect() as conn:
+        table_names = {
+            row[0]
+            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).all()
+        }
+
+        def scalar(sql: str, extra: dict | None = None) -> int:
+            merged = dict(params)
+            if extra:
+                merged.update(extra)
+            try:
+                return int(conn.execute(text(sql), merged).scalar() or 0)
+            except Exception:
+                return 0
+
+        listed = scalar(
+            "SELECT COUNT(*) FROM companies c WHERE c.stock_code IS NOT NULL "
+            "AND c.market IN ('KOSPI','KOSDAQ')" + market_filter
+        )
+        raw_source_docs = (
+            scalar(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.content_type!='derived_report_sections' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        raw_source_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT sd.corp_code) FROM source_documents sd "
+                "JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.content_type!='derived_report_sections' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        raw_business_docs = (
+            scalar(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.content_type!='derived_report_sections' "
+                "AND sd.source_type='business_report' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        raw_business_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT sd.corp_code) FROM source_documents sd "
+                "JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.content_type!='derived_report_sections' "
+                "AND sd.source_type='business_report' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        raw_audit_docs = (
+            scalar(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.content_type!='derived_report_sections' "
+                "AND sd.source_type='audit_report' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        raw_audit_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT sd.corp_code) FROM source_documents sd "
+                "JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.content_type!='derived_report_sections' "
+                "AND sd.source_type='audit_report' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        kam_sections = (
+            scalar(
+                "SELECT COUNT(*) FROM report_sections rs JOIN companies c ON c.corp_code=rs.corp_code "
+                "WHERE rs.section_key='kam' AND rs.bsns_year=:year" + market_filter
+            )
+            if "report_sections" in table_names
+            else 0
+        )
+        kam_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT rs.corp_code) FROM report_sections rs "
+                "JOIN companies c ON c.corp_code=rs.corp_code "
+                "WHERE rs.section_key='kam' AND rs.bsns_year=:year" + market_filter
+            )
+            if "report_sections" in table_names
+            else 0
+        )
+        kam_reason = (
+            scalar(
+                "SELECT COUNT(*) FROM report_sections rs JOIN companies c ON c.corp_code=rs.corp_code "
+                "WHERE rs.section_key='kam' AND rs.bsns_year=:year "
+                "AND (rs.body_text LIKE '%핵심감사사항으로 결정%' "
+                "OR rs.body_text LIKE '%중요한 왜곡표시위험%' OR rs.body_text LIKE '%경영진의 판단%')"
+                + market_filter
+            )
+            if "report_sections" in table_names
+            else 0
+        )
+        kam_procedure = (
+            scalar(
+                "SELECT COUNT(*) FROM report_sections rs JOIN companies c ON c.corp_code=rs.corp_code "
+                "WHERE rs.section_key='kam' AND rs.bsns_year=:year "
+                "AND (rs.body_text LIKE '%감사절차%' OR rs.body_text LIKE '%감사에서 다루어진 방법%' "
+                "OR rs.body_text LIKE '%수행하였습니다%')"
+                + market_filter
+            )
+            if "report_sections" in table_names
+            else 0
+        )
+        matter_sections = (
+            scalar(
+                "SELECT COUNT(*) FROM report_sections rs JOIN companies c ON c.corp_code=rs.corp_code "
+                "WHERE rs.source_type='audit_report' "
+                "AND rs.section_key IN ('emphasis','other_matter','going_concern') "
+                "AND rs.bsns_year=:year" + market_filter
+            )
+            if "report_sections" in table_names
+            else 0
+        )
+        note_chapters = (
+            scalar(
+                "SELECT COUNT(*) FROM accounting_note_chapters anc JOIN companies c ON c.corp_code=anc.corp_code "
+                "WHERE anc.bsns_year=:year" + market_filter
+            )
+            if "accounting_note_chapters" in table_names
+            else 0
+        )
+        note_chapter_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT anc.corp_code) FROM accounting_note_chapters anc "
+                "JOIN companies c ON c.corp_code=anc.corp_code "
+                "WHERE anc.bsns_year=:year" + market_filter
+            )
+            if "accounting_note_chapters" in table_names
+            else 0
+        )
+        policy_items = (
+            scalar(
+                "SELECT COUNT(*) FROM accounting_policy_items api JOIN companies c ON c.corp_code=api.corp_code "
+                "WHERE api.bsns_year=:year" + market_filter
+            )
+            if "accounting_policy_items" in table_names
+            else 0
+        )
+        policy_item_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT api.corp_code) FROM accounting_policy_items api "
+                "JOIN companies c ON c.corp_code=api.corp_code "
+                "WHERE api.bsns_year=:year" + market_filter
+            )
+            if "accounting_policy_items" in table_names
+            else 0
+        )
+        procedure_items = (
+            scalar(
+                "SELECT COUNT(*) FROM audit_procedure_items api JOIN companies c ON c.corp_code=api.corp_code "
+                "WHERE api.bsns_year=:year" + market_filter
+            )
+            if "audit_procedure_items" in table_names
+            else 0
+        )
+        procedure_item_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT api.corp_code) FROM audit_procedure_items api "
+                "JOIN companies c ON c.corp_code=api.corp_code "
+                "WHERE api.bsns_year=:year" + market_filter
+            )
+            if "audit_procedure_items" in table_names
+            else 0
+        )
+
+    feature_status = {
+        "raw_source_documents": "usable" if raw_source_docs > 0 else "missing",
+        "kam_sections": "usable" if kam_sections > 0 else "missing",
+        "kam_reason_hints": "usable" if kam_reason > 0 else "missing",
+        "kam_procedure_hints": "usable" if kam_procedure > 0 else "missing",
+        "audit_report_matters": "usable" if matter_sections > 0 else "missing",
+        "accounting_notes": "usable" if note_chapters > 0 else "missing",
+        "accounting_policy_items": "usable" if policy_items > 0 else "missing",
+        "audit_procedure_items": "usable" if procedure_items > 0 else "missing",
+    }
+    missing = [key for key, status in feature_status.items() if status == "missing"]
+    return {
+        "verdict": "pass" if not missing else "conditional",
+        "year": year,
+        "market": market,
+        "listed_companies": listed,
+        "counts": {
+            "raw_source_documents": raw_source_docs,
+            "raw_source_document_companies": raw_source_companies,
+            "raw_business_documents": raw_business_docs,
+            "raw_business_document_companies": raw_business_companies,
+            "raw_audit_documents": raw_audit_docs,
+            "raw_audit_document_companies": raw_audit_companies,
+            "kam_sections": kam_sections,
+            "kam_companies": kam_companies,
+            "kam_reason_hints": kam_reason,
+            "kam_procedure_hints": kam_procedure,
+            "audit_report_matters": matter_sections,
+            "accounting_note_chapters": note_chapters,
+            "accounting_note_chapter_companies": note_chapter_companies,
+            "accounting_policy_items": policy_items,
+            "accounting_policy_item_companies": policy_item_companies,
+            "audit_procedure_items": procedure_items,
+            "audit_procedure_item_companies": procedure_item_companies,
+        },
+        "rates": {
+            "raw_source_company_coverage": pct(raw_source_companies, listed),
+            "raw_business_company_coverage": pct(raw_business_companies, listed),
+            "raw_audit_company_coverage": pct(raw_audit_companies, listed),
+            "kam_company_coverage": pct(kam_companies, listed),
+            "accounting_note_company_coverage": pct(note_chapter_companies, listed),
+            "accounting_policy_company_coverage": pct(policy_item_companies, listed),
+            "audit_procedure_company_coverage": pct(procedure_item_companies, listed),
+            "kam_reason_to_kam": pct(kam_reason, kam_sections),
+            "kam_procedure_to_kam": pct(kam_procedure, kam_sections),
+        },
+        "feature_status": feature_status,
+        "missing_features": missing,
+        "recommended_next": [
+            "Continue source_documents backfill until raw business/audit documents cover the target universe.",
+            "Run document extractors after raw backfill increments to refresh policy/procedure indexes.",
+            "Investigate parser gaps where KAM exists but reason/procedure hints are absent.",
         ],
     }

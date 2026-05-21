@@ -410,7 +410,7 @@ def test_document_extractors_persist_accounting_note_chapters_from_raw_source(te
             doc_hash="cached-doc-hash",
         ))
 
-    out = run_document_extractors(year=2024, source_type="business_report")
+    out = run_document_extractors(year=2024, source_type="business_report", extractor="note_chapters")
 
     assert out["total"] == 1
     assert out["ok"] == 1

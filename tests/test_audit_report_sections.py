@@ -2,7 +2,10 @@ from datetime import date, datetime
 
 from kreports.analysis.api import compare_peer_kam_topics, get_audit_report_sections
 from kreports.collector.fetcher import parse_attachment_options
-from kreports.collector.report_document_collector import collect_report_sections_for_disclosure
+from kreports.collector.report_document_collector import (
+    collect_report_sections_for_disclosure,
+    index_audit_procedures_from_sections,
+)
 from kreports.db.models import Company, Disclosure, Financial, ReportDocument, ReportSection, SourceDocument
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
@@ -69,6 +72,22 @@ def test_extract_audit_procedure_items_splits_and_classifies_kam_response():
     assert items[0]["procedure_type"] == "internal_control"
     assert items[1]["procedure_type"] == "substantive_test"
     assert "정산 금액 비교" in items[2]["procedure_text"]
+
+
+def test_extract_audit_procedure_items_handles_korean_middle_dot_bullets():
+    body = """
+    나. 핵심감사사항이 감사에서 다루어진 방법
+    핵심감사사항에 대응하기 위하여 우리는 다음을 포함한 감사절차를 수행하였습니다.
+    ㆍ가치평가 모델의 적절성을 평가
+    ㆍ미래현금흐름 추정과 관련된 통제를 이해하고 평가
+    ㆍ할인율을 독립적으로 계산하여 경영진이 적용한 할인율과 비교
+    """
+
+    items = extract_audit_procedure_items(body)
+
+    assert len(items) == 3
+    assert items[0]["procedure_text"] == "가치평가 모델의 적절성을 평가"
+    assert "할인율과 비교" in items[-1]["procedure_text"]
 
 
 def test_extract_audit_report_sections_does_not_treat_auditor_responsibility_phrase_as_kam():
@@ -617,3 +636,43 @@ def test_compare_peer_kam_topics_reports_reason_and_procedure_coverage(temp_engi
     assert out["audit_report_sections"]["kam_reason_coverage"]["with_reason_hint"] == 2
     assert out["audit_report_sections"]["kam_procedure_coverage"]["with_procedure_hint"] == 2
     assert out["subject_sections"][0]["kam_analysis"]["procedure_excerpt"]
+
+
+def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditProcedureItem
+
+    monkeypatch.setattr(collector_module, "engine", temp_engine)
+
+    with get_session() as session:
+        session.add(ReportSection(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "나. 핵심감사사항이 감사에서 다루어진 방법\n"
+                "ㆍ가치평가 모델의 적절성을 평가\n"
+                "ㆍ미래현금흐름 추정과 관련된 통제를 이해하고 평가\n"
+            ),
+            body_hash="hash",
+            body_length=100,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = index_audit_procedures_from_sections(year=2024)
+
+    assert out["ok"] == 1
+    assert out["rows_written"] == 2
+    with get_session() as session:
+        procedure_types = [
+            row.procedure_type
+            for row in session.query(AuditProcedureItem)
+            .order_by(AuditProcedureItem.procedure_ordinal)
+            .all()
+        ]
+    assert procedure_types == ["estimation_assumption", "internal_control"]

@@ -795,6 +795,38 @@ def dataset_completeness_cmd(
             )
 
 
+@app.command("auditor-feature-readiness")
+def auditor_feature_readiness_cmd(
+    year: int = typer.Option(2025, "--year", help="기준 사업연도"),
+    market: Optional[str] = typer.Option(None, "--market", help="시장 필터: KOSPI/KOSDAQ"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """현재 DB가 감사인 관점 MCP 기능을 실제로 뒷받침하는지 점검한다."""
+    from kreports.analysis.readiness import auditor_feature_readiness_snapshot
+
+    snapshot = auditor_feature_readiness_snapshot(year=year, market=market)
+    if json_output:
+        _json_print(snapshot)
+        return
+
+    typer.echo(f"Auditor feature readiness: {snapshot['verdict']}")
+    typer.echo(f"year: {snapshot['year']} | market: {snapshot['market'] or '-'}")
+    typer.echo(f"listed_companies: {snapshot['listed_companies']:,}")
+    typer.echo("counts:")
+    for key, value in snapshot["counts"].items():
+        typer.echo(f"- {key}: {value:,}")
+    typer.echo("rates:")
+    for key, value in snapshot["rates"].items():
+        typer.echo(f"- {key}: {value}%")
+    typer.echo("feature_status:")
+    for key, value in snapshot["feature_status"].items():
+        typer.echo(f"- {key}: {value}")
+    typer.echo(f"missing_features: {', '.join(snapshot['missing_features']) or '-'}")
+    typer.echo("recommended_next:")
+    for item in snapshot["recommended_next"]:
+        typer.echo(f"- {item}")
+
+
 # ---------------------------------------------------------------------------
 # collect-golden
 # ---------------------------------------------------------------------------
@@ -1443,6 +1475,35 @@ def run_document_extractors_cmd(
         year=year,
         source_type=source_type,
         extractor=extractor,
+        limit=limit,
+        progress_callback=_progress,
+    )
+    typer.echo(
+        f"완료 - 처리 {result['total']:,} | 성공 {result['ok']:,} | "
+        f"실패 {result['failed']:,} | rows_written {result['rows_written']:,}"
+    )
+    if result["errors"]:
+        typer.echo("실패 샘플:")
+        for row in result["errors"][:10]:
+            typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
+
+
+@app.command("index-audit-procedures")
+def index_audit_procedures_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 KAM 섹션 수"),
+):
+    """이미 저장된 KAM 본문에서 감사절차 인덱스를 생성한다."""
+    from kreports.collector.report_document_collector import index_audit_procedures_from_sections
+
+    init_db()
+
+    def _progress(idx, total, corp_code, yy, rcept_no):
+        if idx == 1 or idx % 100 == 0 or idx == total:
+            typer.echo(f"  [{idx}/{total}] {corp_code} {yy} {rcept_no}")
+
+    result = index_audit_procedures_from_sections(
+        year=year,
         limit=limit,
         progress_callback=_progress,
     )
