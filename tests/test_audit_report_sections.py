@@ -3,7 +3,7 @@ from datetime import date, datetime
 from kreports.analysis.api import compare_peer_kam_topics, get_audit_report_sections
 from kreports.collector.fetcher import parse_attachment_options
 from kreports.collector.report_document_collector import collect_report_sections_for_disclosure
-from kreports.db.models import Company, Disclosure, Financial, ReportDocument, ReportSection
+from kreports.db.models import Company, Disclosure, Financial, ReportDocument, ReportSection, SourceDocument
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
     extract_audit_report_sections,
@@ -257,6 +257,139 @@ def test_collect_business_report_collects_summary_and_attached_audit_reports(tem
     assert "요약" in business_kam_text
     assert audit_dcm_nos == ["audit_consolidated_x", "audit_xml"]
     assert "감사에서 다루어진 방법" in audit_text
+
+
+def test_collect_business_report_uses_viewer_html_when_document_api_unavailable(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
+        session.add(Disclosure(
+            rcept_no="20250311001085",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2025, 3, 11),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+
+    monkeypatch.setattr(collector_module, "fetch_document_zip_files", lambda _rcept_no: {})
+    monkeypatch.setattr(collector_module, "fetch_document_xml", lambda _rcept_no: None)
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_dart_main_html",
+        lambda _rcept_no: """
+        <select id="att">
+          <option value="rcpNo=20250311001085&amp;dcmNo=10392689">사업보고서</option>
+          <option value="rcpNo=20250311001085&amp;dcmNo=10392690">감사보고서</option>
+        </select>
+        """,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_viewer_html",
+        lambda _rcept_no, dcm_no: f"""
+        <html><body>
+          <h1>{dcm_no} 사업보고서</h1>
+          <p>II. 사업의 내용</p>
+          <p>회사는 반도체와 디스플레이 제품을 판매합니다.</p>
+          <p>핵심감사사항</p>
+          <p>수익인식 관련 핵심감사사항 요약입니다.</p>
+        </body></html>
+        """,
+    )
+
+    result = collect_report_sections_for_disclosure("20250311001085")
+
+    assert result["ok"] == 1
+    assert result["source"] == "dart_viewer_html"
+    with get_session() as session:
+        source_doc = session.query(SourceDocument).filter_by(
+            rcept_no="20250311001085",
+            source_type="business_report",
+        ).one()
+        section = session.query(ReportSection).filter_by(
+            rcept_no="20250311001085",
+            source_type="business_report",
+            section_key="kam",
+        ).one()
+        source_content_type = source_doc.content_type
+        source_raw_content = source_doc.raw_content
+        section_body = section.body_text
+    assert source_content_type == "html"
+    assert "사업보고서" in source_raw_content
+    assert "수익인식" in section_body
+
+
+def test_collect_business_report_uses_viewer_tree_when_attachment_option_missing(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
+        session.add(Disclosure(
+            rcept_no="20250311001085",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2025, 3, 11),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+
+    monkeypatch.setattr(collector_module, "fetch_document_zip_files", lambda _rcept_no: {})
+    monkeypatch.setattr(collector_module, "fetch_document_xml", lambda _rcept_no: None)
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_dart_main_html",
+        lambda _rcept_no: """
+        <script>
+        var node1 = {};
+        node1['text'] = "사 업 보 고 서";
+        node1['rcpNo'] = "20250311001085";
+        node1['dcmNo'] = "10392689";
+        node1['eleId'] = "1";
+        node1['offset'] = "100";
+        node1['length'] = "200";
+        node1['dtd'] = "dart4.xsd";
+        </script>
+        """,
+    )
+
+    calls = []
+
+    def fake_viewer(rcept_no, dcm_no, **kwargs):
+        calls.append((rcept_no, dcm_no, kwargs))
+        return """
+        <html><body>
+          <p>핵심감사사항</p>
+          <p>재고자산 평가와 관련하여 감사절차를 수행하였습니다.</p>
+        </body></html>
+        """
+
+    monkeypatch.setattr(collector_module, "fetch_viewer_html", fake_viewer)
+
+    result = collect_report_sections_for_disclosure("20250311001085")
+
+    assert result["ok"] == 1
+    assert result["source"] == "dart_viewer_html"
+    assert calls[0][1] == "10392689"
+    assert calls[0][2]["ele_id"] == "1"
+    assert calls[0][2]["dtd"] == "dart4.xsd"
+    with get_session() as session:
+        source_doc = session.query(SourceDocument).filter_by(
+            rcept_no="20250311001085",
+            source_type="business_report",
+        ).one()
+        section = session.query(ReportSection).filter_by(
+            rcept_no="20250311001085",
+            source_type="business_report",
+            section_key="kam",
+        ).one()
+        source_content_type = source_doc.content_type
+        section_body = section.body_text
+    assert source_content_type == "html"
+    assert "재고자산" in section_body
 
 
 def test_get_audit_report_sections_reads_cached_sections(temp_engine):

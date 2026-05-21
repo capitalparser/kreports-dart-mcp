@@ -418,7 +418,39 @@ def parse_attachment_options(main_html: str) -> list[dict[str, str]]:
     return options
 
 
-def fetch_viewer_html(rcept_no: str, dcm_no: str) -> str | None:
+def parse_viewer_tree_nodes(main_html: str) -> list[dict[str, str]]:
+    """Parse top-level DART viewer tree nodes from a filing main page."""
+    nodes: list[dict[str, str]] = []
+    for match in re.finditer(
+        r"var\s+node1\s*=\s*\{\};(?P<body>.*?)(?=var\s+node1\s*=\s*\{\};|\Z)",
+        main_html or "",
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        body = match.group("body")
+        node: dict[str, str] = {}
+        for key in ("text", "rcpNo", "dcmNo", "eleId", "offset", "length", "dtd"):
+            field = re.search(
+                rf"node1\[['\"]{key}['\"]\]\s*=\s*[\"'](.*?)[\"']",
+                body,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if field:
+                value = html.unescape(field.group(1))
+                node[key] = re.sub(r"\s+", " ", value).strip()
+        if node.get("rcpNo") and node.get("dcmNo") and node.get("eleId"):
+            nodes.append(node)
+    return nodes
+
+
+def fetch_viewer_html(
+    rcept_no: str,
+    dcm_no: str,
+    *,
+    ele_id: str = "0",
+    offset: str = "0",
+    length: str = "0",
+    dtd: str = "HTML",
+) -> str | None:
     """Fetch a DART attachment viewer body by rcpNo/dcmNo."""
     try:
         with _get_client() as client:
@@ -427,10 +459,10 @@ def fetch_viewer_html(rcept_no: str, dcm_no: str) -> str | None:
                 params={
                     "rcpNo": rcept_no,
                     "dcmNo": dcm_no,
-                    "eleId": "0",
-                    "offset": "0",
-                    "length": "0",
-                    "dtd": "HTML",
+                    "eleId": ele_id,
+                    "offset": offset,
+                    "length": length,
+                    "dtd": dtd,
                 },
                 timeout=60.0,
             )

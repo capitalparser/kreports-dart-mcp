@@ -16,6 +16,7 @@ from kreports.collector.fetcher import (
     fetch_document_xml,
     fetch_viewer_html,
     parse_attachment_options,
+    parse_viewer_tree_nodes,
 )
 from kreports.db.engine import get_session
 from kreports.db.models import (
@@ -86,6 +87,9 @@ def collect_report_sections_for_disclosure(rcept_no: str) -> dict:
         zipped = _collect_business_report_zip(meta)
         if zipped.get("ok"):
             return zipped
+        viewer = _collect_business_report_viewer_html(meta)
+        if viewer.get("ok"):
+            return viewer
 
     content = fetch_document_xml(rcept_no)
     if not content:
@@ -179,6 +183,81 @@ def _collect_business_report_zip(meta: dict) -> dict:
     }
 
 
+def _is_business_report_attachment(title: str) -> bool:
+    title = re.sub(r"\s+", "", title or "")
+    return "사업보고서" in title and "감사보고서" not in title
+
+
+def _collect_business_report_viewer_html(meta: dict) -> dict:
+    """Collect business-report main body from DART web viewer when OpenDART API is unavailable."""
+    main_html = fetch_dart_main_html(meta["rcept_no"])
+    if not main_html:
+        return {"ok": 0, "documents": 0, "sections": 0, "error": "DART main HTML empty", **meta}
+
+    options = [option for option in parse_attachment_options(main_html) if _is_business_report_attachment(option.get("title", ""))]
+    if options:
+        option = options[0]
+        content = fetch_viewer_html(meta["rcept_no"], option["dcm_no"])
+        title = option.get("title") or meta["report_nm"]
+        dcm_no = option["dcm_no"]
+    else:
+        nodes = parse_viewer_tree_nodes(main_html)
+        business_nodes = [node for node in nodes if _is_business_report_attachment(node.get("text", ""))]
+        if not business_nodes:
+            business_nodes = [node for node in nodes if str(node.get("eleId")) == "1"]
+        if not business_nodes:
+            return {"ok": 0, "documents": 0, "sections": 0, "error": "business report viewer option not found", **meta}
+        first = business_nodes[0]
+        content = _fetch_viewer_tree_content(nodes, first["dcmNo"])
+        title = first.get("text") or meta["report_nm"]
+        dcm_no = first["dcmNo"]
+
+    if not content:
+        return {"ok": 0, "documents": 0, "sections": 0, "error": "business report viewer option not found", **meta}
+
+    doc_meta = {
+        **meta,
+        "dcm_no": dcm_no,
+        "report_nm": title,
+        "content_type": "html",
+    }
+    result = _persist_report_document(doc_meta, content=content)
+    attached = _collect_attached_audit_reports(meta, log_fetch=False)
+    _log_fetch(meta["corp_code"], "business_report", meta["bsns_year"], "success", None)
+    return {
+        "ok": 1,
+        "documents": 1 + int(attached.get("documents") or 0),
+        "sections": int(result["sections"]) + int(attached.get("sections") or 0),
+        "business_report_sections": int(result["sections"]),
+        "audit_report_sections": int(attached.get("sections") or 0),
+        "affiliate_auditors": int(result.get("affiliate_auditors") or 0),
+        "source": "dart_viewer_html",
+        "error": None,
+        "errors": attached.get("errors", []),
+        **meta,
+    }
+
+
+def _fetch_viewer_tree_content(nodes: list[dict[str, str]], dcm_no: str) -> str | None:
+    """Fetch and concatenate top-level viewer sections for one report document."""
+    fragments: list[str] = []
+    for node in nodes:
+        if node.get("dcmNo") != dcm_no:
+            continue
+        fragment = fetch_viewer_html(
+            node["rcpNo"],
+            node["dcmNo"],
+            ele_id=node.get("eleId") or "0",
+            offset=node.get("offset") or "0",
+            length=node.get("length") or "0",
+            dtd=node.get("dtd") or "HTML",
+        )
+        if fragment:
+            title = node.get("text") or ""
+            fragments.append(f"<h1>{title}</h1>\n{fragment}")
+    return "\n".join(fragments) if fragments else None
+
+
 def collect_attached_audit_reports_for_disclosure(rcept_no: str) -> dict:
     """Collect only attached audit-report viewer bodies for a DART filing."""
     with get_session() as session:
@@ -259,7 +338,7 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
 def _persist_report_document(meta: dict, *, content: str) -> dict:
     """Persist one normalized report document and its extracted sections."""
     source_doc_id = _persist_source_document(meta, content=content)
-    extraction = extract_document_features_from_content(meta, content=content)
+    extraction = extract_document_features_from_content(_report_document_meta(meta), content=content)
     _log_extraction_run(
         source_document_id=source_doc_id,
         meta=meta,
@@ -283,7 +362,7 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
     with get_session() as session:
         stmt = sqlite_insert(SourceDocument).values({
             **meta,
-            "content_type": "xml",
+            "content_type": meta.get("content_type") or "xml",
             "raw_content": content,
             "doc_hash": doc_hash,
             "fetched_at": now,
@@ -310,6 +389,18 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
             {"rcept_no": meta["rcept_no"], "source_type": meta["source_type"]},
         ).scalar_one()
     return int(source_doc_id)
+
+
+def _report_document_meta(meta: dict) -> dict:
+    """Keep source-document cache metadata out of normalized report rows."""
+    return {
+        "rcept_no": meta["rcept_no"],
+        "corp_code": meta["corp_code"],
+        "bsns_year": meta["bsns_year"],
+        "source_type": meta["source_type"],
+        "report_nm": meta.get("report_nm"),
+        "dcm_no": meta.get("dcm_no"),
+    }
 
 
 def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
