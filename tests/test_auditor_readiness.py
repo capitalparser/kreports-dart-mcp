@@ -14,6 +14,22 @@ def test_full_backfill_runs_policies_before_financial_endpoint():
     assert business_pos < extractor_pos < policy_pos < financial_pos
 
 
+def test_source_documents_backfill_avoids_financial_endpoint():
+    script = open("scripts/run_source_documents_backfill.sh", encoding="utf-8").read()
+
+    assert "collect-business-report-sections" in script
+    assert "run-document-extractors --source-type business_report" in script
+    assert "collect-all --year-from" not in script
+    assert "collect-audit-fees" not in script
+
+
+def test_limit_aware_backfill_defaults_to_source_documents_script():
+    script = open("scripts/dart_limit_aware_backfill.sh", encoding="utf-8").read()
+
+    assert "KREPORTS_BACKFILL_SCRIPT" in script
+    assert "scripts/run_source_documents_backfill.sh" in script
+
+
 def test_readiness_verdict_passes_core_thresholds():
     snapshot = {
         "markets": {
