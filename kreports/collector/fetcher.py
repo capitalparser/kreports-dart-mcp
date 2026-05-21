@@ -40,6 +40,29 @@ def _decode_dart_text(content: bytes, fallback_encoding: str | None = None) -> s
     return content.decode("utf-8", errors="replace")
 
 
+def _looks_like_dart_error_xml(text: str) -> bool:
+    return bool(
+        re.search(r"<status>\s*(?!000\b)[^<]+</status>", text or "", flags=re.IGNORECASE)
+        and re.search(r"<message\b", text or "", flags=re.IGNORECASE)
+    )
+
+
+def _looks_like_report_document_xml(text: str) -> bool:
+    return bool(
+        re.search(r"<DOCUMENT\b", text or "", flags=re.IGNORECASE)
+        or re.search(r"<DOCUMENT-NAME\b", text or "", flags=re.IGNORECASE)
+    )
+
+
+def _raw_document_xml_from_response(content: bytes, fallback_encoding: str | None = None) -> str | None:
+    text = _decode_dart_text(content, fallback_encoding).strip()
+    if not text or _looks_like_dart_error_xml(text):
+        return None
+    if _looks_like_report_document_xml(text):
+        return text
+    return None
+
+
 def _check_api_key() -> None:
     if not settings.dart_api_key:
         raise ValueError(
@@ -308,6 +331,9 @@ def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
                 else:
                     result[name] = raw.decode("utf-8", errors="replace")
     except Exception as e:
+        raw_xml = _raw_document_xml_from_response(resp.content, resp.encoding)
+        if raw_xml is not None:
+            return {f"{rcept_no}.xml": raw_xml}
         logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, e)
     return result
 
@@ -327,6 +353,9 @@ def fetch_document_xml(rcept_no: str) -> str | None:
             content_type = resp.headers.get("content-type", "")
             _BINARY_TYPES = ("zip", "octet-stream", "x-msdownload", "application/")
             if not any(t in content_type for t in _BINARY_TYPES):
+                raw_xml = _raw_document_xml_from_response(resp.content, resp.encoding)
+                if raw_xml is not None:
+                    return raw_xml
                 logger.warning("document.xml 비정상 응답 [%s]: %s", rcept_no, content_type)
                 return None
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
@@ -345,6 +374,9 @@ def fetch_document_xml(rcept_no: str) -> str | None:
                     continue
             return raw.decode("utf-8", errors="replace")
     except Exception as e:
+        raw_xml = _raw_document_xml_from_response(resp.content, getattr(resp, "encoding", None)) if "resp" in locals() else None
+        if raw_xml is not None:
+            return raw_xml
         logger.warning("document.xml 수집 실패 [%s]: %s", rcept_no, e)
         return None
 
