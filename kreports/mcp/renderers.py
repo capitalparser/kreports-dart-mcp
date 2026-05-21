@@ -158,6 +158,98 @@ def _render_acceptance_pack(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_audit_report_sections(result: dict) -> str:
+    subject = _subject_label(result)
+    year = result.get("year")
+    section_key = result.get("section_key") or "감사보고서 섹션"
+    count = result.get("section_count") or 0
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} {year or ''}년 `{section_key}` 조회 결과, 로컬 감사보고서 본문 섹션 {count}건이 확인됩니다.",
+        "",
+        "근거:",
+    ]
+    sections = result.get("sections") or []
+    for section in sections[:3]:
+        title = section.get("section_title") or section.get("section_key") or "섹션"
+        excerpt = section.get("body_excerpt") or ""
+        lines.append(f"- {title}: {excerpt[:220]}")
+        analysis = section.get("kam_analysis") or {}
+        if analysis:
+            topics = ", ".join(analysis.get("topics") or [])
+            if topics:
+                lines.append(f"  KAM topic: {topics}")
+            if analysis.get("has_procedure_hint"):
+                lines.append("  감사절차 힌트가 확인됩니다.")
+    if not sections:
+        lines.append("- 현재 조건에 맞는 감사보고서 본문 섹션을 찾지 못했습니다.")
+    lines.append("")
+    lines.append("데이터 한계:")
+    data_quality = result.get("data_quality") or {}
+    lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
+    lines.append(f"- {data_quality.get('interpretation') or '로컬 캐시 기준이며 원 공시 확인이 필요합니다.'}")
+    return "\n".join(lines)
+
+
+def _render_audit_report_matters(result: dict) -> str:
+    query = result.get("query") or {}
+    year = result.get("year") or query.get("year")
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{year or ''}년 감사보고서 강조사항·기타사항·계속기업 문단 검색 결과입니다. 회사 {result.get('total_companies', 0)}개, 섹션 {result.get('total_sections', 0)}건이 확인됩니다.",
+        "",
+        "근거:",
+    ]
+    for company in (result.get("companies") or [])[:5]:
+        counts = company.get("matter_counts") or {}
+        count_text = ", ".join(f"{k} {v}" for k, v in counts.items() if v)
+        lines.append(f"- {company.get('corp_name') or company.get('corp_code')}: {count_text or 'matter count 없음'}")
+        first = (company.get("sections") or [{}])[0]
+        if first.get("severity_hint") or first.get("topic_tags"):
+            lines.append(f"  분류: {first.get('severity_hint')}, tags={first.get('topic_tags')}")
+    if not result.get("companies"):
+        lines.append("- 현재 조건에 맞는 matter 섹션을 찾지 못했습니다.")
+    lines.append("")
+    lines.append("데이터 한계:")
+    data_quality = result.get("data_quality") or {}
+    lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
+    lines.append(f"- {data_quality.get('interpretation') or '없음은 공시 부재가 아니라 캐시 부재일 수 있습니다.'}")
+    return "\n".join(lines)
+
+
+def _render_audit_procedures(result: dict) -> str:
+    query = result.get("query") or {}
+    subject = _subject_label(result)
+    total = result.get("total_procedures")
+    if total is None:
+        total = sum((result.get("subject_procedure_type_counts") or {}).values()) + sum((result.get("peer_procedure_type_counts") or {}).values())
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} 조건의 KAM 감사절차 조회 결과입니다. 절차 항목 {total or 0}건이 확인됩니다.",
+    ]
+    if query.get("kam_topic"):
+        lines.append(f"KAM topic 필터는 `{query.get('kam_topic')}`입니다.")
+    lines.extend(["", "근거:"])
+    type_counts = result.get("procedure_type_counts") or result.get("peer_procedure_type_counts") or {}
+    if type_counts:
+        lines.append("- 절차 유형 분포: " + ", ".join(f"{k} {v}" for k, v in type_counts.items()))
+    for company in (result.get("companies") or [])[:3]:
+        first = (company.get("records") or [{}])[0]
+        if first:
+            lines.append(f"- {company.get('corp_name') or company.get('corp_code')}: {first.get('procedure_type')} / {first.get('procedure_excerpt', '')[:220]}")
+    if not type_counts and not result.get("companies"):
+        lines.append("- 현재 조건에 맞는 감사절차 항목을 찾지 못했습니다.")
+    lines.append("")
+    lines.append("데이터 한계:")
+    data_quality = result.get("data_quality") or {}
+    lines.append(f"- 출처: {data_quality.get('source') or 'audit_procedure_items'}")
+    lines.append(f"- {data_quality.get('interpretation') or data_quality.get('coverage_note') or 'KAM 본문에서 rule 기반으로 분리한 절차 힌트입니다.'}")
+    return "\n".join(lines)
+
+
 def _render_generic(tool_name: str, result: dict) -> str:
     status = _status(result)
     subject = _subject_label(result)
@@ -191,6 +283,12 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         return _render_search_dataset(result)
     if tool_name == "compare_peer_kam_topics":
         return _render_kam_topics(result)
+    if tool_name in {"get_audit_report_sections"}:
+        return _render_audit_report_sections(result)
+    if tool_name in {"search_audit_report_matters", "compare_peer_audit_report_matters"}:
+        return _render_audit_report_matters(result)
+    if tool_name in {"search_audit_procedures", "compare_peer_audit_procedures"}:
+        return _render_audit_procedures(result)
     if tool_name == "build_audit_acceptance_pack":
         return _render_acceptance_pack(result)
     return _render_generic(tool_name, result)

@@ -39,3 +39,21 @@ def test_build_audit_acceptance_pack_returns_user_facing_narrative():
     assert out["answer"].startswith("판정:")
     assert "수임" in out["answer"] or "감사" in out["answer"]
     assert "근거" in out["answer"]
+
+
+def test_search_audit_report_matters_returns_user_facing_narrative():
+    out = json.loads(call_tool("search_audit_report_matters", {"company": "005930", "year": 2024, "limit": 3}))
+
+    assert isinstance(out.get("answer"), str)
+    assert out["answer"].startswith("판정:")
+    assert "감사보고서" in out["answer"]
+    assert "데이터" in out["answer"]
+
+
+def test_get_audit_report_sections_returns_user_facing_narrative():
+    out = json.loads(call_tool("get_audit_report_sections", {"company": "005930", "year": 2024, "section_key": "kam"}))
+
+    assert isinstance(out.get("answer"), str)
+    assert out["answer"].startswith("판정:")
+    assert "근거" in out["answer"]
+    assert "KAM" in out["answer"] or "감사절차" in out["answer"]
