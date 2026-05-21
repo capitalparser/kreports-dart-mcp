@@ -383,18 +383,22 @@ def fetch_document_xml(rcept_no: str) -> str | None:
 
 def fetch_dart_main_html(rcept_no: str) -> str | None:
     """Fetch DART filing main page HTML, used to discover attached dcmNo values."""
-    try:
-        with _get_client() as client:
-            resp = client.get(
-                f"{DART_WEB_BASE}/dsaf001/main.do",
-                params={"rcpNo": rcept_no},
-                timeout=30.0,
-            )
-            resp.raise_for_status()
-            return _decode_dart_text(resp.content, resp.encoding)
-    except Exception as e:
-        logger.warning("DART main HTML 수집 실패 [%s]: %s", rcept_no, e)
-        return None
+    for attempt in range(1, 4):
+        try:
+            with _get_client() as client:
+                resp = client.get(
+                    f"{DART_WEB_BASE}/dsaf001/main.do",
+                    params={"rcpNo": rcept_no},
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                return _decode_dart_text(resp.content, resp.encoding)
+        except Exception as e:
+            if attempt == 3:
+                logger.warning("DART main HTML 수집 실패 [%s]: %s", rcept_no, e)
+                return None
+            time.sleep(settings.request_delay * attempt)
+    return None
 
 
 def parse_attachment_options(main_html: str) -> list[dict[str, str]]:
@@ -452,25 +456,30 @@ def fetch_viewer_html(
     dtd: str = "HTML",
 ) -> str | None:
     """Fetch a DART attachment viewer body by rcpNo/dcmNo."""
-    try:
-        with _get_client() as client:
-            resp = client.get(
-                f"{DART_WEB_BASE}/report/viewer.do",
-                params={
-                    "rcpNo": rcept_no,
-                    "dcmNo": dcm_no,
-                    "eleId": ele_id,
-                    "offset": offset,
-                    "length": length,
-                    "dtd": dtd,
-                },
-                timeout=60.0,
-            )
-            resp.raise_for_status()
-            return _decode_dart_text(resp.content, resp.encoding)
-    except Exception as e:
-        logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, e)
-        return None
+    for attempt in range(1, 4):
+        try:
+            with _get_client() as client:
+                resp = client.get(
+                    f"{DART_WEB_BASE}/report/viewer.do",
+                    params={
+                        "rcpNo": rcept_no,
+                        "dcmNo": dcm_no,
+                        "eleId": ele_id,
+                        "offset": offset,
+                        "length": length,
+                        "dtd": dtd,
+                    },
+                    timeout=60.0,
+                )
+                resp.raise_for_status()
+                time.sleep(settings.request_delay)
+                return _decode_dart_text(resp.content, resp.encoding)
+        except Exception as e:
+            if attempt == 3:
+                logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, e)
+                return None
+            time.sleep(settings.request_delay * attempt)
+    return None
 
 
 # ---------------------------------------------------------------------------
