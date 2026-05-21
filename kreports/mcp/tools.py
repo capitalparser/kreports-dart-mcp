@@ -77,6 +77,7 @@ from kreports.db.models import (
     FinancialFact,
     ReportSection,
 )
+from kreports.mcp.renderers import render_answer
 
 
 _FS_DIVS = {"CFS", "OFS"}
@@ -327,6 +328,10 @@ def _attach_meta(name: str, result: Any) -> Any:
         meta["result_count"] = enriched.get("count", 0)
 
     enriched["_meta"] = meta
+    if not enriched.get("answer"):
+        answer = render_answer(name, enriched)
+        if answer:
+            enriched["answer"] = answer
     return enriched
 
 
