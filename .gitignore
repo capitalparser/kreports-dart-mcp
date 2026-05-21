@@ -55,3 +55,4 @@ logs/
 
 # Local backfill process markers
 *.pid
+.dart-backfill.lock/
