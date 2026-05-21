@@ -2202,6 +2202,32 @@ def get_audit_report_sections(
 
 _AUDIT_MATTER_KEYS = ("other_matter", "emphasis", "going_concern", "basis_for_opinion")
 
+_AUDIT_MATTER_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "going_concern": ("계속기업", "존속능력", "유동부채", "유동성"),
+    "covid": ("COVID-19", "코로나", "코로나바이러스"),
+    "subsequent_event": ("보고기간후", "보고기간 후", "후속사건", "작성기준일 이후"),
+    "restatement": ("재작성", "재작성", "정정", "재분류", "수정"),
+    "litigation": ("소송", "분쟁", "우발부채"),
+    "scope_limitation": ("범위제한", "충분하고 적합한 감사증거", "의견거절"),
+    "uncertainty": ("불확실성", "추정", "중요한 불확실성"),
+}
+
+
+def _classify_audit_matter(text_value: str, section_key: str | None = None) -> dict:
+    body = text_value or ""
+    topics = [
+        topic
+        for topic, keywords in _AUDIT_MATTER_TOPIC_KEYWORDS.items()
+        if any(keyword in body for keyword in keywords)
+    ]
+    if section_key == "going_concern" or "going_concern" in topics:
+        severity = "high"
+    elif section_key == "emphasis" or any(topic in topics for topic in ("scope_limitation", "uncertainty")):
+        severity = "warning"
+    else:
+        severity = "info"
+    return {"topic_tags": topics, "severity_hint": severity}
+
 
 def compare_peer_audit_report_matters(
     company: str,
@@ -2259,6 +2285,7 @@ def compare_peer_audit_report_matters(
         key = row["section_key"]
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
+        row.update(_classify_audit_matter(body, key))
         row.pop("body_text", None)
         counts[key]["total_sections"] += 1
         if row["corp_code"] == corp_code:
@@ -2425,7 +2452,9 @@ def search_audit_report_matters(
             "body_length": row.get("body_length"),
         }
         if include_excerpt:
-            section["body_excerpt"] = _display_text(row.get("body_text"))[:1200]
+            body = _display_text(row.get("body_text"))
+            section["body_excerpt"] = body[:1200]
+            section.update(_classify_audit_matter(body, row["section_key"]))
         item["sections"].append(section)
 
     company_rows = list(companies.values())

@@ -123,6 +123,39 @@ def test_search_audit_report_matters_industry_question_mcp_dispatch():
     assert out["total_companies"] >= 0
 
 
+def test_search_audit_report_matters_adds_topic_and_severity_hints(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import ReportSection
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="강조테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(ReportSection(
+            rcept_no="20250311000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="going_concern",
+            section_title="계속기업 관련 중요한 불확실성",
+            body_text="유동부채가 유동자산을 초과하여 계속기업 존속능력에 중요한 불확실성이 존재합니다.",
+            body_hash="x",
+            body_length=50,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = search_audit_report_matters(company="000001", year=2024, section_keys=["going_concern"], limit=5)
+
+    section = out["companies"][0]["sections"][0]
+    assert section["severity_hint"] == "high"
+    assert "going_concern" in section["topic_tags"]
+
+
 def test_search_dataset_report_sections_shape():
     out = search_dataset(
         dataset="report_sections",
