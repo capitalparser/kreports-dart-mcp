@@ -115,11 +115,16 @@ main() {
   set -e
   if [[ "$code" != "0" ]]; then
     if [[ "$code" == "75" ]]; then
-      log "skip: DART API limit still unavailable"
-      exit 0
+      if [[ "$(basename "$BACKFILL_SCRIPT")" == "run_source_documents_backfill.sh" ]]; then
+        log "DART API limit unavailable; continuing source-document backfill via DART viewer fallback"
+      else
+        log "skip: DART API limit still unavailable"
+        exit 0
+      fi
+    else
+      log "probe failed exit_code=$code"
+      exit "$code"
     fi
-    log "probe failed exit_code=$code"
-    exit "$code"
   fi
 
   log "backfill started script=$BACKFILL_SCRIPT"
