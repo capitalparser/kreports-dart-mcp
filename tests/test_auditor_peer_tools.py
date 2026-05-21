@@ -12,7 +12,7 @@ from kreports.analysis.api import (
     search_dataset,
     search_audit_report_matters,
 )
-from kreports.db.models import AccountingNoteChapter, Company
+from kreports.db.models import AccountingNoteChapter, Company, SourceDocument
 from kreports.mcp.tools import call_tool
 
 
@@ -215,6 +215,49 @@ def test_search_dataset_accounting_note_chapters(temp_engine):
     assert record["note_title"] == "중요한 회계정책"
     assert record["section_type"] == "policy"
     assert "수익" in record["body_excerpt"]
+
+
+def test_search_dataset_source_documents_marks_derived_evidence(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="근거테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(SourceDocument(
+            rcept_no="20250311000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            report_nm="derived from report_sections",
+            content_type="derived_report_sections",
+            raw_content="DERIVED FROM report_sections\n## kam | 핵심감사사항\n수익인식 관련 핵심감사사항입니다.",
+            doc_hash="x",
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = json.loads(call_tool(
+        "search_dataset",
+        {
+            "dataset": "source_documents",
+            "company": "000001",
+            "year": 2024,
+            "source_type": "audit_report",
+            "keyword": "수익인식",
+            "limit": 5,
+        },
+    ))
+
+    assert out["query"]["dataset"] == "source_documents"
+    assert out["data_quality"]["source"] == "source_documents"
+    assert "derived" in out["data_quality"]["interpretation"]
+    record = out["companies"][0]["records"][0]
+    assert record["content_type"] == "derived_report_sections"
+    assert "수익인식" in record["body_excerpt"]
 
 
 def test_estimate_audit_hours_proxy_shape():

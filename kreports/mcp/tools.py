@@ -84,6 +84,7 @@ from kreports.mcp.renderers import render_answer
 _FS_DIVS = {"CFS", "OFS"}
 _FS_STRATEGIES = {"CFS", "OFS", "auto"}
 _SEARCH_DATASETS = {
+    "source_documents",
     "report_sections",
     "accounting_policies",
     "accounting_note_chapters",
@@ -1243,6 +1244,7 @@ TOOL_SEARCH_DATASET = Tool(
             "dataset": {
                 "type": "string",
                 "enum": [
+                    "source_documents",
                     "report_sections",
                     "accounting_policies",
                     "accounting_note_chapters",

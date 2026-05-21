@@ -2468,6 +2468,7 @@ def search_audit_report_matters(
 
 
 _SEARCH_DATASETS = {
+    "source_documents",
     "report_sections",
     "accounting_policies",
     "accounting_note_chapters",
@@ -2556,7 +2557,34 @@ def search_dataset(
 
     bind_expanding = []
     source = dataset
-    if dataset == "report_sections":
+    interpretation = "Search reads local cached tables only. Empty result means no cached matching row."
+    if dataset == "source_documents":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("sd.bsns_year=:year")
+            params["year"] = int(year)
+        if source_type:
+            where.append("sd.source_type=:source_type")
+            params["source_type"] = source_type
+        if keyword:
+            where.append("(sd.report_nm LIKE :kw OR sd.raw_content LIKE :kw)")
+            params["kw"] = f"%{keyword}%"
+        sql = f"""
+            SELECT sd.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   sd.bsns_year AS year, sd.rcept_no, sd.dcm_no, sd.source_type,
+                   sd.report_nm, sd.content_type, sd.raw_content AS body, LENGTH(sd.raw_content) AS body_length
+            FROM source_documents sd
+            JOIN companies c ON c.corp_code=sd.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY sd.bsns_year DESC, c.market, c.corp_name, sd.source_type
+            LIMIT :row_limit
+        """
+        source = "source_documents"
+        interpretation = (
+            "Search reads source_documents cache. Rows with content_type=derived_report_sections "
+            "are reconstructed legacy evidence bundles, not original DART filing bodies."
+        )
+    elif dataset == "report_sections":
         where = ["1=1", *filters]
         if year is not None:
             where.append("rs.bsns_year=:year")
@@ -2734,7 +2762,7 @@ def search_dataset(
         "data_quality": {
             "status": "usable" if companies else "missing",
             "source": source,
-            "interpretation": "Search reads local cached tables only. Empty result means no cached matching row.",
+            "interpretation": interpretation,
         },
     })
 
