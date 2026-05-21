@@ -798,6 +798,7 @@ def collect_business_report_sections(
               SELECT 1 FROM source_documents sd
               WHERE sd.rcept_no=d.rcept_no
                 AND sd.source_type='business_report'
+                AND sd.content_type!='derived_report_sections'
             )
             OR
             NOT EXISTS (
@@ -863,7 +864,7 @@ def run_document_extractors(
     stmt = """
         SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type, report_nm, raw_content, doc_hash
         FROM source_documents
-        WHERE 1=1
+        WHERE content_type!='derived_report_sections'
     """
     params: dict[str, object] = {}
     if year is not None:
@@ -935,6 +936,118 @@ def run_document_extractors(
             totals["failed"] += 1
             if len(totals["errors"]) < 20:
                 totals["errors"].append({"rcept_no": rcept_no, "error": str(exc)})
+    return totals
+
+
+def _derived_source_document_body(sections: list[dict]) -> str:
+    parts = [
+        "DERIVED FROM report_sections",
+        "This is not the original DART filing body. It is a legacy evidence bundle reconstructed from cached extracted sections.",
+        "",
+    ]
+    for section in sections:
+        title = section.get("section_title") or section.get("section_key") or "section"
+        parts.append(f"## {section.get('section_key')} | {title}")
+        parts.append(f"rcept_no={section.get('rcept_no')} source_type={section.get('source_type')} ordinal={section.get('ordinal')}")
+        parts.append((section.get("body_text") or "").strip())
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def hydrate_source_documents_from_report_sections(
+    *,
+    year: int | None = None,
+    source_type: str | None = None,
+    limit: int | None = None,
+    progress_callback=None,
+) -> dict:
+    """Create derived evidence bundles from existing report_sections.
+
+    These rows are explicitly marked `content_type=derived_report_sections`.
+    They are useful for MCP evidence search, but do not count as original DART
+    source documents and are ignored by raw-document extractor reruns.
+    """
+    if source_type and source_type not in {"business_report", "audit_report"}:
+        return {"total": 0, "created": 0, "updated": 0, "skipped_raw": 0, "errors": [{"error": "invalid source_type"}]}
+
+    where = ["1=1"]
+    params: dict[str, object] = {}
+    if year is not None:
+        where.append("rs.bsns_year=:year")
+        params["year"] = int(year)
+    if source_type:
+        where.append("rs.source_type=:source_type")
+        params["source_type"] = source_type
+
+    group_sql = f"""
+        SELECT rs.rcept_no, rs.source_type, rs.corp_code, rs.bsns_year, COUNT(*) AS section_count
+        FROM report_sections rs
+        WHERE {" AND ".join(where)}
+        GROUP BY rs.rcept_no, rs.source_type, rs.corp_code, rs.bsns_year
+        ORDER BY rs.bsns_year, rs.source_type, rs.rcept_no
+    """
+    if limit:
+        group_sql += " LIMIT :limit"
+        params["limit"] = int(limit)
+
+    with get_session() as session:
+        groups = session.execute(text(group_sql), params).all()
+
+    totals = {"total": len(groups), "created": 0, "updated": 0, "skipped_raw": 0, "errors": []}
+    now = datetime.utcnow()
+    for idx, (rcept_no, src_type, corp_code, bsns_year, _section_count) in enumerate(groups, 1):
+        if progress_callback:
+            progress_callback(idx, totals["total"], corp_code, bsns_year, src_type, rcept_no)
+        try:
+            with get_session() as session:
+                existing = session.query(SourceDocument).filter_by(
+                    rcept_no=rcept_no,
+                    source_type=src_type,
+                ).first()
+                if existing is not None and existing.content_type != "derived_report_sections":
+                    totals["skipped_raw"] += 1
+                    continue
+                section_rows = session.execute(
+                    text(
+                        """
+                        SELECT rcept_no, source_type, section_key, section_title,
+                               body_text, body_length, ordinal
+                        FROM report_sections
+                        WHERE rcept_no=:rcept_no AND source_type=:source_type
+                        ORDER BY ordinal, section_key
+                        """
+                    ),
+                    {"rcept_no": rcept_no, "source_type": src_type},
+                ).mappings().all()
+                sections = [dict(row) for row in section_rows if (row.get("body_text") or "").strip()]
+                if not sections:
+                    continue
+                body = _derived_source_document_body(sections)
+                if existing is None:
+                    session.add(SourceDocument(
+                        rcept_no=rcept_no,
+                        dcm_no=None,
+                        corp_code=corp_code,
+                        bsns_year=bsns_year,
+                        source_type=src_type,
+                        report_nm="derived from report_sections",
+                        content_type="derived_report_sections",
+                        raw_content=body,
+                        doc_hash=_sha1(body),
+                        fetched_at=now,
+                    ))
+                    totals["created"] += 1
+                else:
+                    existing.corp_code = corp_code
+                    existing.bsns_year = bsns_year
+                    existing.report_nm = "derived from report_sections"
+                    existing.raw_content = body
+                    existing.doc_hash = _sha1(body)
+                    existing.fetched_at = now
+                    totals["updated"] += 1
+        except Exception as exc:
+            if len(totals["errors"]) < 20:
+                totals["errors"].append({"rcept_no": rcept_no, "source_type": src_type, "error": str(exc)})
     return totals
 
 

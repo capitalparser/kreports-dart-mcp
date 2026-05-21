@@ -1456,6 +1456,37 @@ def run_document_extractors_cmd(
             typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
 
 
+@app.command("hydrate-source-documents-from-sections")
+def hydrate_source_documents_from_sections_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
+):
+    """기존 report_sections를 derived source_documents로 묶는다. 원문 캐시로 간주하지 않는다."""
+    from kreports.collector.report_document_collector import hydrate_source_documents_from_report_sections
+
+    init_db()
+
+    def _progress(idx, total, corp_code, yy, src_type, rcept_no):
+        if idx == 1 or idx % 100 == 0 or idx == total:
+            typer.echo(f"  [{idx}/{total}] {corp_code} {yy} {src_type} {rcept_no}")
+
+    result = hydrate_source_documents_from_report_sections(
+        year=year,
+        source_type=source_type,
+        limit=limit,
+        progress_callback=_progress,
+    )
+    typer.echo(
+        f"완료 - 처리 {result['total']:,} | 생성 {result['created']:,} | "
+        f"갱신 {result['updated']:,} | 원문보존 skip {result['skipped_raw']:,}"
+    )
+    if result["errors"]:
+        typer.echo("실패 샘플:")
+        for row in result["errors"][:10]:
+            typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
+
+
 # ---------------------------------------------------------------------------
 # collect-audit-fees (DS002 감사보수 수집)
 # ---------------------------------------------------------------------------

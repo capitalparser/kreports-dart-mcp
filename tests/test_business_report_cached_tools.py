@@ -214,6 +214,102 @@ def test_business_report_backfill_targets_existing_sections_when_source_document
     assert calls == ["20250331000001"]
 
 
+def test_business_report_backfill_targets_derived_source_document_as_raw_missing(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="대상",
+            market="KOSPI",
+            induty_code="58221",
+        ))
+        session.add(Disclosure(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            corp_name="대상",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서 (2024.12)",
+            content_type="derived_report_sections",
+            raw_content="파생 문단 묶음입니다.",
+            doc_hash="derived",
+        ))
+
+    calls = []
+    monkeypatch.setattr(
+        collector_module,
+        "collect_report_sections_for_disclosure",
+        lambda rcept_no: calls.append(rcept_no) or {"ok": 1, "sections": 0},
+    )
+
+    out = collector_module.collect_business_report_sections(year=2024, missing_only=True)
+
+    assert out["total"] == 1
+    assert calls == ["20250331000001"]
+
+
+def test_hydrates_derived_source_documents_from_report_sections(temp_engine):
+    from kreports.collector.report_document_collector import hydrate_source_documents_from_report_sections
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="대상",
+            market="KOSPI",
+            induty_code="58221",
+        ))
+        session.add(ReportSection(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="수익인식 관련 핵심감사사항입니다.",
+            body_hash="kam",
+            body_length=18,
+            ordinal=0,
+        ))
+        session.add(ReportSection(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="emphasis",
+            section_title="강조사항",
+            body_text="계속기업 관련 강조사항입니다.",
+            body_hash="emphasis",
+            body_length=16,
+            ordinal=1,
+        ))
+
+    out = hydrate_source_documents_from_report_sections(year=2024, source_type="audit_report")
+
+    assert out["total"] == 1
+    assert out["created"] == 1
+    with get_session() as session:
+        doc = session.query(SourceDocument).filter_by(
+            rcept_no="20250331000001",
+            source_type="audit_report",
+        ).one()
+        assert doc.content_type == "derived_report_sections"
+        assert "DERIVED FROM report_sections" in doc.raw_content
+        assert "핵심감사사항" in doc.raw_content
+        assert "계속기업 관련 강조사항" in doc.raw_content
+
+
 def test_document_extractors_rerun_from_raw_source_without_dart(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
