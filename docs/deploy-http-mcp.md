@@ -29,6 +29,33 @@ DB_URL=sqlite:////path/to/writable/kreports.db
 
 Do not put `DART_API_KEY` in the MCP endpoint environment.
 
+## User-Facing Response Contract
+
+MCP tools should not expose raw JSON as the primary answer. Internal handlers may
+produce structured dictionaries, but the MCP-facing response should be readable
+Korean prose:
+
+- verdict first,
+- short evidence paragraphs,
+- source references such as receipt number, filing year, section title,
+- explicit data-quality and coverage notes.
+
+Structured JSON can remain available for tests, API clients, and future UI
+renderers, but public MCP users should receive narrative output that can be used
+directly in audit, investment, or disclosure review workflows.
+
+## On-Demand Disclosure Fetch Contract
+
+The hosted endpoint is cache-first by default. If a public MCP user requests an
+uncached ad-hoc disclosure, the endpoint may support on-demand DART fetch only
+under this contract:
+
+- the user supplies their own OpenDART API key for that request,
+- the server-side collector `DART_API_KEY` is never used by the public endpoint,
+- the user key is not persisted, logged, or echoed,
+- fetched documents are cached and subsequent reads use the cache,
+- responses disclose whether the answer came from cache or a user-keyed fetch.
+
 ## Local Production-Like Run
 
 ```bash

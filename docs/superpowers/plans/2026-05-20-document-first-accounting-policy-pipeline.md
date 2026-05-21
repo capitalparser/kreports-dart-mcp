@@ -277,3 +277,120 @@ Run:
 git add scripts/evaluate_current_mcp_quality.py docs/disclosure-db-completeness.md
 git commit -m "chore: report accounting note chapter coverage"
 ```
+
+### Task 7: User-Facing Narrative MCP Responses
+
+**Files:**
+- Create: `kreports/mcp/renderers.py`
+- Modify: `kreports/mcp/tools.py`
+- Test: `tests/test_mcp_narrative_responses.py`
+
+- [ ] **Step 1: Write failing renderer tests**
+
+Add tests for representative tools:
+- `search_dataset(dataset="report_sections", ...)`
+- `compare_peer_kam_topics`
+- `build_audit_acceptance_pack`
+
+Each test should assert that the MCP-facing response contains a Korean narrative block with:
+- verdict first
+- coverage/data quality note
+- source evidence references such as `corp_name`, `year`, `rcept_no`, `section_title`
+- no raw JSON-only output as the primary user-facing answer
+
+- [ ] **Step 2: Verify red**
+
+Run:
+```bash
+uv run pytest tests/test_mcp_narrative_responses.py -q
+```
+Expected: fail because current tool calls return JSON strings only.
+
+- [ ] **Step 3: Implement narrative renderer**
+
+Add a renderer layer that converts structured internal dicts into readable Korean prose:
+```text
+판정: usable
+
+삼성전자 2024년 감사보고서 기준 핵심감사사항은 3건 확인됩니다. ...
+
+근거:
+- 20250218800508 / 핵심감사사항 / ...
+
+데이터 한계:
+- 현재 결과는 로컬 캐시 기준입니다.
+```
+
+Keep structured data available internally for tests and future UI, but make the MCP user-facing content narrative-first.
+
+- [ ] **Step 4: Run focused tests**
+
+Run:
+```bash
+uv run pytest tests/test_mcp_narrative_responses.py tests/test_dart_mcp.py -q
+```
+Expected: pass.
+
+- [ ] **Step 5: Commit**
+
+Run:
+```bash
+git add kreports/mcp/renderers.py kreports/mcp/tools.py tests/test_mcp_narrative_responses.py tests/test_dart_mcp.py
+git commit -m "feat: render MCP responses as user-facing narrative"
+```
+
+### Task 8: User-Keyed On-Demand DART Disclosure Fetch
+
+**Files:**
+- Modify: `kreports/mcp/tools.py`
+- Modify: `kreports/mcp/http_server.py`
+- Modify: `kreports/runtime.py`
+- Create: `kreports/collector/on_demand.py`
+- Test: `tests/test_on_demand_disclosure_fetch.py`
+- Test: `tests/test_readonly_mcp.py`
+
+- [ ] **Step 1: Write failing authorization tests**
+
+Add tests asserting:
+- public MCP never uses server-side `DART_API_KEY` for on-demand fetch
+- on-demand fetch requires a user-provided DART key argument or approved per-user credential channel
+- missing user key returns an actionable Korean message, not a collector-mode failure
+- fetched documents are cached locally and subsequent reads can be served from cache
+
+- [ ] **Step 2: Verify red**
+
+Run:
+```bash
+uv run pytest tests/test_on_demand_disclosure_fetch.py tests/test_readonly_mcp.py -q
+```
+Expected: fail because no on-demand user-keyed fetch exists.
+
+- [ ] **Step 3: Implement on-demand fetch contract**
+
+Add a tool such as `fetch_disclosure_on_demand` with inputs:
+- `rcept_no`
+- `corp_code` or `company` optional
+- `user_dart_api_key`
+- `cache_policy`: `cache_first` / `refresh`
+
+Security rules:
+- do not persist `user_dart_api_key`
+- do not echo `user_dart_api_key` in logs or responses
+- cache fetched document body and derived sections
+- response should be narrative-first and cite the cached `rcept_no`
+
+- [ ] **Step 4: Run focused tests**
+
+Run:
+```bash
+uv run pytest tests/test_on_demand_disclosure_fetch.py tests/test_readonly_mcp.py tests/test_mcp_tools_registration.py -q
+```
+Expected: pass.
+
+- [ ] **Step 5: Commit**
+
+Run:
+```bash
+git add kreports/mcp/tools.py kreports/mcp/http_server.py kreports/runtime.py kreports/collector/on_demand.py tests/test_on_demand_disclosure_fetch.py tests/test_readonly_mcp.py tests/test_mcp_tools_registration.py
+git commit -m "feat: support user-keyed on-demand DART disclosure fetch"
+```
