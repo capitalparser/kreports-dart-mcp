@@ -69,6 +69,27 @@ def test_extract_audit_report_sections_does_not_treat_auditor_responsibility_phr
     assert "kam" not in sections
 
 
+def test_extract_audit_report_sections_trims_other_matter_before_attached_financials():
+    xml = """
+    <DOCUMENT>
+      <TITLE>기타사항</TITLE>
+      <P>기타사항 본문입니다. 전기 재무제표 감사인과 비교정보를 설명합니다.</P>
+      <P>이 감사보고서의 근거가 된 감사를 실시한 업무수행이사는 공인회계사입니다.</P>
+      <P>(첨부)재 무 제 표</P>
+      <P>삼성전자주식회사 제 53 기 재무상태표와 손익계산서 본문입니다.</P>
+      <TITLE>재무제표에 대한 경영진의 책임</TITLE>
+      <P>경영진 책임입니다.</P>
+    </DOCUMENT>
+    """
+
+    sections = extract_audit_report_sections(xml)
+
+    assert "other_matter" in sections
+    assert "기타사항 본문" in sections["other_matter"]["body_text"]
+    assert "재무상태표" not in sections["other_matter"]["body_text"]
+    assert len(sections["other_matter"]["body_text"]) < 120
+
+
 def test_parse_attachment_options_reads_dcm_no_from_dart_main_html():
     html = """
     <select id="att">

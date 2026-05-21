@@ -67,6 +67,33 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _TITLE_OR_P_RE = re.compile(r"</?(?:TITLE|P|TR|TABLE)[^>]*>", re.IGNORECASE)
 
+_AUDIT_REPORT_TRAILING_MARKERS = (
+    "(첨부)재무제표",
+    "(첨부) 재무제표",
+    "(첨부)재 무 제 표",
+    "(첨부) 재 무 제 표",
+    "첨부된 재무제표",
+    "별첨 재무제표",
+    "재 무 제 표",
+    "연 결 재 무 제 표",
+)
+
+_SIGNATURE_MARKERS = (
+    "이 감사보고서의 근거가 된 감사를 실시한 업무수행이사는",
+    "이 감사보고서는 감사보고서일",
+    "대 표 이 사",
+    "대표이사",
+)
+
+_SECTION_SPECIFIC_TRAILING_MARKERS: dict[str, tuple[str, ...]] = {
+    "other_matter": _AUDIT_REPORT_TRAILING_MARKERS + _SIGNATURE_MARKERS,
+    "emphasis": _AUDIT_REPORT_TRAILING_MARKERS,
+    "going_concern": _AUDIT_REPORT_TRAILING_MARKERS,
+    "basis_for_opinion": _AUDIT_REPORT_TRAILING_MARKERS,
+    "audit_opinion": _AUDIT_REPORT_TRAILING_MARKERS,
+    "kam": _AUDIT_REPORT_TRAILING_MARKERS,
+}
+
 
 def _clean(value: str) -> str:
     text = _TAG_RE.sub(" ", value or "")
@@ -107,6 +134,33 @@ def _matches(title: str, keywords: list[str]) -> bool:
     return False
 
 
+def _compact(value: str) -> str:
+    return re.sub(r"\s+", "", value or "")
+
+
+def _find_compact_marker(text: str, marker: str) -> int:
+    """Find a marker while ignoring whitespace inserted by DART HTML/XML."""
+    compact_marker = _compact(marker)
+    if not compact_marker:
+        return -1
+    pattern = re.compile(r"\s*".join(re.escape(ch) for ch in compact_marker))
+    match = pattern.search(text or "")
+    return match.start() if match else -1
+
+
+def _trim_section_body(section_key: str, body: str) -> str:
+    """Trim obvious non-audit-report appendices accidentally captured as a section."""
+    if not body:
+        return body
+    end = len(body)
+    for marker in _SECTION_SPECIFIC_TRAILING_MARKERS.get(section_key, ()):
+        pos = _find_compact_marker(body, marker)
+        if pos > 0:
+            end = min(end, pos)
+    trimmed = body[:end].strip()
+    return trimmed or body.strip()
+
+
 def _section_end(titles: list[tuple[int, int, str]], idx: int, xml_len: int) -> int:
     if idx + 1 < len(titles):
         return titles[idx + 1][0]
@@ -141,7 +195,7 @@ def extract_audit_report_sections(xml_content: str) -> dict[str, dict]:
         start = titles[match_idx][0]
         end = _section_end(titles, match_idx, len(xml_content))
         section_xml = xml_content[start:end]
-        body = xml_to_text(section_xml)
+        body = _trim_section_body(section_key, xml_to_text(section_xml))
         if not body:
             continue
         result[section_key] = {
@@ -183,7 +237,7 @@ def _extract_by_text_headings(text: str) -> dict[str, dict]:
             if next_start > start:
                 end = next_start
                 break
-        body = text[start:end].strip()
+        body = _trim_section_body(section_key, text[start:end].strip())
         if len(body) < len(heading) + 10:
             continue
         result[section_key] = {
