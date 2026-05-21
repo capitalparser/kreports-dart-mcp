@@ -2467,6 +2467,170 @@ def search_audit_report_matters(
     })
 
 
+_AUDIT_PROCEDURE_TYPES = {
+    "internal_control",
+    "substantive_test",
+    "estimation_assumption",
+    "external_confirmation",
+    "valuation_specialist",
+    "analytics",
+    "cutoff",
+    "other",
+}
+
+
+def search_audit_procedures(
+    *,
+    company: str | None = None,
+    year: int | None = None,
+    market: str | None = None,
+    induty_prefix: str | None = None,
+    kam_topic: str | None = None,
+    procedure_type: str | None = None,
+    keyword: str | None = None,
+    limit: int = 50,
+    include_excerpt: bool = True,
+) -> dict:
+    """Search KAM audit procedures by company/year/industry/topic filters."""
+    if procedure_type and procedure_type not in _AUDIT_PROCEDURE_TYPES:
+        return {"error": "invalid procedure_type", "allowed": sorted(_AUDIT_PROCEDURE_TYPES)}
+    limit = max(1, min(int(limit), 500))
+    params: dict[str, object] = {"row_limit": limit * 10}
+    filters, subject = _company_filters(
+        company=company,
+        market=market,
+        induty_prefix=induty_prefix,
+        params=params,
+    )
+    if "__company_not_found__" in filters:
+        return {"error": "company not found", "company": company}
+    where = ["1=1", *filters]
+    if year is not None:
+        where.append("api.bsns_year=:year")
+        params["year"] = int(year)
+    if kam_topic:
+        where.append("api.kam_topic=:kam_topic")
+        params["kam_topic"] = kam_topic
+    if procedure_type:
+        where.append("api.procedure_type=:procedure_type")
+        params["procedure_type"] = procedure_type
+    if keyword:
+        where.append("api.procedure_text LIKE :kw")
+        params["kw"] = f"%{keyword}%"
+
+    sql = text(f"""
+        SELECT api.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+               api.bsns_year AS year, api.rcept_no, api.dcm_no, api.source_type,
+               api.kam_topic, api.procedure_type, api.procedure_text,
+               api.procedure_length, api.section_ordinal, api.procedure_ordinal
+        FROM audit_procedure_items api
+        JOIN companies c ON c.corp_code=api.corp_code
+        WHERE {" AND ".join(where)}
+        ORDER BY api.bsns_year DESC, c.market, c.corp_name, api.kam_topic, api.procedure_type
+        LIMIT :row_limit
+    """)
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
+
+    for row in rows:
+        text_value = _display_text(row.pop("procedure_text") or "")
+        if include_excerpt:
+            row["procedure_excerpt"] = text_value[:900]
+    companies = _group_company_records(rows, limit=limit)
+    type_counts: dict[str, int] = {}
+    topic_counts: dict[str, int] = {}
+    for company_row in companies:
+        for record in company_row["records"]:
+            type_key = record.get("procedure_type") or "unknown"
+            topic_key = record.get("kam_topic") or "unknown"
+            type_counts[type_key] = type_counts.get(type_key, 0) + 1
+            topic_counts[topic_key] = topic_counts.get(topic_key, 0) + 1
+    return _clean_dict({
+        "query": {
+            "company": company,
+            "year": year,
+            "market": market,
+            "induty_prefix": induty_prefix,
+            "kam_topic": kam_topic,
+            "procedure_type": procedure_type,
+            "keyword": keyword,
+            "limit": limit,
+            "include_excerpt": include_excerpt,
+        },
+        "subject": subject,
+        "total_companies": len(companies),
+        "total_procedures": sum(item["record_count"] for item in companies),
+        "procedure_type_counts": type_counts,
+        "kam_topic_counts": topic_counts,
+        "companies": companies,
+        "data_quality": {
+            "status": "usable" if companies else "missing",
+            "source": "audit_procedure_items",
+            "interpretation": (
+                "Procedure items are parsed hints from cached KAM audit-response paragraphs. "
+                "They support comparison and search, but do not replace reading the full audit report."
+            ),
+        },
+    })
+
+
+def compare_peer_audit_procedures(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict:
+    """Compare KAM audit procedure patterns for a subject and its peer group."""
+    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    if "error" in base:
+        return base
+    subject = base["subject"]
+    peer_codes = [subject["corp_code"]] + [peer["corp_code"] for peer in base.get("peers", [])]
+    if not peer_codes:
+        return {"error": "no peers"}
+    stmt = text("""
+        SELECT api.corp_code, c.corp_name, api.kam_topic, api.procedure_type,
+               COUNT(*) AS cnt
+        FROM audit_procedure_items api
+        JOIN companies c ON c.corp_code=api.corp_code
+        WHERE api.bsns_year=:year AND api.corp_code IN :corp_codes
+        GROUP BY api.corp_code, c.corp_name, api.kam_topic, api.procedure_type
+        ORDER BY c.corp_name, api.kam_topic, api.procedure_type
+    """).bindparams(bindparam("corp_codes", expanding=True))
+    with _engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(stmt, {"year": year, "corp_codes": peer_codes}).mappings().all()]
+
+    subject_counts: dict[str, int] = {}
+    peer_type_counts: dict[str, int] = {}
+    peer_topic_counts: dict[str, int] = {}
+    companies_with_procedures: set[str] = set()
+    for row in rows:
+        companies_with_procedures.add(row["corp_code"])
+        key = row["procedure_type"] or "other"
+        topic = row["kam_topic"] or "unknown"
+        if row["corp_code"] == subject["corp_code"]:
+            subject_counts[key] = subject_counts.get(key, 0) + int(row["cnt"] or 0)
+        else:
+            peer_type_counts[key] = peer_type_counts.get(key, 0) + int(row["cnt"] or 0)
+            peer_topic_counts[topic] = peer_topic_counts.get(topic, 0) + int(row["cnt"] or 0)
+
+    return _clean_dict({
+        "subject": subject,
+        "year": year,
+        "peer_count": len(base.get("peers", [])),
+        "companies_with_procedures": len(companies_with_procedures),
+        "subject_procedure_type_counts": subject_counts,
+        "peer_procedure_type_counts": peer_type_counts,
+        "peer_kam_topic_counts": peer_topic_counts,
+        "selection_policy": base.get("selection_policy"),
+        "data_quality": {
+            "status": "usable" if rows else "missing",
+            "source": "audit_procedure_items",
+            "coverage_note": "Parsed from cached KAM sections; coverage increases as source_documents and extractors backfill.",
+        },
+    })
+
+
 _SEARCH_DATASETS = {
     "source_documents",
     "report_sections",

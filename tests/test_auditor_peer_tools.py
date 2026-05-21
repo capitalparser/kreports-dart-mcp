@@ -5,14 +5,16 @@ from kreports.analysis.api import (
     build_audit_acceptance_pack,
     compare_peer_accounting_policies,
     compare_peer_audit_fees,
+    compare_peer_audit_procedures,
     compare_peer_audit_report_matters,
     compare_peer_kam_topics,
     compare_peer_risk_profile,
     estimate_audit_hours_proxy,
     search_dataset,
+    search_audit_procedures,
     search_audit_report_matters,
 )
-from kreports.db.models import AccountingNoteChapter, Company, SourceDocument
+from kreports.db.models import AccountingNoteChapter, AuditProcedureItem, Company, Financial, SourceDocument
 from kreports.mcp.tools import call_tool
 
 
@@ -258,6 +260,94 @@ def test_search_dataset_source_documents_marks_derived_evidence(temp_engine):
     record = out["companies"][0]["records"][0]
     assert record["content_type"] == "derived_report_sections"
     assert "수익인식" in record["body_excerpt"]
+
+
+def test_search_audit_procedures_mcp_dispatch(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="절차테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20250311000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="internal_control",
+            procedure_text="매출차감 처리 관련 내부통제 이해 및 평가를 수행하였습니다.",
+            procedure_hash="x",
+            procedure_length=35,
+            section_ordinal=0,
+            procedure_ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = json.loads(call_tool(
+        "search_audit_procedures",
+        {
+            "company": "000001",
+            "year": 2024,
+            "kam_topic": "revenue",
+            "procedure_type": "internal_control",
+            "keyword": "내부통제",
+            "limit": 5,
+        },
+    ))
+
+    assert out["_meta"]["tool"] == "search_audit_procedures"
+    assert out["total_procedures"] == 1
+    assert out["procedure_type_counts"]["internal_control"] == 1
+    assert "내부통제" in out["companies"][0]["records"][0]["procedure_excerpt"]
+
+
+def test_compare_peer_audit_procedures_shape(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", stock_code="000001", corp_name="대상", market="KOSPI", induty_code="264"),
+            Company(corp_code="00000002", stock_code="000002", corp_name="피어", market="KOSPI", induty_code="264"),
+        ])
+        for cc in ("00000001", "00000002"):
+            session.add(Financial(
+                corp_code=cc,
+                year=2024,
+                quarter=4,
+                fs_div="CFS",
+                revenue=100,
+                operating_profit=10,
+                net_income=8,
+                total_assets=1000,
+                total_debt=400,
+                total_equity=600,
+            ))
+            session.add(AuditProcedureItem(
+                rcept_no=f"20250331{cc[-6:]}",
+                corp_code=cc,
+                bsns_year=2024,
+                source_type="audit_report",
+                kam_topic="revenue",
+                procedure_type="substantive_test",
+                procedure_text="매출 거래 근거 문서검사를 수행하였습니다.",
+                procedure_hash=cc,
+                procedure_length=24,
+                section_ordinal=0,
+                procedure_ordinal=0,
+                fetched_at=datetime.utcnow(),
+            ))
+
+    out = compare_peer_audit_procedures("000001", year=2024, peer_limit=5)
+
+    assert out["subject"]["corp_code"] == "00000001"
+    assert out["data_quality"]["source"] == "audit_procedure_items"
+    assert out["subject_procedure_type_counts"]["substantive_test"] == 1
+    assert out["peer_procedure_type_counts"]["substantive_test"] == 1
 
 
 def test_estimate_audit_hours_proxy_shape():

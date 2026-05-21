@@ -328,6 +328,36 @@ class ReportSection(Base):
     )
 
 
+class AuditProcedureItem(Base):
+    """Procedure-level evidence parsed from KAM audit-response paragraphs."""
+    __tablename__ = "audit_procedure_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(80), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_type = Column(String(30), nullable=False)
+    kam_topic = Column(String(50), nullable=True)
+    procedure_type = Column(String(50), nullable=False)
+    procedure_text = Column(Text, nullable=False)
+    procedure_hash = Column(String(40), nullable=True)
+    procedure_length = Column(Integer, nullable=True)
+    section_ordinal = Column(SmallInteger, nullable=False, default=0)
+    procedure_ordinal = Column(SmallInteger, nullable=False, default=0)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "rcept_no", "source_type", "section_ordinal", "procedure_ordinal",
+            name="uq_audit_procedure_item",
+        ),
+        Index("idx_audit_procedure_corp_year", "corp_code", "bsns_year"),
+        Index("idx_audit_procedure_type", "procedure_type"),
+        Index("idx_audit_procedure_topic", "kam_topic"),
+    )
+
+
 class BusinessAffiliateAuditor(Base):
     """Subsidiary/equity affiliate auditor matrix cached from business reports."""
     __tablename__ = "subsidiary_auditor_matrix"

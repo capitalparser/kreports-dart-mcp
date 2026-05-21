@@ -23,6 +23,8 @@ dart_mcp.tools — MCP 도구 정의.
   compare_peer_risk_profile     감사 위험 signal peer 비교
   compare_peer_accounting_policies  회계정책 cache peer 비교
   compare_peer_kam_topics       감사보고서/KAM event peer 비교
+  search_audit_procedures       KAM 감사절차 검색
+  compare_peer_audit_procedures KAM 감사절차 peer 비교
   compare_peer_audit_report_matters 감사보고서 기타사항·강조사항 peer 비교
   search_dataset                주요 로컬 데이터셋 공통 검색
   search_audit_report_matters   회사/연도/업종별 감사보고서 matters 검색
@@ -44,6 +46,7 @@ from kreports.analysis.api import (
     build_audit_acceptance_pack,
     compare_peer_accounting_policies,
     compare_peer_audit_fees,
+    compare_peer_audit_procedures,
     compare_peer_audit_report_matters,
     compare_peer_kam_topics,
     compare_peer_risk_profile,
@@ -61,6 +64,7 @@ from kreports.analysis.api import (
     get_subsidiary_auditors,
     resolve_corp_code,
     search_dataset,
+    search_audit_procedures,
     search_audit_report_matters,
     select_peer_group,
     score_going_concern,
@@ -1383,6 +1387,89 @@ TOOL_SEARCH_AUDIT_REPORT_MATTERS = Tool(
 )
 
 
+_AUDIT_PROCEDURE_TYPES = {
+    "internal_control",
+    "substantive_test",
+    "estimation_assumption",
+    "external_confirmation",
+    "valuation_specialist",
+    "analytics",
+    "cutoff",
+    "other",
+}
+
+
+def _handle_search_audit_procedures(args: dict) -> dict:
+    return search_audit_procedures(
+        company=_optional_string(args, "company"),
+        year=_optional_int(args, "year", None, min_value=2000, max_value=2100),
+        market=_optional_string(args, "market"),
+        induty_prefix=_optional_string(args, "induty_prefix"),
+        kam_topic=_optional_string(args, "kam_topic"),
+        procedure_type=_optional_enum(args, "procedure_type", _AUDIT_PROCEDURE_TYPES, None)
+        if args.get("procedure_type") is not None
+        else None,
+        keyword=_optional_string(args, "keyword"),
+        limit=_optional_int(args, "limit", 50, min_value=1, max_value=500) or 50,
+        include_excerpt=_optional_bool(args, "include_excerpt", True),
+    )
+
+
+TOOL_SEARCH_AUDIT_PROCEDURES = Tool(
+    name="search_audit_procedures",
+    description=(
+        "KAM 본문에서 분리한 감사절차 항목을 회사, 연도, 시장, 업종, KAM topic, 절차 유형, 키워드로 검색한다. "
+        "'수익인식 KAM에서 어떤 감사절차를 했나', '동종업종에서 내부통제 테스트가 언급된 회사는?' 같은 질문에 사용한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string", "description": "선택. corp_code/stock_code/company name"},
+            "year": {"type": "integer", "minimum": 2000, "maximum": 2100},
+            "market": {"type": "string", "description": "선택. KOSPI/KOSDAQ/KONEX"},
+            "induty_prefix": {"type": "string", "description": "선택. KSIC/업종코드 prefix 예: 26"},
+            "kam_topic": {"type": "string", "description": "예: revenue, inventory, impairment"},
+            "procedure_type": {
+                "type": "string",
+                "enum": sorted(_AUDIT_PROCEDURE_TYPES),
+            },
+            "keyword": {"type": "string"},
+            "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
+            "include_excerpt": {"type": "boolean", "default": True},
+        },
+    },
+)
+
+
+def _handle_compare_peer_audit_procedures(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return compare_peer_audit_procedures(
+        company=company,
+        year=_optional_int(args, "year", 2025, min_value=2000, max_value=2100) or 2025,
+        peer_limit=_optional_int(args, "peer_limit", 30, min_value=1, max_value=200) or 30,
+        fs_strategy=_optional_enum(args, "fs_strategy", _FS_STRATEGIES, "auto"),
+    )
+
+
+TOOL_COMPARE_PEER_AUDIT_PROCEDURES = Tool(
+    name="compare_peer_audit_procedures",
+    description=(
+        "기준 회사와 peer group의 KAM 감사절차 유형을 비교한다. 내부통제, 입증절차, 추정/가정 평가, 외부조회, "
+        "전문가 활용 등 절차 유형별 분포를 보여준다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "peer_limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 200},
+            "fs_strategy": {"type": "string", "enum": ["CFS", "OFS", "auto"], "default": "auto"},
+        },
+        "required": ["company"],
+    },
+)
+
+
 def _handle_get_audit_report_sections(args: dict) -> dict:
     company = _resolve_or_error(_require_string(args, "company"))
     section_key = args.get("section_key")
@@ -1604,6 +1691,8 @@ ALL_TOOLS: list[Tool] = [
     TOOL_SEARCH_DATASET,
     TOOL_FETCH_DISCLOSURE_ON_DEMAND,
     TOOL_SEARCH_AUDIT_REPORT_MATTERS,
+    TOOL_SEARCH_AUDIT_PROCEDURES,
+    TOOL_COMPARE_PEER_AUDIT_PROCEDURES,
     TOOL_GET_AUDIT_REPORT_SECTIONS,
     TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
     TOOL_BUILD_AUDIT_ACCEPTANCE_PACK,
@@ -1631,6 +1720,8 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "search_dataset": _handle_search_dataset,
     "fetch_disclosure_on_demand": _handle_fetch_disclosure_on_demand,
     "search_audit_report_matters": _handle_search_audit_report_matters,
+    "search_audit_procedures": _handle_search_audit_procedures,
+    "compare_peer_audit_procedures": _handle_compare_peer_audit_procedures,
     "get_audit_report_sections": _handle_get_audit_report_sections,
     "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,
     "build_audit_acceptance_pack": _handle_build_audit_acceptance_pack,

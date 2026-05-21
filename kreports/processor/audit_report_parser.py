@@ -309,6 +309,16 @@ _KAM_PROCEDURE_HINTS = (
     "대사",
 )
 
+_PROCEDURE_TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "internal_control": ("내부통제", "통제", "프로세스", "승인"),
+    "substantive_test": ("문서검사", "표본", "대사", "확인", "검사", "입증"),
+    "estimation_assumption": ("추정", "가정", "민감도", "회수가능", "평가"),
+    "external_confirmation": ("조회", "외부조회", "확인서", "채권조회"),
+    "valuation_specialist": ("전문가", "평가법인", "감정", "외부평가기관"),
+    "analytics": ("분석적", "추세", "비교분석", "분석"),
+    "cutoff": ("cutoff", "기간귀속", "마감", "발생사실"),
+}
+
 
 def _sentence_windows(text: str) -> list[str]:
     cleaned = xml_to_text(text)
@@ -354,3 +364,56 @@ def summarize_kam_body(text: str) -> dict:
         "reason_keywords": reason_hits,
         "procedure_keywords": procedure_hits,
     }
+
+
+def classify_audit_procedure_type(text: str) -> str:
+    body = text or ""
+    for procedure_type, keywords in _PROCEDURE_TYPE_KEYWORDS.items():
+        if any(keyword in body for keyword in keywords):
+            return procedure_type
+    return "other"
+
+
+def _procedure_zone(text: str) -> str:
+    body = xml_to_text(text)
+    candidates = [
+        "핵심감사사항이 감사에서 다루어진 방법",
+        "감사에서 다루어진 방법",
+        "주요 감사절차",
+        "감사절차",
+    ]
+    positions = [body.find(marker) for marker in candidates if body.find(marker) >= 0]
+    if not positions:
+        return body
+    return body[min(positions):]
+
+
+def extract_audit_procedure_items(kam_body: str) -> list[dict]:
+    """Split a KAM body into procedure-level evidence items."""
+    zone = _procedure_zone(kam_body)
+    if not zone:
+        return []
+    pieces = re.split(r"\n+|(?:^|\s)[·•\-]\s+|(?:^|\s)\(\d+\)\s*", zone)
+    items: list[dict] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        text = re.sub(r"\s+", " ", piece or "").strip(" ;·•-")
+        if len(text) < 12:
+            continue
+        if text in {
+            "핵심감사사항이 감사에서 다루어진 방법",
+            "감사에서 다루어진 방법",
+            "주요 감사절차",
+            "감사절차",
+        }:
+            continue
+        if not any(hint in text for hint in _KAM_PROCEDURE_HINTS + ("내부통제", "문서검사", "재계산", "대사", "조회")):
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        items.append({
+            "procedure_text": text[:1200],
+            "procedure_type": classify_audit_procedure_type(text),
+        })
+    return items

@@ -6,6 +6,7 @@ from kreports.collector.report_document_collector import collect_report_sections
 from kreports.db.models import Company, Disclosure, Financial, ReportDocument, ReportSection, SourceDocument
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
+    extract_audit_procedure_items,
     extract_audit_report_sections,
     summarize_kam_body,
 )
@@ -52,6 +53,22 @@ def test_summarize_kam_body_extracts_reason_and_audit_response():
     assert "감사절차" in summary["procedure_excerpt"]
     assert summary["has_reason_hint"] is True
     assert summary["has_procedure_hint"] is True
+
+
+def test_extract_audit_procedure_items_splits_and_classifies_kam_response():
+    body = """
+    핵심감사사항이 감사에서 다루어진 방법
+    · 매출차감 처리 관련 회사의 정책, 프로세스 및 내부통제 이해
+    · 매출차감 거래 근거 문서검사를 통한 추정과 관련 가정에 대한 평가
+    · 판매장려금의 추정치와 정산 금액 비교 및 관련 문서검사
+    """
+
+    items = extract_audit_procedure_items(body)
+
+    assert len(items) == 3
+    assert items[0]["procedure_type"] == "internal_control"
+    assert items[1]["procedure_type"] == "substantive_test"
+    assert "정산 금액 비교" in items[2]["procedure_text"]
 
 
 def test_extract_audit_report_sections_does_not_treat_auditor_responsibility_phrase_as_kam():
@@ -111,6 +128,7 @@ def test_parse_attachment_options_reads_dcm_no_from_dart_main_html():
 def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
+    from kreports.db.models import AuditProcedureItem
 
     with get_session() as session:
         session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
@@ -144,7 +162,9 @@ def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monke
           <P>{dcm_no} 감사의견은 적정입니다.</P>
           <TITLE>핵심감사사항</TITLE>
           <P>건설중인자산의 감가상각개시시점 평가를 핵심감사사항으로 결정한 이유입니다.</P>
-          <P>감사에서 다루어진 방법은 내부통제 테스트와 관련 문서 대사입니다.</P>
+          <P>감사에서 다루어진 방법</P>
+          <P>· 감가상각개시 관련 내부통제 테스트를 수행하였습니다.</P>
+          <P>· 관련 문서 대사와 재계산을 수행하였습니다.</P>
           <TITLE>재무제표에 대한 경영진의 책임</TITLE>
           <P>경영진 책임입니다.</P>
         </DOCUMENT>
@@ -159,15 +179,19 @@ def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monke
     with get_session() as session:
         docs = session.query(ReportDocument).order_by(ReportDocument.dcm_no).all()
         sections = session.query(ReportSection).filter_by(section_key="kam").order_by(ReportSection.dcm_no).all()
+        procedures = session.query(AuditProcedureItem).order_by(AuditProcedureItem.dcm_no).all()
         doc_dcm_nos = [doc.dcm_no for doc in docs]
         section_rcept_nos = [section.rcept_no for section in sections]
         first_kam_body = sections[0].body_text
+        procedure_types = [row.procedure_type for row in procedures]
     assert doc_dcm_nos == ["10316976", "10316977"]
     assert section_rcept_nos == [
         "20250218800508_10316976",
         "20250218800508_10316977",
     ]
     assert "감가상각개시시점" in first_kam_body
+    assert "internal_control" in procedure_types
+    assert "substantive_test" in procedure_types
 
 
 def test_collect_business_report_collects_summary_and_attached_audit_reports(temp_engine, monkeypatch):

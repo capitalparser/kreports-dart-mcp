@@ -22,6 +22,7 @@ from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingNoteChapter,
     AccountingPolicyItem,
+    AuditProcedureItem,
     Auditor,
     BusinessAffiliateAuditor,
     Company,
@@ -33,7 +34,11 @@ from kreports.db.models import (
     SourceDocument,
 )
 from kreports.processor.audit_parser import parse_auditor_from_doc_xml, parse_bsns_year
-from kreports.processor.audit_report_parser import extract_audit_report_sections
+from kreports.processor.audit_report_parser import (
+    classify_kam_topics,
+    extract_audit_procedure_items,
+    extract_audit_report_sections,
+)
 from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
 from kreports.processor.subsidiary_parser import extract_affiliates_from_report
@@ -478,6 +483,7 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
     affiliate_count = 0
     note_chapter_count = 0
     policy_item_count = 0
+    procedure_count = _persist_audit_procedure_items_from_sections(meta, rows)
     if meta.get("source_type") == "business_report":
         auditor_count = _persist_auditors_from_business_report(meta, content=content)
         affiliate_count = _persist_business_affiliate_auditors(meta, content=content)["count"]
@@ -491,8 +497,65 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
         "affiliate_auditors": affiliate_count,
         "accounting_note_chapters": note_chapter_count,
         "accounting_policy_items": policy_item_count,
-        "rows_written": len(rows) + auditor_count + affiliate_count + note_chapter_count + policy_item_count,
+        "audit_procedure_items": procedure_count,
+        "rows_written": len(rows) + auditor_count + affiliate_count + note_chapter_count + policy_item_count + procedure_count,
     }
+
+
+def _persist_audit_procedure_items_from_sections(meta: dict, section_rows: list[dict]) -> int:
+    """Persist procedure-level rows derived from KAM sections."""
+    rows: list[dict] = []
+    now = datetime.utcnow()
+    for section in section_rows:
+        if section.get("section_key") != "kam":
+            continue
+        body = section.get("body_text") or ""
+        topics = classify_kam_topics(body) or [None]
+        procedure_items = extract_audit_procedure_items(body)
+        for ordinal, item in enumerate(procedure_items):
+            text_value = item["procedure_text"]
+            rows.append({
+                "rcept_no": section["rcept_no"],
+                "dcm_no": section.get("dcm_no"),
+                "corp_code": section["corp_code"],
+                "bsns_year": section["bsns_year"],
+                "source_type": section["source_type"],
+                "kam_topic": topics[0],
+                "procedure_type": item["procedure_type"],
+                "procedure_text": text_value,
+                "procedure_hash": _sha1(text_value),
+                "procedure_length": len(text_value),
+                "section_ordinal": section["ordinal"],
+                "procedure_ordinal": ordinal,
+                "fetched_at": now,
+            })
+    with get_session() as session:
+        session.execute(
+            text(
+                "DELETE FROM audit_procedure_items "
+                "WHERE rcept_no=:rcept_no AND source_type=:source_type"
+            ),
+            {"rcept_no": meta["rcept_no"], "source_type": meta["source_type"]},
+        )
+        if not rows:
+            return 0
+        stmt = sqlite_insert(AuditProcedureItem).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["rcept_no", "source_type", "section_ordinal", "procedure_ordinal"],
+            set_={
+                "corp_code": stmt.excluded.corp_code,
+                "dcm_no": stmt.excluded.dcm_no,
+                "bsns_year": stmt.excluded.bsns_year,
+                "kam_topic": stmt.excluded.kam_topic,
+                "procedure_type": stmt.excluded.procedure_type,
+                "procedure_text": stmt.excluded.procedure_text,
+                "procedure_hash": stmt.excluded.procedure_hash,
+                "procedure_length": stmt.excluded.procedure_length,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        session.execute(stmt)
+    return len(rows)
 
 
 def _persist_auditors_from_business_report(meta: dict, *, content: str) -> int:
