@@ -1427,7 +1427,7 @@ def collect_business_report_sections_cmd(
 def run_document_extractors_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
     source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
-    extractor: str = typer.Option("all", "--extractor", help="all/sections/auditors/subsidiaries"),
+    extractor: str = typer.Option("all", "--extractor", help="all/sections/auditors/subsidiaries/note_chapters"),
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
 ):
     """source_documents 원문 캐시에서 extractor를 재실행한다. DART API를 호출하지 않는다."""

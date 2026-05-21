@@ -7,7 +7,7 @@ from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
     run_document_extractors,
 )
-from kreports.db.models import Auditor, Company, Disclosure, ReportSection
+from kreports.db.models import Auditor, Company, Disclosure, ReportSection, SourceDocument
 
 
 def _create_subsidiary_auditor_matrix_cache(session):
@@ -207,6 +207,65 @@ def test_document_extractors_rerun_from_raw_source_without_dart(temp_engine, mon
         assert session.query(ExtractionRun).filter_by(status="success").count() >= 2
         auditor = session.query(Auditor).filter_by(corp_code="00000001", bsns_year=2024).one()
         assert auditor.auditor_nm == "삼일회계법인"
+
+
+def test_document_extractors_persist_accounting_note_chapters_from_raw_source(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    def fail_dart_call(*_args, **_kwargs):
+        raise AssertionError("note chapter extraction must use cached source_documents only")
+
+    monkeypatch.setattr(collector_module, "fetch_document_zip_files", fail_dart_call)
+    monkeypatch.setattr(collector_module, "fetch_document_xml", fail_dart_call)
+    monkeypatch.setattr(collector_module, "fetch_dart_main_html", fail_dart_call)
+
+    raw_business_report = """
+    <DOCUMENT>
+      <DOCUMENT-NAME>사업보고서</DOCUMENT-NAME>
+      <TITLE>III. 재무에 관한 사항</TITLE>
+      <TITLE>연결재무제표 주석</TITLE>
+      <P>1. 일반사항</P><P>회사의 개요입니다.</P>
+      <P>2. 재무제표 작성기준</P><P>연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.</P>
+      <P>3. 중요한 회계정책</P><P>수익은 고객과의 계약에서 수행의무가 이행될 때 인식합니다.</P>
+      <P>4. 중요한 회계추정 및 판단</P><P>손상검사와 이연법인세자산 인식에는 경영진의 판단이 필요합니다.</P>
+      <P>5. 영업부문</P><P>다음 주석입니다.</P>
+    </DOCUMENT>
+    """
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서 (2024.12)",
+            content_type="xml",
+            raw_content=raw_business_report,
+            doc_hash="cached-doc-hash",
+        ))
+
+    out = run_document_extractors(year=2024, source_type="business_report")
+
+    assert out["total"] == 1
+    assert out["ok"] == 1
+    assert out["rows_written"] >= 3
+    with get_session() as session:
+        rows = (
+            session.query(AccountingNoteChapter)
+            .with_entities(
+                AccountingNoteChapter.note_no,
+                AccountingNoteChapter.section_type,
+                AccountingNoteChapter.body,
+            )
+            .filter_by(corp_code="00000001", bsns_year=2024, fs_div="CFS")
+            .order_by(AccountingNoteChapter.note_no)
+            .all()
+        )
+    assert [row.note_no for row in rows] == ["2", "3", "4"]
+    assert [row.section_type for row in rows] == ["basis", "policy", "estimate_judgment"]
+    assert "수행의무" in rows[1].body
 
 
 def test_get_business_overview_reads_cached_management_sections_without_dart(temp_engine, monkeypatch):

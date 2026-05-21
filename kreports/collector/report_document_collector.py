@@ -9,6 +9,7 @@ from datetime import datetime
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy import text
 
+from kreports.analysis.queries import extract_accounting_note_chapters
 from kreports.collector.fetcher import (
     fetch_dart_main_html,
     fetch_document_zip_files,
@@ -18,6 +19,7 @@ from kreports.collector.fetcher import (
 )
 from kreports.db.engine import get_session
 from kreports.db.models import (
+    AccountingNoteChapter,
     Auditor,
     BusinessAffiliateAuditor,
     Company,
@@ -381,15 +383,18 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
 
     auditor_count = 0
     affiliate_count = 0
+    note_chapter_count = 0
     if meta.get("source_type") == "business_report":
         auditor_count = _persist_auditors_from_business_report(meta, content=content)
         affiliate_count = _persist_business_affiliate_auditors(meta, content=content)["count"]
+        note_chapter_count = _persist_accounting_note_chapters_from_business_report(meta, content=content)
 
     return {
         "sections": len(rows),
         "auditors": auditor_count,
         "affiliate_auditors": affiliate_count,
-        "rows_written": len(rows) + auditor_count + affiliate_count,
+        "accounting_note_chapters": note_chapter_count,
+        "rows_written": len(rows) + auditor_count + affiliate_count + note_chapter_count,
     }
 
 
@@ -424,6 +429,82 @@ def _persist_auditors_from_business_report(meta: dict, *, content: str) -> int:
                 "auditor_nm": stmt.excluded.auditor_nm,
                 "audit_opinion": stmt.excluded.audit_opinion,
                 "rcept_no": stmt.excluded.rcept_no,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        session.execute(stmt)
+    return len(rows)
+
+
+def _note_blocks_by_fs_div(content: str) -> list[tuple[str, str]]:
+    """Split a business-report body into CFS/OFS note blocks when headings exist."""
+    marker_re = re.compile(
+        r"(연결\s*재무제표\s*주석|별도\s*재무제표\s*주석|(?<!연결)(?<!별도)재무제표\s*주석)",
+        flags=re.IGNORECASE,
+    )
+    markers = list(marker_re.finditer(content or ""))
+    if not markers:
+        return [("CFS", content or "")]
+
+    blocks: list[tuple[str, str]] = []
+    for idx, marker in enumerate(markers):
+        label = marker.group(1)
+        fs_div = "CFS" if "연결" in label else "OFS"
+        end = markers[idx + 1].start() if idx + 1 < len(markers) else len(content)
+        block = content[marker.start():end]
+        if block.strip():
+            blocks.append((fs_div, block))
+    return blocks
+
+
+def _persist_accounting_note_chapters_from_business_report(meta: dict, *, content: str) -> int:
+    """Persist note 2/3/4-style accounting chapters from cached business-report text."""
+    if meta.get("source_type") != "business_report":
+        return 0
+
+    now = datetime.utcnow()
+    rows: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for fs_div, note_block in _note_blocks_by_fs_div(content):
+        for chapter in extract_accounting_note_chapters(note_block):
+            note_no = str(chapter.get("note_no") or "").strip()
+            section_type = str(chapter.get("section_type") or "").strip()
+            body = (chapter.get("body") or "").strip()
+            key = (fs_div, note_no, section_type)
+            if not note_no or not section_type or not body or key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "corp_code": meta["corp_code"],
+                "bsns_year": meta["bsns_year"],
+                "fs_div": fs_div,
+                "rcept_no": meta["rcept_no"],
+                "dcm_no": meta.get("dcm_no"),
+                "source_type": meta.get("source_type") or "business_report",
+                "note_no": note_no,
+                "note_title": (chapter.get("note_title") or "").strip()[:500] or None,
+                "section_type": section_type,
+                "body": body,
+                "body_hash": _sha1(body),
+                "body_length": len(body),
+                "fetched_at": now,
+            })
+
+    if not rows:
+        return 0
+
+    with get_session() as session:
+        stmt = sqlite_insert(AccountingNoteChapter).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["corp_code", "bsns_year", "fs_div", "note_no", "section_type"],
+            set_={
+                "rcept_no": stmt.excluded.rcept_no,
+                "dcm_no": stmt.excluded.dcm_no,
+                "source_type": stmt.excluded.source_type,
+                "note_title": stmt.excluded.note_title,
+                "body": stmt.excluded.body,
+                "body_hash": stmt.excluded.body_hash,
+                "body_length": stmt.excluded.body_length,
                 "fetched_at": stmt.excluded.fetched_at,
             },
         )
@@ -770,7 +851,7 @@ def run_document_extractors(
     """Rerun extractors from cached raw source_documents without DART calls."""
     if source_type and source_type not in {"business_report", "audit_report"}:
         return {"total": 0, "ok": 0, "failed": 0, "rows_written": 0, "errors": [{"error": "invalid source_type"}]}
-    if extractor not in {"all", "sections", "auditors", "subsidiaries"}:
+    if extractor not in {"all", "sections", "auditors", "subsidiaries", "note_chapters"}:
         return {"total": 0, "ok": 0, "failed": 0, "rows_written": 0, "errors": [{"error": "invalid extractor"}]}
 
     stmt = """
@@ -817,6 +898,9 @@ def run_document_extractors(
             elif extractor == "subsidiaries":
                 rows_written = _persist_business_affiliate_auditors(meta, content=content)["count"]
                 extractor_name = "subsidiaries"
+            elif extractor == "note_chapters":
+                rows_written = _persist_accounting_note_chapters_from_business_report(meta, content=content)
+                extractor_name = "note_chapters"
             else:
                 extracted = extract_document_features_from_content(meta, content=content)
                 rows_written = int(extracted.get("rows_written") or 0)
