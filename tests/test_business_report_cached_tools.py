@@ -146,6 +146,74 @@ def test_business_report_collector_persists_management_sections_for_mcp(temp_eng
     assert "파트너 채널" in overview["sections"]["management_plan"]["body_text"]
 
 
+def test_business_report_backfill_targets_existing_sections_when_source_document_missing(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import BusinessAffiliateAuditor
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="대상",
+            market="KOSPI",
+            induty_code="58221",
+        ))
+        session.add(Disclosure(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            corp_name="대상",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add(ReportSection(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            section_key="business_overview",
+            section_title="사업의 개요",
+            body_text="이미 저장된 사업 개요",
+            body_hash="overview",
+            body_length=11,
+            ordinal=0,
+        ))
+        session.add(ReportSection(
+            rcept_no="20250331000001_attached",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="이미 저장된 핵심감사사항",
+            body_hash="kam",
+            body_length=12,
+            ordinal=0,
+        ))
+        session.add(BusinessAffiliateAuditor(
+            parent_corp_code="00000001",
+            parent_rcept_no="20250331000001",
+            bsns_year=2024,
+            name="자회사",
+            ordinal=0,
+        ))
+
+    calls = []
+
+    def fake_collect(rcept_no):
+        calls.append(rcept_no)
+        return {"ok": 1, "sections": 0}
+
+    monkeypatch.setattr(collector_module, "collect_report_sections_for_disclosure", fake_collect)
+
+    out = collector_module.collect_business_report_sections(year=2024, missing_only=True)
+
+    assert out["total"] == 1
+    assert out["ok"] == 1
+    assert calls == ["20250331000001"]
+
+
 def test_document_extractors_rerun_from_raw_source_without_dart(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session

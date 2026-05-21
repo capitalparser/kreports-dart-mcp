@@ -795,6 +795,12 @@ def collect_business_report_sections(
         stmt += """
           AND (
             NOT EXISTS (
+              SELECT 1 FROM source_documents sd
+              WHERE sd.rcept_no=d.rcept_no
+                AND sd.source_type='business_report'
+            )
+            OR
+            NOT EXISTS (
             SELECT 1 FROM report_sections rs
             WHERE rs.rcept_no=d.rcept_no
               AND rs.source_type='business_report'
