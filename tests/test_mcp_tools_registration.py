@@ -43,6 +43,12 @@ def test_search_dataset_registered():
     assert "search_dataset" in HANDLERS
 
 
+def test_fetch_disclosure_on_demand_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "fetch_disclosure_on_demand" in names
+    assert "fetch_disclosure_on_demand" in HANDLERS
+
+
 def test_compare_to_industry_multi_call_smoke():
     """smoke: dispatch by name, expect JSON-serializable result."""
     out_str = call_tool(

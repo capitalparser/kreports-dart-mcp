@@ -66,6 +66,7 @@ from kreports.analysis.api import (
     score_going_concern,
     search_company,
 )
+from kreports.collector.on_demand import fetch_disclosure_on_demand
 from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingPolicyItem,
@@ -92,6 +93,7 @@ _SEARCH_DATASETS = {
 }
 _ACCOUNTING_NOTE_SECTION_TYPES = {"basis", "policy", "estimate_judgment", "other_note"}
 _REPORT_SOURCE_TYPES = {"audit_report", "business_report"}
+_CACHE_POLICIES = {"cache_first", "refresh"}
 _COMPARE_METRICS = [
     "영업이익률",
     "순이익률",
@@ -1279,6 +1281,52 @@ TOOL_SEARCH_DATASET = Tool(
 )
 
 
+def _handle_fetch_disclosure_on_demand(args: dict) -> dict:
+    return fetch_disclosure_on_demand(
+        rcept_no=_require_string(args, "rcept_no"),
+        user_dart_api_key=_optional_string(args, "user_dart_api_key"),
+        cache_policy=_optional_enum(args, "cache_policy", _CACHE_POLICIES, "cache_first"),
+        corp_code=_optional_string(args, "corp_code"),
+        year=_optional_int(args, "year", None, min_value=1900, max_value=2100),
+    )
+
+
+TOOL_FETCH_DISCLOSURE_ON_DEMAND = Tool(
+    name="fetch_disclosure_on_demand",
+    description=(
+        "사용자가 제공한 OpenDART API key로 특정 접수번호의 수시공시 원문을 온디맨드 조회하고 "
+        "source_documents에 캐시한다. 공개 MCP 서버의 DART_API_KEY는 사용하지 않으며, 사용자 key는 "
+        "저장하거나 응답에 노출하지 않는다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "rcept_no": {"type": "string", "description": "DART 접수번호"},
+            "user_dart_api_key": {
+                "type": "string",
+                "description": "요청 사용자의 OpenDART API key. 저장/로그/응답 노출 금지.",
+            },
+            "cache_policy": {
+                "type": "string",
+                "enum": ["cache_first", "refresh"],
+                "default": "cache_first",
+            },
+            "corp_code": {
+                "type": "string",
+                "description": "선택. disclosures 메타가 없을 때 캐시 메타데이터로 사용.",
+            },
+            "year": {
+                "type": "integer",
+                "minimum": 1900,
+                "maximum": 2100,
+                "description": "선택. disclosures 메타가 없을 때 캐시 메타데이터로 사용.",
+            },
+        },
+        "required": ["rcept_no"],
+    },
+)
+
+
 def _handle_search_audit_report_matters(args: dict) -> dict:
     company = args.get("company")
     if company is not None and not isinstance(company, str):
@@ -1552,6 +1600,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_COMPARE_PEER_KAM_TOPICS,
     TOOL_COMPARE_PEER_AUDIT_REPORT_MATTERS,
     TOOL_SEARCH_DATASET,
+    TOOL_FETCH_DISCLOSURE_ON_DEMAND,
     TOOL_SEARCH_AUDIT_REPORT_MATTERS,
     TOOL_GET_AUDIT_REPORT_SECTIONS,
     TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
@@ -1578,6 +1627,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "compare_peer_kam_topics": _handle_compare_peer_kam_topics,
     "compare_peer_audit_report_matters": _handle_compare_peer_audit_report_matters,
     "search_dataset": _handle_search_dataset,
+    "fetch_disclosure_on_demand": _handle_fetch_disclosure_on_demand,
     "search_audit_report_matters": _handle_search_audit_report_matters,
     "get_audit_report_sections": _handle_get_audit_report_sections,
     "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,

@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 23  # base tools plus auditor peer/planning tools
+EXPECTED_TOOL_COUNT = 24  # base tools plus auditor peer/planning/on-demand tools
 
 
 class TestToolRegistryConsistency:
