@@ -498,6 +498,60 @@ def test_document_extractors_persist_accounting_notes_from_viewer_html_source(te
     assert "수행의무" in policy_body
 
 
+def test_document_extractors_load_raw_from_storage_uri(temp_engine, tmp_path, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, SourceDocument
+    from kreports.storage.raw_documents import RawDocumentStore
+
+    store = RawDocumentStore(base_dir=tmp_path)
+    content = """
+    <DOCUMENT>
+      <TITLE>III. 재무에 관한 사항</TITLE>
+      <TITLE>연결재무제표 주석</TITLE>
+      <P>2. 재무제표 작성기준</P><P>한국채택국제회계기준에 따라 작성되었습니다.</P>
+      <P>3. 중요한 회계정책</P><P>수익은 수행의무 이행 시 인식합니다.</P>
+      <P>4. 중요한 회계추정 및 판단</P><P>손상검사에는 경영진 판단이 필요합니다.</P>
+      <P>5. 영업부문</P><P>다음 주석입니다.</P>
+    </DOCUMENT>
+    """
+    saved = store.write(
+        corp_code="00000001",
+        bsns_year=2024,
+        source_type="business_report",
+        rcept_no="20250331000001",
+        content_type="xml",
+        content=content,
+    )
+    monkeypatch.setattr(collector_module, "RawDocumentStore", lambda: store)
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서",
+            content_type="xml",
+            raw_content="",
+            doc_hash=saved.doc_hash,
+            storage_uri=saved.storage_uri,
+            content_length=saved.content_length,
+            compressed_length=saved.compressed_length,
+            storage_status="externalized",
+        ))
+
+    out = collector_module.run_document_extractors(
+        year=2024,
+        source_type="business_report",
+        extractor="note_chapters",
+    )
+
+    assert out["ok"] == 1
+    with get_session() as session:
+        assert session.query(AccountingNoteChapter).filter_by(corp_code="00000001").count() == 3
+
+
 def test_get_business_overview_reads_cached_management_sections_without_dart(temp_engine, monkeypatch):
     import kreports.collector.fetcher as fetcher_module
     import kreports.collector.report_document_collector as collector_module

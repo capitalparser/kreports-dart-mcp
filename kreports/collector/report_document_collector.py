@@ -33,6 +33,7 @@ from kreports.db.models import (
     ReportSection,
     SourceDocument,
 )
+from kreports.storage.raw_documents import RawDocumentStore
 from kreports.processor.audit_parser import parse_auditor_from_doc_xml, parse_bsns_year
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
@@ -48,6 +49,22 @@ logger = logging.getLogger(__name__)
 
 def _sha1(value: str) -> str:
     return hashlib.sha1((value or "").encode("utf-8")).hexdigest()
+
+
+def _load_source_document_content(
+    *,
+    source_document_id: int,
+    storage_uri: str | None,
+    doc_hash: str | None,
+) -> str:
+    if storage_uri:
+        return RawDocumentStore().read(storage_uri, expected_hash=doc_hash)
+    with get_session() as session:
+        content = session.execute(
+            text("SELECT raw_content FROM source_documents WHERE id=:id"),
+            {"id": source_document_id},
+        ).scalar()
+    return content or ""
 
 
 def _source_type(report_nm: str) -> str | None:
@@ -1079,7 +1096,8 @@ def run_document_extractors(
         return {"total": 0, "ok": 0, "failed": 0, "rows_written": 0, "errors": [{"error": "invalid extractor"}]}
 
     stmt = """
-        SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type, report_nm, raw_content, doc_hash
+        SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type, report_nm,
+               doc_hash, storage_uri, content_type
         FROM source_documents
         WHERE content_type!='derived_report_sections'
     """
@@ -1100,7 +1118,7 @@ def run_document_extractors(
 
     totals = {"total": len(rows), "ok": 0, "failed": 0, "rows_written": 0, "errors": []}
     for idx, row in enumerate(rows, 1):
-        source_document_id, rcept_no, dcm_no, corp_code, bsns_year, src_type, report_nm, content, doc_hash = row
+        source_document_id, rcept_no, dcm_no, corp_code, bsns_year, src_type, report_nm, doc_hash, storage_uri, _content_type = row
         if progress_callback:
             progress_callback(idx, totals["total"], corp_code, bsns_year, src_type, rcept_no)
         meta = {
@@ -1112,6 +1130,11 @@ def run_document_extractors(
             "report_nm": report_nm,
         }
         try:
+            content = _load_source_document_content(
+                source_document_id=source_document_id,
+                storage_uri=storage_uri,
+                doc_hash=doc_hash,
+            )
             if extractor == "sections":
                 before = extract_document_features_from_content(meta, content=content)
                 rows_written = int(before.get("sections") or 0)
