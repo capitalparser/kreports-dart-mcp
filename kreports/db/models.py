@@ -272,12 +272,18 @@ class SourceDocument(Base):
     content_type = Column(String(30), nullable=False, default="xml")
     raw_content = Column(Text, nullable=False)
     doc_hash = Column(String(40), nullable=False)
+    storage_uri = Column(String(500), nullable=True)
+    content_length = Column(Integer, nullable=True)
+    compressed_length = Column(Integer, nullable=True)
+    storage_status = Column(String(30), nullable=False, default="inline")
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
         UniqueConstraint("rcept_no", "source_type", name="uq_source_document"),
         Index("idx_source_doc_corp_year", "corp_code", "bsns_year", "source_type"),
         Index("idx_source_doc_hash", "doc_hash"),
+        Index("idx_source_doc_storage_status", "storage_status"),
+        Index("idx_source_doc_storage_uri", "storage_uri"),
     )
 
 

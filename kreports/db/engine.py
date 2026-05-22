@@ -68,6 +68,11 @@ def _migrate_existing_tables() -> None:
         # 감사보고서제출 첨부문서 식별자
         ("report_documents", "dcm_no VARCHAR(20)"),
         ("report_sections", "dcm_no VARCHAR(20)"),
+        # raw document external storage manifest
+        ("source_documents", "storage_uri VARCHAR(500)"),
+        ("source_documents", "content_length INTEGER"),
+        ("source_documents", "compressed_length INTEGER"),
+        ("source_documents", "storage_status VARCHAR(30) DEFAULT 'inline' NOT NULL"),
     ]
     with engine.connect() as conn:
         if "sqlite" in settings.db_url:
@@ -98,6 +103,8 @@ def _migrate_existing_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_backfill_runs_started ON backfill_runs(started_at)",
             "CREATE INDEX IF NOT EXISTS idx_source_doc_corp_year ON source_documents(corp_code, bsns_year, source_type)",
             "CREATE INDEX IF NOT EXISTS idx_source_doc_hash ON source_documents(doc_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_source_doc_storage_status ON source_documents(storage_status)",
+            "CREATE INDEX IF NOT EXISTS idx_source_doc_storage_uri ON source_documents(storage_uri)",
             "CREATE INDEX IF NOT EXISTS idx_extraction_runs_doc ON extraction_runs(rcept_no, source_type)",
             "CREATE INDEX IF NOT EXISTS idx_extraction_runs_extractor ON extraction_runs(extractor_name, status)",
             "CREATE INDEX IF NOT EXISTS idx_note_chapter_corp_year ON accounting_note_chapters(corp_code, bsns_year, fs_div)",
