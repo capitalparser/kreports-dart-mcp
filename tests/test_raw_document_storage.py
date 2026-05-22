@@ -4,6 +4,7 @@ from sqlalchemy import inspect
 from pathlib import Path
 
 from kreports.storage.raw_documents import RawDocumentStore
+from kreports.storage.raw_documents import sha1_text
 
 
 def test_source_documents_has_raw_storage_columns(temp_engine):
@@ -34,3 +35,36 @@ def test_raw_document_store_writes_gzip_and_verifies_hash(tmp_path):
     assert saved.compressed_length > 0
     assert Path(saved.path).exists()
     assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
+
+
+def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, monkeypatch):
+    import kreports.maintenance.raw_storage_migration as migration_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+
+    monkeypatch.setattr(migration_module, "RawDocumentStore", lambda: RawDocumentStore(base_dir=tmp_path))
+    raw_content = "<DOCUMENT><P>원문</P></DOCUMENT>"
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서",
+            content_type="xml",
+            raw_content=raw_content,
+            doc_hash=sha1_text(raw_content),
+            storage_status="inline",
+        ))
+
+    result = migration_module.migrate_raw_documents_to_storage(limit=10, clear_inline=True)
+
+    assert result["migrated"] == 1
+    with get_session() as session:
+        doc = session.query(SourceDocument).one()
+        assert doc.storage_uri.startswith("file://")
+        assert doc.storage_status == "externalized"
+        assert doc.raw_content == ""
+        assert doc.content_length > 0
+        assert doc.compressed_length > 0

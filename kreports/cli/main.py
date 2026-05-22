@@ -1517,6 +1517,19 @@ def index_audit_procedures_cmd(
             typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
 
 
+@app.command("migrate-raw-documents-to-storage")
+def migrate_raw_documents_to_storage_cmd(
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
+    clear_inline: bool = typer.Option(False, "--clear-inline", help="검증 후 DB raw_content를 비움"),
+):
+    """source_documents.raw_content를 압축 raw store로 이전한다."""
+    from kreports.maintenance.raw_storage_migration import migrate_raw_documents_to_storage
+
+    init_db()
+    result = migrate_raw_documents_to_storage(limit=limit, clear_inline=clear_inline)
+    _json_print(result)
+
+
 @app.command("hydrate-source-documents-from-sections")
 def hydrate_source_documents_from_sections_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
