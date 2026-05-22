@@ -1530,6 +1530,26 @@ def migrate_raw_documents_to_storage_cmd(
     _json_print(result)
 
 
+@app.command("verify-raw-storage")
+def verify_raw_storage_cmd(
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 검증 문서 수"),
+):
+    """외부화된 원문을 읽고 hash/length를 검증한다."""
+    from kreports.maintenance.raw_storage_migration import verify_raw_storage
+
+    result = verify_raw_storage(limit=limit)
+    _json_print(result)
+
+
+@app.command("raw-storage-readiness")
+def raw_storage_readiness_cmd():
+    """source_documents 원문 외부화 상태를 요약한다."""
+    from kreports.maintenance.raw_storage_migration import raw_storage_readiness
+
+    init_db()
+    _json_print(raw_storage_readiness())
+
+
 @app.command("hydrate-source-documents-from-sections")
 def hydrate_source_documents_from_sections_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),

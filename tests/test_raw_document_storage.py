@@ -68,3 +68,29 @@ def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, 
         assert doc.raw_content == ""
         assert doc.content_length > 0
         assert doc.compressed_length > 0
+
+
+def test_verify_raw_storage_detects_missing_file(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+    from kreports.maintenance.raw_storage_migration import verify_raw_storage
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서",
+            content_type="xml",
+            raw_content="",
+            doc_hash="abc",
+            storage_uri="file:///missing/file.xml.gz",
+            storage_status="externalized",
+        ))
+
+    out = verify_raw_storage(limit=10)
+
+    assert out["checked"] == 1
+    assert out["failed"] == 1
+    assert "missing" in out["errors"][0]["error"]

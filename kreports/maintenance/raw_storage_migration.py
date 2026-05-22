@@ -66,3 +66,37 @@ def raw_storage_readiness() -> dict:
             """
         )).mappings().one()
     return dict(row)
+
+
+def verify_raw_storage(*, limit: int | None = None) -> dict:
+    totals = {"checked": 0, "ok": 0, "failed": 0, "errors": []}
+    with get_session() as session:
+        query = (
+            session.query(SourceDocument)
+            .with_entities(
+                SourceDocument.rcept_no,
+                SourceDocument.storage_uri,
+                SourceDocument.doc_hash,
+                SourceDocument.content_length,
+            )
+            .filter(SourceDocument.storage_status == "externalized")
+            .filter(SourceDocument.storage_uri.isnot(None))
+            .order_by(SourceDocument.bsns_year, SourceDocument.rcept_no)
+        )
+        if limit:
+            query = query.limit(int(limit))
+        rows = query.all()
+
+    store = RawDocumentStore()
+    for doc in rows:
+        totals["checked"] += 1
+        try:
+            content = store.read(doc.storage_uri, expected_hash=doc.doc_hash)
+            if doc.content_length is not None and len(content.encode("utf-8")) != doc.content_length:
+                raise ValueError("content length mismatch")
+            totals["ok"] += 1
+        except Exception as exc:
+            totals["failed"] += 1
+            if len(totals["errors"]) < 20:
+                totals["errors"].append({"rcept_no": doc.rcept_no, "error": str(exc)})
+    return totals
