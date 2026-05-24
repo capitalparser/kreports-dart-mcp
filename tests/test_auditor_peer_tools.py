@@ -295,6 +295,64 @@ def test_search_dataset_source_documents_marks_derived_evidence(temp_engine):
     assert "수익인식" in record["body_excerpt"]
 
 
+def test_search_dataset_source_documents_reads_externalized_excerpt(temp_engine, tmp_path, monkeypatch):
+    import kreports.analysis.api as api_module
+    from kreports.db.engine import get_session
+    from kreports.storage.raw_documents import RawDocumentStore, sha1_text
+
+    store = RawDocumentStore(base_dir=tmp_path)
+    monkeypatch.setattr(api_module, "RawDocumentStore", lambda: store)
+    raw_content = "<DOCUMENT><P>외부 gzip 원문에서 수익인식 문단을 읽습니다.</P></DOCUMENT>"
+    saved = store.write(
+        corp_code="00000001",
+        bsns_year=2024,
+        source_type="audit_report",
+        rcept_no="20250311000002",
+        content_type="xml",
+        content=raw_content,
+    )
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="외부원문테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(SourceDocument(
+            rcept_no="20250311000002",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            report_nm="감사보고서",
+            content_type="xml",
+            raw_content="",
+            doc_hash=sha1_text(raw_content),
+            storage_uri=saved.storage_uri,
+            content_length=saved.content_length,
+            compressed_length=saved.compressed_length,
+            storage_status="externalized",
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = json.loads(call_tool(
+        "search_dataset",
+        {
+            "dataset": "source_documents",
+            "company": "000001",
+            "year": 2024,
+            "source_type": "audit_report",
+            "keyword": "수익인식",
+            "limit": 5,
+        },
+    ))
+
+    assert out["data_quality"]["source"] == "source_documents"
+    record = out["companies"][0]["records"][0]
+    assert record["storage_status"] == "externalized"
+    assert "수익인식" in record["body_excerpt"]
+
+
 def test_search_audit_procedures_mcp_dispatch(temp_engine):
     from kreports.db.engine import get_session
 

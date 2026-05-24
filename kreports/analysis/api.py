@@ -27,6 +27,7 @@ from kreports.analysis.peer import (
     resolve_fs_div_for_company,
     resolve_peers,
 )
+from kreports.storage.raw_documents import RawDocumentStore
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,29 @@ def _display_text(value: str | None) -> str:
     text_value = text_value.replace("&nbsp;", " ").replace("&#160;", " ")
     text_value = text_value.replace("\r", "\n")
     return text_value
+
+
+def _load_source_document_excerpt(row: dict, *, keyword: str | None, limit: int = 1200) -> tuple[bool, str]:
+    """Return keyword match and excerpt without requiring inline raw_content.
+
+    For source_documents, raw XML/HTML may have been cleared from SQLite and
+    moved to compressed storage. This helper reads at most the bounded result
+    candidates selected by metadata filters.
+    """
+    report_nm = row.get("report_nm") or ""
+    inline = row.pop("_inline_body", "") or ""
+    body = inline
+    if not body and row.get("storage_uri"):
+        try:
+            body = RawDocumentStore().read(row["storage_uri"], expected_hash=row.get("doc_hash"))
+        except Exception as exc:
+            row["source_load_error"] = str(exc)
+            body = ""
+
+    haystack = f"{report_nm}\n{body}"
+    if keyword and keyword not in haystack:
+        return False, ""
+    return True, _display_text(body)[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -2761,12 +2785,17 @@ def search_dataset(
             where.append("sd.source_type=:source_type")
             params["source_type"] = source_type
         if keyword:
-            where.append("(sd.report_nm LIKE :kw OR sd.raw_content LIKE :kw)")
-            params["kw"] = f"%{keyword}%"
+            params["row_limit"] = max(params["row_limit"], limit * 50)
         sql = f"""
             SELECT sd.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
                    sd.bsns_year AS year, sd.rcept_no, sd.dcm_no, sd.source_type,
-                   sd.report_nm, sd.content_type, sd.raw_content AS body, LENGTH(sd.raw_content) AS body_length
+                   sd.report_nm, sd.content_type, sd.storage_uri, sd.doc_hash,
+                   sd.content_length, sd.compressed_length, sd.storage_status,
+                   CASE WHEN sd.content_type='derived_report_sections' THEN sd.raw_content ELSE '' END AS _inline_body,
+                   CASE
+                     WHEN sd.content_length IS NOT NULL THEN sd.content_length
+                     ELSE LENGTH(sd.raw_content)
+                   END AS body_length
             FROM source_documents sd
             JOIN companies c ON c.corp_code=sd.corp_code
             WHERE {" AND ".join(where)}
@@ -2776,7 +2805,9 @@ def search_dataset(
         source = "source_documents"
         interpretation = (
             "Search reads source_documents cache. Rows with content_type=derived_report_sections "
-            "are reconstructed legacy evidence bundles, not original DART filing bodies."
+            "are reconstructed legacy evidence bundles, not original DART filing bodies. "
+            "Raw body keyword search is bounded to selected metadata candidates; use evidence_documents "
+            "for broad text search."
         )
     elif dataset == "report_sections":
         where = ["1=1", *filters]
@@ -2949,6 +2980,19 @@ def search_dataset(
         stmt = stmt.bindparams(bindparam(key, expanding=True))
     with _engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, params).mappings().all()]
+
+    if dataset == "source_documents":
+        filtered_rows = []
+        for row in rows:
+            matched, excerpt = _load_source_document_excerpt(row, keyword=keyword)
+            if not matched:
+                continue
+            if include_excerpt:
+                row["body_excerpt"] = excerpt
+            filtered_rows.append(row)
+            if len(filtered_rows) >= limit * 10:
+                break
+        rows = filtered_rows
 
     for row in rows:
         if "body_text" in row:

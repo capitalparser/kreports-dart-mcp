@@ -114,3 +114,52 @@ def test_on_demand_cache_first_does_not_call_dart(temp_engine, monkeypatch):
 
     assert out["data_quality"]["source"] == "source_documents_cache"
     assert out["cached"] is True
+
+
+def test_on_demand_cache_first_reads_externalized_raw_document(temp_engine, tmp_path, monkeypatch):
+    from kreports.db.engine import get_session
+    from kreports.storage.raw_documents import RawDocumentStore, sha1_text
+
+    def fail_client(*args, **kwargs):
+        raise AssertionError("DART should not be called on cache hit")
+
+    store = RawDocumentStore(base_dir=tmp_path)
+    monkeypatch.setattr(on_demand, "RawDocumentStore", lambda: store)
+    monkeypatch.setattr(on_demand.httpx, "Client", fail_client)
+    raw_content = "<DOCUMENT><TITLE>주요사항보고서</TITLE><P>external cached</P></DOCUMENT>"
+    saved = store.write(
+        corp_code="00126380",
+        bsns_year=2025,
+        source_type="event_disclosure",
+        rcept_no="20250101000002",
+        content_type="xml",
+        content=raw_content,
+    )
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250101000002",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="event_disclosure",
+            report_nm="주요사항보고서",
+            content_type="xml",
+            raw_content="",
+            doc_hash=sha1_text(raw_content),
+            storage_uri=saved.storage_uri,
+            content_length=saved.content_length,
+            compressed_length=saved.compressed_length,
+            storage_status="externalized",
+        ))
+
+    out = json.loads(call_tool(
+        "fetch_disclosure_on_demand",
+        {
+            "rcept_no": "20250101000002",
+            "user_dart_api_key": "user-key",
+            "cache_policy": "cache_first",
+        },
+    ))
+
+    assert out["data_quality"]["source"] == "source_documents_cache"
+    assert out["cached"] is True
+    assert out["body_length"] == len(raw_content)

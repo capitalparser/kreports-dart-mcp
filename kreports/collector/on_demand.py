@@ -12,6 +12,7 @@ from kreports.collector.fetcher import DART_BASE, _decode_dart_text
 from kreports.collector.report_document_collector import _persist_source_document, _sha1
 from kreports.db.engine import get_session
 from kreports.db.models import Disclosure, SourceDocument
+from kreports.storage.raw_documents import RawDocumentStore
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ def _cached_source(rcept_no: str) -> SourceDocument | None:
         )
         if row is None:
             return None
+        raw_content = row.raw_content or ""
+        if not raw_content and row.storage_uri:
+            raw_content = RawDocumentStore().read(row.storage_uri, expected_hash=row.doc_hash)
         return SourceDocument(
             rcept_no=row.rcept_no,
             dcm_no=row.dcm_no,
@@ -38,8 +42,12 @@ def _cached_source(rcept_no: str) -> SourceDocument | None:
             source_type=row.source_type,
             report_nm=row.report_nm,
             content_type=row.content_type,
-            raw_content=row.raw_content,
+            raw_content=raw_content,
             doc_hash=row.doc_hash,
+            storage_uri=row.storage_uri,
+            content_length=row.content_length,
+            compressed_length=row.compressed_length,
+            storage_status=row.storage_status,
             fetched_at=row.fetched_at,
         )
 
