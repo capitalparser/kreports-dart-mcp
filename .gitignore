@@ -41,6 +41,9 @@ Thumbs.db
 # DART API cache
 .cache/
 
+# Local raw disclosure document store
+data/raw_documents/
+
 # Streamlit
 .streamlit/secrets.toml
 
