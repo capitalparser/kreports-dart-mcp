@@ -34,11 +34,24 @@ def test_source_documents_backfill_avoids_financial_endpoint():
     assert "collect-audit-fees" not in script
 
 
-def test_limit_aware_backfill_defaults_to_source_documents_script():
+def test_derived_dataset_backfill_does_not_collect_more_raw_documents():
+    script = open("scripts/run_derived_dataset_backfill.sh", encoding="utf-8").read()
+
+    assert "collect-business-report-sections" not in script
+    assert "run-document-extractors --source-type business_report" in script
+    assert "run-document-extractors --source-type audit_report" in script
+    assert "trim-evidence-documents --year-from 2024 --year-to 2025" in script
+    assert "rebuild-evidence-documents --year-from 2024 --year-to 2025" in script
+    assert "--max-text-chars 12000" in script
+    assert "collect-all --year-from 2021 --year-to 2025" in script
+    assert "collect-audit-fees" in script
+
+
+def test_limit_aware_backfill_defaults_to_derived_dataset_script():
     script = open("scripts/dart_limit_aware_backfill.sh", encoding="utf-8").read()
 
     assert "KREPORTS_BACKFILL_SCRIPT" in script
-    assert "scripts/run_source_documents_backfill.sh" in script
+    assert "scripts/run_derived_dataset_backfill.sh" in script
 
 
 def test_readiness_verdict_passes_core_thresholds():
@@ -279,3 +292,12 @@ def test_auditor_feature_readiness_snapshot_counts_feature_layers(temp_engine):
     assert snapshot["counts"]["accounting_policy_items"] == 1
     assert snapshot["counts"]["audit_procedure_items"] == 1
     assert snapshot["missing_features"] == []
+
+
+def test_auditor_feature_readiness_recommends_derived_first_backfill(temp_engine):
+    snapshot = auditor_feature_readiness_snapshot(year=2025, market="KOSPI")
+
+    joined = "\n".join(snapshot["recommended_next"])
+    assert "source_documents backfill" not in joined
+    assert "evidence_documents" in joined
+    assert "audit_fee" in joined

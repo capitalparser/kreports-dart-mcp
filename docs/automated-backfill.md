@@ -8,7 +8,9 @@ endpoint remains read-only and must not have `DART_API_KEY`.
 - `scripts/dart_limit_aware_backfill.sh` is idempotent.
 - It exits when another live backfill is already running.
 - It closes stale `backfill_runs` records whose PID no longer exists.
-- It probes DART once before starting the full backfill.
+- It probes DART once before starting the configured backfill script.
+- The default script is `scripts/run_derived_dataset_backfill.sh`, not a raw
+  source-document expansion job.
 - If DART returns usage-limit status `020`, it logs and waits for the next
   scheduled run instead of failing loudly.
 
@@ -45,8 +47,23 @@ Status:
 ```bash
 launchctl print gui/$(id -u)/com.kjun.kreports-dart-backfill
 tail -f logs/dart-limit-aware-backfill.log
-tail -f logs/full-dataset-backfill.log
+tail -f logs/derived-dataset-backfill.log
 ```
+
+## Backfill Policy
+
+Default unattended runs are derived-data-first:
+
+- refresh parsers from already cached/externalized raw documents;
+- rebuild `evidence_documents`;
+- collect compact structured data such as financials, auditors, audit fees, and
+  audit hours;
+- avoid expanding `source_documents.raw_content` unless explicitly requested.
+
+Raw source collection remains available through
+`scripts/run_source_documents_backfill.sh`, but it should be treated as a manual
+hot-raw archive operation for selected years or companies. Do not use it as the
+default launchd target while local/Drive capacity is constrained.
 
 Uninstall:
 

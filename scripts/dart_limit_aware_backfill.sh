@@ -6,7 +6,7 @@ ENV_FILE="${KREPORTS_COLLECTOR_ENV:-$HOME/.config/kreports/collector.env}"
 LOCK_DIR="${KREPORTS_BACKFILL_LOCK_DIR:-$PROJECT_DIR/.dart-backfill.lock}"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/dart-limit-aware-backfill.log"
-BACKFILL_SCRIPT="${KREPORTS_BACKFILL_SCRIPT:-scripts/run_source_documents_backfill.sh}"
+BACKFILL_SCRIPT="${KREPORTS_BACKFILL_SCRIPT:-scripts/run_derived_dataset_backfill.sh}"
 
 mkdir -p "$LOG_DIR"
 
@@ -115,12 +115,8 @@ main() {
   set -e
   if [[ "$code" != "0" ]]; then
     if [[ "$code" == "75" ]]; then
-      if [[ "$(basename "$BACKFILL_SCRIPT")" == "run_source_documents_backfill.sh" ]]; then
-        log "DART API limit unavailable; continuing source-document backfill via DART viewer fallback"
-      else
-        log "skip: DART API limit still unavailable"
-        exit 0
-      fi
+      log "skip: DART API limit still unavailable"
+      exit 0
     else
       log "probe failed exit_code=$code"
       exit "$code"

@@ -1564,9 +1564,12 @@ def raw_storage_readiness_cmd():
 @app.command("rebuild-evidence-documents")
 def rebuild_evidence_documents_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    year_from: Optional[int] = typer.Option(None, "--year-from", help="시작 사업연도"),
+    year_to: Optional[int] = typer.Option(None, "--year-to", help="종료 사업연도"),
     corp_code: Optional[str] = typer.Option(None, "--corp-code", help="대상 DART corp_code"),
     source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
+    max_text_chars: int = typer.Option(12000, "--max-text-chars", help="문서별 evidence text 최대 문자 수"),
 ):
     """파생 evidence 테이블에서 MCP 검색용 경량 문서 캐시를 재생성한다."""
     from kreports.maintenance.evidence_documents import rebuild_evidence_documents
@@ -1574,9 +1577,30 @@ def rebuild_evidence_documents_cmd(
     init_db()
     result = rebuild_evidence_documents(
         year=year,
+        year_from=year_from,
+        year_to=year_to,
         corp_code=corp_code,
         source_type=source_type,
         limit=limit,
+        max_text_chars=max_text_chars,
+    )
+    _json_print(result)
+
+
+@app.command("trim-evidence-documents")
+def trim_evidence_documents_cmd(
+    year_from: Optional[int] = typer.Option(None, "--year-from", help="이 연도 이전 evidence 삭제"),
+    year_to: Optional[int] = typer.Option(None, "--year-to", help="이 연도 이후 evidence 삭제"),
+    max_text_chars: int = typer.Option(12000, "--max-text-chars", help="문서별 evidence text 최대 문자 수"),
+):
+    """MCP 검색용 evidence document를 최근연도/길이 기준으로 슬림화한다."""
+    from kreports.maintenance.evidence_documents import trim_evidence_documents
+
+    init_db()
+    result = trim_evidence_documents(
+        year_from=year_from,
+        year_to=year_to,
+        max_text_chars=max_text_chars,
     )
     _json_print(result)
 

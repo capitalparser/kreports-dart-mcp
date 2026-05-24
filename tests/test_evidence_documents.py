@@ -113,3 +113,44 @@ def test_search_dataset_evidence_documents_uses_compact_cache(temp_engine):
     assert record["source_type"] == "business_report"
     assert record["source_count"] == 1
     assert "수행의무" in record["body_excerpt"]
+
+
+def test_trim_evidence_documents_prunes_years_and_caps_text(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.evidence_documents import trim_evidence_documents
+
+    long_text = "가" * 200
+    with get_session() as session:
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2023,
+            source_type="audit_report",
+            rcept_no="20240301000001",
+            evidence_scope="auditor_view",
+            normalized_text="old",
+            text_hash="old",
+            text_length=3,
+            source_count=1,
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260301000001",
+            evidence_scope="auditor_view",
+            normalized_text=long_text,
+            text_hash="x",
+            text_length=len(long_text),
+            source_count=1,
+        ))
+
+    result = trim_evidence_documents(year_from=2024, year_to=2025, max_text_chars=50)
+
+    assert result["deleted"] == 1
+    assert result["trimmed"] == 1
+    with get_session() as session:
+        docs = session.query(EvidenceDocument).all()
+        assert len(docs) == 1
+        assert docs[0].bsns_year == 2025
+        assert len(docs[0].normalized_text) < 70
+        assert docs[0].normalized_text.endswith("(truncated)")

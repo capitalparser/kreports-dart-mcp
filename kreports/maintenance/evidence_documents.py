@@ -51,6 +51,7 @@ def build_evidence_text(
     source_type: str,
     rcept_no: str,
     dcm_no: str | None = None,
+    max_text_chars: int | None = 12000,
 ) -> tuple[str, int]:
     """Return a markdown-like evidence bundle and the number of rows used."""
     parts: list[str] = []
@@ -140,7 +141,10 @@ def build_evidence_text(
     ]
     if dcm_no:
         header.append(f"- dcm_no: {dcm_no}")
-    return "\n".join(header + ["", *parts]).strip(), rows_used
+    evidence = "\n".join(header + ["", *parts]).strip()
+    if max_text_chars and len(evidence) > int(max_text_chars):
+        evidence = evidence[: int(max_text_chars)].rstrip() + "\n... (truncated)"
+    return evidence, rows_used
 
 
 def rebuild_evidence_documents(
@@ -149,6 +153,9 @@ def rebuild_evidence_documents(
     corp_code: str | None = None,
     source_type: str | None = None,
     limit: int | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    max_text_chars: int | None = 12000,
 ) -> dict:
     """Rebuild evidence_documents from already parsed local evidence tables."""
     where = []
@@ -156,6 +163,12 @@ def rebuild_evidence_documents(
     if year is not None:
         where.append("bsns_year=:year")
         params["year"] = int(year)
+    if year_from is not None:
+        where.append("bsns_year>=:year_from")
+        params["year_from"] = int(year_from)
+    if year_to is not None:
+        where.append("bsns_year<=:year_to")
+        params["year_to"] = int(year_to)
     if corp_code is not None:
         where.append("corp_code=:corp_code")
         params["corp_code"] = corp_code
@@ -195,6 +208,7 @@ def rebuild_evidence_documents(
             source_type=target["source_type"],
             rcept_no=target["rcept_no"],
             dcm_no=target["dcm_no"],
+            max_text_chars=max_text_chars,
         )
         if not evidence_text:
             skipped += 1
@@ -237,6 +251,49 @@ def rebuild_evidence_documents(
         "skipped": skipped,
         "targets": len(targets),
     }
+
+
+def trim_evidence_documents(
+    *,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    max_text_chars: int = 12000,
+) -> dict:
+    """Prune or truncate evidence_documents to keep the runtime DB compact."""
+    result = {"deleted": 0, "trimmed": 0, "trimmed_bytes": 0}
+    with get_session() as session:
+        delete_filters = []
+        params: dict[str, object] = {}
+        if year_from is not None:
+            delete_filters.append("bsns_year < :year_from")
+            params["year_from"] = int(year_from)
+        if year_to is not None:
+            delete_filters.append("bsns_year > :year_to")
+            params["year_to"] = int(year_to)
+        if delete_filters:
+            delete_result = session.execute(
+                text(f"DELETE FROM evidence_documents WHERE {' OR '.join(delete_filters)}"),
+                params,
+            )
+            result["deleted"] = int(delete_result.rowcount or 0)
+
+        rows = (
+            session.query(EvidenceDocument)
+            .filter(EvidenceDocument.text_length > int(max_text_chars))
+            .all()
+        )
+        for doc in rows:
+            original = doc.normalized_text or ""
+            if len(original) <= int(max_text_chars):
+                continue
+            trimmed = original[: int(max_text_chars)].rstrip() + "\n... (truncated)"
+            result["trimmed_bytes"] += max(0, len(original.encode("utf-8")) - len(trimmed.encode("utf-8")))
+            doc.normalized_text = trimmed
+            doc.text_hash = _sha1(trimmed)
+            doc.text_length = len(trimmed)
+            result["trimmed"] += 1
+        session.flush()
+    return result
 
 
 def evidence_document_readiness() -> dict:

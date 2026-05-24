@@ -896,8 +896,9 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         "feature_status": feature_status,
         "missing_features": missing,
         "recommended_next": [
-            "Continue source_documents backfill until raw business/audit documents cover the target universe.",
-            "Run document extractors after raw backfill increments to refresh policy/procedure indexes.",
+            "Run derived-first backfill: refresh extractors from cached/externalized raw documents before collecting more raw bodies.",
+            "Rebuild evidence_documents so MCP narrative search uses compact normalized evidence instead of source_documents raw XML.",
+            "Backfill compact structured tables: financials, auditors, audit_fee, audit_hours, policy items, and audit procedures.",
             "Investigate parser gaps where KAM exists but reason/procedure hints are absent.",
         ],
     }

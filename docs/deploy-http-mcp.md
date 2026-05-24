@@ -101,25 +101,31 @@ Use a separate shell or worker:
 ```bash
 export DART_API_KEY=<opendart-key>
 export KREPORTS_RUNTIME_MODE=collector
-scripts/run_full_dataset_backfill.sh
+scripts/run_derived_dataset_backfill.sh
 ```
 
 For unattended local collection that resumes after DART daily-limit resets, use
 the macOS launchd wrapper in [automated-backfill.md](automated-backfill.md).
 
-Backfill is document-first. The collector stores raw business/audit report bodies
-in `source_documents`, then populates derived tables such as `report_sections`,
-`auditors`, and `subsidiary_auditor_matrix`. When a new extractor is added, rerun
-it from the local source cache instead of downloading the same DART document
-again:
+Backfill is derived-data-first by default. The collector should answer MCP tools
+from compact tables such as `financials`, `auditors`, `audit_fees`,
+`report_sections`, `accounting_note_chapters`, `audit_procedure_items`, and
+`evidence_documents`. Raw business/audit report bodies in `source_documents` are
+a hot/cold archive for re-parsing and source verification, not the primary
+runtime dataset. When a new extractor is added, rerun it from the local or
+externalized source cache instead of downloading the same DART document again:
 
 ```bash
 kreports run-document-extractors --source-type business_report
 kreports run-document-extractors --year 2025 --source-type business_report --extractor auditors
 ```
 
-This command does not require `DART_API_KEY`; it only reads cached
-`source_documents` and writes derived rows.
+This command does not require `DART_API_KEY`; it only reads cached or
+externalized `source_documents` and writes derived rows.
+
+Use `scripts/run_source_documents_backfill.sh` only for explicitly selected raw
+archive expansion. On capacity-constrained machines, prefer rebuilding
+`evidence_documents` and structured facts over collecting more full XML bodies.
 
 Current long-running backfills are tracked in:
 
