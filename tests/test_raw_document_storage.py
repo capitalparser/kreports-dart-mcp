@@ -94,3 +94,77 @@ def test_verify_raw_storage_detects_missing_file(temp_engine):
     assert out["checked"] == 1
     assert out["failed"] == 1
     assert "missing" in out["errors"][0]["error"]
+
+
+def test_clear_externalized_inline_content_verifies_before_clear(temp_engine, tmp_path, monkeypatch):
+    import kreports.maintenance.raw_storage_migration as migration_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+
+    store = RawDocumentStore(base_dir=tmp_path)
+    monkeypatch.setattr(migration_module, "RawDocumentStore", lambda: store)
+    raw_content = "<DOCUMENT><P>검증 후 삭제</P></DOCUMENT>"
+    saved = store.write(
+        corp_code="00000001",
+        bsns_year=2024,
+        source_type="business_report",
+        rcept_no="20250331000001",
+        content_type="xml",
+        content=raw_content,
+    )
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서",
+            content_type="xml",
+            raw_content=raw_content,
+            doc_hash=saved.doc_hash,
+            storage_uri=saved.storage_uri,
+            content_length=saved.content_length,
+            compressed_length=saved.compressed_length,
+            storage_status="externalized",
+        ))
+
+    out = migration_module.clear_externalized_inline_content(limit=10)
+
+    assert out["checked"] == 1
+    assert out["cleared"] == 1
+    assert out["failed"] == 0
+    assert out["cleared_bytes"] == len(raw_content.encode("utf-8"))
+    with get_session() as session:
+        doc = session.query(SourceDocument).one()
+        assert doc.raw_content == ""
+        assert doc.storage_status == "externalized"
+
+
+def test_clear_externalized_inline_content_keeps_inline_on_verify_failure(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+    from kreports.maintenance.raw_storage_migration import clear_externalized_inline_content
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서",
+            content_type="xml",
+            raw_content="<DOCUMENT>보존</DOCUMENT>",
+            doc_hash="abc",
+            storage_uri="file:///missing/file.xml.gz",
+            storage_status="externalized",
+        ))
+
+    out = clear_externalized_inline_content(limit=10)
+
+    assert out["checked"] == 1
+    assert out["cleared"] == 0
+    assert out["failed"] == 1
+    with get_session() as session:
+        doc = session.query(SourceDocument).one()
+        assert doc.raw_content == "<DOCUMENT>보존</DOCUMENT>"

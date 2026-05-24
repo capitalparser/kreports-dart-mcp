@@ -100,3 +100,44 @@ def verify_raw_storage(*, limit: int | None = None) -> dict:
             if len(totals["errors"]) < 20:
                 totals["errors"].append({"rcept_no": doc.rcept_no, "error": str(exc)})
     return totals
+
+
+def clear_externalized_inline_content(*, limit: int | None = None) -> dict:
+    """Clear DB inline raw_content only after external storage verification.
+
+    This does not shrink the SQLite file by itself. It makes pages reusable; an
+    eventual VACUUM/checkpoint strategy is needed to reduce the physical file.
+    """
+    totals = {"checked": 0, "cleared": 0, "failed": 0, "cleared_bytes": 0, "errors": []}
+    store = RawDocumentStore()
+    with get_session() as session:
+        query = (
+            session.query(SourceDocument)
+            .filter(SourceDocument.storage_status == "externalized")
+            .filter(SourceDocument.storage_uri.isnot(None))
+            .filter(SourceDocument.raw_content != "")
+            .order_by(SourceDocument.bsns_year, SourceDocument.rcept_no)
+        )
+        if limit:
+            query = query.limit(int(limit))
+        rows = query.all()
+
+        for doc in rows:
+            totals["checked"] += 1
+            try:
+                content = store.read(doc.storage_uri, expected_hash=doc.doc_hash)
+                if doc.content_length is not None and len(content.encode("utf-8")) != doc.content_length:
+                    raise ValueError("content length mismatch")
+                inline = doc.raw_content or ""
+                inline_hash = sha1_text(inline)
+                if doc.doc_hash and inline_hash != doc.doc_hash:
+                    raise ValueError("inline hash mismatch")
+                totals["cleared_bytes"] += len(inline.encode("utf-8"))
+                doc.raw_content = ""
+                totals["cleared"] += 1
+            except Exception as exc:
+                totals["failed"] += 1
+                if len(totals["errors"]) < 20:
+                    totals["errors"].append({"rcept_no": doc.rcept_no, "error": str(exc)})
+        session.flush()
+    return totals

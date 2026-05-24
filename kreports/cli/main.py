@@ -1541,6 +1541,17 @@ def verify_raw_storage_cmd(
     _json_print(result)
 
 
+@app.command("clear-externalized-raw-content")
+def clear_externalized_raw_content_cmd(
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
+):
+    """외부 gzip 검증이 끝난 문서의 DB inline raw_content를 비운다."""
+    from kreports.maintenance.raw_storage_migration import clear_externalized_inline_content
+
+    result = clear_externalized_inline_content(limit=limit)
+    _json_print(result)
+
+
 @app.command("raw-storage-readiness")
 def raw_storage_readiness_cmd():
     """source_documents 원문 외부화 상태를 요약한다."""
