@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import bindparam, text
 
 from kreports.db.engine import get_session, engine as _engine
-from kreports.db.models import BusinessAffiliateAuditor, Company, Disclosure, ReportSection
+from kreports.db.models import BusinessAffiliateAuditor, Company, Disclosure, EvidenceDocument, ReportSection
 
 # dashboard.db는 streamlit optional import를 지원하므로 headless에서도 사용 가능
 from kreports.analysis import queries as _queries
@@ -2665,6 +2665,7 @@ _SEARCH_DATASETS = {
     "report_sections",
     "accounting_policies",
     "accounting_note_chapters",
+    "evidence_documents",
     "disclosures",
     "audit_fees",
     "financials",
@@ -2854,6 +2855,34 @@ def search_dataset(
             LIMIT :row_limit
         """
         source = "accounting_note_chapters"
+    elif dataset == "evidence_documents":
+        where = ["1=1", *filters]
+        if year is not None:
+            where.append("ed.bsns_year=:year")
+            params["year"] = int(year)
+        if source_type:
+            where.append("ed.source_type=:source_type")
+            params["source_type"] = source_type
+        if keyword:
+            where.append("(ed.title LIKE :kw OR ed.normalized_text LIKE :kw)")
+            params["kw"] = f"%{keyword}%"
+        sql = f"""
+            SELECT ed.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   ed.bsns_year AS year, ed.rcept_no, ed.dcm_no, ed.source_type,
+                   ed.evidence_scope, ed.title, ed.normalized_text AS body,
+                   ed.text_length AS body_length, ed.source_count, ed.generated_at
+            FROM evidence_documents ed
+            JOIN companies c ON c.corp_code=ed.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY ed.bsns_year DESC, c.market, c.corp_name, ed.source_type
+            LIMIT :row_limit
+        """
+        source = "evidence_documents"
+        interpretation = (
+            "Search reads compact normalized evidence bundles derived from report_sections, "
+            "accounting note chapters, accounting policies, and audit procedures. It is suitable "
+            "for MCP narrative answers, while raw DART XML/HTML remains the source of record."
+        )
     elif dataset == "disclosures":
         where = ["1=1", *filters]
         if year is not None:

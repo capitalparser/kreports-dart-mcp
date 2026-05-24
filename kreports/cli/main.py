@@ -1550,6 +1550,35 @@ def raw_storage_readiness_cmd():
     _json_print(raw_storage_readiness())
 
 
+@app.command("rebuild-evidence-documents")
+def rebuild_evidence_documents_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    corp_code: Optional[str] = typer.Option(None, "--corp-code", help="대상 DART corp_code"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
+):
+    """파생 evidence 테이블에서 MCP 검색용 경량 문서 캐시를 재생성한다."""
+    from kreports.maintenance.evidence_documents import rebuild_evidence_documents
+
+    init_db()
+    result = rebuild_evidence_documents(
+        year=year,
+        corp_code=corp_code,
+        source_type=source_type,
+        limit=limit,
+    )
+    _json_print(result)
+
+
+@app.command("evidence-document-readiness")
+def evidence_document_readiness_cmd():
+    """MCP 검색용 경량 evidence document 적재 상태를 요약한다."""
+    from kreports.maintenance.evidence_documents import evidence_document_readiness
+
+    init_db()
+    _json_print(evidence_document_readiness())
+
+
 @app.command("hydrate-source-documents-from-sections")
 def hydrate_source_documents_from_sections_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),

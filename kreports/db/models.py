@@ -334,6 +334,39 @@ class ReportSection(Base):
     )
 
 
+class EvidenceDocument(Base):
+    """Markdown-like evidence bundle derived from normalized report tables.
+
+    This is not the legal filing source. It is a compact, human-readable cache
+    for MCP search and narrative responses, with raw source hashes kept in
+    source_documents for re-parsing and verification.
+    """
+    __tablename__ = "evidence_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_type = Column(String(30), nullable=False)  # business_report / audit_report / mixed
+    rcept_no = Column(String(80), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    evidence_scope = Column(String(40), nullable=False, default="auditor_view")
+    title = Column(String(500), nullable=True)
+    normalized_text = Column(Text, nullable=False)
+    text_hash = Column(String(40), nullable=True)
+    text_length = Column(Integer, nullable=True)
+    source_count = Column(Integer, nullable=False, default=0)
+    generated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "corp_code", "bsns_year", "source_type", "rcept_no", "evidence_scope",
+            name="uq_evidence_document",
+        ),
+        Index("idx_evidence_doc_corp_year", "corp_code", "bsns_year", "source_type"),
+        Index("idx_evidence_doc_scope", "evidence_scope"),
+    )
+
+
 class AuditProcedureItem(Base):
     """Procedure-level evidence parsed from KAM audit-response paragraphs."""
     __tablename__ = "audit_procedure_items"
