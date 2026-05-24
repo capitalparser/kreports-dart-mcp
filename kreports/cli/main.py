@@ -1552,6 +1552,23 @@ def clear_externalized_raw_content_cmd(
     _json_print(result)
 
 
+@app.command("clear-cold-derived-raw-content")
+def clear_cold_derived_raw_content_cmd(
+    year_to: int = typer.Option(..., "--year-to", help="이 사업연도 이하의 cold raw만 처리"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
+    apply: bool = typer.Option(False, "--apply", help="dry-run이 아니라 실제 raw_content를 비움"),
+):
+    """파생데이터가 존재하는 과거 원문을 derived_only 상태로 비운다."""
+    from kreports.maintenance.raw_storage_migration import clear_cold_derived_inline_content
+
+    result = clear_cold_derived_inline_content(
+        year_to=year_to,
+        limit=limit,
+        dry_run=not apply,
+    )
+    _json_print(result)
+
+
 @app.command("raw-storage-readiness")
 def raw_storage_readiness_cmd():
     """source_documents 원문 외부화 상태를 요약한다."""

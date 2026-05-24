@@ -168,3 +168,58 @@ def test_clear_externalized_inline_content_keeps_inline_on_verify_failure(temp_e
     with get_session() as session:
         doc = session.query(SourceDocument).one()
         assert doc.raw_content == "<DOCUMENT>보존</DOCUMENT>"
+
+
+def test_clear_cold_derived_inline_content_requires_derived_evidence(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import ReportSection, SourceDocument
+    from kreports.maintenance.raw_storage_migration import clear_cold_derived_inline_content
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20230331000001",
+            corp_code="00000001",
+            bsns_year=2022,
+            source_type="audit_report",
+            report_nm="감사보고서",
+            content_type="xml",
+            raw_content="<DOCUMENT>파생 있음</DOCUMENT>",
+            doc_hash="x",
+            storage_status="inline",
+        ))
+        session.add(SourceDocument(
+            rcept_no="20230331000002",
+            corp_code="00000002",
+            bsns_year=2022,
+            source_type="audit_report",
+            report_nm="감사보고서",
+            content_type="xml",
+            raw_content="<DOCUMENT>파생 없음</DOCUMENT>",
+            doc_hash="y",
+            storage_status="inline",
+        ))
+        session.add(ReportSection(
+            rcept_no="20230331000001",
+            corp_code="00000001",
+            bsns_year=2022,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="파생된 KAM",
+            ordinal=0,
+        ))
+
+    dry = clear_cold_derived_inline_content(year_to=2023, limit=10, dry_run=True)
+    assert dry["checked"] == 1
+    assert dry["dry_run"] is True
+
+    out = clear_cold_derived_inline_content(year_to=2023, limit=10, dry_run=False)
+    assert out["checked"] == 1
+    assert out["cleared"] == 1
+
+    with get_session() as session:
+        cleared = session.query(SourceDocument).filter_by(rcept_no="20230331000001").one()
+        preserved = session.query(SourceDocument).filter_by(rcept_no="20230331000002").one()
+        assert cleared.raw_content == ""
+        assert cleared.storage_status == "derived_only"
+        assert preserved.raw_content == "<DOCUMENT>파생 없음</DOCUMENT>"

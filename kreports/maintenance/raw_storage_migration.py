@@ -141,3 +141,101 @@ def clear_externalized_inline_content(*, limit: int | None = None) -> dict:
                     totals["errors"].append({"rcept_no": doc.rcept_no, "error": str(exc)})
         session.flush()
     return totals
+
+
+def clear_cold_derived_inline_content(
+    *,
+    year_to: int,
+    limit: int | None = None,
+    dry_run: bool = True,
+) -> dict:
+    """Clear cold raw_content when derived evidence/facts already exist.
+
+    This is the fallback when there is not enough space to externalize every raw
+    filing. It intentionally sacrifices raw re-parsing for old documents, while
+    preserving the derived rows MCP tools use for answers.
+    """
+    params: dict[str, object] = {"year_to": int(year_to)}
+    limit_sql = "LIMIT :limit" if limit else ""
+    if limit:
+        params["limit"] = int(limit)
+
+    candidate_sql = f"""
+        SELECT sd.id, sd.rcept_no, sd.bsns_year, sd.source_type,
+               length(sd.raw_content) AS raw_bytes
+        FROM source_documents sd
+        WHERE sd.raw_content!=''
+          AND sd.content_type!='derived_report_sections'
+          AND sd.storage_status!='externalized'
+          AND sd.bsns_year<=:year_to
+          AND (
+            EXISTS (
+              SELECT 1 FROM report_sections rs
+              WHERE rs.rcept_no=sd.rcept_no
+                AND rs.source_type=sd.source_type
+                AND rs.corp_code=sd.corp_code
+                AND rs.bsns_year=sd.bsns_year
+            )
+            OR EXISTS (
+              SELECT 1 FROM accounting_note_chapters anc
+              WHERE anc.rcept_no=sd.rcept_no
+                AND anc.source_type=sd.source_type
+                AND anc.corp_code=sd.corp_code
+                AND anc.bsns_year=sd.bsns_year
+            )
+            OR EXISTS (
+              SELECT 1 FROM audit_procedure_items api
+              WHERE api.rcept_no=sd.rcept_no
+                AND api.source_type=sd.source_type
+                AND api.corp_code=sd.corp_code
+                AND api.bsns_year=sd.bsns_year
+            )
+            OR EXISTS (
+              SELECT 1 FROM evidence_documents ed
+              WHERE ed.rcept_no=sd.rcept_no
+                AND ed.source_type=sd.source_type
+                AND ed.corp_code=sd.corp_code
+                AND ed.bsns_year=sd.bsns_year
+            )
+          )
+        ORDER BY sd.bsns_year ASC, sd.source_type ASC, sd.rcept_no ASC
+        {limit_sql}
+    """
+    with get_session() as session:
+        rows = session.execute(text(candidate_sql), params).mappings().all()
+        result = {
+            "dry_run": bool(dry_run),
+            "year_to": int(year_to),
+            "checked": len(rows),
+            "cleared": 0,
+            "cleared_bytes": int(sum(int(row["raw_bytes"] or 0) for row in rows)),
+            "status": "would_clear" if dry_run else "cleared",
+            "sample": [
+                {
+                    "rcept_no": row["rcept_no"],
+                    "bsns_year": row["bsns_year"],
+                    "source_type": row["source_type"],
+                    "raw_bytes": row["raw_bytes"],
+                }
+                for row in rows[:10]
+            ],
+        }
+        if dry_run or not rows:
+            return result
+
+        for row in rows:
+            session.execute(
+                text(
+                    """
+                    UPDATE source_documents
+                    SET content_length=COALESCE(content_length, :raw_bytes),
+                        raw_content='',
+                        storage_status='derived_only'
+                    WHERE id=:id
+                    """
+                ),
+                {"id": row["id"], "raw_bytes": int(row["raw_bytes"] or 0)},
+            )
+            result["cleared"] += 1
+        session.flush()
+    return result
