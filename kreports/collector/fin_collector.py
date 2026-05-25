@@ -38,6 +38,19 @@ QUARTER_TO_REPRT = {v: k for k, v in REPRT_TO_QUARTER.items()}
 
 _LISTED_MARKETS = {"KOSPI", "KOSDAQ", "KONEX"}
 _DART_NO_DATA_STATUS = "013"
+_DART_LIMIT_MARKERS = ("사용한도", "초과", "limit")
+
+
+class DartApiLimitExceeded(RuntimeError):
+    """Raised when DART reports that the API key has exhausted its call quota."""
+
+
+def _is_dart_limit_response(response: dict | None) -> bool:
+    if not response:
+        return False
+    message = str(response.get("message") or "").lower()
+    status = str(response.get("status") or "")
+    return status != "000" and any(marker in message for marker in _DART_LIMIT_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +82,11 @@ def collect_financial(
         _log_fetch(corp_code, year, quarter, "error", str(e))
         return "error"
 
+    if _is_dart_limit_response(response):
+        message = response.get("message") or "DART API limit exceeded"
+        _log_fetch(corp_code, year, quarter, "error", message)
+        raise DartApiLimitExceeded(str(message))
+
     # CFS 없으면 OFS 폴백
     if response.get("status") != "000" and fs_div == "CFS":
         try:
@@ -78,6 +96,11 @@ def collect_financial(
         except Exception as e:
             _log_fetch(corp_code, year, quarter, "error", str(e))
             return "error"
+
+        if _is_dart_limit_response(response):
+            message = response.get("message") or "DART API limit exceeded"
+            _log_fetch(corp_code, year, quarter, "error", message)
+            raise DartApiLimitExceeded(str(message))
 
     # acntall 양쪽 실패 시 acnt(주요계정 요약) 폴백 — KOSDAQ 소형주 갭 보완
     if response.get("status") != "000":
@@ -121,6 +144,10 @@ def _try_summary_fallback(
             logger.warning("acnt 폴백 실패 [%s %s %s]: %s", corp_code, year, fs_div, e)
             saw_error = True
             continue
+
+        if _is_dart_limit_response(response):
+            message = response.get("message") or "DART API limit exceeded"
+            raise DartApiLimitExceeded(str(message))
 
         if response.get("status") not in ("000", _DART_NO_DATA_STATUS):
             logger.warning(
