@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from kreports.db.engine import engine
-
-
 def get_financial_timeseries_quality(corp_code: str, *, year: int = 2025, years_back: int = 5) -> dict:
+    from kreports.db.engine import engine
+
     years = list(range(int(year) - int(years_back) + 1, int(year) + 1))
     with engine.connect() as conn:
         rows = conn.execute(text(

@@ -1,5 +1,5 @@
 """
-test_integrity.py — 삼성전자 5개년 수집 데이터 정합성 검증.
+test_integrity.py — 삼성전자 compact 데이터셋 정합성 검증.
 
 목표:
 - 6개 핵심 계정 전 분기 비결측 확인
@@ -53,9 +53,9 @@ def samsung_financials(samsung_corp_code):
 
 class TestSamsungDataCompleteness:
     def test_minimum_quarters_collected(self, samsung_financials):
-        """최소 12분기(3개년) 이상 CFS 데이터가 있어야 한다."""
-        assert len(samsung_financials) >= 12, \
-            f"CFS 분기 수={len(samsung_financials)} (최소 12개 필요)"
+        """compact 배포 DB 기준 최소 8분기(2개년) 이상 CFS 데이터가 있어야 한다."""
+        assert len(samsung_financials) >= 8, \
+            f"CFS 분기 수={len(samsung_financials)} (최소 8개 필요)"
 
     def test_no_missing_core_accounts(self, samsung_financials):
         """6개 핵심 계정이 모두 비결측이어야 한다."""
