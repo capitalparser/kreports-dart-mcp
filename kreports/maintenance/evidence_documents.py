@@ -44,6 +44,64 @@ class EvidenceBuildResult:
     skipped: int
 
 
+@dataclass(frozen=True)
+class EvidenceBlock:
+    heading: str
+    body: str
+    priority: int
+
+    def render(self) -> str:
+        return f"{self.heading}\n{self.body}".strip()
+
+
+_AUDIT_REPORT_PRIORITY_SECTIONS = {
+    "kam": 0,
+    "emphasis": 1,
+    "other_matter": 1,
+    "going_concern": 1,
+    "basis_for_opinion": 2,
+    "audit_opinion": 3,
+}
+
+
+def _render_evidence_bundle(
+    *,
+    header: list[str],
+    blocks: list[EvidenceBlock],
+    max_text_chars: int | None,
+) -> str:
+    if not blocks:
+        return ""
+    ordered_blocks = blocks
+    if max_text_chars:
+        rendered_full = "\n".join(header + ["", *[block.render() for block in ordered_blocks]]).strip()
+        if len(rendered_full) <= int(max_text_chars):
+            return rendered_full
+        ordered_blocks = sorted(
+            blocks,
+            key=lambda block: (block.priority, blocks.index(block)),
+        )
+
+    rendered_parts = header + [""]
+    truncated = False
+    for block in ordered_blocks:
+        candidate_parts = rendered_parts + [block.render()]
+        candidate = "\n".join(candidate_parts).strip()
+        if not max_text_chars or len(candidate) <= int(max_text_chars):
+            rendered_parts.append(block.render())
+            continue
+        truncated = True
+        remaining = int(max_text_chars) - len("\n".join(rendered_parts).strip()) - len("\n... (truncated)") - 2
+        if remaining > 80 and not any(part.startswith(block.heading) for part in rendered_parts):
+            rendered_parts.append(f"{block.heading}\n{block.body[:remaining].rstrip()}")
+        break
+
+    evidence = "\n".join(rendered_parts).strip()
+    if truncated:
+        evidence = evidence.rstrip() + "\n... (truncated)"
+    return evidence
+
+
 def build_evidence_text(
     *,
     corp_code: str,
@@ -54,7 +112,7 @@ def build_evidence_text(
     max_text_chars: int | None = 12000,
 ) -> tuple[str, int]:
     """Return a markdown-like evidence bundle and the number of rows used."""
-    parts: list[str] = []
+    blocks: list[EvidenceBlock] = []
     rows_used = 0
 
     with get_session() as session:
@@ -73,8 +131,12 @@ def build_evidence_text(
             body = _clean_text(section.body_text)
             if not body:
                 continue
-            parts.append(_section_heading(f"report_section/{section.section_key}", section.section_title))
-            parts.append(body)
+            priority = _AUDIT_REPORT_PRIORITY_SECTIONS.get(section.section_key, 10) if source_type == "audit_report" else 10
+            blocks.append(EvidenceBlock(
+                heading=_section_heading(f"report_section/{section.section_key}", section.section_title),
+                body=body,
+                priority=priority,
+            ))
             rows_used += 1
 
         if source_type == "business_report":
@@ -89,8 +151,11 @@ def build_evidence_text(
                 if not body:
                     continue
                 label = f"accounting_note/{chapter.fs_div}/{chapter.note_no}/{chapter.section_type}"
-                parts.append(_section_heading(label, chapter.note_title))
-                parts.append(body)
+                blocks.append(EvidenceBlock(
+                    heading=_section_heading(label, chapter.note_title),
+                    body=body,
+                    priority=5 if chapter.section_type == "policy" else 8,
+                ))
                 rows_used += 1
 
             policies = (
@@ -104,8 +169,11 @@ def build_evidence_text(
                 if not body:
                     continue
                 label = f"accounting_policy/{policy.fs_div}/{policy.item_key}"
-                parts.append(_section_heading(label, policy.heading))
-                parts.append(body)
+                blocks.append(EvidenceBlock(
+                    heading=_section_heading(label, policy.heading),
+                    body=body,
+                    priority=5,
+                ))
                 rows_used += 1
 
         procedures = (
@@ -125,11 +193,14 @@ def build_evidence_text(
                 continue
             topic = item.kam_topic or "unknown_topic"
             label = f"audit_procedure/{topic}/{item.procedure_type}"
-            parts.append(_section_heading(label))
-            parts.append(body)
+            blocks.append(EvidenceBlock(
+                heading=_section_heading(label),
+                body=body,
+                priority=0 if source_type == "audit_report" else 6,
+            ))
             rows_used += 1
 
-    if not parts:
+    if not blocks:
         return "", 0
 
     header = [
@@ -141,9 +212,11 @@ def build_evidence_text(
     ]
     if dcm_no:
         header.append(f"- dcm_no: {dcm_no}")
-    evidence = "\n".join(header + ["", *parts]).strip()
-    if max_text_chars and len(evidence) > int(max_text_chars):
-        evidence = evidence[: int(max_text_chars)].rstrip() + "\n... (truncated)"
+    evidence = _render_evidence_bundle(
+        header=header,
+        blocks=blocks,
+        max_text_chars=max_text_chars,
+    )
     return evidence, rows_used
 
 

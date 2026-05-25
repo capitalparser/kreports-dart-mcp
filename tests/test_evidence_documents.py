@@ -154,3 +154,75 @@ def test_trim_evidence_documents_prunes_years_and_caps_text(temp_engine):
         assert docs[0].bsns_year == 2025
         assert len(docs[0].normalized_text) < 70
         assert docs[0].normalized_text.endswith("(truncated)")
+
+
+def test_rebuild_evidence_documents_preserves_auditor_priority_blocks_when_capped(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.evidence_documents import rebuild_evidence_documents
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000003",
+            stock_code="000003",
+            corp_name="우선순위근거테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(ReportSection(
+            rcept_no="20260311000003",
+            dcm_no="300",
+            corp_code="00000003",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="audit_opinion",
+            section_title="감사의견",
+            body_text="감사의견 일반 문단 " + ("가" * 600),
+            body_hash="opinion",
+            body_length=610,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add(ReportSection(
+            rcept_no="20260311000003",
+            dcm_no="300",
+            corp_code="00000003",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="수익인식",
+            body_text=(
+                "수익인식은 핵심감사사항입니다. 핵심감사사항으로 선정한 이유는 거래조건 판단이 중요하기 때문입니다. "
+                "우리는 매출 관련 내부통제 이해 및 평가와 표본 문서검사를 수행하였습니다."
+            ),
+            body_hash="kam",
+            body_length=120,
+            ordinal=1,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20260311000003",
+            dcm_no="300",
+            corp_code="00000003",
+            bsns_year=2025,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="internal_control",
+            procedure_text="매출 관련 내부통제 이해 및 평가를 수행하였습니다.",
+            procedure_hash="proc",
+            procedure_length=30,
+            section_ordinal=1,
+            procedure_ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    result = rebuild_evidence_documents(year=2025, corp_code="00000003", max_text_chars=420)
+
+    assert result["documents"] == 1
+    with get_session() as session:
+        doc = session.query(EvidenceDocument).one()
+        assert len(doc.normalized_text) <= 450
+        assert "## report_section/kam: 수익인식" in doc.normalized_text
+        assert "핵심감사사항으로 선정한 이유" in doc.normalized_text
+        assert "## audit_procedure/revenue/internal_control" in doc.normalized_text
+        assert "감사의견 일반 문단" not in doc.normalized_text
+        assert doc.normalized_text.endswith("(truncated)")
