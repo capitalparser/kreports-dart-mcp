@@ -1,4 +1,5 @@
 from kreports.analysis.readiness import (
+    auditor_readiness_snapshot,
     auditor_feature_readiness_snapshot,
     backfill_plan,
     readiness_verdict,
@@ -301,3 +302,53 @@ def test_auditor_feature_readiness_recommends_derived_first_backfill(temp_engine
     assert "source_documents backfill" not in joined
     assert "evidence_documents" in joined
     assert "audit_fee" in joined
+
+
+def test_auditor_readiness_counts_cached_source_documents_not_submission_window(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+                induty_code="264",
+            )
+        )
+        session.add_all(
+            [
+                SourceDocument(
+                    rcept_no="20260301000001",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="business_report",
+                    report_nm="사업보고서",
+                    content_type="xml",
+                    raw_content="",
+                    doc_hash="brhash",
+                    storage_status="derived_only",
+                ),
+                SourceDocument(
+                    rcept_no="20260301000002",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    report_nm="감사보고서",
+                    content_type="xml",
+                    raw_content="",
+                    doc_hash="arhash",
+                    storage_status="derived_only",
+                ),
+            ]
+        )
+
+    snapshot = auditor_readiness_snapshot(year=2025, years_back=1)
+
+    kospi = snapshot["markets"]["KOSPI"]
+    yearly = snapshot["yearly_markets"][2025]["KOSPI"]
+    assert kospi["business_report_2025"] == 1
+    assert kospi["audit_report_2025"] == 1
+    assert yearly["business_report"] == 1
+    assert yearly["audit_report"] == 1

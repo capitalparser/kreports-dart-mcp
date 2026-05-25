@@ -66,16 +66,14 @@ def auditor_readiness_snapshot(year: int = 2025, years_back: int = DEFAULT_YEARS
                   WHERE bsns_year=:year AND fs_div='CFS'
                 ),
                 br AS (
-                  SELECT DISTINCT corp_code FROM disclosures
-                  WHERE report_nm LIKE '%사업보고서%'
-                    AND report_nm NOT LIKE '%제출기한연장%'
-                    AND report_nm NOT LIKE '%해외증권%'
-                    AND disc_date BETWEEN :report_start AND :report_end
+                  SELECT DISTINCT corp_code FROM source_documents
+                  WHERE bsns_year=:year
+                    AND source_type='business_report'
                 ),
                 ar AS (
-                  SELECT DISTINCT corp_code FROM disclosures
-                  WHERE report_nm LIKE '%감사보고서%'
-                    AND disc_date BETWEEN :report_start AND :report_end
+                  SELECT DISTINCT corp_code FROM source_documents
+                  WHERE bsns_year=:year
+                    AND source_type='audit_report'
                 ),
                 disc AS (
                   SELECT DISTINCT corp_code FROM disclosures
@@ -104,8 +102,6 @@ def auditor_readiness_snapshot(year: int = 2025, years_back: int = DEFAULT_YEARS
             {
                 "year": year,
                 "recent_start": f"{year}-01-01",
-                "report_start": f"{year + 1}-01-01",
-                "report_end": f"{year + 1}-12-31",
             },
         ).mappings().all()
         policy_corps = conn.execute(
@@ -177,79 +173,35 @@ def auditor_readiness_snapshot(year: int = 2025, years_back: int = DEFAULT_YEARS
         business_report_rows = conn.execute(
             text(
                 """
-                SELECT c.market, :report_year year,
-                       COUNT(DISTINCT d.corp_code) business_report
+                SELECT c.market, sd.bsns_year year,
+                       COUNT(DISTINCT sd.corp_code) business_report
                 FROM companies c
-                JOIN disclosures d ON d.corp_code=c.corp_code
+                JOIN source_documents sd ON sd.corp_code=c.corp_code
                 WHERE c.stock_code IS NOT NULL
                   AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
-                  AND d.report_nm LIKE '%사업보고서%'
-                  AND d.report_nm NOT LIKE '%제출기한연장%'
-                  AND d.report_nm NOT LIKE '%해외증권%'
-                  AND d.disc_date BETWEEN :start_date AND :end_date
-                GROUP BY c.market
+                  AND sd.source_type='business_report'
+                  AND sd.bsns_year BETWEEN :start_year AND :year
+                GROUP BY c.market, sd.bsns_year
                 """
             ),
-            {"report_year": year, "start_date": f"{year + 1}-01-01", "end_date": f"{year + 1}-12-31"},
+            {"start_year": start_year, "year": year},
         ).mappings().all()
         audit_report_rows = conn.execute(
             text(
                 """
-                SELECT c.market, :report_year year,
-                       COUNT(DISTINCT d.corp_code) audit_report
+                SELECT c.market, sd.bsns_year year,
+                       COUNT(DISTINCT sd.corp_code) audit_report
                 FROM companies c
-                JOIN disclosures d ON d.corp_code=c.corp_code
+                JOIN source_documents sd ON sd.corp_code=c.corp_code
                 WHERE c.stock_code IS NOT NULL
                   AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
-                  AND d.report_nm LIKE '%감사보고서%'
-                  AND d.disc_date BETWEEN :start_date AND :end_date
-                GROUP BY c.market
+                  AND sd.source_type='audit_report'
+                  AND sd.bsns_year BETWEEN :start_year AND :year
+                GROUP BY c.market, sd.bsns_year
                 """
             ),
-            {"report_year": year, "start_date": f"{year + 1}-01-01", "end_date": f"{year + 1}-12-31"},
+            {"start_year": start_year, "year": year},
         ).mappings().all()
-        report_rows = []
-        for report_year in years:
-            start_date = f"{report_year + 1}-01-01"
-            end_date = f"{report_year + 1}-12-31"
-            br_rows = conn.execute(
-                text(
-                    """
-                    SELECT c.market,
-                           COUNT(DISTINCT d.corp_code) business_report
-                    FROM companies c
-                    JOIN disclosures d ON d.corp_code=c.corp_code
-                    WHERE c.stock_code IS NOT NULL
-                      AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
-                      AND d.report_nm LIKE '%사업보고서%'
-                      AND d.report_nm NOT LIKE '%제출기한연장%'
-                      AND d.report_nm NOT LIKE '%해외증권%'
-                      AND d.disc_date BETWEEN :start_date AND :end_date
-                    GROUP BY c.market
-                    """
-                ),
-                {"start_date": start_date, "end_date": end_date},
-            ).mappings().all()
-            ar_rows = conn.execute(
-                text(
-                    """
-                    SELECT c.market,
-                           COUNT(DISTINCT d.corp_code) audit_report
-                    FROM companies c
-                    JOIN disclosures d ON d.corp_code=c.corp_code
-                    WHERE c.stock_code IS NOT NULL
-                      AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX')
-                      AND d.report_nm LIKE '%감사보고서%'
-                      AND d.disc_date BETWEEN :start_date AND :end_date
-                    GROUP BY c.market
-                    """
-                ),
-                {"start_date": start_date, "end_date": end_date},
-            ).mappings().all()
-            for row in br_rows:
-                report_rows.append({"year": report_year, "market": row["market"], "business_report": int(row["business_report"] or 0)})
-            for row in ar_rows:
-                report_rows.append({"year": report_year, "market": row["market"], "audit_report": int(row["audit_report"] or 0)})
         pol_rows = conn.execute(
             text(
                 """
@@ -307,15 +259,6 @@ def auditor_readiness_snapshot(year: int = 2025, years_back: int = DEFAULT_YEARS
             _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
         )
         target["audit_report"] = int(row["audit_report"] or 0)
-    for row in report_rows:
-        target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
-            row["market"],
-            _empty_year_market_row(row["market"], listed_by_market.get(row["market"], 0)),
-        )
-        if "business_report" in row:
-            target["business_report"] = int(row["business_report"] or 0)
-        if "audit_report" in row:
-            target["audit_report"] = int(row["audit_report"] or 0)
     for row in pol_rows:
         target = yearly_markets.setdefault(int(row["year"]), {}).setdefault(
             row["market"],
