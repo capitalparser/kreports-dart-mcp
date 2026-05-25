@@ -38,6 +38,42 @@ def test_extract_audit_report_sections_finds_kam_and_opinion():
     assert classify_kam_topics(sections["kam"]["body_text"]) == ["revenue", "inventory"]
 
 
+def test_extract_audit_report_sections_keeps_kam_child_titles_until_next_main_section():
+    xml = """
+    <DOCUMENT>
+      <TITLE>감사의견</TITLE>
+      <P>우리는 회사의 재무제표가 적정하게 표시되어 있다고 판단합니다.</P>
+      <TITLE>감사의견근거</TITLE>
+      <P>우리는 감사기준에 따라 감사를 수행하였습니다.</P>
+      <TITLE>핵심감사사항</TITLE>
+      <P>핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다.</P>
+      <TITLE>수익인식</TITLE>
+      <P>회사는 복수의 수행의무가 포함된 계약에서 수익을 인식하고 있습니다.</P>
+      <P>핵심감사사항으로 선정한 이유는 거래조건 판단과 기간귀속에 중요한 왜곡표시위험이 있기 때문입니다.</P>
+      <P>핵심감사사항이 감사에서 다루어진 방법</P>
+      <P>· 매출 관련 내부통제 이해 및 평가를 수행하였습니다.</P>
+      <P>· 표본 거래에 대해 계약서와 세금계산서 문서검사를 수행하였습니다.</P>
+      <TITLE>재고자산 평가</TITLE>
+      <P>재고자산 순실현가능가치 평가도 핵심감사사항입니다.</P>
+      <TITLE>재무제표에 대한 경영진의 책임</TITLE>
+      <P>경영진은 재무제표 작성 책임이 있습니다.</P>
+    </DOCUMENT>
+    """
+
+    sections = extract_audit_report_sections(xml)
+
+    assert "kam" in sections
+    kam_body = sections["kam"]["body_text"]
+    assert "수익인식" in kam_body
+    assert "핵심감사사항으로 선정한 이유" in kam_body
+    assert "문서검사" in kam_body
+    assert "재고자산 순실현가능가치" in kam_body
+    assert "경영진은 재무제표 작성 책임" not in kam_body
+    summary = summarize_kam_body(kam_body)
+    assert summary["has_reason_hint"] is True
+    assert summary["has_procedure_hint"] is True
+
+
 def test_summarize_kam_body_extracts_reason_and_audit_response():
     body = """
     핵심감사사항

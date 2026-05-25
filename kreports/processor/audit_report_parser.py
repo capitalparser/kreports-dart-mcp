@@ -167,6 +167,24 @@ def _section_end(titles: list[tuple[int, int, str]], idx: int, xml_len: int) -> 
     return xml_len
 
 
+def _title_section_key(title: str) -> str | None:
+    for section_key, keywords in SECTION_KEYWORDS.items():
+        if _matches(title, keywords):
+            return section_key
+    return None
+
+
+def _section_end_for_key(titles: list[tuple[int, int, str]], idx: int, xml_len: int, section_key: str) -> int:
+    """Return section end, preserving KAM child titles inside the KAM body."""
+    if section_key != "kam":
+        return _section_end(titles, idx, xml_len)
+    for next_idx in range(idx + 1, len(titles)):
+        next_key = _title_section_key(titles[next_idx][2])
+        if next_key and next_key != "kam":
+            return titles[next_idx][0]
+    return xml_len
+
+
 def extract_audit_report_sections(xml_content: str) -> dict[str, dict]:
     """Extract auditor-useful sections from an audit report document.xml body."""
     titles = _title_positions(xml_content)
@@ -193,7 +211,7 @@ def extract_audit_report_sections(xml_content: str) -> dict[str, dict]:
             continue
 
         start = titles[match_idx][0]
-        end = _section_end(titles, match_idx, len(xml_content))
+        end = _section_end_for_key(titles, match_idx, len(xml_content), section_key)
         section_xml = xml_content[start:end]
         body = _trim_section_body(section_key, xml_to_text(section_xml))
         if not body:
