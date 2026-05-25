@@ -1154,6 +1154,7 @@ def collect(
 def collect_all(
     year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
     year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
+    market: Optional[str] = typer.Option(None, help="시장 필터: KOSPI/KOSDAQ/KONEX. 생략 시 상장 시장 전체."),
     force: bool = typer.Option(False, "--force", help="동일 백필 running 기록이 있어도 강제 실행"),
 ):
     """전체 상장사 재무데이터를 배치 수집한다."""
@@ -1170,11 +1171,11 @@ def collect_all(
     with _backfill_run_guard(
         task_type="financials",
         year=year_from,
-        market="ALL",
-        params={"year_from": year_from, "year_to": year_to},
+        market=(market or "LISTED").upper(),
+        params={"year_from": year_from, "year_to": year_to, "market": market},
         force=force,
     ) as run_id:
-        result = collect_all_companies(year_from, year_to, progress_callback=_progress)
+        result = collect_all_companies(year_from, year_to, market=market, progress_callback=_progress)
         _finish_backfill_run(run_id, result)
     typer.echo(f"\n완료 - 성공: {result['success']:,}, 데이터없음: {result['no_data']:,}, 오류: {result['error']:,}")
 

@@ -175,9 +175,10 @@ def collect_financial_range(
 def collect_all_companies(
     year_from: int | None = None,
     year_to: int | None = None,
+    market: str | None = None,
     progress_callback=None,
 ) -> dict:
-    """DB 등록 전체 상장사 재무데이터 배치 수집."""
+    """DB 등록 상장사 재무데이터 배치 수집."""
     from datetime import date
     current_year = date.today().year
 
@@ -187,12 +188,14 @@ def collect_all_companies(
         year_from = year_to - settings.collect_years + 1
 
     with get_session() as session:
-        companies = list(
-            session.query(Company.stock_code, Company.corp_name)
-            .filter(Company.stock_code.isnot(None))
-            .order_by(Company.market, Company.corp_name)
-            .all()
+        query = session.query(Company.stock_code, Company.corp_name).filter(
+            Company.stock_code.isnot(None)
         )
+        if market:
+            query = query.filter(Company.market == market.upper())
+        else:
+            query = query.filter(Company.market.in_(_LISTED_MARKETS))
+        companies = list(query.order_by(Company.market, Company.corp_name).all())
 
     total = len(companies)
     totals: dict = {"success": 0, "no_data": 0, "error": 0}
