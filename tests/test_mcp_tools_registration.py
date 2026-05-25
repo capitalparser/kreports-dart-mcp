@@ -43,6 +43,11 @@ def test_search_dataset_registered():
     assert "search_dataset" in HANDLERS
 
 
+def test_search_dataset_schema_exposes_evidence_documents():
+    tool = next(t for t in ALL_TOOLS if t.name == "search_dataset")
+    assert "evidence_documents" in tool.inputSchema["properties"]["dataset"]["enum"]
+
+
 def test_fetch_disclosure_on_demand_registered():
     names = [t.name for t in ALL_TOOLS]
     assert "fetch_disclosure_on_demand" in names

@@ -1253,6 +1253,7 @@ TOOL_SEARCH_DATASET = Tool(
                     "report_sections",
                     "accounting_policies",
                     "accounting_note_chapters",
+                    "evidence_documents",
                     "disclosures",
                     "audit_fees",
                     "financials",
