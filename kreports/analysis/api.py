@@ -7,6 +7,7 @@ JSON 직렬화 안전성을 보장한다 (NaN → None, numpy dtype → python).
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from datetime import date, timedelta
 from typing import Any, Optional
@@ -209,6 +210,123 @@ def _cached_years_for_sections(corp_code: str, source_type: str, section_key: st
             params,
         ).scalars().all()
     return [int(y) for y in rows]
+
+
+_EVIDENCE_REPORT_SECTION_RE = re.compile(
+    r"^##\s+report_section/(?P<section_key>[A-Za-z0-9_]+):\s*(?P<section_title>.*?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _iter_evidence_report_sections(normalized_text: str | None) -> list[dict]:
+    """Parse MD-like evidence_documents headings into report-section rows."""
+    text_value = _display_text(normalized_text)
+    matches = list(_EVIDENCE_REPORT_SECTION_RE.finditer(text_value))
+    rows: list[dict] = []
+    for idx, match in enumerate(matches):
+        body_start = match.end()
+        body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text_value)
+        body = text_value[body_start:body_end].strip()
+        section_key = match.group("section_key").strip()
+        section_title = match.group("section_title").strip()
+        rows.append({
+            "section_key": section_key,
+            "section_title": section_title,
+            "body_text": body,
+            "body_length": len(body),
+            "ordinal": idx,
+        })
+    return rows
+
+
+def _evidence_report_section_rows(
+    *,
+    corp_codes: list[str],
+    year: int,
+    source_types: list[str],
+    section_keys: list[str] | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    if not corp_codes:
+        return []
+    stmt = text(
+        """
+        SELECT ed.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+               ed.bsns_year, ed.rcept_no, ed.dcm_no, ed.source_type,
+               ed.normalized_text, ed.text_length, ed.generated_at
+        FROM evidence_documents ed
+        JOIN companies c ON c.corp_code=ed.corp_code
+        WHERE ed.corp_code IN :corp_codes
+          AND ed.bsns_year=:year
+          AND ed.source_type IN :source_types
+        ORDER BY ed.bsns_year DESC, c.market, c.corp_name, ed.source_type
+        LIMIT :doc_limit
+        """
+    ).bindparams(
+        bindparam("corp_codes", expanding=True),
+        bindparam("source_types", expanding=True),
+    )
+    wanted = set(section_keys or [])
+    out: list[dict] = []
+    with _engine.connect() as conn:
+        docs = [dict(r) for r in conn.execute(
+            stmt,
+            {
+                "corp_codes": corp_codes,
+                "year": int(year),
+                "source_types": source_types,
+                "doc_limit": max(limit, len(corp_codes) * 2),
+            },
+        ).mappings().all()]
+    for doc in docs:
+        for section in _iter_evidence_report_sections(doc.pop("normalized_text", "")):
+            if wanted and section["section_key"] not in wanted:
+                continue
+            body = section["body_text"]
+            out.append({
+                "corp_code": doc["corp_code"],
+                "stock_code": doc.get("stock_code"),
+                "corp_name": doc.get("corp_name"),
+                "market": doc.get("market"),
+                "induty_code": doc.get("induty_code"),
+                "bsns_year": doc["bsns_year"],
+                "rcept_no": doc["rcept_no"],
+                "dcm_no": doc.get("dcm_no"),
+                "source_type": doc["source_type"],
+                "section_key": section["section_key"],
+                "section_title": section["section_title"],
+                "body_text": body,
+                "body_length": len(body),
+                "ordinal": section["ordinal"],
+                "evidence_source": "evidence_documents",
+            })
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _evidence_years_for_sections(corp_code: str, source_type: str, section_key: str | None = None) -> list[int]:
+    with _engine.connect() as conn:
+        docs = [dict(r) for r in conn.execute(
+            text(
+                """
+                SELECT bsns_year, normalized_text
+                FROM evidence_documents
+                WHERE corp_code=:corp_code AND source_type=:source_type
+                ORDER BY bsns_year DESC
+                """
+            ),
+            {"corp_code": corp_code, "source_type": source_type},
+        ).mappings().all()]
+    years: list[int] = []
+    for doc in docs:
+        sections = _iter_evidence_report_sections(doc.get("normalized_text"))
+        if section_key and not any(section["section_key"] == section_key for section in sections):
+            continue
+        year_value = int(doc["bsns_year"])
+        if year_value not in years:
+            years.append(year_value)
+    return years
 
 
 def _cache_quality_status(*, subject_count: int, peer_total: int = 0, peer_covered: int = 0) -> str:
@@ -2030,6 +2148,19 @@ def compare_peer_kam_topics(
             section_stmt,
             {"ccs": all_codes, "year": year},
         ).mappings().all()]
+    section_source = "report_sections.audit_report"
+    audit_report_sections_source = "audit_report_sections"
+    if not section_rows:
+        section_rows = _evidence_report_section_rows(
+            corp_codes=all_codes,
+            year=year,
+            source_types=["audit_report"],
+            section_keys=["kam", "audit_opinion", "emphasis", "going_concern"],
+            limit=max(500, len(all_codes) * 8),
+        )
+        if section_rows:
+            section_source = "evidence_documents.audit_report"
+            audit_report_sections_source = "evidence_documents.audit_report"
 
     from kreports.processor.audit_report_parser import classify_kam_topics, summarize_kam_body
 
@@ -2110,7 +2241,7 @@ def compare_peer_kam_topics(
             peer_total=len(peer_codes),
             peer_covered=len(peer_sections),
         ),
-        "source": "report_sections.audit_report",
+        "source": section_source,
         "requested_year": year,
         "subject_kam_body_count": len([r for r in subject_sections if r.get("section_key") == "kam"]),
         "peer_companies_with_sections": len(peer_sections),
@@ -2120,9 +2251,12 @@ def compare_peer_kam_topics(
         "kam_reason_coverage": kam_hint_coverage["reason"],
         "kam_procedure_coverage": kam_hint_coverage["procedure"],
         "business_report_summary_sections": len(summary_rows),
-        "available_subject_kam_years": _cached_years_for_sections(corp_code, "audit_report", "kam"),
+        "available_subject_kam_years": sorted(set(
+            _cached_years_for_sections(corp_code, "audit_report", "kam")
+            + _evidence_years_for_sections(corp_code, "audit_report", "kam")
+        ), reverse=True),
         "coverage_note": (
-            "KAM body comparison uses cached audit_report report_sections. "
+            "KAM body comparison uses cached audit_report report_sections, with evidence_documents fallback. "
             "Disclosure events are not a substitute for KAM body/topic coverage."
         ),
     }
@@ -2152,7 +2286,7 @@ def compare_peer_kam_topics(
             "kam_body_count": len(kam_body_rows),
             "kam_reason_coverage": kam_hint_coverage["reason"],
             "kam_procedure_coverage": kam_hint_coverage["procedure"],
-            "source": "audit_report_sections" if has_body else "disclosure_events_only",
+            "source": audit_report_sections_source if has_body else "disclosure_events_only",
         },
         "data_quality": data_quality,
         "business_report_kam_summary": {
@@ -2214,6 +2348,17 @@ def get_audit_report_sections(
                 "limit": int(limit),
             },
         ).mappings().all()]
+    row_source = "report_sections"
+    if not rows:
+        rows = _evidence_report_section_rows(
+            corp_codes=[corp_code],
+            year=year,
+            source_types=list(source_filter),
+            section_keys=[section_key] if section_key else None,
+            limit=int(limit),
+        )
+        if rows:
+            row_source = "evidence_documents"
 
     alternative_rows: list[dict] = []
     alternative_year: int | None = None
@@ -2226,6 +2371,15 @@ def get_audit_report_sections(
             _cached_years_for_sections(corp_code, "audit_report", section_key)
             + _cached_years_for_sections(corp_code, "business_report", section_key)
         ), reverse=True)
+        evidence_years = _evidence_years_for_sections(
+            corp_code,
+            "audit_report" if source_type == "audit_report" else "business_report",
+            section_key,
+        ) if source_type != "all" else sorted(set(
+            _evidence_years_for_sections(corp_code, "audit_report", section_key)
+            + _evidence_years_for_sections(corp_code, "business_report", section_key)
+        ), reverse=True)
+        years = sorted(set(years + evidence_years), reverse=True)
         alternative_year = years[0] if years else None
         if alternative_year is not None:
             with _engine.connect() as conn:
@@ -2239,6 +2393,14 @@ def get_audit_report_sections(
                         "limit": min(int(limit), 5),
                     },
                 ).mappings().all()]
+            if not alternative_rows:
+                alternative_rows = _evidence_report_section_rows(
+                    corp_codes=[corp_code],
+                    year=alternative_year,
+                    source_types=list(source_filter),
+                    section_keys=[section_key] if section_key else None,
+                    limit=min(int(limit), 5),
+                )
 
     for row in rows:
         body = _display_text(row.get("body_text"))
@@ -2263,6 +2425,8 @@ def get_audit_report_sections(
             if source_type == "audit_report"
             else "Cached report_sections."
         )
+        if row_source == "evidence_documents":
+            coverage_note = "Compact evidence_documents fallback parsed from normalized report evidence."
     else:
         coverage_note = (
             "No cached sections. Run collect-audit-report-sections for detailed audit reports; "
@@ -2271,15 +2435,21 @@ def get_audit_report_sections(
     kam_hint_coverage = _kam_hint_coverage(rows)
     section_quality = {
         "status": "usable" if rows else "missing",
-        "source": "report_sections",
+        "source": row_source,
         "requested_year": year,
         "requested_source_type": source_type,
         "requested_section_key": section_key,
         "section_count": len(rows),
         "kam_reason_coverage": kam_hint_coverage["reason"],
         "kam_procedure_coverage": kam_hint_coverage["procedure"],
-        "available_audit_report_years": _cached_years_for_sections(corp_code, "audit_report", section_key),
-        "available_business_report_years": _cached_years_for_sections(corp_code, "business_report", section_key),
+        "available_audit_report_years": sorted(set(
+            _cached_years_for_sections(corp_code, "audit_report", section_key)
+            + _evidence_years_for_sections(corp_code, "audit_report", section_key)
+        ), reverse=True),
+        "available_business_report_years": sorted(set(
+            _cached_years_for_sections(corp_code, "business_report", section_key)
+            + _evidence_years_for_sections(corp_code, "business_report", section_key)
+        ), reverse=True),
         "latest_available_year": alternative_year if not rows else year,
         "alternative_section_count": len(alternative_rows),
         "interpretation": (
@@ -2370,6 +2540,17 @@ def compare_peer_audit_report_matters(
             stmt,
             {"ccs": all_codes, "year": year, "section_keys": list(_AUDIT_MATTER_KEYS)},
         ).mappings().all()]
+    row_source = "report_sections.audit_report"
+    if not rows:
+        rows = _evidence_report_section_rows(
+            corp_codes=all_codes,
+            year=year,
+            source_types=["audit_report"],
+            section_keys=list(_AUDIT_MATTER_KEYS),
+            limit=max(500, len(all_codes) * 8),
+        )
+        if rows:
+            row_source = "evidence_documents"
 
     counts = {
         key: {
@@ -2415,7 +2596,7 @@ def compare_peer_audit_report_matters(
             peer_total=len(peer_codes),
             peer_covered=peer_covered,
         ),
-        "source": "report_sections.audit_report",
+        "source": row_source,
         "requested_year": year,
         "section_keys": list(_AUDIT_MATTER_KEYS),
         "subject_section_count": subject_count,
@@ -2525,6 +2706,42 @@ def search_audit_report_matters(
 
     with _engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
+    row_source = "report_sections.audit_report"
+    if not rows:
+        company_where = ["1=1"]
+        company_params: dict[str, object] = {}
+        if corp_code:
+            company_where.append("corp_code=:corp_code")
+            company_params["corp_code"] = corp_code
+        if market:
+            company_where.append("market=:market")
+            company_params["market"] = market
+        if induty_prefix:
+            company_where.append("induty_code LIKE :induty_prefix")
+            company_params["induty_prefix"] = f"{induty_prefix}%"
+        with _engine.connect() as conn:
+            corp_codes = [str(r) for r in conn.execute(
+                text(
+                    f"""
+                    SELECT corp_code
+                    FROM companies
+                    WHERE {" AND ".join(company_where)}
+                    ORDER BY market, induty_code, corp_name
+                    LIMIT :corp_limit
+                    """
+                ),
+                {**company_params, "corp_limit": max(int(limit) * 20, 100)},
+            ).scalars().all()]
+        if year is not None:
+            rows = _evidence_report_section_rows(
+                corp_codes=corp_codes,
+                year=int(year),
+                source_types=["audit_report"],
+                section_keys=keys,
+                limit=int(limit) * 10,
+            )
+            if rows:
+                row_source = "evidence_documents"
 
     companies: dict[str, dict] = {}
     for row in rows:
@@ -2587,7 +2804,7 @@ def search_audit_report_matters(
         "companies": company_rows,
         "data_quality": {
             "status": "usable" if company_rows else "missing",
-            "source": "report_sections.audit_report",
+            "source": row_source,
             "interpretation": (
                 "Results are local cached audit-report sections. Empty results mean no cached matching section, "
                 "not proof that the filing has no such matter."
@@ -2606,6 +2823,94 @@ _AUDIT_PROCEDURE_TYPES = {
     "cutoff",
     "other",
 }
+
+_AUDIT_PROCEDURE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "internal_control": ("내부통제", "통제", "통제활동"),
+    "substantive_test": ("문서검사", "표본", "입증", "증빙", "거래검사"),
+    "estimation_assumption": ("추정", "가정", "민감도", "회수가능", "평가"),
+    "external_confirmation": ("외부조회", "조회", "확인서"),
+    "valuation_specialist": ("전문가", "가치평가", "평가기관"),
+    "analytics": ("분석적", "추세", "비교분석"),
+    "cutoff": ("기간귀속", "cut-off", "컷오프"),
+}
+
+
+def _classify_audit_procedure_type(text_value: str) -> str:
+    body = text_value or ""
+    for procedure_type, keywords in _AUDIT_PROCEDURE_KEYWORDS.items():
+        if any(keyword in body for keyword in keywords):
+            return procedure_type
+    return "other"
+
+
+def _procedure_excerpt_from_kam(body: str) -> str:
+    text_value = _display_text(body)
+    candidates = [
+        item.strip()
+        for item in re.split(r"\n+|(?<=\.)\s+|(?<=!)\s+|(?<=\?)\s+|(?<=。)\s+|(?<=다\.)\s+", text_value)
+        if item.strip()
+    ]
+    for candidate in candidates:
+        if any(keyword in candidate for keywords in _AUDIT_PROCEDURE_KEYWORDS.values() for keyword in keywords):
+            return candidate.strip()
+    if "수행" in text_value or "검토" in text_value:
+        return text_value[:900].strip()
+    return ""
+
+
+def _evidence_audit_procedure_rows(
+    *,
+    corp_codes: list[str],
+    year: int,
+    keyword: str | None = None,
+    kam_topic: str | None = None,
+    procedure_type: str | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    from kreports.processor.audit_report_parser import classify_kam_topics
+
+    section_rows = _evidence_report_section_rows(
+        corp_codes=corp_codes,
+        year=year,
+        source_types=["audit_report"],
+        section_keys=["kam"],
+        limit=limit,
+    )
+    out: list[dict] = []
+    for row in section_rows:
+        body = _display_text(row.get("body_text"))
+        excerpt = _procedure_excerpt_from_kam(body)
+        if not excerpt:
+            continue
+        topics = classify_kam_topics(body) or _topic_hits(body)
+        topic = topics[0] if topics else "unknown"
+        ptype = _classify_audit_procedure_type(excerpt)
+        if kam_topic and topic != kam_topic:
+            continue
+        if procedure_type and ptype != procedure_type:
+            continue
+        if keyword and keyword not in excerpt and keyword not in body:
+            continue
+        out.append({
+            "corp_code": row["corp_code"],
+            "stock_code": row.get("stock_code"),
+            "corp_name": row.get("corp_name"),
+            "market": row.get("market"),
+            "induty_code": row.get("induty_code"),
+            "year": row["bsns_year"],
+            "rcept_no": row["rcept_no"],
+            "dcm_no": row.get("dcm_no"),
+            "source_type": "audit_report",
+            "kam_topic": topic,
+            "procedure_type": ptype,
+            "procedure_text": excerpt,
+            "procedure_length": len(excerpt),
+            "section_ordinal": row.get("ordinal", 0),
+            "procedure_ordinal": 0,
+        })
+        if len(out) >= limit:
+            break
+    return out
 
 
 def search_audit_procedures(
@@ -2660,6 +2965,43 @@ def search_audit_procedures(
     """)
     with _engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
+    row_source = "audit_procedure_items"
+    if not rows and year is not None:
+        company_where = ["1=1"]
+        company_params: dict[str, object] = {}
+        if company:
+            corp_code = resolve_corp_code(company) or company
+            company_where.append("corp_code=:corp_code")
+            company_params["corp_code"] = corp_code
+        if market:
+            company_where.append("market=:market")
+            company_params["market"] = market
+        if induty_prefix:
+            company_where.append("induty_code LIKE :induty_prefix")
+            company_params["induty_prefix"] = f"{induty_prefix}%"
+        with _engine.connect() as conn:
+            corp_codes = [str(r) for r in conn.execute(
+                text(
+                    f"""
+                    SELECT corp_code
+                    FROM companies
+                    WHERE {" AND ".join(company_where)}
+                    ORDER BY market, induty_code, corp_name
+                    LIMIT :corp_limit
+                    """
+                ),
+                {**company_params, "corp_limit": max(limit * 20, 100)},
+            ).scalars().all()]
+        rows = _evidence_audit_procedure_rows(
+            corp_codes=corp_codes,
+            year=int(year),
+            keyword=keyword,
+            kam_topic=kam_topic,
+            procedure_type=procedure_type,
+            limit=limit * 10,
+        )
+        if rows:
+            row_source = "evidence_documents.audit_report_kam"
 
     for row in rows:
         text_value = _display_text(row.pop("procedure_text") or "")
@@ -2694,7 +3036,7 @@ def search_audit_procedures(
         "companies": companies,
         "data_quality": {
             "status": "usable" if companies else "missing",
-            "source": "audit_procedure_items",
+            "source": row_source,
             "interpretation": (
                 "Procedure items are parsed hints from cached KAM audit-response paragraphs. "
                 "They support comparison and search, but do not replace reading the full audit report."
@@ -2728,6 +3070,35 @@ def compare_peer_audit_procedures(
     """).bindparams(bindparam("corp_codes", expanding=True))
     with _engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, {"year": year, "corp_codes": peer_codes}).mappings().all()]
+    row_source = "audit_procedure_items"
+    if not rows:
+        evidence_rows = _evidence_audit_procedure_rows(
+            corp_codes=peer_codes,
+            year=year,
+            limit=max(500, len(peer_codes) * 10),
+        )
+        aggregated: dict[tuple[str, str, str, str], int] = {}
+        names = {row["corp_code"]: row.get("corp_name") for row in evidence_rows}
+        for row in evidence_rows:
+            key = (
+                row["corp_code"],
+                row.get("corp_name") or names.get(row["corp_code"]) or "",
+                row.get("kam_topic") or "unknown",
+                row.get("procedure_type") or "other",
+            )
+            aggregated[key] = aggregated.get(key, 0) + 1
+        rows = [
+            {
+                "corp_code": cc,
+                "corp_name": name,
+                "kam_topic": topic,
+                "procedure_type": ptype,
+                "cnt": cnt,
+            }
+            for (cc, name, topic, ptype), cnt in aggregated.items()
+        ]
+        if rows:
+            row_source = "evidence_documents.audit_report_kam"
 
     subject_counts: dict[str, int] = {}
     peer_type_counts: dict[str, int] = {}
@@ -2754,7 +3125,7 @@ def compare_peer_audit_procedures(
         "selection_policy": base.get("selection_policy"),
         "data_quality": {
             "status": "usable" if rows else "missing",
-            "source": "audit_procedure_items",
+            "source": row_source,
             "coverage_note": "Parsed from cached KAM sections; coverage increases as source_documents and extractors backfill.",
         },
     })

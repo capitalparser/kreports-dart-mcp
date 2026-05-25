@@ -10,11 +10,12 @@ from kreports.analysis.api import (
     compare_peer_kam_topics,
     compare_peer_risk_profile,
     estimate_audit_hours_proxy,
+    get_audit_report_sections,
     search_dataset,
     search_audit_procedures,
     search_audit_report_matters,
 )
-from kreports.db.models import AccountingNoteChapter, AuditProcedureItem, Company, Financial, SourceDocument
+from kreports.db.models import AccountingNoteChapter, AuditProcedureItem, Company, EvidenceDocument, Financial, SourceDocument
 from kreports.mcp.tools import call_tool
 
 
@@ -154,6 +155,127 @@ def test_search_audit_report_matters_adds_topic_and_severity_hints(temp_engine):
     section = out["companies"][0]["sections"][0]
     assert section["severity_hint"] == "high"
     assert "going_concern" in section["topic_tags"]
+
+
+def test_get_audit_report_sections_falls_back_to_evidence_documents(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="근거KAM테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001",
+            dcm_no="D001",
+            evidence_scope="auditor_view",
+            title="2025 audit_report evidence",
+            normalized_text=(
+                "# Evidence document\n"
+                "## report_section/audit_opinion: 감사의견\n"
+                "적정의견입니다.\n"
+                "## report_section/kam: 핵심감사사항\n"
+                "수익인식은 핵심감사사항입니다. 핵심감사사항으로 선정한 이유는 거래조건 판단이 중요하기 때문입니다.\n"
+                "우리는 매출 거래의 근거 문서검사와 기간귀속 테스트를 수행하였습니다.\n"
+            ),
+            text_hash="x",
+            text_length=180,
+            source_count=1,
+            generated_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["section_count"] == 1
+    assert out["data_quality"]["source"] == "evidence_documents"
+    assert out["sections"][0]["section_key"] == "kam"
+    assert "수익인식" in out["sections"][0]["body_excerpt"]
+    assert out["sections"][0]["kam_analysis"]["has_procedure_hint"] is True
+
+
+def test_search_audit_report_matters_falls_back_to_evidence_documents(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="근거강조테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000002",
+            dcm_no="D002",
+            evidence_scope="auditor_view",
+            title="2025 audit_report evidence",
+            normalized_text=(
+                "# Evidence document\n"
+                "## report_section/emphasis: 강조사항\n"
+                "계속기업 존속능력에 중요한 불확실성이 존재합니다.\n"
+            ),
+            text_hash="x",
+            text_length=90,
+            source_count=1,
+            generated_at=datetime.utcnow(),
+        ))
+
+    out = search_audit_report_matters(company="000001", year=2025, section_keys=["emphasis"], limit=5)
+
+    assert out["data_quality"]["source"] == "evidence_documents"
+    assert out["total_sections"] == 1
+    section = out["companies"][0]["sections"][0]
+    assert section["section_key"] == "emphasis"
+    assert section["severity_hint"] == "high"
+
+
+def test_search_audit_procedures_falls_back_to_evidence_kam_text(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="근거절차테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000003",
+            dcm_no="D003",
+            evidence_scope="auditor_view",
+            title="2025 audit_report evidence",
+            normalized_text=(
+                "# Evidence document\n"
+                "## report_section/kam: 핵심감사사항\n"
+                "수익인식은 핵심감사사항입니다.\n"
+                "우리는 매출 관련 내부통제 이해 및 평가를 수행하였고, 표본 거래에 대해 문서검사를 수행하였습니다.\n"
+            ),
+            text_hash="x",
+            text_length=150,
+            source_count=1,
+            generated_at=datetime.utcnow(),
+        ))
+
+    out = search_audit_procedures(company="000001", year=2025, keyword="내부통제", limit=5)
+
+    assert out["data_quality"]["source"] == "evidence_documents.audit_report_kam"
+    assert out["total_procedures"] == 1
+    record = out["companies"][0]["records"][0]
+    assert record["procedure_type"] == "internal_control"
+    assert "내부통제" in record["procedure_excerpt"]
 
 
 def test_search_dataset_report_sections_shape():
