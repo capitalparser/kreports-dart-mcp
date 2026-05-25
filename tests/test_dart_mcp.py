@@ -312,9 +312,8 @@ class TestStdioE2E:
         text = asyncio.run(
             _e2e_stdio_call_tool("search_company", {"query": "삼성전자", "limit": 2})
         )
-        parsed = json.loads(text)
-        assert "count" in parsed
-        assert "results" in parsed
+        assert text.startswith("판정:")
+        assert "삼성전자" in text or "search_company" in text
 
     def test_stdio_call_score_going_concern_samsung(self):
         import kreports
@@ -323,9 +322,8 @@ class TestStdioE2E:
         text = asyncio.run(
             _e2e_stdio_call_tool("score_going_concern", {"company": "005930"})
         )
-        parsed = json.loads(text)
-        assert parsed["has_data"] is True
-        assert parsed["grade"] in ("안정", "주의", "경고", "위험")
+        assert text.startswith("판정:")
+        assert "계속기업" in text or "score_going_concern" in text
 
 
 class TestStreamableHttpE2E:

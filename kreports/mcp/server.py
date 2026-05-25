@@ -11,7 +11,7 @@ import logging
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool
+from mcp.types import TextContent, Tool
 
 from kreports.mcp.tools import ALL_TOOLS, call_tool
 from kreports.runtime import runtime_mode
@@ -32,7 +32,7 @@ async def list_tools() -> list[Tool]:
 
 
 @server.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> dict:
+async def handle_call_tool(name: str, arguments: dict):
     """도구 실행. 결과는 structured content로 반환."""
     logger.info(
         "call_tool: %s runtime_mode=%s arg_keys=%s",
@@ -43,6 +43,9 @@ async def handle_call_tool(name: str, arguments: dict) -> dict:
     result_json = call_tool(name, arguments)
     logger.info("call_tool_done: %s bytes=%d", name, len(result_json))
     result = json.loads(result_json)
+    answer = result.get("answer") if isinstance(result, dict) else None
+    if isinstance(answer, str) and answer.strip():
+        return [TextContent(type="text", text=answer)], result
     return result
 
 
