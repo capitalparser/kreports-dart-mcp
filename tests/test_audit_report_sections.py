@@ -6,7 +6,7 @@ from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
     index_audit_procedures_from_sections,
 )
-from kreports.db.models import Company, Disclosure, Financial, ReportDocument, ReportSection, SourceDocument
+from kreports.db.models import AuditProcedureItem, Company, Disclosure, Financial, ReportDocument, ReportSection, SourceDocument
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
     extract_audit_procedure_items,
@@ -512,6 +512,86 @@ def test_get_audit_report_sections_adds_kam_analysis(temp_engine):
     assert analysis["has_procedure_hint"] is True
     assert "revenue" in analysis["topics"]
     assert out["data_quality"]["kam_reason_coverage"]["with_reason_hint"] == 1
+    assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 1
+
+
+def test_get_audit_report_sections_enriches_short_kam_with_indexed_procedures(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="샘플", market="KOSPI"))
+        session.add(ReportSection(
+            rcept_no="20250331000001_00760_xml",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="핵심감사사항 핵심감사사항은 우리의 전문가적 판단에 따라 당기",
+            body_hash="x",
+            body_length=33,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20250331000001_00760_xml",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="substantive_test",
+            procedure_text="매출 거래의 계약서, 세금계산서 및 입금증빙을 표본 대사하였습니다.",
+            procedure_length=35,
+            section_ordinal=0,
+            procedure_ordinal=0,
+        ))
+
+    out = get_audit_report_sections("000001", year=2024, section_key="kam")
+
+    section = out["sections"][0]
+    assert section["related_audit_procedure_count"] == 1
+    assert section["related_audit_procedure_source"] == "audit_procedure_items"
+    assert "세금계산서" in section["related_audit_procedures"][0]["procedure_excerpt"]
+    assert section["kam_analysis"]["has_procedure_hint"] is True
+    assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 1
+
+
+def test_get_audit_report_sections_falls_back_to_company_year_procedures(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="샘플", market="KOSPI"))
+        session.add(ReportSection(
+            rcept_no="20250331000001_00760_xml",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="핵심감사사항 핵심감사사항은 우리의 전문가적 판단에 따라 당기",
+            body_hash="x",
+            body_length=33,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            kam_topic="impairment",
+            procedure_type="estimation_assumption",
+            procedure_text="손상평가에 사용된 할인율과 미래현금흐름 가정을 검토하였습니다.",
+            procedure_length=31,
+            section_ordinal=0,
+            procedure_ordinal=0,
+        ))
+
+    out = get_audit_report_sections("000001", year=2024, section_key="kam")
+
+    section = out["sections"][0]
+    assert section["related_audit_procedure_source"] == "audit_procedure_items_company_year"
+    assert "할인율" in section["related_audit_procedures"][0]["procedure_excerpt"]
     assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 1
 
 

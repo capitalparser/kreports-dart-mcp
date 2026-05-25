@@ -230,6 +230,7 @@ def _kam_hint_coverage(rows: list[dict]) -> dict:
     with_procedure = sum(
         1 for row in kam_rows
         if (row.get("kam_analysis") or {}).get("has_procedure_hint")
+        or bool(row.get("related_audit_procedures"))
     )
     total = len(kam_rows)
     return {
@@ -243,6 +244,78 @@ def _kam_hint_coverage(rows: list[dict]) -> dict:
             "coverage_pct": round(with_procedure * 100.0 / total, 1) if total else 0.0,
         },
     }
+
+
+def _attach_related_audit_procedures(rows: list[dict], *, corp_code: str, year: int) -> None:
+    kam_rcept_nos = sorted({
+        str(row.get("rcept_no"))
+        for row in rows
+        if row.get("section_key") == "kam" and row.get("rcept_no")
+    })
+    if not kam_rcept_nos:
+        return
+    stmt = text(
+        """
+        SELECT rcept_no, dcm_no, kam_topic, procedure_type, procedure_text,
+               procedure_length, section_ordinal, procedure_ordinal
+        FROM audit_procedure_items
+        WHERE corp_code=:corp_code
+          AND bsns_year=:year
+          AND rcept_no IN :rcept_nos
+        ORDER BY rcept_no, section_ordinal, procedure_ordinal
+        """
+    ).bindparams(bindparam("rcept_nos", expanding=True))
+    with _engine.connect() as conn:
+        procedure_rows = [dict(r) for r in conn.execute(
+            stmt,
+            {"corp_code": corp_code, "year": year, "rcept_nos": kam_rcept_nos},
+        ).mappings().all()]
+        fallback_rows = [dict(r) for r in conn.execute(
+            text(
+                """
+                SELECT rcept_no, dcm_no, kam_topic, procedure_type, procedure_text,
+                       procedure_length, section_ordinal, procedure_ordinal
+                FROM audit_procedure_items
+                WHERE corp_code=:corp_code
+                  AND bsns_year=:year
+                ORDER BY source_type, rcept_no, section_ordinal, procedure_ordinal
+                LIMIT 10
+                """
+            ),
+            {"corp_code": corp_code, "year": year},
+        ).mappings().all()]
+
+    grouped: dict[str, list[dict]] = {}
+    for item in procedure_rows:
+        text_value = _display_text(item.pop("procedure_text") or "")
+        item["procedure_excerpt"] = text_value[:900]
+        grouped.setdefault(str(item.get("rcept_no")), []).append(item)
+    for item in fallback_rows:
+        text_value = _display_text(item.pop("procedure_text") or "")
+        item["procedure_excerpt"] = text_value[:900]
+
+    for row in rows:
+        if row.get("section_key") != "kam":
+            continue
+        procedures = grouped.get(str(row.get("rcept_no")), [])
+        source = "audit_procedure_items"
+        if not procedures:
+            procedures = fallback_rows
+            source = "audit_procedure_items_company_year"
+        if not procedures:
+            continue
+        row["related_audit_procedures"] = procedures[:10]
+        row["related_audit_procedure_count"] = len(procedures)
+        row["related_audit_procedure_source"] = source
+        analysis = row.setdefault("kam_analysis", {})
+        if not analysis.get("has_procedure_hint"):
+            analysis["has_procedure_hint"] = True
+            analysis["procedure_excerpt"] = procedures[0].get("procedure_excerpt") or ""
+            analysis["procedure_keywords"] = sorted({
+                str(item.get("procedure_type"))
+                for item in procedures
+                if item.get("procedure_type")
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -2174,6 +2247,7 @@ def get_audit_report_sections(
             from kreports.processor.audit_report_parser import summarize_kam_body
             row["kam_analysis"] = summarize_kam_body(body)
         row.pop("body_text", None)
+    _attach_related_audit_procedures(rows, corp_code=corp_code, year=year)
     for row in alternative_rows:
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
@@ -2181,6 +2255,8 @@ def get_audit_report_sections(
             from kreports.processor.audit_report_parser import summarize_kam_body
             row["kam_analysis"] = summarize_kam_body(body)
         row.pop("body_text", None)
+    if alternative_year is not None:
+        _attach_related_audit_procedures(alternative_rows, corp_code=corp_code, year=alternative_year)
     if rows:
         coverage_note = (
             "Cached audit_report report_sections."
