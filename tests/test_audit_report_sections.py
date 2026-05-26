@@ -6,7 +6,7 @@ from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
     index_audit_procedures_from_sections,
 )
-from kreports.db.models import AuditProcedureItem, Company, Disclosure, Financial, ReportDocument, ReportSection, SourceDocument
+from kreports.db.models import AuditProcedureItem, Company, Disclosure, EvidenceDocument, Financial, ReportDocument, ReportSection, SourceDocument
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
     extract_audit_procedure_items,
@@ -792,3 +792,47 @@ def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypa
             .all()
         ]
     assert procedure_types == ["estimation_assumption", "internal_control"]
+
+
+def test_index_audit_procedures_falls_back_to_evidence_documents(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    monkeypatch.setattr(collector_module, "engine", temp_engine)
+
+    with get_session() as session:
+        session.add(EvidenceDocument(
+            rcept_no="20260311000001_20260311000001_00761_xml",
+            dcm_no="20260311000001_00761",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 수익인식\n"
+                "핵심감사사항으로 선정한 이유는 수익인식의 중요한 왜곡표시위험입니다.\n"
+                "핵심감사사항이 감사에서 다루어진 방법\n"
+                "ㆍ매출 내부통제를 이해하고 평가\n"
+                "ㆍ거래 문서검사와 세금계산서 대사를 수행하였습니다.\n"
+                "## report_section/other_matter: 기타사항\n"
+                "비교표시 재무제표는 전임감사인이 감사하였습니다."
+            ),
+            text_hash="hash",
+            text_length=250,
+            source_count=1,
+        ))
+
+    out = index_audit_procedures_from_sections(year=2025)
+
+    assert out["source_basis"] == "evidence_documents"
+    assert out["ok"] == 1
+    assert out["rows_written"] == 2
+    with get_session() as session:
+        procedure_types = [
+            row.procedure_type
+            for row in session.query(AuditProcedureItem)
+            .order_by(AuditProcedureItem.procedure_ordinal)
+            .all()
+        ]
+    assert procedure_types == ["internal_control", "substantive_test"]

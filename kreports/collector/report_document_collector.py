@@ -575,6 +575,22 @@ def _persist_audit_procedure_items_from_sections(meta: dict, section_rows: list[
     return len(rows)
 
 
+def _evidence_kam_body(normalized_text: str) -> str:
+    marker = "report_section/kam"
+    start = (normalized_text or "").find(marker)
+    if start < 0:
+        return ""
+    line_start = normalized_text.rfind("\n", 0, start)
+    if line_start < 0:
+        line_start = 0
+    else:
+        line_start += 1
+    next_section = normalized_text.find("\n## report_section/", start + len(marker))
+    if next_section < 0:
+        next_section = len(normalized_text)
+    return normalized_text[line_start:next_section].strip()
+
+
 def _persist_auditors_from_business_report(meta: dict, *, content: str) -> int:
     """Persist auditor/opinion rows parsed from a cached business report."""
     if meta.get("source_type") != "business_report":
@@ -1206,8 +1222,45 @@ def index_audit_procedures_from_sections(
 
     with engine.connect() as conn:
         rows = [dict(row) for row in conn.execute(text(sql), params).mappings().all()]
+        source_basis = "report_sections"
+        if not rows:
+            evidence_sql = """
+                SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type,
+                       title AS section_title, normalized_text, text_hash, text_length,
+                       generated_at
+                FROM evidence_documents
+                WHERE source_type='audit_report'
+                  AND normalized_text LIKE '%report_section/kam%'
+            """
+            if year is not None:
+                evidence_sql += " AND bsns_year=:year"
+            evidence_sql += " ORDER BY bsns_year, rcept_no"
+            if limit is not None:
+                evidence_sql += " LIMIT :limit"
+            evidence_rows = conn.execute(text(evidence_sql), params).mappings().all()
+            rows = []
+            for ordinal, row in enumerate(evidence_rows):
+                body_text = _evidence_kam_body(row["normalized_text"])
+                if not body_text:
+                    continue
+                rows.append({
+                    "id": row["id"],
+                    "rcept_no": row["rcept_no"],
+                    "dcm_no": row["dcm_no"],
+                    "corp_code": row["corp_code"],
+                    "bsns_year": row["bsns_year"],
+                    "source_type": row["source_type"],
+                    "section_key": "kam",
+                    "section_title": row["section_title"],
+                    "body_text": body_text,
+                    "body_hash": row["text_hash"],
+                    "body_length": len(body_text),
+                    "ordinal": ordinal,
+                    "fetched_at": row["generated_at"],
+                })
+            source_basis = "evidence_documents"
 
-    totals = {"total": len(rows), "ok": 0, "failed": 0, "rows_written": 0, "errors": []}
+    totals = {"source_basis": source_basis, "total": len(rows), "ok": 0, "failed": 0, "rows_written": 0, "errors": []}
     for idx, row in enumerate(rows, 1):
         if progress_callback:
             progress_callback(idx, totals["total"], row["corp_code"], row["bsns_year"], row["rcept_no"])
