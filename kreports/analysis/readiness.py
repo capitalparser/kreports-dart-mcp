@@ -10,6 +10,7 @@ CORE_MARKETS = ("KOSPI", "KOSDAQ")
 DEFAULT_YEARS_BACK = 5
 CORE_COVERAGE_THRESHOLD = 95.0
 COMPLETENESS_THRESHOLD = 95.0
+FEATURE_COVERAGE_THRESHOLD = 50.0
 
 
 def pct(numerator: int | float | None, denominator: int | float | None) -> float:
@@ -842,19 +843,27 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             else 0
         )
 
+    def coverage_status(count: int, denominator: int, threshold: float = FEATURE_COVERAGE_THRESHOLD) -> str:
+        if int(count or 0) <= 0:
+            return "missing"
+        if pct(count, denominator) < threshold:
+            return "degraded"
+        return "usable"
+
     feature_status = {
-        "raw_source_documents": "usable" if raw_source_docs > 0 else "missing",
-        "kam_sections": "usable" if kam_sections > 0 else "missing",
-        "kam_reason_hints": "usable" if kam_reason > 0 else "missing",
-        "kam_procedure_hints": "usable" if kam_procedure > 0 else "missing",
+        "raw_source_documents": coverage_status(raw_source_companies, listed),
+        "kam_sections": coverage_status(kam_companies, listed),
+        "kam_reason_hints": "usable" if kam_reason > 0 and pct(kam_reason, kam_sections) >= FEATURE_COVERAGE_THRESHOLD else ("degraded" if kam_reason > 0 else "missing"),
+        "kam_procedure_hints": "usable" if kam_procedure > 0 and pct(kam_procedure, kam_sections) >= FEATURE_COVERAGE_THRESHOLD else ("degraded" if kam_procedure > 0 else "missing"),
         "audit_report_matters": "usable" if matter_sections > 0 else "missing",
-        "accounting_notes": "usable" if note_chapters > 0 else "missing",
-        "accounting_policy_items": "usable" if policy_items > 0 else "missing",
-        "audit_procedure_items": "usable" if procedure_items > 0 else "missing",
+        "accounting_notes": coverage_status(note_chapter_companies, listed),
+        "accounting_policy_items": coverage_status(policy_item_companies, listed),
+        "audit_procedure_items": coverage_status(procedure_item_companies, listed),
     }
     missing = [key for key, status in feature_status.items() if status == "missing"]
+    degraded = [key for key, status in feature_status.items() if status == "degraded"]
     return {
-        "verdict": "pass" if not missing else "conditional",
+        "verdict": "pass" if not missing and not degraded else "conditional",
         "year": year,
         "market": market,
         "listed_companies": listed,
@@ -891,6 +900,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         },
         "feature_status": feature_status,
         "missing_features": missing,
+        "degraded_features": degraded,
         "recommended_next": [
             "Run derived-first backfill: refresh extractors from cached/externalized raw documents before collecting more raw bodies.",
             "Rebuild evidence_documents so MCP narrative search uses compact normalized evidence instead of source_documents raw XML.",
@@ -921,6 +931,7 @@ def audit_kam_quality_snapshot(
     reason_condition = (
         "rs.body_text LIKE '%핵심감사사항으로 결정%' "
         "OR rs.body_text LIKE '%핵심 감사사항으로 결정%' "
+        "OR rs.body_text LIKE '%핵심감사사항으로 선정한 이유%' "
         "OR rs.body_text LIKE '%중요한 왜곡표시위험%' "
         "OR rs.body_text LIKE '%유의적인 위험%' "
         "OR rs.body_text LIKE '%추정의 불확실성%' "
@@ -1017,6 +1028,7 @@ def audit_kam_quality_snapshot(
             evidence_reason_condition = (
                 "ed.normalized_text LIKE '%핵심감사사항으로 결정%' "
                 "OR ed.normalized_text LIKE '%핵심 감사사항으로 결정%' "
+                "OR ed.normalized_text LIKE '%핵심감사사항으로 선정한 이유%' "
                 "OR ed.normalized_text LIKE '%중요한 왜곡표시위험%' "
                 "OR ed.normalized_text LIKE '%유의적인 위험%' "
                 "OR ed.normalized_text LIKE '%추정의 불확실성%' "
@@ -1048,7 +1060,7 @@ def audit_kam_quality_snapshot(
                     LEFT JOIN audit_procedure_items api
                       ON api.corp_code=ed.corp_code
                      AND api.bsns_year=ed.bsns_year
-                     AND api.rcept_no=ed.rcept_no
+                     AND (api.rcept_no=ed.rcept_no OR api.source_type=ed.source_type)
                     WHERE ed.bsns_year=:year
                       AND ed.source_type='audit_report'
                       AND ed.normalized_text LIKE '%report_section/kam%'
@@ -1081,7 +1093,7 @@ def audit_kam_quality_snapshot(
                     LEFT JOIN audit_procedure_items api
                       ON api.corp_code=ed.corp_code
                      AND api.bsns_year=ed.bsns_year
-                     AND api.rcept_no=ed.rcept_no
+                     AND (api.rcept_no=ed.rcept_no OR api.source_type=ed.source_type)
                     WHERE ed.bsns_year=:year
                       AND ed.source_type='audit_report'
                       AND ed.normalized_text LIKE '%report_section/kam%'

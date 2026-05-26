@@ -349,6 +349,56 @@ def test_auditor_feature_readiness_counts_evidence_kam_fallback(temp_engine):
     assert "kam_sections" not in snapshot["missing_features"]
 
 
+def test_auditor_feature_readiness_marks_low_coverage_as_degraded(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        for idx in range(10):
+            session.add(Company(
+                corp_code=f"{idx:08d}",
+                stock_code=f"{idx:06d}",
+                corp_name=f"상장사{idx}",
+                market="KOSPI",
+                induty_code="264",
+            ))
+        session.add(EvidenceDocument(
+            corp_code="00000000",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000000_A",
+            dcm_no="A",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 수익인식\n"
+                "핵심감사사항으로 선정한 이유는 중요한 왜곡표시위험 때문입니다. "
+                "우리는 문서검사 감사절차를 수행하였습니다."
+            ),
+            text_hash="x",
+            text_length=180,
+            source_count=1,
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20260311000000_A",
+            corp_code="00000000",
+            bsns_year=2025,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="substantive_test",
+            procedure_text="문서검사 감사절차를 수행하였습니다.",
+            section_ordinal=0,
+            procedure_ordinal=0,
+        ))
+
+    snapshot = auditor_feature_readiness_snapshot(year=2025, market="KOSPI")
+
+    assert snapshot["verdict"] == "conditional"
+    assert snapshot["feature_status"]["kam_sections"] == "degraded"
+    assert snapshot["feature_status"]["audit_procedure_items"] == "degraded"
+    assert "kam_sections" in snapshot["degraded_features"]
+    assert "audit_procedure_items" in snapshot["degraded_features"]
+
+
 def test_audit_kam_quality_snapshot_identifies_repair_candidates(temp_engine):
     from kreports.db.engine import get_session
 
@@ -446,6 +496,53 @@ def test_audit_kam_quality_snapshot_falls_back_to_evidence_documents(temp_engine
     assert snapshot["counts"]["kam_sections"] == 1
     assert snapshot["counts"]["reason_hints"] == 1
     assert snapshot["counts"]["procedure_hints"] == 1
+
+
+def test_audit_kam_quality_counts_company_year_procedure_index_for_evidence(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="절차색인회사",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001_A",
+            dcm_no="A",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 수익인식\n"
+                "핵심감사사항으로 선정한 이유는 중요한 왜곡표시위험 때문입니다. "
+                "우리는 내부통제 이해 및 평가와 문서검사 감사절차를 수행하였습니다."
+            ),
+            text_hash="x",
+            text_length=180,
+            source_count=1,
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20260311000001_B",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="substantive_test",
+            procedure_text="문서검사 감사절차를 수행하였습니다.",
+            section_ordinal=0,
+            procedure_ordinal=0,
+        ))
+
+    snapshot = audit_kam_quality_snapshot(year=2025, market="KOSPI", min_body_length=80, limit=10)
+
+    assert snapshot["source_basis"] == "evidence_documents"
+    assert snapshot["counts"]["indexed_procedure_sections"] == 1
+    assert snapshot["rates"]["indexed_procedure_coverage"] == 100.0
 
 
 def test_kam_repair_targets_normalizes_original_disclosure_receipts(temp_engine):
