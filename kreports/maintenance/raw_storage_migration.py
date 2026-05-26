@@ -61,11 +61,82 @@ def raw_storage_readiness() -> dict:
               SUM(CASE WHEN content_type='derived_report_sections' THEN 1 ELSE 0 END) derived,
               SUM(CASE WHEN storage_status='externalized' THEN 1 ELSE 0 END) externalized,
               SUM(CASE WHEN storage_uri IS NULL OR storage_uri='' THEN 1 ELSE 0 END) missing_uri,
-              SUM(CASE WHEN raw_content!='' THEN 1 ELSE 0 END) inline_present
+              SUM(CASE WHEN raw_content!='' THEN 1 ELSE 0 END) inline_present,
+              SUM(CASE
+                    WHEN content_type!='derived_report_sections'
+                     AND COALESCE(storage_status, 'inline')!='derived_only'
+                     AND (
+                       (raw_content IS NOT NULL AND raw_content!='')
+                       OR (storage_uri IS NOT NULL AND storage_uri!='')
+                     )
+                    THEN 1 ELSE 0
+                  END) raw_extractable,
+              SUM(CASE
+                    WHEN content_type!='derived_report_sections'
+                     AND (
+                       COALESCE(storage_status, '')='derived_only'
+                       OR (
+                         (raw_content IS NULL OR raw_content='')
+                         AND (storage_uri IS NULL OR storage_uri='')
+                       )
+                     )
+                    THEN 1 ELSE 0
+                  END) derived_placeholders,
+              SUM(CASE
+                    WHEN source_type='business_report'
+                     AND content_type!='derived_report_sections'
+                     AND COALESCE(storage_status, 'inline')!='derived_only'
+                     AND (
+                       (raw_content IS NOT NULL AND raw_content!='')
+                       OR (storage_uri IS NOT NULL AND storage_uri!='')
+                     )
+                    THEN 1 ELSE 0
+                  END) raw_business_extractable,
+              SUM(CASE
+                    WHEN source_type='audit_report'
+                     AND content_type!='derived_report_sections'
+                     AND COALESCE(storage_status, 'inline')!='derived_only'
+                     AND (
+                       (raw_content IS NOT NULL AND raw_content!='')
+                       OR (storage_uri IS NOT NULL AND storage_uri!='')
+                     )
+                    THEN 1 ELSE 0
+                  END) raw_audit_extractable,
+              SUM(CASE
+                    WHEN source_type='business_report'
+                     AND content_type!='derived_report_sections'
+                     AND (
+                       COALESCE(storage_status, '')='derived_only'
+                       OR (
+                         (raw_content IS NULL OR raw_content='')
+                         AND (storage_uri IS NULL OR storage_uri='')
+                       )
+                     )
+                    THEN 1 ELSE 0
+                  END) derived_business_placeholders,
+              SUM(CASE
+                    WHEN source_type='audit_report'
+                     AND content_type!='derived_report_sections'
+                     AND (
+                       COALESCE(storage_status, '')='derived_only'
+                       OR (
+                         (raw_content IS NULL OR raw_content='')
+                         AND (storage_uri IS NULL OR storage_uri='')
+                       )
+                     )
+                    THEN 1 ELSE 0
+                  END) derived_audit_placeholders
             FROM source_documents
             """
         )).mappings().one()
-    return dict(row)
+    out = {key: int(value or 0) for key, value in dict(row).items()}
+    out["parser_repair_ready"] = out["raw_extractable"] > 0
+    out["status_note"] = (
+        "raw documents available for parser repair"
+        if out["parser_repair_ready"]
+        else "no raw documents available; only derived placeholders cannot support parser repair"
+    )
+    return out
 
 
 def verify_raw_storage(*, limit: int | None = None) -> dict:

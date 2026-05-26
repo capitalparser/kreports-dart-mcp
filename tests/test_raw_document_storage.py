@@ -70,6 +70,74 @@ def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, 
         assert doc.compressed_length > 0
 
 
+def test_raw_storage_readiness_distinguishes_extractable_raw_from_placeholders(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+    from kreports.maintenance.raw_storage_migration import raw_storage_readiness
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250331000001",
+                corp_code="00000001",
+                bsns_year=2024,
+                source_type="business_report",
+                report_nm="사업보고서",
+                content_type="xml",
+                raw_content="<DOCUMENT>원문</DOCUMENT>",
+                doc_hash="raw",
+                storage_status="inline",
+            ),
+            SourceDocument(
+                rcept_no="20250331000002",
+                corp_code="00000001",
+                bsns_year=2024,
+                source_type="audit_report",
+                report_nm="감사보고서",
+                content_type="xml",
+                raw_content="",
+                doc_hash="derived",
+                storage_status="derived_only",
+            ),
+        ])
+
+    out = raw_storage_readiness()
+
+    assert out["total"] == 2
+    assert out["raw_extractable"] == 1
+    assert out["raw_business_extractable"] == 1
+    assert out["raw_audit_extractable"] == 0
+    assert out["derived_placeholders"] == 1
+    assert out["derived_audit_placeholders"] == 1
+    assert out["parser_repair_ready"] is True
+
+
+def test_raw_storage_readiness_marks_parser_repair_blocked_without_raw(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+    from kreports.maintenance.raw_storage_migration import raw_storage_readiness
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000002",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            report_nm="감사보고서",
+            content_type="xml",
+            raw_content="",
+            doc_hash="derived",
+            storage_status="derived_only",
+        ))
+
+    out = raw_storage_readiness()
+
+    assert out["raw_extractable"] == 0
+    assert out["derived_placeholders"] == 1
+    assert out["parser_repair_ready"] is False
+    assert "no raw documents" in out["status_note"]
+
+
 def test_verify_raw_storage_detects_missing_file(temp_engine):
     from kreports.db.engine import get_session
     from kreports.db.models import SourceDocument
