@@ -827,6 +827,52 @@ def auditor_feature_readiness_cmd(
         typer.echo(f"- {item}")
 
 
+@app.command("audit-kam-quality")
+def audit_kam_quality_cmd(
+    year: int = typer.Option(2025, "--year", help="기준 사업연도"),
+    market: Optional[str] = typer.Option(None, "--market", help="시장 필터: KOSPI/KOSDAQ"),
+    min_body_length: int = typer.Option(300, "--min-body-length", help="짧은 KAM 본문 판정 기준"),
+    limit: int = typer.Option(50, "--limit", help="repair candidate 출력 수"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """KAM 본문 품질과 재파싱 후보를 점검한다."""
+    from kreports.analysis.readiness import audit_kam_quality_snapshot
+
+    snapshot = audit_kam_quality_snapshot(
+        year=year,
+        market=market,
+        min_body_length=min_body_length,
+        limit=limit,
+    )
+    if json_output:
+        _json_print(snapshot)
+        return
+
+    typer.echo(f"Audit KAM quality: {snapshot['verdict']}")
+    typer.echo(
+        f"year: {snapshot['year']} | market: {snapshot['market'] or '-'} "
+        f"| min_body_length: {snapshot['min_body_length']}"
+    )
+    typer.echo("counts:")
+    for key, value in snapshot["counts"].items():
+        typer.echo(f"- {key}: {value:,}")
+    typer.echo("rates:")
+    for key, value in snapshot["rates"].items():
+        typer.echo(f"- {key}: {value}%")
+    typer.echo(f"required_gaps: {', '.join(snapshot['required_gaps']) or '-'}")
+    if snapshot["repair_candidates"]:
+        typer.echo("repair_candidates:")
+        for row in snapshot["repair_candidates"]:
+            typer.echo(
+                f"  {row['stock_code'] or row['corp_code']} {row['corp_name']} "
+                f"rcept_no={row['rcept_no']} dcm_no={row.get('dcm_no') or '-'} "
+                f"len={row['body_length']} gaps={','.join(row['gap_reasons'])}"
+            )
+    typer.echo("recommended_next:")
+    for item in snapshot["recommended_next"]:
+        typer.echo(f"- {item}")
+
+
 # ---------------------------------------------------------------------------
 # collect-golden
 # ---------------------------------------------------------------------------

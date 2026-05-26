@@ -1,4 +1,5 @@
 from kreports.analysis.readiness import (
+    audit_kam_quality_snapshot,
     auditor_readiness_snapshot,
     auditor_feature_readiness_snapshot,
     backfill_plan,
@@ -10,6 +11,7 @@ from kreports.db.models import (
     AccountingPolicyItem,
     AuditProcedureItem,
     Company,
+    EvidenceDocument,
     ReportSection,
     SourceDocument,
 )
@@ -302,6 +304,105 @@ def test_auditor_feature_readiness_recommends_derived_first_backfill(temp_engine
     assert "source_documents backfill" not in joined
     assert "evidence_documents" in joined
     assert "audit_fee" in joined
+
+
+def test_audit_kam_quality_snapshot_identifies_repair_candidates(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="짧은KAM",
+                market="KOSPI",
+                induty_code="264",
+            ),
+            Company(
+                corp_code="00000002",
+                stock_code="000002",
+                corp_name="좋은KAM",
+                market="KOSPI",
+                induty_code="264",
+            ),
+        ])
+        session.add_all([
+            ReportSection(
+                rcept_no="20260311000001_A",
+                corp_code="00000001",
+                bsns_year=2025,
+                source_type="audit_report",
+                section_key="kam",
+                section_title="핵심감사사항",
+                body_text="핵심감사사항은 우리의 판단에 따라 당기 감사에서 유의적인 사항입니다.",
+                body_length=40,
+                ordinal=0,
+            ),
+            ReportSection(
+                rcept_no="20260311000002_A",
+                corp_code="00000002",
+                bsns_year=2025,
+                source_type="audit_report",
+                section_key="kam",
+                section_title="수익인식",
+                body_text=(
+                    "수익인식은 핵심감사사항입니다. 핵심감사사항으로 선정한 이유는 거래조건 판단과 "
+                    "중요한 왜곡표시위험 때문입니다. 우리는 매출 관련 내부통제 이해 및 평가와 "
+                    "표본 문서검사 감사절차를 수행하였습니다."
+                ),
+                body_length=120,
+                ordinal=0,
+            ),
+        ])
+
+    snapshot = audit_kam_quality_snapshot(year=2025, market="KOSPI", min_body_length=80, limit=10)
+
+    assert snapshot["verdict"] == "fail"
+    assert snapshot["counts"]["kam_sections"] == 2
+    assert snapshot["counts"]["short_kam_sections"] == 1
+    assert snapshot["counts"]["reason_hints"] == 1
+    assert snapshot["counts"]["procedure_hints"] == 1
+    assert snapshot["rates"]["reason_hint_coverage"] == 50.0
+    assert snapshot["repair_candidates"][0]["corp_name"] == "짧은KAM"
+    assert "short_body" in snapshot["repair_candidates"][0]["gap_reasons"]
+
+
+def test_audit_kam_quality_snapshot_falls_back_to_evidence_documents(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="증거KAM",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001_A",
+            dcm_no="A",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "# Evidence document\n"
+                "## report_section/kam: 핵심감사사항\n"
+                "핵심감사사항으로 결정한 이유는 중요한 왜곡표시위험 때문입니다. "
+                "우리는 내부통제 이해 및 평가와 문서검사 감사절차를 수행하였습니다."
+            ),
+            text_hash="x",
+            text_length=180,
+            source_count=1,
+        ))
+
+    snapshot = audit_kam_quality_snapshot(year=2025, market="KOSPI", min_body_length=80, limit=10)
+
+    assert snapshot["source_basis"] == "evidence_documents"
+    assert snapshot["counts"]["kam_sections"] == 1
+    assert snapshot["counts"]["reason_hints"] == 1
+    assert snapshot["counts"]["procedure_hints"] == 1
 
 
 def test_auditor_readiness_counts_cached_source_documents_not_submission_window(temp_engine):

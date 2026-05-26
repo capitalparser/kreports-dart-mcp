@@ -845,3 +845,290 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "Investigate parser gaps where KAM exists but reason/procedure hints are absent.",
         ],
     }
+
+
+def audit_kam_quality_snapshot(
+    *,
+    year: int = 2025,
+    market: str | None = None,
+    min_body_length: int = 300,
+    limit: int = 50,
+) -> dict:
+    """Quality view for audit-report KAM sections and repair targeting."""
+    params: dict[str, object] = {
+        "year": int(year),
+        "min_body_length": int(min_body_length),
+        "limit": int(limit),
+    }
+    market_filter = ""
+    if market:
+        market_filter = " AND c.market=:market"
+        params["market"] = market
+
+    reason_condition = (
+        "rs.body_text LIKE '%핵심감사사항으로 결정%' "
+        "OR rs.body_text LIKE '%핵심 감사사항으로 결정%' "
+        "OR rs.body_text LIKE '%중요한 왜곡표시위험%' "
+        "OR rs.body_text LIKE '%유의적인 위험%' "
+        "OR rs.body_text LIKE '%추정의 불확실성%' "
+        "OR rs.body_text LIKE '%경영진의 판단%'"
+    )
+    procedure_condition = (
+        "rs.body_text LIKE '%감사절차%' "
+        "OR rs.body_text LIKE '%감사에서 다루어진 방법%' "
+        "OR rs.body_text LIKE '%수행하였습니다%' "
+        "OR rs.body_text LIKE '%문서검사%' "
+        "OR rs.body_text LIKE '%내부통제%' "
+        "OR rs.body_text LIKE '%재계산%' "
+        "OR rs.body_text LIKE '%대사%'"
+    )
+
+    with engine.connect() as conn:
+        counts = conn.execute(
+            text(
+                f"""
+                SELECT
+                  COUNT(*) AS kam_sections,
+                  COUNT(DISTINCT rs.corp_code) AS kam_companies,
+                  SUM(CASE WHEN COALESCE(rs.body_length, LENGTH(rs.body_text)) < :min_body_length THEN 1 ELSE 0 END)
+                    AS short_kam_sections,
+                  SUM(CASE WHEN {reason_condition} THEN 1 ELSE 0 END) AS reason_hints,
+                  SUM(CASE WHEN {procedure_condition} THEN 1 ELSE 0 END) AS procedure_hints,
+                  SUM(CASE WHEN api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
+                  COUNT(DISTINCT CASE WHEN api.id IS NOT NULL THEN rs.corp_code END) AS indexed_procedure_companies
+                FROM report_sections rs
+                JOIN companies c ON c.corp_code=rs.corp_code
+                LEFT JOIN audit_procedure_items api
+                  ON api.corp_code=rs.corp_code
+                 AND api.bsns_year=rs.bsns_year
+                 AND api.rcept_no=rs.rcept_no
+                WHERE rs.bsns_year=:year
+                  AND rs.source_type='audit_report'
+                  AND rs.section_key='kam'
+                  {market_filter}
+                """
+            ),
+            params,
+        ).mappings().first() or {}
+
+        candidates = conn.execute(
+            text(
+                f"""
+                SELECT
+                  rs.corp_code,
+                  c.stock_code,
+                  c.corp_name,
+                  c.market,
+                  c.induty_code,
+                  rs.bsns_year,
+                  rs.rcept_no,
+                  rs.dcm_no,
+                  rs.section_title,
+                  COALESCE(rs.body_length, LENGTH(rs.body_text)) AS body_length,
+                  CASE WHEN {reason_condition} THEN 1 ELSE 0 END AS has_reason_hint,
+                  CASE WHEN {procedure_condition} THEN 1 ELSE 0 END AS has_procedure_hint,
+                  COUNT(api.id) AS procedure_item_count,
+                  substr(rs.body_text, 1, 260) AS body_head
+                FROM report_sections rs
+                JOIN companies c ON c.corp_code=rs.corp_code
+                LEFT JOIN audit_procedure_items api
+                  ON api.corp_code=rs.corp_code
+                 AND api.bsns_year=rs.bsns_year
+                 AND api.rcept_no=rs.rcept_no
+                WHERE rs.bsns_year=:year
+                  AND rs.source_type='audit_report'
+                  AND rs.section_key='kam'
+                  {market_filter}
+                GROUP BY rs.id
+                HAVING body_length < :min_body_length
+                    OR has_reason_hint=0
+                    OR has_procedure_hint=0
+                    OR procedure_item_count=0
+                ORDER BY
+                  CASE WHEN body_length < :min_body_length THEN 0 ELSE 1 END,
+                  has_reason_hint ASC,
+                  has_procedure_hint ASC,
+                  procedure_item_count ASC,
+                  body_length ASC,
+                  c.market,
+                  c.corp_name
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings().all()
+
+        source_basis = "report_sections"
+        if int(counts.get("kam_sections") or 0) == 0:
+            source_basis = "evidence_documents"
+            evidence_reason_condition = (
+                "ed.normalized_text LIKE '%핵심감사사항으로 결정%' "
+                "OR ed.normalized_text LIKE '%핵심 감사사항으로 결정%' "
+                "OR ed.normalized_text LIKE '%중요한 왜곡표시위험%' "
+                "OR ed.normalized_text LIKE '%유의적인 위험%' "
+                "OR ed.normalized_text LIKE '%추정의 불확실성%' "
+                "OR ed.normalized_text LIKE '%경영진의 판단%'"
+            )
+            evidence_procedure_condition = (
+                "ed.normalized_text LIKE '%감사절차%' "
+                "OR ed.normalized_text LIKE '%감사에서 다루어진 방법%' "
+                "OR ed.normalized_text LIKE '%수행하였습니다%' "
+                "OR ed.normalized_text LIKE '%문서검사%' "
+                "OR ed.normalized_text LIKE '%내부통제%' "
+                "OR ed.normalized_text LIKE '%재계산%' "
+                "OR ed.normalized_text LIKE '%대사%'"
+            )
+            counts = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                      COUNT(*) AS kam_sections,
+                      COUNT(DISTINCT ed.corp_code) AS kam_companies,
+                      SUM(CASE WHEN COALESCE(ed.text_length, LENGTH(ed.normalized_text)) < :min_body_length THEN 1 ELSE 0 END)
+                        AS short_kam_sections,
+                      SUM(CASE WHEN {evidence_reason_condition} THEN 1 ELSE 0 END) AS reason_hints,
+                      SUM(CASE WHEN {evidence_procedure_condition} THEN 1 ELSE 0 END) AS procedure_hints,
+                      SUM(CASE WHEN api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
+                      COUNT(DISTINCT CASE WHEN api.id IS NOT NULL THEN ed.corp_code END) AS indexed_procedure_companies
+                    FROM evidence_documents ed
+                    JOIN companies c ON c.corp_code=ed.corp_code
+                    LEFT JOIN audit_procedure_items api
+                      ON api.corp_code=ed.corp_code
+                     AND api.bsns_year=ed.bsns_year
+                     AND api.rcept_no=ed.rcept_no
+                    WHERE ed.bsns_year=:year
+                      AND ed.source_type='audit_report'
+                      AND ed.normalized_text LIKE '%report_section/kam%'
+                      {market_filter}
+                    """
+                ),
+                params,
+            ).mappings().first() or {}
+
+            candidates = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                      ed.corp_code,
+                      c.stock_code,
+                      c.corp_name,
+                      c.market,
+                      c.induty_code,
+                      ed.bsns_year,
+                      ed.rcept_no,
+                      ed.dcm_no,
+                      ed.title AS section_title,
+                      COALESCE(ed.text_length, LENGTH(ed.normalized_text)) AS body_length,
+                      CASE WHEN {evidence_reason_condition} THEN 1 ELSE 0 END AS has_reason_hint,
+                      CASE WHEN {evidence_procedure_condition} THEN 1 ELSE 0 END AS has_procedure_hint,
+                      COUNT(api.id) AS procedure_item_count,
+                      substr(ed.normalized_text, instr(ed.normalized_text, 'report_section/kam'), 260) AS body_head
+                    FROM evidence_documents ed
+                    JOIN companies c ON c.corp_code=ed.corp_code
+                    LEFT JOIN audit_procedure_items api
+                      ON api.corp_code=ed.corp_code
+                     AND api.bsns_year=ed.bsns_year
+                     AND api.rcept_no=ed.rcept_no
+                    WHERE ed.bsns_year=:year
+                      AND ed.source_type='audit_report'
+                      AND ed.normalized_text LIKE '%report_section/kam%'
+                      {market_filter}
+                    GROUP BY ed.id
+                    HAVING body_length < :min_body_length
+                        OR has_reason_hint=0
+                        OR has_procedure_hint=0
+                        OR procedure_item_count=0
+                    ORDER BY
+                      CASE WHEN body_length < :min_body_length THEN 0 ELSE 1 END,
+                      has_reason_hint ASC,
+                      has_procedure_hint ASC,
+                      procedure_item_count ASC,
+                      body_length ASC,
+                      c.market,
+                      c.corp_name
+                    LIMIT :limit
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+    kam_sections = int(counts.get("kam_sections") or 0)
+    reason_hints = int(counts.get("reason_hints") or 0)
+    procedure_hints = int(counts.get("procedure_hints") or 0)
+    indexed_procedure_sections = int(counts.get("indexed_procedure_sections") or 0)
+    repair_candidates = []
+    for row in candidates:
+        body_length = int(row["body_length"] or 0)
+        has_reason = bool(row["has_reason_hint"])
+        has_procedure = bool(row["has_procedure_hint"])
+        procedure_count = int(row["procedure_item_count"] or 0)
+        gap_reasons = []
+        if body_length < int(min_body_length):
+            gap_reasons.append("short_body")
+        if not has_reason:
+            gap_reasons.append("missing_reason_hint")
+        if not has_procedure:
+            gap_reasons.append("missing_procedure_hint")
+        if procedure_count <= 0:
+            gap_reasons.append("missing_indexed_procedures")
+        repair_candidates.append({
+            "source_basis": source_basis,
+            "corp_code": row["corp_code"],
+            "stock_code": row["stock_code"],
+            "corp_name": row["corp_name"],
+            "market": row["market"],
+            "induty_code": row["induty_code"],
+            "bsns_year": int(row["bsns_year"]),
+            "rcept_no": row["rcept_no"],
+            "dcm_no": row["dcm_no"],
+            "section_title": row["section_title"],
+            "body_length": body_length,
+            "has_reason_hint": has_reason,
+            "has_procedure_hint": has_procedure,
+            "procedure_item_count": procedure_count,
+            "gap_reasons": gap_reasons,
+            "body_head": row["body_head"],
+        })
+
+    rates = {
+        "reason_hint_coverage": pct(reason_hints, kam_sections),
+        "procedure_hint_coverage": pct(procedure_hints, kam_sections),
+        "indexed_procedure_coverage": pct(indexed_procedure_sections, kam_sections),
+        "short_body_rate": pct(int(counts.get("short_kam_sections") or 0), kam_sections),
+    }
+    required_gaps = []
+    if kam_sections <= 0:
+        required_gaps.append("kam_sections")
+    if rates["reason_hint_coverage"] < 50.0:
+        required_gaps.append("kam_reason_hints")
+    if rates["procedure_hint_coverage"] < 50.0:
+        required_gaps.append("kam_procedure_hints")
+    if rates["indexed_procedure_coverage"] < 50.0:
+        required_gaps.append("audit_procedure_items")
+    if rates["short_body_rate"] > 30.0:
+        required_gaps.append("short_kam_body")
+
+    return {
+        "verdict": "pass" if not required_gaps else "fail",
+        "year": int(year),
+        "market": market,
+        "min_body_length": int(min_body_length),
+        "source_basis": source_basis,
+        "counts": {
+            "kam_sections": kam_sections,
+            "kam_companies": int(counts.get("kam_companies") or 0),
+            "short_kam_sections": int(counts.get("short_kam_sections") or 0),
+            "reason_hints": reason_hints,
+            "procedure_hints": procedure_hints,
+            "indexed_procedure_sections": indexed_procedure_sections,
+            "indexed_procedure_companies": int(counts.get("indexed_procedure_companies") or 0),
+        },
+        "rates": rates,
+        "required_gaps": required_gaps,
+        "repair_candidates": repair_candidates,
+        "recommended_next": [
+            "Reparse only repair_candidates from original DART audit-report attachments when API quota is available.",
+            "Run index-audit-procedures after KAM section repair.",
+            "Rebuild evidence_documents after report_sections and audit_procedure_items are repaired.",
+        ],
+    }
