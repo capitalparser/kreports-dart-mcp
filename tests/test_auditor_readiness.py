@@ -630,7 +630,8 @@ def test_kam_repair_targets_normalizes_original_disclosure_receipts(temp_engine)
                 normalized_text=(
                     "## report_section/kam: 수익인식\n"
                     "핵심감사사항으로 선정한 이유는 중요한 왜곡표시위험 때문입니다. "
-                    "우리는 문서검사 감사절차를 수행하였습니다."
+                    "우리는 문서검사 감사절차를 수행하였습니다. "
+                    "관련 내부통제 이해와 평가, 계약 조건 검토 및 기간귀속 테스트를 수행하였습니다."
                 ),
                 text_hash="y",
                 text_length=180,
@@ -649,6 +650,47 @@ def test_kam_repair_targets_normalizes_original_disclosure_receipts(temp_engine)
     assert targets["targets"][0]["source_rcept_no"] == "20260311000001"
     assert targets["targets"][0]["rcept_no"] == "20260311000001_20260311000001_00761_xml"
     assert "missing_indexed_procedures" in targets["excluded_gap_reasons"]
+
+
+def test_evidence_kam_quality_ignores_generic_auditor_responsibility_procedures(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="절차오인방지",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001_20260311000001_00761_xml",
+            dcm_no="20260311000001_00761",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 핵심감사사항\n"
+                "핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다.\n"
+                "## report_section/auditor_responsibility: 감사인의 책임\n"
+                "우리는 중요왜곡표시위험에 대응하는 감사절차를 설계하고 수행합니다."
+            ),
+            text_hash="x",
+            text_length=210,
+            source_count=2,
+        ))
+
+    quality = audit_kam_quality_snapshot(year=2025, market="KOSPI", min_body_length=10, limit=10)
+
+    assert quality["counts"]["kam_sections"] == 1
+    assert quality["counts"]["procedure_hints"] == 0
+    assert quality["repair_candidates"][0]["gap_reasons"] == [
+        "missing_reason_hint",
+        "missing_procedure_hint",
+        "missing_indexed_procedures",
+    ]
 
 
 def test_repair_kam_sections_executes_only_normalized_targets(temp_engine, monkeypatch):

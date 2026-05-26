@@ -17,6 +17,50 @@ def pct(numerator: int | float | None, denominator: int | float | None) -> float
     return round(100.0 * float(numerator or 0) / float(denominator or 0), 1) if denominator else 0.0
 
 
+_KAM_REASON_PATTERNS = (
+    "핵심감사사항으로 결정",
+    "핵심 감사사항으로 결정",
+    "핵심감사사항으로 선정한 이유",
+    "중요한 왜곡표시위험",
+    "유의적인 위험",
+    "추정의 불확실성",
+    "경영진의 판단",
+)
+
+_KAM_PROCEDURE_PATTERNS = (
+    "감사절차",
+    "감사에서 다루어진 방법",
+    "수행하였습니다",
+    "문서검사",
+    "내부통제",
+    "재계산",
+    "대사",
+)
+
+_NO_KAM_PATTERNS = (
+    "보고해야 할 핵심감사사항이 없",
+    "보고할 핵심감사사항이 없",
+    "핵심감사사항이 없다고 결정",
+)
+
+
+def _evidence_kam_body(normalized_text: str | None) -> str:
+    """Return only the KAM evidence block, excluding later generic sections."""
+    text_value = normalized_text or ""
+    start = text_value.find("report_section/kam")
+    if start < 0:
+        return ""
+    tail = text_value[start:]
+    next_section = tail.find("\n## report_section/", len("report_section/kam"))
+    if next_section > 0:
+        tail = tail[:next_section]
+    return tail.strip()
+
+
+def _contains_any(text_value: str, patterns: tuple[str, ...]) -> bool:
+    return any(pattern in text_value for pattern in patterns)
+
+
 def required_years(year: int = 2025, years_back: int = DEFAULT_YEARS_BACK) -> list[int]:
     return list(range(int(year) - int(years_back) + 1, int(year) + 1))
 
@@ -746,39 +790,31 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "audit_report_matters": "report_sections",
         }
         if kam_sections == 0 and "evidence_documents" in table_names:
-            evidence_kam_filter = (
-                "ed.source_type='audit_report' AND ed.bsns_year=:year "
-                "AND ed.normalized_text LIKE '%report_section/kam%'"
-            )
-            kam_sections = scalar(
-                "SELECT COUNT(*) FROM evidence_documents ed "
-                "JOIN companies c ON c.corp_code=ed.corp_code "
-                f"WHERE {evidence_kam_filter}" + market_filter
-            )
-            kam_companies = scalar(
-                "SELECT COUNT(DISTINCT ed.corp_code) FROM evidence_documents ed "
-                "JOIN companies c ON c.corp_code=ed.corp_code "
-                f"WHERE {evidence_kam_filter}" + market_filter
-            )
-            kam_reason = scalar(
-                "SELECT COUNT(*) FROM evidence_documents ed "
-                "JOIN companies c ON c.corp_code=ed.corp_code "
-                f"WHERE {evidence_kam_filter} "
-                "AND (ed.normalized_text LIKE '%핵심감사사항으로 결정%' "
-                "OR ed.normalized_text LIKE '%핵심감사사항으로 선정한 이유%' "
-                "OR ed.normalized_text LIKE '%중요한 왜곡표시위험%' "
-                "OR ed.normalized_text LIKE '%경영진의 판단%')"
-                + market_filter
-            )
-            kam_procedure = scalar(
-                "SELECT COUNT(*) FROM evidence_documents ed "
-                "JOIN companies c ON c.corp_code=ed.corp_code "
-                f"WHERE {evidence_kam_filter} "
-                "AND (ed.normalized_text LIKE '%감사절차%' "
-                "OR ed.normalized_text LIKE '%감사에서 다루어진 방법%' "
-                "OR ed.normalized_text LIKE '%수행하였습니다%')"
-                + market_filter
-            )
+            evidence_rows = conn.execute(
+                text(
+                    "SELECT ed.corp_code, ed.normalized_text "
+                    "FROM evidence_documents ed "
+                    "JOIN companies c ON c.corp_code=ed.corp_code "
+                    "WHERE ed.source_type='audit_report' AND ed.bsns_year=:year "
+                    "AND ed.normalized_text LIKE '%report_section/kam%'" + market_filter
+                ),
+                params,
+            ).mappings().all()
+            kam_companies_seen = set()
+            kam_sections = 0
+            kam_reason = 0
+            kam_procedure = 0
+            for row in evidence_rows:
+                kam_body = _evidence_kam_body(row["normalized_text"])
+                if not kam_body or _contains_any(kam_body, _NO_KAM_PATTERNS):
+                    continue
+                kam_sections += 1
+                kam_companies_seen.add(row["corp_code"])
+                if _contains_any(kam_body, _KAM_REASON_PATTERNS):
+                    kam_reason += 1
+                if _contains_any(kam_body, _KAM_PROCEDURE_PATTERNS):
+                    kam_procedure += 1
+            kam_companies = len(kam_companies_seen)
             source_basis["kam_sections"] = "evidence_documents"
         if matter_sections == 0 and "evidence_documents" in table_names:
             matter_sections = scalar(
@@ -1032,58 +1068,7 @@ def audit_kam_quality_snapshot(
         source_basis = "report_sections"
         if int(counts.get("kam_sections") or 0) == 0:
             source_basis = "evidence_documents"
-            evidence_reason_condition = (
-                "ed.normalized_text LIKE '%핵심감사사항으로 결정%' "
-                "OR ed.normalized_text LIKE '%핵심 감사사항으로 결정%' "
-                "OR ed.normalized_text LIKE '%핵심감사사항으로 선정한 이유%' "
-                "OR ed.normalized_text LIKE '%중요한 왜곡표시위험%' "
-                "OR ed.normalized_text LIKE '%유의적인 위험%' "
-                "OR ed.normalized_text LIKE '%추정의 불확실성%' "
-                "OR ed.normalized_text LIKE '%경영진의 판단%'"
-            )
-            evidence_procedure_condition = (
-                "ed.normalized_text LIKE '%감사절차%' "
-                "OR ed.normalized_text LIKE '%감사에서 다루어진 방법%' "
-                "OR ed.normalized_text LIKE '%수행하였습니다%' "
-                "OR ed.normalized_text LIKE '%문서검사%' "
-                "OR ed.normalized_text LIKE '%내부통제%' "
-                "OR ed.normalized_text LIKE '%재계산%' "
-                "OR ed.normalized_text LIKE '%대사%'"
-            )
-            evidence_no_kam_condition = (
-                "ed.normalized_text LIKE '%보고해야 할 핵심감사사항이 없%' "
-                "OR ed.normalized_text LIKE '%보고할 핵심감사사항이 없%' "
-                "OR ed.normalized_text LIKE '%핵심감사사항이 없다고 결정%'"
-            )
-            counts = conn.execute(
-                text(
-                    f"""
-                    SELECT
-                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) THEN 1 ELSE 0 END) AS kam_sections,
-                      COUNT(DISTINCT CASE WHEN NOT ({evidence_no_kam_condition}) THEN ed.corp_code END) AS kam_companies,
-                      SUM(CASE WHEN {evidence_no_kam_condition} THEN 1 ELSE 0 END) AS no_kam_sections,
-                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND COALESCE(ed.text_length, LENGTH(ed.normalized_text)) < :min_body_length THEN 1 ELSE 0 END)
-                        AS short_kam_sections,
-                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND ({evidence_reason_condition}) THEN 1 ELSE 0 END) AS reason_hints,
-                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND ({evidence_procedure_condition}) THEN 1 ELSE 0 END) AS procedure_hints,
-                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
-                      COUNT(DISTINCT CASE WHEN NOT ({evidence_no_kam_condition}) AND api.id IS NOT NULL THEN ed.corp_code END) AS indexed_procedure_companies
-                    FROM evidence_documents ed
-                    JOIN companies c ON c.corp_code=ed.corp_code
-                    LEFT JOIN audit_procedure_items api
-                      ON api.corp_code=ed.corp_code
-                     AND api.bsns_year=ed.bsns_year
-                     AND (api.rcept_no=ed.rcept_no OR api.source_type=ed.source_type)
-                    WHERE ed.bsns_year=:year
-                      AND ed.source_type='audit_report'
-                      AND ed.normalized_text LIKE '%report_section/kam%'
-                      {market_filter}
-                    """
-                ),
-                params,
-            ).mappings().first() or {}
-
-            candidates = conn.execute(
+            evidence_rows = conn.execute(
                 text(
                     f"""
                     SELECT
@@ -1096,9 +1081,7 @@ def audit_kam_quality_snapshot(
                       ed.rcept_no,
                       ed.dcm_no,
                       ed.title AS section_title,
-                      COALESCE(ed.text_length, LENGTH(ed.normalized_text)) AS body_length,
-                      CASE WHEN {evidence_reason_condition} THEN 1 ELSE 0 END AS has_reason_hint,
-                      CASE WHEN {evidence_procedure_condition} THEN 1 ELSE 0 END AS has_procedure_hint,
+                      ed.normalized_text,
                       COUNT(api.id) AS procedure_item_count,
                       substr(ed.normalized_text, instr(ed.normalized_text, 'report_section/kam'), 260) AS body_head
                     FROM evidence_documents ed
@@ -1110,26 +1093,76 @@ def audit_kam_quality_snapshot(
                     WHERE ed.bsns_year=:year
                       AND ed.source_type='audit_report'
                       AND ed.normalized_text LIKE '%report_section/kam%'
-                      AND NOT ({evidence_no_kam_condition})
                       {market_filter}
                     GROUP BY ed.id
-                    HAVING body_length < :min_body_length
-                        OR has_reason_hint=0
-                        OR has_procedure_hint=0
-                        OR procedure_item_count=0
-                    ORDER BY
-                      CASE WHEN body_length < :min_body_length THEN 0 ELSE 1 END,
-                      has_reason_hint ASC,
-                      has_procedure_hint ASC,
-                      procedure_item_count ASC,
-                      body_length ASC,
-                      c.market,
-                      c.corp_name
-                    LIMIT :limit
                     """
                 ),
                 params,
             ).mappings().all()
+            candidate_rows = []
+            kam_companies_seen = set()
+            indexed_companies_seen = set()
+            computed_counts = {
+                "kam_sections": 0,
+                "kam_companies": 0,
+                "no_kam_sections": 0,
+                "short_kam_sections": 0,
+                "reason_hints": 0,
+                "procedure_hints": 0,
+                "indexed_procedure_sections": 0,
+                "indexed_procedure_companies": 0,
+            }
+            for row in evidence_rows:
+                kam_body = _evidence_kam_body(row["normalized_text"])
+                if not kam_body:
+                    continue
+                is_no_kam = _contains_any(kam_body, _NO_KAM_PATTERNS)
+                body_length = len(kam_body)
+                has_reason = _contains_any(kam_body, _KAM_REASON_PATTERNS)
+                has_procedure = _contains_any(kam_body, _KAM_PROCEDURE_PATTERNS)
+                procedure_count = int(row["procedure_item_count"] or 0)
+                if is_no_kam:
+                    computed_counts["no_kam_sections"] += 1
+                    continue
+                computed_counts["kam_sections"] += 1
+                kam_companies_seen.add(row["corp_code"])
+                if body_length < int(min_body_length):
+                    computed_counts["short_kam_sections"] += 1
+                if has_reason:
+                    computed_counts["reason_hints"] += 1
+                if has_procedure:
+                    computed_counts["procedure_hints"] += 1
+                if procedure_count > 0:
+                    computed_counts["indexed_procedure_sections"] += 1
+                    indexed_companies_seen.add(row["corp_code"])
+                if (
+                    body_length < int(min_body_length)
+                    or not has_reason
+                    or not has_procedure
+                    or procedure_count <= 0
+                ):
+                    candidate_rows.append({
+                        **dict(row),
+                        "body_length": body_length,
+                        "has_reason_hint": 1 if has_reason else 0,
+                        "has_procedure_hint": 1 if has_procedure else 0,
+                        "body_head": kam_body[:260],
+                    })
+            computed_counts["kam_companies"] = len(kam_companies_seen)
+            computed_counts["indexed_procedure_companies"] = len(indexed_companies_seen)
+            counts = computed_counts
+            candidates = sorted(
+                candidate_rows,
+                key=lambda row: (
+                    0 if int(row["body_length"] or 0) < int(min_body_length) else 1,
+                    int(row["has_reason_hint"] or 0),
+                    int(row["has_procedure_hint"] or 0),
+                    int(row["procedure_item_count"] or 0),
+                    int(row["body_length"] or 0),
+                    row["market"] or "",
+                    row["corp_name"] or "",
+                ),
+            )[: int(limit)]
 
     kam_sections = int(counts.get("kam_sections") or 0)
     reason_hints = int(counts.get("reason_hints") or 0)

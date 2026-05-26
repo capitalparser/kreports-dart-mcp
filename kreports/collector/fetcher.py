@@ -47,6 +47,16 @@ def _looks_like_dart_error_xml(text: str) -> bool:
     )
 
 
+def _dart_error_from_xml(text: str) -> tuple[str | None, str | None]:
+    status_match = re.search(r"<status>\s*([^<]+?)\s*</status>", text or "", flags=re.IGNORECASE)
+    message_match = re.search(r"<message>\s*([^<]+?)\s*</message>", text or "", flags=re.IGNORECASE)
+    status = html.unescape(status_match.group(1).strip()) if status_match else None
+    message = html.unescape(message_match.group(1).strip()) if message_match else None
+    if status == "000":
+        return None, None
+    return status, message
+
+
 def _looks_like_report_document_xml(text: str) -> bool:
     return bool(
         re.search(r"<DOCUMENT\b", text or "", flags=re.IGNORECASE)
@@ -334,6 +344,11 @@ def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
         raw_xml = _raw_document_xml_from_response(resp.content, resp.encoding)
         if raw_xml is not None:
             return {f"{rcept_no}.xml": raw_xml}
+        text = _decode_dart_text(resp.content, resp.encoding).strip()
+        status, message = _dart_error_from_xml(text)
+        if status:
+            logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
+            return {}
         logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, e)
     return result
 
