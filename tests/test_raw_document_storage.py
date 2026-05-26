@@ -114,6 +114,38 @@ def test_raw_document_store_requires_bucket_for_gcs():
         raise AssertionError("expected ValueError")
 
 
+def test_raw_storage_config_status_reports_inline_db_growth(monkeypatch):
+    import kreports.maintenance.raw_storage_migration as migration_module
+
+    monkeypatch.setattr(migration_module.settings, "raw_storage_backend", "inline")
+    monkeypatch.setattr(migration_module.settings, "raw_storage_bucket", "")
+    monkeypatch.setattr(migration_module.settings, "raw_storage_prefix", "")
+    monkeypatch.setattr(migration_module.settings, "raw_storage_keep_inline", False)
+
+    out = migration_module.raw_storage_config_status()
+
+    assert out["ready"] is True
+    assert out["verdict"] == "inline_raw_will_grow_db"
+    assert out["will_store_inline_raw_content"] is True
+    assert out["will_write_storage_uri"] is False
+
+
+def test_raw_storage_config_status_requires_gcs_bucket(monkeypatch):
+    import kreports.maintenance.raw_storage_migration as migration_module
+
+    monkeypatch.setattr(migration_module.settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(migration_module.settings, "raw_storage_bucket", "")
+    monkeypatch.setattr(migration_module.settings, "raw_storage_prefix", "dart")
+    monkeypatch.setattr(migration_module.settings, "raw_storage_keep_inline", False)
+
+    out = migration_module.raw_storage_config_status()
+
+    assert out["ready"] is False
+    assert out["verdict"] == "gcs_bucket_missing"
+    assert out["mode"] == "externalized"
+    assert out["will_write_storage_uri"] is True
+
+
 def test_raw_storage_smoke_roundtrips_file_backend(tmp_path, monkeypatch):
     import kreports.maintenance.raw_storage_migration as migration_module
 

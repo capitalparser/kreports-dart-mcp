@@ -48,6 +48,11 @@ the cache status instead of pretending the raw filing is locally available.
 - Default automated backfill is `scripts/run_derived_dataset_backfill.sh`.
 - Use `scripts/run_source_documents_backfill.sh` only for explicit hot-raw
   archive expansion.
+- Set `RAW_STORAGE_BACKEND=file` or `RAW_STORAGE_BACKEND=gcs` before collecting
+  new hot raw documents. Otherwise the collector stores raw XML/HTML inline in
+  `source_documents.raw_content` and the SQLite DB will keep growing.
+- Confirm the effective collector behavior with `kreports raw-storage-config`.
+- Confirm storage write/read/hash behavior with `kreports raw-storage-smoke`.
 - Before clearing inline raw XML, verify externalized storage with
   `kreports verify-raw-storage`.
 - Clearing inline XML creates SQLite reusable pages, but physical file shrinkage

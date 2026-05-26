@@ -2,9 +2,65 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from kreports.config import settings
 from kreports.db.engine import get_session
 from kreports.db.models import SourceDocument
+from kreports.runtime import runtime_mode
 from kreports.storage.raw_documents import RawDocumentStore, sha1_text
+
+
+def raw_storage_config_status() -> dict:
+    """Report whether the collector will inline or externalize new raw documents."""
+    backend = (settings.raw_storage_backend or "inline").strip().lower()
+    bucket = (settings.raw_storage_bucket or "").strip()
+    prefix = (settings.raw_storage_prefix or "").strip("/")
+    keep_inline = bool(settings.raw_storage_keep_inline)
+
+    if backend in {"", "inline", "db"}:
+        mode = "inline"
+        ready = True
+        verdict = "inline_raw_will_grow_db"
+        notes = [
+            "new source_documents will store full raw_content inside SQLite",
+            "use RAW_STORAGE_BACKEND=file or RAW_STORAGE_BACKEND=gcs to externalize new raw documents",
+        ]
+    elif backend == "file":
+        mode = "externalized"
+        ready = True
+        verdict = "file_storage_ready"
+        notes = ["new raw documents will be written as gzip files and referenced by storage_uri"]
+    elif backend == "gcs":
+        mode = "externalized"
+        ready = bool(bucket)
+        verdict = "gcs_storage_ready" if ready else "gcs_bucket_missing"
+        notes = ["new raw documents will be written to GCS and referenced by gs:// storage_uri"]
+        if not bucket:
+            notes.append("RAW_STORAGE_BUCKET is required when RAW_STORAGE_BACKEND=gcs")
+    else:
+        mode = "unknown"
+        ready = False
+        verdict = "unsupported_backend"
+        notes = [f"unsupported RAW_STORAGE_BACKEND={backend!r}; expected inline, file, or gcs"]
+
+    return {
+        "ready": ready,
+        "verdict": verdict,
+        "runtime_mode": runtime_mode(),
+        "backend": backend or "inline",
+        "mode": mode,
+        "bucket": bucket or None,
+        "prefix": prefix,
+        "keep_inline": keep_inline,
+        "will_store_inline_raw_content": mode == "inline" or keep_inline,
+        "will_write_storage_uri": mode == "externalized",
+        "env": {
+            "backend": "RAW_STORAGE_BACKEND",
+            "bucket": "RAW_STORAGE_BUCKET",
+            "prefix": "RAW_STORAGE_PREFIX",
+            "keep_inline": "RAW_STORAGE_KEEP_INLINE",
+        },
+        "notes": notes,
+    }
 
 
 def raw_storage_smoke(

@@ -32,6 +32,37 @@ DART_API_KEY=<opendart-key>
 KREPORTS_RUNTIME_MODE=collector
 ```
 
+If the collector should stop growing SQLite with full XML/HTML bodies, also set
+raw storage explicitly:
+
+```env
+RAW_STORAGE_BACKEND=gcs
+RAW_STORAGE_BUCKET=<gcs-bucket-name>
+RAW_STORAGE_PREFIX=dart/raw
+RAW_STORAGE_KEEP_INLINE=false
+```
+
+For a local gzip archive instead of GCS:
+
+```env
+RAW_STORAGE_BACKEND=file
+RAW_STORAGE_PREFIX=dart/raw
+RAW_STORAGE_KEEP_INLINE=false
+```
+
+Before a scheduled collector run, verify what will happen to newly collected raw
+documents:
+
+```bash
+uv run kreports raw-storage-config
+uv run kreports raw-storage-smoke --backend file --prefix smoke-test
+uv run kreports raw-storage-smoke --backend gcs --bucket <gcs-bucket-name> --prefix smoke-test
+```
+
+`raw-storage-config` is the guardrail: if it says
+`inline_raw_will_grow_db`, new source documents will still be stored inside
+SQLite.
+
 ## Install macOS launchd Job
 
 ```bash

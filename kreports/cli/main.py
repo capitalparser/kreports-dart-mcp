@@ -1730,6 +1730,14 @@ def raw_storage_readiness_cmd():
     _json_print(raw_storage_readiness())
 
 
+@app.command("raw-storage-config")
+def raw_storage_config_cmd():
+    """collector가 신규 원문을 DB inline 또는 외부 저장소 중 어디에 저장할지 보여준다."""
+    from kreports.maintenance.raw_storage_migration import raw_storage_config_status
+
+    _json_print(raw_storage_config_status())
+
+
 @app.command("raw-storage-smoke")
 def raw_storage_smoke_cmd(
     backend: str = typer.Option("file", "--backend", help="저장 backend: file/gcs"),

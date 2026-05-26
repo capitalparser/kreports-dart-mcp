@@ -25,9 +25,15 @@ Collector environment:
 KREPORTS_RUNTIME_MODE=collector
 DART_API_KEY=<opendart-key>
 DB_URL=sqlite:////path/to/writable/kreports.db
+RAW_STORAGE_BACKEND=gcs
+RAW_STORAGE_BUCKET=<gcs-bucket-name>
+RAW_STORAGE_PREFIX=dart/raw
+RAW_STORAGE_KEEP_INLINE=false
 ```
 
 Do not put `DART_API_KEY` in the MCP endpoint environment.
+Do not put `RAW_STORAGE_BACKEND=inline` on the collector unless the intent is to
+grow the SQLite DB with full raw XML/HTML bodies.
 
 ## User-Facing Response Contract
 
@@ -106,6 +112,16 @@ scripts/run_derived_dataset_backfill.sh
 
 For unattended local collection that resumes after DART daily-limit resets, use
 the macOS launchd wrapper in [automated-backfill.md](automated-backfill.md).
+
+Before collecting new hot raw documents, check the collector storage mode:
+
+```bash
+kreports raw-storage-config
+kreports raw-storage-smoke --backend gcs --bucket <gcs-bucket-name> --prefix smoke-test
+```
+
+If `raw-storage-config` reports `inline_raw_will_grow_db`, newly collected raw
+documents will still be written into SQLite rather than GCS/file storage.
 
 Backfill is derived-data-first by default. The collector should answer MCP tools
 from compact tables such as `financials`, `auditors`, `audit_fees`,
