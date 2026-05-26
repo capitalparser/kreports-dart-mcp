@@ -114,6 +114,24 @@ def test_raw_document_store_requires_bucket_for_gcs():
         raise AssertionError("expected ValueError")
 
 
+def test_raw_storage_smoke_roundtrips_file_backend(tmp_path, monkeypatch):
+    import kreports.maintenance.raw_storage_migration as migration_module
+
+    monkeypatch.setattr(
+        migration_module,
+        "RawDocumentStore",
+        lambda **kwargs: RawDocumentStore(base_dir=tmp_path, **kwargs),
+    )
+
+    out = migration_module.raw_storage_smoke(backend="file", content="<DOCUMENT>smoke</DOCUMENT>")
+
+    assert out["ok"] is True
+    assert out["backend"] == "file"
+    assert out["storage_uri"].startswith("file://")
+    assert out["content_length"] == len("<DOCUMENT>smoke</DOCUMENT>".encode("utf-8"))
+    assert out["compressed_length"] > 0
+
+
 def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.raw_storage_migration as migration_module
     from kreports.db.engine import get_session

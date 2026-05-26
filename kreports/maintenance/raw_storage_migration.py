@@ -7,6 +7,37 @@ from kreports.db.models import SourceDocument
 from kreports.storage.raw_documents import RawDocumentStore, sha1_text
 
 
+def raw_storage_smoke(
+    *,
+    backend: str = "file",
+    bucket: str | None = None,
+    prefix: str = "",
+    content: str | None = None,
+) -> dict:
+    """Write and read one tiny raw document through the configured raw store."""
+    smoke_content = content or "<DOCUMENT><TITLE>raw storage smoke</TITLE><P>ok</P></DOCUMENT>"
+    store = RawDocumentStore(backend=backend, bucket=bucket, prefix=prefix)
+    saved = store.write(
+        corp_code="00000000",
+        bsns_year=2099,
+        source_type="smoke_test",
+        rcept_no="raw_storage_smoke",
+        content_type="xml",
+        content=smoke_content,
+    )
+    read_back = store.read(saved.storage_uri, expected_hash=saved.doc_hash)
+    ok = read_back == smoke_content
+    return {
+        "ok": ok,
+        "backend": backend,
+        "storage_uri": saved.storage_uri,
+        "doc_hash": saved.doc_hash,
+        "content_length": saved.content_length,
+        "compressed_length": saved.compressed_length,
+        "roundtrip_bytes": len(read_back.encode("utf-8")),
+    }
+
+
 def migrate_raw_documents_to_storage(
     *,
     limit: int | None = None,

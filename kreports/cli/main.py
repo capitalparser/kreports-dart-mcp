@@ -1730,6 +1730,19 @@ def raw_storage_readiness_cmd():
     _json_print(raw_storage_readiness())
 
 
+@app.command("raw-storage-smoke")
+def raw_storage_smoke_cmd(
+    backend: str = typer.Option("file", "--backend", help="저장 backend: file/gcs"),
+    bucket: Optional[str] = typer.Option(None, "--bucket", help="GCS bucket 이름. backend=gcs일 때 필요"),
+    prefix: str = typer.Option("", "--prefix", help="GCS object prefix"),
+):
+    """원문 저장소에 작은 문서 1건을 쓰고 다시 읽어 hash/roundtrip을 검증한다."""
+    from kreports.maintenance.raw_storage_migration import raw_storage_smoke
+
+    result = raw_storage_smoke(backend=backend, bucket=bucket, prefix=prefix)
+    _json_print(result)
+
+
 @app.command("rebuild-evidence-documents")
 def rebuild_evidence_documents_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
