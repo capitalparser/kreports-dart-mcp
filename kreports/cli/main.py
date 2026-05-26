@@ -1664,12 +1664,21 @@ def index_audit_procedures_cmd(
 def migrate_raw_documents_to_storage_cmd(
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
     clear_inline: bool = typer.Option(False, "--clear-inline", help="검증 후 DB raw_content를 비움"),
+    backend: str = typer.Option("file", "--backend", help="저장 backend: file/gcs"),
+    bucket: Optional[str] = typer.Option(None, "--bucket", help="GCS bucket 이름. backend=gcs일 때 필요"),
+    prefix: str = typer.Option("", "--prefix", help="GCS object prefix"),
 ):
     """source_documents.raw_content를 압축 raw store로 이전한다."""
     from kreports.maintenance.raw_storage_migration import migrate_raw_documents_to_storage
 
     init_db()
-    result = migrate_raw_documents_to_storage(limit=limit, clear_inline=clear_inline)
+    result = migrate_raw_documents_to_storage(
+        limit=limit,
+        clear_inline=clear_inline,
+        backend=backend,
+        bucket=bucket,
+        prefix=prefix,
+    )
     _json_print(result)
 
 

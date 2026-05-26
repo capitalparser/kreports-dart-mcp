@@ -7,7 +7,14 @@ from kreports.db.models import SourceDocument
 from kreports.storage.raw_documents import RawDocumentStore, sha1_text
 
 
-def migrate_raw_documents_to_storage(*, limit: int | None = None, clear_inline: bool = False) -> dict:
+def migrate_raw_documents_to_storage(
+    *,
+    limit: int | None = None,
+    clear_inline: bool = False,
+    backend: str = "file",
+    bucket: str | None = None,
+    prefix: str = "",
+) -> dict:
     totals = {"scanned": 0, "migrated": 0, "skipped": 0, "errors": []}
     with get_session() as session:
         query = (
@@ -21,7 +28,7 @@ def migrate_raw_documents_to_storage(*, limit: int | None = None, clear_inline: 
             query = query.limit(int(limit))
         rows = query.all()
 
-        store = RawDocumentStore()
+        store = RawDocumentStore(backend=backend, bucket=bucket, prefix=prefix)
         for doc in rows:
             totals["scanned"] += 1
             content = doc.raw_content or ""

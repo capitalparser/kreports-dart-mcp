@@ -7,6 +7,36 @@ from kreports.storage.raw_documents import RawDocumentStore
 from kreports.storage.raw_documents import sha1_text
 
 
+class _FakeGcsBlob:
+    def __init__(self, bucket: "_FakeGcsBucket", name: str):
+        self.bucket = bucket
+        self.name = name
+
+    def upload_from_string(self, data: bytes, content_type: str | None = None):
+        self.bucket.objects[self.name] = {"data": data, "content_type": content_type}
+
+    def download_as_bytes(self) -> bytes:
+        if self.name not in self.bucket.objects:
+            raise FileNotFoundError(self.name)
+        return self.bucket.objects[self.name]["data"]
+
+
+class _FakeGcsBucket:
+    def __init__(self, objects: dict):
+        self.objects = objects
+
+    def blob(self, name: str) -> _FakeGcsBlob:
+        return _FakeGcsBlob(self, name)
+
+
+class _FakeGcsClient:
+    def __init__(self):
+        self.objects: dict[str, dict] = {}
+
+    def bucket(self, _name: str) -> _FakeGcsBucket:
+        return _FakeGcsBucket(self.objects)
+
+
 def test_source_documents_has_raw_storage_columns(temp_engine):
     inspector = inspect(temp_engine)
     columns = {column["name"] for column in inspector.get_columns("source_documents")}
@@ -37,12 +67,63 @@ def test_raw_document_store_writes_gzip_and_verifies_hash(tmp_path):
     assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
 
 
+def test_raw_document_store_writes_and_reads_gcs_uri():
+    client = _FakeGcsClient()
+    store = RawDocumentStore(
+        backend="gcs",
+        bucket="kreports-raw-documents",
+        prefix="dart",
+        gcs_client=client,
+    )
+    content = "<DOCUMENT><TITLE>감사보고서</TITLE><P>핵심감사사항</P></DOCUMENT>"
+
+    saved = store.write(
+        corp_code="00126380",
+        bsns_year=2025,
+        source_type="audit_report",
+        rcept_no="20260331000001_00760_xml",
+        content_type="xml",
+        content=content,
+    )
+
+    assert saved.storage_uri == (
+        "gs://kreports-raw-documents/dart/2025/audit_report/"
+        "00126380/20260331000001_00760_xml.xml.gz"
+    )
+    assert saved.path == "dart/2025/audit_report/00126380/20260331000001_00760_xml.xml.gz"
+    assert saved.content_length == len(content.encode("utf-8"))
+    assert saved.compressed_length > 0
+    assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
+
+
+def test_raw_document_store_requires_bucket_for_gcs():
+    store = RawDocumentStore(backend="gcs")
+
+    try:
+        store.write(
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260331000001",
+            content_type="xml",
+            content="<DOCUMENT/>",
+        )
+    except ValueError as exc:
+        assert "bucket is required" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
 def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.raw_storage_migration as migration_module
     from kreports.db.engine import get_session
     from kreports.db.models import SourceDocument
 
-    monkeypatch.setattr(migration_module, "RawDocumentStore", lambda: RawDocumentStore(base_dir=tmp_path))
+    monkeypatch.setattr(
+        migration_module,
+        "RawDocumentStore",
+        lambda **kwargs: RawDocumentStore(base_dir=tmp_path, **kwargs),
+    )
     raw_content = "<DOCUMENT><P>원문</P></DOCUMENT>"
 
     with get_session() as session:
@@ -64,6 +145,50 @@ def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, 
     with get_session() as session:
         doc = session.query(SourceDocument).one()
         assert doc.storage_uri.startswith("file://")
+        assert doc.storage_status == "externalized"
+        assert doc.raw_content == ""
+        assert doc.content_length > 0
+        assert doc.compressed_length > 0
+
+
+def test_migrate_raw_documents_to_gcs_storage(temp_engine, monkeypatch):
+    import kreports.maintenance.raw_storage_migration as migration_module
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+
+    client = _FakeGcsClient()
+    monkeypatch.setattr(
+        migration_module,
+        "RawDocumentStore",
+        lambda **kwargs: RawDocumentStore(gcs_client=client, **kwargs),
+    )
+    raw_content = "<DOCUMENT><P>원문</P></DOCUMENT>"
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서",
+            content_type="xml",
+            raw_content=raw_content,
+            doc_hash=sha1_text(raw_content),
+            storage_status="inline",
+        ))
+
+    result = migration_module.migrate_raw_documents_to_storage(
+        limit=10,
+        clear_inline=True,
+        backend="gcs",
+        bucket="kreports-raw-documents",
+        prefix="dart",
+    )
+
+    assert result["migrated"] == 1
+    with get_session() as session:
+        doc = session.query(SourceDocument).one()
+        assert doc.storage_uri.startswith("gs://kreports-raw-documents/dart/")
         assert doc.storage_status == "externalized"
         assert doc.raw_content == ""
         assert doc.content_length > 0
