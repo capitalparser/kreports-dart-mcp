@@ -740,6 +740,56 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             if "report_sections" in table_names
             else 0
         )
+        source_basis = {
+            "kam_sections": "report_sections",
+            "audit_report_matters": "report_sections",
+        }
+        if kam_sections == 0 and "evidence_documents" in table_names:
+            evidence_kam_filter = (
+                "ed.source_type='audit_report' AND ed.bsns_year=:year "
+                "AND ed.normalized_text LIKE '%report_section/kam%'"
+            )
+            kam_sections = scalar(
+                "SELECT COUNT(*) FROM evidence_documents ed "
+                "JOIN companies c ON c.corp_code=ed.corp_code "
+                f"WHERE {evidence_kam_filter}" + market_filter
+            )
+            kam_companies = scalar(
+                "SELECT COUNT(DISTINCT ed.corp_code) FROM evidence_documents ed "
+                "JOIN companies c ON c.corp_code=ed.corp_code "
+                f"WHERE {evidence_kam_filter}" + market_filter
+            )
+            kam_reason = scalar(
+                "SELECT COUNT(*) FROM evidence_documents ed "
+                "JOIN companies c ON c.corp_code=ed.corp_code "
+                f"WHERE {evidence_kam_filter} "
+                "AND (ed.normalized_text LIKE '%핵심감사사항으로 결정%' "
+                "OR ed.normalized_text LIKE '%핵심감사사항으로 선정한 이유%' "
+                "OR ed.normalized_text LIKE '%중요한 왜곡표시위험%' "
+                "OR ed.normalized_text LIKE '%경영진의 판단%')"
+                + market_filter
+            )
+            kam_procedure = scalar(
+                "SELECT COUNT(*) FROM evidence_documents ed "
+                "JOIN companies c ON c.corp_code=ed.corp_code "
+                f"WHERE {evidence_kam_filter} "
+                "AND (ed.normalized_text LIKE '%감사절차%' "
+                "OR ed.normalized_text LIKE '%감사에서 다루어진 방법%' "
+                "OR ed.normalized_text LIKE '%수행하였습니다%')"
+                + market_filter
+            )
+            source_basis["kam_sections"] = "evidence_documents"
+        if matter_sections == 0 and "evidence_documents" in table_names:
+            matter_sections = scalar(
+                "SELECT COUNT(*) FROM evidence_documents ed "
+                "JOIN companies c ON c.corp_code=ed.corp_code "
+                "WHERE ed.source_type='audit_report' AND ed.bsns_year=:year "
+                "AND (ed.normalized_text LIKE '%report_section/emphasis%' "
+                "OR ed.normalized_text LIKE '%report_section/other_matter%' "
+                "OR ed.normalized_text LIKE '%report_section/going_concern%')"
+                + market_filter
+            )
+            source_basis["audit_report_matters"] = "evidence_documents"
         note_chapters = (
             scalar(
                 "SELECT COUNT(*) FROM accounting_note_chapters anc JOIN companies c ON c.corp_code=anc.corp_code "
@@ -808,6 +858,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         "year": year,
         "market": market,
         "listed_companies": listed,
+        "source_basis": source_basis,
         "counts": {
             "raw_source_documents": raw_source_docs,
             "raw_source_document_companies": raw_source_companies,

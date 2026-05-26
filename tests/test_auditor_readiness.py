@@ -307,6 +307,48 @@ def test_auditor_feature_readiness_recommends_derived_first_backfill(temp_engine
     assert "audit_fee" in joined
 
 
+def test_auditor_feature_readiness_counts_evidence_kam_fallback(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="증거KAM",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001_A",
+            dcm_no="A",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 수익인식\n"
+                "핵심감사사항으로 선정한 이유는 중요한 왜곡표시위험 때문입니다. "
+                "우리는 내부통제 이해 및 평가와 문서검사 감사절차를 수행하였습니다.\n"
+                "## report_section/other_matter: 기타사항\n"
+                "비교표시 재무제표는 전임감사인이 감사하였습니다."
+            ),
+            text_hash="x",
+            text_length=250,
+            source_count=2,
+        ))
+
+    snapshot = auditor_feature_readiness_snapshot(year=2025, market="KOSPI")
+
+    assert snapshot["source_basis"]["kam_sections"] == "evidence_documents"
+    assert snapshot["counts"]["kam_sections"] == 1
+    assert snapshot["counts"]["kam_companies"] == 1
+    assert snapshot["counts"]["kam_reason_hints"] == 1
+    assert snapshot["counts"]["kam_procedure_hints"] == 1
+    assert snapshot["counts"]["audit_report_matters"] == 1
+    assert "kam_sections" not in snapshot["missing_features"]
+
+
 def test_audit_kam_quality_snapshot_identifies_repair_candidates(temp_engine):
     from kreports.db.engine import get_session
 
