@@ -84,25 +84,55 @@ def _is_primary_audit_attachment(title: str) -> bool:
     return True
 
 
+def _looks_unreadable_korean_audit_report(content: str) -> bool:
+    """Detect DART viewer bodies that are mojibaked before parser storage."""
+    text = content or ""
+    if any(marker in text for marker in ("감사의견", "감사보고서", "핵심감사사항", "재무제표")):
+        return False
+    mojibake_markers = ("媛", "蹂", "닿", "퀬", "?꽌", "?쓽", "?옱", "?젣", "?몴")
+    return sum(text.count(marker) for marker in mojibake_markers) >= 2
+
+
 def collect_report_sections_for_disclosure(rcept_no: str) -> dict:
     """Fetch one report document and persist useful normalized sections."""
     with get_session() as session:
         disc = session.query(Disclosure).filter_by(rcept_no=rcept_no).first()
         if disc is None:
-            return {"ok": 0, "sections": 0, "error": "disclosure not found"}
-        source_type = _source_type(disc.report_nm)
-        if source_type is None:
-            return {"ok": 0, "sections": 0, "error": "unsupported report type"}
-        bsns_year = parse_bsns_year(disc.report_nm, disc.disc_date.strftime("%Y%m%d"))
-        if bsns_year is None:
-            return {"ok": 0, "sections": 0, "error": "business year unresolved"}
-        meta = {
-            "rcept_no": disc.rcept_no,
-            "corp_code": disc.corp_code,
-            "bsns_year": bsns_year,
-            "source_type": source_type,
-            "report_nm": disc.report_nm,
-        }
+            source_doc = (
+                session.query(SourceDocument)
+                .filter_by(rcept_no=rcept_no, source_type="business_report")
+                .first()
+            )
+            if source_doc is None:
+                return {"ok": 0, "sections": 0, "error": "disclosure not found"}
+            meta = {
+                "rcept_no": source_doc.rcept_no,
+                "corp_code": source_doc.corp_code,
+                "bsns_year": source_doc.bsns_year,
+                "source_type": source_doc.source_type,
+                "report_nm": source_doc.report_nm,
+            }
+            from kreports.config import settings
+
+            if settings.dart_api_key:
+                zipped = _collect_business_report_zip(meta)
+                if zipped.get("ok"):
+                    return zipped
+            return _collect_attached_audit_reports(meta, log_fetch=False)
+        else:
+            source_type = _source_type(disc.report_nm)
+            if source_type is None:
+                return {"ok": 0, "sections": 0, "error": "unsupported report type"}
+            bsns_year = parse_bsns_year(disc.report_nm, disc.disc_date.strftime("%Y%m%d"))
+            if bsns_year is None:
+                return {"ok": 0, "sections": 0, "error": "business year unresolved"}
+            meta = {
+                "rcept_no": disc.rcept_no,
+                "corp_code": disc.corp_code,
+                "bsns_year": bsns_year,
+                "source_type": source_type,
+                "report_nm": disc.report_nm,
+            }
 
     if source_type == "audit_report" and "감사보고서제출" in meta["report_nm"]:
         return _collect_attached_audit_reports(meta)
@@ -331,6 +361,9 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
         content = fetch_viewer_html(meta["rcept_no"], dcm_no)
         if not content:
             totals["errors"].append({"dcm_no": dcm_no, "error": "viewer HTML empty"})
+            continue
+        if _looks_unreadable_korean_audit_report(content):
+            totals["errors"].append({"dcm_no": dcm_no, "error": "viewer HTML unreadable"})
             continue
         stored_rcept_no = f"{meta['rcept_no']}_{dcm_no}"
         doc_meta = {

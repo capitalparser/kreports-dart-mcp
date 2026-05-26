@@ -2,6 +2,7 @@ from datetime import date, datetime
 
 from kreports.analysis.api import compare_peer_kam_topics, get_audit_report_sections
 from kreports.collector.fetcher import parse_attachment_options
+from kreports.collector.fetcher import _decode_dart_text
 from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
     index_audit_procedures_from_sections,
@@ -36,6 +37,16 @@ def test_extract_audit_report_sections_finds_kam_and_opinion():
     assert "emphasis" in sections
     assert "수익인식" in sections["kam"]["body_text"]
     assert classify_kam_topics(sections["kam"]["body_text"]) == ["revenue", "inventory"]
+
+
+def test_decode_dart_text_prefers_korean_readable_encoding_when_utf8_mojibakes():
+    raw = "감사보고서\n핵심감사사항\n재무제표".encode("cp949")
+
+    decoded = _decode_dart_text(raw)
+
+    assert "감사보고서" in decoded
+    assert "핵심감사사항" in decoded
+    assert "媛" not in decoded
 
 
 def test_extract_audit_report_sections_keeps_kam_child_titles_until_next_main_section():
@@ -357,6 +368,109 @@ def test_collect_business_report_collects_summary_and_attached_audit_reports(tem
     assert "요약" in business_kam_text
     assert audit_dcm_nos == ["audit_consolidated_x", "audit_xml"]
     assert "감사에서 다루어진 방법" in audit_text
+
+
+def test_collect_report_sections_falls_back_to_source_document_when_disclosure_missing(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20260318000625",
+            corp_code="00130684",
+            bsns_year=2025,
+            source_type="business_report",
+            report_nm="사업보고서 (2025.12)",
+            content_type="xml",
+            raw_content="",
+            doc_hash="hash",
+            storage_status="derived_only",
+        ))
+
+    called = []
+
+    def fake_collect_attached(meta, *, log_fetch=True):
+        called.append((meta["rcept_no"], meta["corp_code"], meta["bsns_year"], meta["source_type"], log_fetch))
+        return {"ok": 1, "documents": 1, "sections": 3, "error": None, **meta}
+
+    monkeypatch.setattr(collector_module, "_collect_attached_audit_reports", fake_collect_attached)
+
+    result = collect_report_sections_for_disclosure("20260318000625")
+
+    assert result["ok"] == 1
+    assert result["sections"] == 3
+    assert called == [("20260318000625", "00130684", 2025, "business_report", False)]
+
+
+def test_collect_report_sections_source_document_fallback_prefers_zip_when_dart_key_present(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.config import settings
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20260318000625",
+            corp_code="00130684",
+            bsns_year=2025,
+            source_type="business_report",
+            report_nm="사업보고서 (2025.12)",
+            content_type="xml",
+            raw_content="",
+            doc_hash="hash",
+            storage_status="derived_only",
+        ))
+
+    monkeypatch.setattr(settings, "dart_api_key", "dummy-key")
+    monkeypatch.setattr(
+        collector_module,
+        "_collect_business_report_zip",
+        lambda meta: {"ok": 1, "documents": 3, "sections": 9, "source": "zip", **meta},
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "_collect_attached_audit_reports",
+        lambda _meta, *, log_fetch=True: (_ for _ in ()).throw(AssertionError("viewer fallback should not run")),
+    )
+
+    result = collect_report_sections_for_disclosure("20260318000625")
+
+    assert result["ok"] == 1
+    assert result["source"] == "zip"
+    assert result["sections"] == 9
+
+
+def test_collect_attached_audit_reports_skips_unreadable_mojibake_viewer_body(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_dart_main_html",
+        lambda _rcept_no: """
+        <select id="att">
+          <option value="rcpNo=20260318000625&amp;dcmNo=11136889">감사보고서</option>
+        </select>
+        """,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_viewer_html",
+        lambda _rcept_no, _dcm_no: "<DOCUMENT><DOCUMENT-NAME>媛먯궗蹂닿퀬?꽌</DOCUMENT-NAME><TITLE>媛먯궗?쓽寃</TITLE></DOCUMENT>",
+    )
+
+    result = collector_module._collect_attached_audit_reports({
+        "rcept_no": "20260318000625",
+        "corp_code": "00130684",
+        "bsns_year": 2025,
+        "source_type": "business_report",
+        "report_nm": "사업보고서 (2025.12)",
+    })
+
+    assert result["ok"] == 0
+    assert result["documents"] == 0
+    assert result["errors"][0]["error"] == "viewer HTML unreadable"
+    with get_session() as session:
+        assert session.query(SourceDocument).count() == 0
 
 
 def test_collect_business_report_uses_viewer_html_when_document_api_unavailable(temp_engine, monkeypatch):
