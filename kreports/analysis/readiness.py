@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import text
 
 from kreports.db.engine import engine
@@ -1130,5 +1132,75 @@ def audit_kam_quality_snapshot(
             "Reparse only repair_candidates from original DART audit-report attachments when API quota is available.",
             "Run index-audit-procedures after KAM section repair.",
             "Rebuild evidence_documents after report_sections and audit_procedure_items are repaired.",
+        ],
+    }
+
+
+def _original_disclosure_rcept_no(rcept_no: str | None, dcm_no: str | None = None) -> str | None:
+    """Return the 14-digit DART disclosure receipt from derived document ids."""
+    for value in (rcept_no, dcm_no):
+        match = re.search(r"\d{14}", value or "")
+        if match:
+            return match.group(0)
+    return None
+
+
+def kam_repair_targets_snapshot(
+    *,
+    year: int = 2025,
+    market: str | None = None,
+    min_body_length: int = 300,
+    limit: int = 50,
+    include_index_only: bool = False,
+) -> dict:
+    """Select KAM rows that need DART re-collection, not just local re-indexing."""
+    quality = audit_kam_quality_snapshot(
+        year=year,
+        market=market,
+        min_body_length=min_body_length,
+        limit=limit,
+    )
+    repair_gaps = {"short_body", "missing_reason_hint", "missing_procedure_hint"}
+    excluded_gap_reasons: set[str] = set()
+    targets: list[dict] = []
+    seen: set[str] = set()
+    for candidate in quality.get("repair_candidates") or []:
+        gap_reasons = set(candidate.get("gap_reasons") or [])
+        needs_dart_repair = bool(gap_reasons & repair_gaps)
+        if not include_index_only and not needs_dart_repair:
+            excluded_gap_reasons.update(gap_reasons)
+            continue
+        source_rcept_no = _original_disclosure_rcept_no(
+            candidate.get("rcept_no"),
+            candidate.get("dcm_no"),
+        )
+        if not source_rcept_no:
+            excluded_gap_reasons.add("unresolved_source_rcept_no")
+            continue
+        if source_rcept_no in seen:
+            continue
+        seen.add(source_rcept_no)
+        targets.append({
+            **candidate,
+            "source_rcept_no": source_rcept_no,
+            "repair_action": "collect_report_sections_for_disclosure",
+        })
+
+    return {
+        "year": int(year),
+        "market": market,
+        "min_body_length": int(min_body_length),
+        "include_index_only": bool(include_index_only),
+        "quality_verdict": quality["verdict"],
+        "source_basis": quality["source_basis"],
+        "quality_counts": quality["counts"],
+        "quality_rates": quality["rates"],
+        "total_candidates": len(targets),
+        "targets": targets,
+        "excluded_gap_reasons": sorted(excluded_gap_reasons),
+        "recommended_next": [
+            "Run repair-kam-sections --execute only for targets listed here.",
+            "Run index-audit-procedures after repair; index-only gaps do not require DART calls.",
+            "Run rebuild-evidence-documents after procedure indexing.",
         ],
     }

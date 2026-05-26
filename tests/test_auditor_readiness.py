@@ -3,6 +3,7 @@ from kreports.analysis.readiness import (
     auditor_readiness_snapshot,
     auditor_feature_readiness_snapshot,
     backfill_plan,
+    kam_repair_targets_snapshot,
     readiness_verdict,
 )
 from kreports.cli.main import _select_policy_targets
@@ -403,6 +404,129 @@ def test_audit_kam_quality_snapshot_falls_back_to_evidence_documents(temp_engine
     assert snapshot["counts"]["kam_sections"] == 1
     assert snapshot["counts"]["reason_hints"] == 1
     assert snapshot["counts"]["procedure_hints"] == 1
+
+
+def test_kam_repair_targets_normalizes_original_disclosure_receipts(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="재파싱대상",
+                market="KOSPI",
+                induty_code="264",
+            ),
+            Company(
+                corp_code="00000002",
+                stock_code="000002",
+                corp_name="색인만대상",
+                market="KOSPI",
+                induty_code="264",
+            ),
+        ])
+        session.add_all([
+            EvidenceDocument(
+                corp_code="00000001",
+                bsns_year=2025,
+                source_type="audit_report",
+                rcept_no="20260311000001_20260311000001_00761_xml",
+                dcm_no="20260311000001_00761",
+                evidence_scope="auditor_view",
+                title="2025 audit report evidence",
+                normalized_text=(
+                    "## report_section/kam: 핵심감사사항\n"
+                    "핵심감사사항은 유의적인 사항입니다. 감사절차를 수행하였습니다."
+                ),
+                text_hash="x",
+                text_length=90,
+                source_count=1,
+            ),
+            EvidenceDocument(
+                corp_code="00000002",
+                bsns_year=2025,
+                source_type="audit_report",
+                rcept_no="20260311000002_20260311000002_00761_xml",
+                dcm_no="20260311000002_00761",
+                evidence_scope="auditor_view",
+                title="2025 audit report evidence",
+                normalized_text=(
+                    "## report_section/kam: 수익인식\n"
+                    "핵심감사사항으로 선정한 이유는 중요한 왜곡표시위험 때문입니다. "
+                    "우리는 문서검사 감사절차를 수행하였습니다."
+                ),
+                text_hash="y",
+                text_length=180,
+                source_count=1,
+            ),
+        ])
+
+    targets = kam_repair_targets_snapshot(
+        year=2025,
+        market="KOSPI",
+        min_body_length=120,
+        limit=10,
+    )
+
+    assert targets["total_candidates"] == 1
+    assert targets["targets"][0]["source_rcept_no"] == "20260311000001"
+    assert targets["targets"][0]["rcept_no"] == "20260311000001_20260311000001_00761_xml"
+    assert "missing_indexed_procedures" in targets["excluded_gap_reasons"]
+
+
+def test_repair_kam_sections_executes_only_normalized_targets(temp_engine, monkeypatch):
+    from kreports.collector import report_document_collector
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="재파싱대상",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001_20260311000001_00761_xml",
+            dcm_no="20260311000001_00761",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 핵심감사사항\n"
+                "핵심감사사항은 유의적인 사항입니다. 감사절차를 수행하였습니다."
+            ),
+            text_hash="x",
+            text_length=90,
+            source_count=1,
+        ))
+
+    called = []
+
+    def fake_collect(rcept_no):
+        called.append(rcept_no)
+        return {"ok": 1, "sections": 7}
+
+    monkeypatch.setattr(
+        report_document_collector,
+        "collect_report_sections_for_disclosure",
+        fake_collect,
+    )
+
+    result = report_document_collector.repair_kam_sections(
+        year=2025,
+        market="KOSPI",
+        min_body_length=120,
+        limit=10,
+        dry_run=False,
+    )
+
+    assert called == ["20260311000001"]
+    assert result["ok"] == 1
+    assert result["sections"] == 7
 
 
 def test_auditor_readiness_counts_cached_source_documents_not_submission_window(temp_engine):

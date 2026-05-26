@@ -873,6 +873,102 @@ def audit_kam_quality_cmd(
         typer.echo(f"- {item}")
 
 
+@app.command("repair-kam-sections")
+def repair_kam_sections_cmd(
+    year: int = typer.Option(2025, "--year", help="기준 사업연도"),
+    market: Optional[str] = typer.Option(None, "--market", help="시장 필터: KOSPI/KOSDAQ/KONEX"),
+    min_body_length: int = typer.Option(300, "--min-body-length", help="짧은 KAM 본문 판정 기준"),
+    limit: int = typer.Option(50, "--limit", help="최대 repair 대상 수"),
+    include_index_only: bool = typer.Option(False, "--include-index-only", help="로컬 색인만 필요한 후보도 DART 재수집 대상에 포함"),
+    execute: bool = typer.Option(False, "--execute", help="dry-run이 아니라 실제 DART 재수집 실행"),
+    force: bool = typer.Option(False, "--force", help="동일 백필 running 기록이 있어도 강제 실행"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """KAM 품질 진단 후보 중 원문 재파싱이 필요한 공시만 다시 수집한다."""
+    from kreports.collector.report_document_collector import repair_kam_sections
+    from kreports.runtime import require_collector_mode
+
+    if execute:
+        require_collector_mode("repair-kam-sections")
+        if not settings.dart_api_key:
+            typer.echo("오류: DART_API_KEY 미설정", err=True)
+            raise typer.Exit(1)
+
+    init_db()
+
+    def _progress(idx, total, corp_name, rcept_no):
+        if idx == 1 or idx % 10 == 0 or idx == total:
+            typer.echo(f"  [{idx}/{total}] {corp_name} {rcept_no}")
+
+    params = {
+        "year": year,
+        "market": market,
+        "min_body_length": min_body_length,
+        "limit": limit,
+        "include_index_only": include_index_only,
+        "execute": execute,
+    }
+    if execute:
+        with _backfill_run_guard(
+            task_type="kam_sections_repair",
+            year=year,
+            market=market,
+            params=params,
+            force=force,
+        ) as run_id:
+            result = repair_kam_sections(
+                year=year,
+                market=market,
+                min_body_length=min_body_length,
+                limit=limit,
+                include_index_only=include_index_only,
+                dry_run=False,
+                progress_callback=_progress,
+            )
+            _finish_backfill_run(run_id, result)
+    else:
+        result = repair_kam_sections(
+            year=year,
+            market=market,
+            min_body_length=min_body_length,
+            limit=limit,
+            include_index_only=include_index_only,
+            dry_run=True,
+            progress_callback=None,
+        )
+
+    if json_output:
+        _json_print(result)
+        return
+
+    mode = "EXECUTE" if execute else "DRY-RUN"
+    typer.echo(f"KAM repair {mode}: total {result['total']:,}")
+    typer.echo(
+        f"quality_rates: reason={result['quality_rates']['reason_hint_coverage']}% "
+        f"procedure={result['quality_rates']['procedure_hint_coverage']}% "
+        f"indexed={result['quality_rates']['indexed_procedure_coverage']}%"
+    )
+    if execute:
+        typer.echo(
+            f"완료 - 성공 {result['ok']:,} | 실패 {result['failed']:,} | "
+            f"sections {result['sections']:,}"
+        )
+    if result["excluded_gap_reasons"]:
+        typer.echo(f"excluded_gap_reasons: {', '.join(result['excluded_gap_reasons'])}")
+    if result["targets"]:
+        typer.echo("targets:")
+        for row in result["targets"][:20]:
+            typer.echo(
+                f"  {row['stock_code'] or row['corp_code']} {row['corp_name']} "
+                f"source_rcept_no={row['source_rcept_no']} "
+                f"gaps={','.join(row['gap_reasons'])}"
+            )
+    if result["errors"]:
+        typer.echo("실패 샘플:")
+        for row in result["errors"][:10]:
+            typer.echo(f"  {row['rcept_no']} {row['corp_name']}: {row['error']}")
+
+
 # ---------------------------------------------------------------------------
 # collect-golden
 # ---------------------------------------------------------------------------

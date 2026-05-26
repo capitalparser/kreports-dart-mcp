@@ -1230,6 +1230,60 @@ def index_audit_procedures_from_sections(
     return totals
 
 
+def repair_kam_sections(
+    *,
+    year: int = 2025,
+    market: str | None = None,
+    min_body_length: int = 300,
+    limit: int = 50,
+    include_index_only: bool = False,
+    dry_run: bool = True,
+    progress_callback=None,
+) -> dict:
+    """Re-collect only KAM filings whose body quality needs original DART repair."""
+    from kreports.analysis.readiness import kam_repair_targets_snapshot
+
+    snapshot = kam_repair_targets_snapshot(
+        year=year,
+        market=market,
+        min_body_length=min_body_length,
+        limit=limit,
+        include_index_only=include_index_only,
+    )
+    targets = snapshot["targets"]
+    totals = {
+        "dry_run": bool(dry_run),
+        "total": len(targets),
+        "ok": 0,
+        "failed": 0,
+        "sections": 0,
+        "targets": targets,
+        "errors": [],
+        "quality_rates": snapshot["quality_rates"],
+        "excluded_gap_reasons": snapshot["excluded_gap_reasons"],
+    }
+    if dry_run:
+        return totals
+
+    for idx, target in enumerate(targets, 1):
+        rcept_no = target["source_rcept_no"]
+        if progress_callback:
+            progress_callback(idx, len(targets), target["corp_name"], rcept_no)
+        result = collect_report_sections_for_disclosure(rcept_no)
+        if result.get("ok"):
+            totals["ok"] += 1
+            totals["sections"] += int(result.get("sections") or 0)
+        else:
+            totals["failed"] += 1
+            if len(totals["errors"]) < 20:
+                totals["errors"].append({
+                    "rcept_no": rcept_no,
+                    "corp_name": target["corp_name"],
+                    "error": result.get("error"),
+                })
+    return totals
+
+
 def _derived_source_document_body(sections: list[dict]) -> str:
     parts = [
         "DERIVED FROM report_sections",
