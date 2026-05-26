@@ -681,10 +681,22 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "SELECT COUNT(*) FROM companies c WHERE c.stock_code IS NOT NULL "
             "AND c.market IN ('KOSPI','KOSDAQ')" + market_filter
         )
+        raw_document_condition = (
+            "sd.content_type!='derived_report_sections' "
+            "AND COALESCE(sd.storage_status, 'inline')!='derived_only' "
+            "AND ((sd.raw_content IS NOT NULL AND sd.raw_content!='') "
+            "OR (sd.storage_uri IS NOT NULL AND sd.storage_uri!=''))"
+        )
+        derived_document_condition = (
+            "sd.content_type!='derived_report_sections' "
+            "AND (COALESCE(sd.storage_status, '')='derived_only' "
+            "OR ((sd.raw_content IS NULL OR sd.raw_content='') "
+            "AND (sd.storage_uri IS NULL OR sd.storage_uri='')))"
+        )
         raw_source_docs = (
             scalar(
                 "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
-                "WHERE sd.content_type!='derived_report_sections' AND sd.bsns_year=:year" + market_filter
+                f"WHERE {raw_document_condition} AND sd.bsns_year=:year" + market_filter
             )
             if "source_documents" in table_names
             else 0
@@ -693,7 +705,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             scalar(
                 "SELECT COUNT(DISTINCT sd.corp_code) FROM source_documents sd "
                 "JOIN companies c ON c.corp_code=sd.corp_code "
-                "WHERE sd.content_type!='derived_report_sections' AND sd.bsns_year=:year" + market_filter
+                f"WHERE {raw_document_condition} AND sd.bsns_year=:year" + market_filter
             )
             if "source_documents" in table_names
             else 0
@@ -701,7 +713,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         raw_business_docs = (
             scalar(
                 "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
-                "WHERE sd.content_type!='derived_report_sections' "
+                f"WHERE {raw_document_condition} "
                 "AND sd.source_type='business_report' AND sd.bsns_year=:year" + market_filter
             )
             if "source_documents" in table_names
@@ -711,7 +723,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             scalar(
                 "SELECT COUNT(DISTINCT sd.corp_code) FROM source_documents sd "
                 "JOIN companies c ON c.corp_code=sd.corp_code "
-                "WHERE sd.content_type!='derived_report_sections' "
+                f"WHERE {raw_document_condition} "
                 "AND sd.source_type='business_report' AND sd.bsns_year=:year" + market_filter
             )
             if "source_documents" in table_names
@@ -720,7 +732,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         raw_audit_docs = (
             scalar(
                 "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
-                "WHERE sd.content_type!='derived_report_sections' "
+                f"WHERE {raw_document_condition} "
                 "AND sd.source_type='audit_report' AND sd.bsns_year=:year" + market_filter
             )
             if "source_documents" in table_names
@@ -730,7 +742,33 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             scalar(
                 "SELECT COUNT(DISTINCT sd.corp_code) FROM source_documents sd "
                 "JOIN companies c ON c.corp_code=sd.corp_code "
-                "WHERE sd.content_type!='derived_report_sections' "
+                f"WHERE {raw_document_condition} "
+                "AND sd.source_type='audit_report' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        derived_source_docs = (
+            scalar(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                f"WHERE {derived_document_condition} AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        derived_business_docs = (
+            scalar(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                f"WHERE {derived_document_condition} "
+                "AND sd.source_type='business_report' AND sd.bsns_year=:year" + market_filter
+            )
+            if "source_documents" in table_names
+            else 0
+        )
+        derived_audit_docs = (
+            scalar(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                f"WHERE {derived_document_condition} "
                 "AND sd.source_type='audit_report' AND sd.bsns_year=:year" + market_filter
             )
             if "source_documents" in table_names
@@ -911,6 +949,9 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "raw_business_document_companies": raw_business_companies,
             "raw_audit_documents": raw_audit_docs,
             "raw_audit_document_companies": raw_audit_companies,
+            "derived_source_document_placeholders": derived_source_docs,
+            "derived_business_document_placeholders": derived_business_docs,
+            "derived_audit_document_placeholders": derived_audit_docs,
             "kam_sections": kam_sections,
             "kam_companies": kam_companies,
             "kam_reason_hints": kam_reason,
@@ -938,7 +979,11 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         "missing_features": missing,
         "degraded_features": degraded,
         "recommended_next": [
-            "Run derived-first backfill: refresh extractors from cached/externalized raw documents before collecting more raw bodies.",
+            (
+                "Collect or restore raw DART document bodies before parser repair; current source_documents are derived placeholders."
+                if raw_source_docs == 0 and derived_source_docs > 0
+                else "Run derived-first backfill: refresh extractors from cached/externalized raw documents before collecting more raw bodies."
+            ),
             "Rebuild evidence_documents so MCP narrative search uses compact normalized evidence instead of source_documents raw XML.",
             "Backfill compact structured tables: financials, auditors, audit_fee, audit_hours, policy items, and audit procedures.",
             "Investigate parser gaps where KAM exists but reason/procedure hints are absent.",

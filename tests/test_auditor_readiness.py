@@ -307,6 +307,54 @@ def test_auditor_feature_readiness_recommends_derived_first_backfill(temp_engine
     assert "audit_fee" in joined
 
 
+def test_auditor_feature_readiness_does_not_count_derived_only_docs_as_raw(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="파생문서회사",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add_all([
+            SourceDocument(
+                rcept_no="20260311000001",
+                corp_code="00000001",
+                bsns_year=2025,
+                source_type="business_report",
+                report_nm="사업보고서",
+                content_type="xml",
+                raw_content="",
+                doc_hash="derived-business",
+                storage_status="derived_only",
+            ),
+            SourceDocument(
+                rcept_no="20260311000001_A",
+                corp_code="00000001",
+                bsns_year=2025,
+                source_type="audit_report",
+                report_nm="감사보고서",
+                content_type="xml",
+                raw_content="",
+                doc_hash="derived-audit",
+                storage_status="derived_only",
+            ),
+        ])
+
+    snapshot = auditor_feature_readiness_snapshot(year=2025, market="KOSPI")
+
+    assert snapshot["counts"]["raw_source_documents"] == 0
+    assert snapshot["counts"]["raw_source_document_companies"] == 0
+    assert snapshot["counts"]["raw_business_documents"] == 0
+    assert snapshot["counts"]["raw_audit_documents"] == 0
+    assert snapshot["counts"]["derived_source_document_placeholders"] == 2
+    assert snapshot["counts"]["derived_business_document_placeholders"] == 1
+    assert snapshot["counts"]["derived_audit_document_placeholders"] == 1
+    assert "derived placeholders" in snapshot["recommended_next"][0]
+
+
 def test_auditor_feature_readiness_counts_evidence_kam_fallback(temp_engine):
     from kreports.db.engine import get_session
 
