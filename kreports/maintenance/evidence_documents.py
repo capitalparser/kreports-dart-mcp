@@ -102,6 +102,25 @@ def _render_evidence_bundle(
     return evidence
 
 
+def _blocks_from_existing_evidence(text: str, source_type: str) -> list[EvidenceBlock]:
+    blocks: list[EvidenceBlock] = []
+    matches = list(re.finditer(r"^##\s+(.+)$", text or "", flags=re.MULTILINE))
+    for idx, match in enumerate(matches):
+        heading = match.group(0).strip()
+        label = match.group(1).split(":", 1)[0].strip()
+        if not label.startswith("report_section/"):
+            continue
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        body = _clean_text(text[start:end])
+        if not body:
+            continue
+        section_key = label.split("/", 1)[1]
+        priority = _AUDIT_REPORT_PRIORITY_SECTIONS.get(section_key, 10) if source_type == "audit_report" else 10
+        blocks.append(EvidenceBlock(heading=heading, body=body, priority=priority))
+    return blocks
+
+
 def build_evidence_text(
     *,
     corp_code: str,
@@ -138,6 +157,23 @@ def build_evidence_text(
                 priority=priority,
             ))
             rows_used += 1
+
+        if not sections:
+            existing = (
+                session.query(EvidenceDocument)
+                .filter_by(
+                    corp_code=corp_code,
+                    bsns_year=bsns_year,
+                    source_type=source_type,
+                    rcept_no=rcept_no,
+                    evidence_scope="auditor_view",
+                )
+                .first()
+            )
+            if existing and existing.normalized_text:
+                existing_blocks = _blocks_from_existing_evidence(existing.normalized_text, source_type)
+                blocks.extend(existing_blocks)
+                rows_used += len(existing_blocks)
 
         if source_type == "business_report":
             chapters = (

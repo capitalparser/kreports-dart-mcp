@@ -226,3 +226,55 @@ def test_rebuild_evidence_documents_preserves_auditor_priority_blocks_when_cappe
         assert "## audit_procedure/revenue/internal_control" in doc.normalized_text
         assert "감사의견 일반 문단" not in doc.normalized_text
         assert doc.normalized_text.endswith("(truncated)")
+
+
+def test_rebuild_evidence_documents_merges_existing_evidence_when_sections_missing(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.evidence_documents import rebuild_evidence_documents
+
+    with get_session() as session:
+        session.add(EvidenceDocument(
+            corp_code="00000004",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000004_00761",
+            dcm_no="00761",
+            evidence_scope="auditor_view",
+            title="2025 audit_report evidence",
+            normalized_text=(
+                "# Evidence document\n"
+                "- corp_code: 00000004\n"
+                "- bsns_year: 2025\n"
+                "- source_type: audit_report\n"
+                "- rcept_no: 20260311000004_00761\n\n"
+                "## report_section/kam: 수익인식\n"
+                "수익인식은 핵심감사사항입니다."
+            ),
+            text_hash="old",
+            text_length=160,
+            source_count=1,
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20260311000004_00761",
+            dcm_no="00761",
+            corp_code="00000004",
+            bsns_year=2025,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="substantive_test",
+            procedure_text="거래 문서검사와 세금계산서 대사를 수행하였습니다.",
+            procedure_hash="proc",
+            procedure_length=30,
+            section_ordinal=0,
+            procedure_ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    result = rebuild_evidence_documents(year=2025, corp_code="00000004")
+
+    assert result["documents"] == 1
+    with get_session() as session:
+        doc = session.query(EvidenceDocument).one()
+        assert "## report_section/kam: 수익인식" in doc.normalized_text
+        assert "## audit_procedure/revenue/substantive_test" in doc.normalized_text
+        assert doc.source_count == 2
