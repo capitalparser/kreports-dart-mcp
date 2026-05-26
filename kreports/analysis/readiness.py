@@ -946,20 +946,26 @@ def audit_kam_quality_snapshot(
         "OR rs.body_text LIKE '%재계산%' "
         "OR rs.body_text LIKE '%대사%'"
     )
+    no_kam_condition = (
+        "rs.body_text LIKE '%보고해야 할 핵심감사사항이 없%' "
+        "OR rs.body_text LIKE '%보고할 핵심감사사항이 없%' "
+        "OR rs.body_text LIKE '%핵심감사사항이 없다고 결정%'"
+    )
 
     with engine.connect() as conn:
         counts = conn.execute(
             text(
                 f"""
                 SELECT
-                  COUNT(*) AS kam_sections,
-                  COUNT(DISTINCT rs.corp_code) AS kam_companies,
-                  SUM(CASE WHEN COALESCE(rs.body_length, LENGTH(rs.body_text)) < :min_body_length THEN 1 ELSE 0 END)
+                  SUM(CASE WHEN NOT ({no_kam_condition}) THEN 1 ELSE 0 END) AS kam_sections,
+                  COUNT(DISTINCT CASE WHEN NOT ({no_kam_condition}) THEN rs.corp_code END) AS kam_companies,
+                  SUM(CASE WHEN {no_kam_condition} THEN 1 ELSE 0 END) AS no_kam_sections,
+                  SUM(CASE WHEN NOT ({no_kam_condition}) AND COALESCE(rs.body_length, LENGTH(rs.body_text)) < :min_body_length THEN 1 ELSE 0 END)
                     AS short_kam_sections,
-                  SUM(CASE WHEN {reason_condition} THEN 1 ELSE 0 END) AS reason_hints,
-                  SUM(CASE WHEN {procedure_condition} THEN 1 ELSE 0 END) AS procedure_hints,
-                  SUM(CASE WHEN api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
-                  COUNT(DISTINCT CASE WHEN api.id IS NOT NULL THEN rs.corp_code END) AS indexed_procedure_companies
+                  SUM(CASE WHEN NOT ({no_kam_condition}) AND ({reason_condition}) THEN 1 ELSE 0 END) AS reason_hints,
+                  SUM(CASE WHEN NOT ({no_kam_condition}) AND ({procedure_condition}) THEN 1 ELSE 0 END) AS procedure_hints,
+                  SUM(CASE WHEN NOT ({no_kam_condition}) AND api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
+                  COUNT(DISTINCT CASE WHEN NOT ({no_kam_condition}) AND api.id IS NOT NULL THEN rs.corp_code END) AS indexed_procedure_companies
                 FROM report_sections rs
                 JOIN companies c ON c.corp_code=rs.corp_code
                 LEFT JOIN audit_procedure_items api
@@ -1002,6 +1008,7 @@ def audit_kam_quality_snapshot(
                 WHERE rs.bsns_year=:year
                   AND rs.source_type='audit_report'
                   AND rs.section_key='kam'
+                  AND NOT ({no_kam_condition})
                   {market_filter}
                 GROUP BY rs.id
                 HAVING body_length < :min_body_length
@@ -1043,18 +1050,24 @@ def audit_kam_quality_snapshot(
                 "OR ed.normalized_text LIKE '%재계산%' "
                 "OR ed.normalized_text LIKE '%대사%'"
             )
+            evidence_no_kam_condition = (
+                "ed.normalized_text LIKE '%보고해야 할 핵심감사사항이 없%' "
+                "OR ed.normalized_text LIKE '%보고할 핵심감사사항이 없%' "
+                "OR ed.normalized_text LIKE '%핵심감사사항이 없다고 결정%'"
+            )
             counts = conn.execute(
                 text(
                     f"""
                     SELECT
-                      COUNT(*) AS kam_sections,
-                      COUNT(DISTINCT ed.corp_code) AS kam_companies,
-                      SUM(CASE WHEN COALESCE(ed.text_length, LENGTH(ed.normalized_text)) < :min_body_length THEN 1 ELSE 0 END)
+                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) THEN 1 ELSE 0 END) AS kam_sections,
+                      COUNT(DISTINCT CASE WHEN NOT ({evidence_no_kam_condition}) THEN ed.corp_code END) AS kam_companies,
+                      SUM(CASE WHEN {evidence_no_kam_condition} THEN 1 ELSE 0 END) AS no_kam_sections,
+                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND COALESCE(ed.text_length, LENGTH(ed.normalized_text)) < :min_body_length THEN 1 ELSE 0 END)
                         AS short_kam_sections,
-                      SUM(CASE WHEN {evidence_reason_condition} THEN 1 ELSE 0 END) AS reason_hints,
-                      SUM(CASE WHEN {evidence_procedure_condition} THEN 1 ELSE 0 END) AS procedure_hints,
-                      SUM(CASE WHEN api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
-                      COUNT(DISTINCT CASE WHEN api.id IS NOT NULL THEN ed.corp_code END) AS indexed_procedure_companies
+                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND ({evidence_reason_condition}) THEN 1 ELSE 0 END) AS reason_hints,
+                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND ({evidence_procedure_condition}) THEN 1 ELSE 0 END) AS procedure_hints,
+                      SUM(CASE WHEN NOT ({evidence_no_kam_condition}) AND api.id IS NOT NULL THEN 1 ELSE 0 END) AS indexed_procedure_sections,
+                      COUNT(DISTINCT CASE WHEN NOT ({evidence_no_kam_condition}) AND api.id IS NOT NULL THEN ed.corp_code END) AS indexed_procedure_companies
                     FROM evidence_documents ed
                     JOIN companies c ON c.corp_code=ed.corp_code
                     LEFT JOIN audit_procedure_items api
@@ -1097,6 +1110,7 @@ def audit_kam_quality_snapshot(
                     WHERE ed.bsns_year=:year
                       AND ed.source_type='audit_report'
                       AND ed.normalized_text LIKE '%report_section/kam%'
+                      AND NOT ({evidence_no_kam_condition})
                       {market_filter}
                     GROUP BY ed.id
                     HAVING body_length < :min_body_length
@@ -1182,6 +1196,7 @@ def audit_kam_quality_snapshot(
         "counts": {
             "kam_sections": kam_sections,
             "kam_companies": int(counts.get("kam_companies") or 0),
+            "no_kam_sections": int(counts.get("no_kam_sections") or 0),
             "short_kam_sections": int(counts.get("short_kam_sections") or 0),
             "reason_hints": reason_hints,
             "procedure_hints": procedure_hints,

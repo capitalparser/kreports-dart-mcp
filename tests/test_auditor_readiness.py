@@ -545,6 +545,43 @@ def test_audit_kam_quality_counts_company_year_procedure_index_for_evidence(temp
     assert snapshot["rates"]["indexed_procedure_coverage"] == 100.0
 
 
+def test_audit_kam_quality_excludes_explicit_no_kam_reports_from_repair_denominator(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="무KAM회사",
+            market="KOSPI",
+            induty_code="64992",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260311000001_A",
+            dcm_no="A",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "## report_section/kam: 핵심감사사항\n"
+                "우리는 감사보고서에 보고해야 할 핵심감사사항이 없다고 결정하였습니다.\n"
+                "## report_section/management_responsibility: 재무제표에 대한 경영진\n"
+                "경영진은 재무제표 작성 책임이 있습니다."
+            ),
+            text_hash="x",
+            text_length=180,
+            source_count=1,
+        ))
+
+    snapshot = audit_kam_quality_snapshot(year=2025, market="KOSPI", min_body_length=80, limit=10)
+
+    assert snapshot["counts"]["kam_sections"] == 0
+    assert snapshot["counts"]["no_kam_sections"] == 1
+    assert snapshot["repair_candidates"] == []
+
+
 def test_kam_repair_targets_normalizes_original_disclosure_receipts(temp_engine):
     from kreports.db.engine import get_session
 
