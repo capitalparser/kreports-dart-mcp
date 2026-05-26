@@ -36,5 +36,11 @@ class Settings(BaseSettings):
     max_retries: int = 3
     collect_years: int = 5       # 최근 N개년
 
+    # 원문 저장소. inline은 DB raw_content에 보관, file/gcs는 storage_uri만 남김.
+    raw_storage_backend: str = "inline"
+    raw_storage_bucket: str = ""
+    raw_storage_prefix: str = ""
+    raw_storage_keep_inline: bool = False
+
 
 settings = Settings()

@@ -536,6 +536,72 @@ def test_collect_business_report_uses_viewer_html_when_document_api_unavailable(
     assert "수익인식" in section_body
 
 
+def test_collect_business_report_can_externalize_raw_content_to_storage(temp_engine, tmp_path, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.config import settings
+    from kreports.db.engine import get_session
+    from kreports.storage.raw_documents import RawDocumentStore
+
+    monkeypatch.setattr(settings, "raw_storage_backend", "file")
+    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setattr(collector_module.settings, "raw_storage_backend", "file")
+    monkeypatch.setattr(collector_module.settings, "raw_storage_keep_inline", False)
+    monkeypatch.setattr(
+        collector_module,
+        "RawDocumentStore",
+        lambda **kwargs: RawDocumentStore(base_dir=tmp_path, **kwargs),
+    )
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
+        session.add(Disclosure(
+            rcept_no="20250311999999",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2025, 3, 11),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+
+    monkeypatch.setattr(collector_module, "fetch_document_zip_files", lambda _rcept_no: {})
+    monkeypatch.setattr(collector_module, "fetch_document_xml", lambda _rcept_no: None)
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_dart_main_html",
+        lambda _rcept_no: """
+        <select id="att">
+          <option value="rcpNo=20250311999999&amp;dcmNo=10392689">사업보고서</option>
+        </select>
+        """,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_viewer_html",
+        lambda _rcept_no, _dcm_no: """
+        <html><body>
+          <h1>사업보고서</h1>
+          <p>핵심감사사항</p>
+          <p>수익인식 관련 핵심감사사항 요약입니다.</p>
+        </body></html>
+        """,
+    )
+    result = collect_report_sections_for_disclosure("20250311999999")
+
+    assert result["ok"] == 1
+    with get_session() as session:
+        source_doc = session.query(SourceDocument).filter_by(
+            rcept_no="20250311999999",
+            source_type="business_report",
+        ).one()
+        assert source_doc.raw_content == ""
+        assert source_doc.storage_uri.startswith("file://")
+        assert source_doc.storage_status == "externalized"
+        assert source_doc.content_length > 0
+        assert source_doc.compressed_length > 0
+        stored_text = RawDocumentStore(base_dir=tmp_path).read(source_doc.storage_uri, expected_hash=source_doc.doc_hash)
+    assert "사업보고서" in stored_text
+    assert "수익인식" in stored_text
+
+
 def test_collect_business_report_uses_viewer_tree_when_attachment_option_missing(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session

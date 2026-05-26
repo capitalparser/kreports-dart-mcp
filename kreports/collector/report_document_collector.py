@@ -18,6 +18,7 @@ from kreports.collector.fetcher import (
     parse_attachment_options,
     parse_viewer_tree_nodes,
 )
+from kreports.config import settings
 from kreports.db.engine import engine, get_session
 from kreports.db.models import (
     AccountingNoteChapter,
@@ -416,12 +417,13 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
     """Persist raw source text so extractors can be rerun without DART calls."""
     now = datetime.utcnow()
     doc_hash = _sha1(content)
+    storage_payload = _raw_storage_payload(meta, content=content, doc_hash=doc_hash)
     with get_session() as session:
         stmt = sqlite_insert(SourceDocument).values({
             **meta,
             "content_type": meta.get("content_type") or "xml",
-            "raw_content": content,
             "doc_hash": doc_hash,
+            **storage_payload,
             "fetched_at": now,
         })
         stmt = stmt.on_conflict_do_update(
@@ -434,6 +436,10 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
                 "content_type": stmt.excluded.content_type,
                 "raw_content": stmt.excluded.raw_content,
                 "doc_hash": stmt.excluded.doc_hash,
+                "storage_uri": stmt.excluded.storage_uri,
+                "content_length": stmt.excluded.content_length,
+                "compressed_length": stmt.excluded.compressed_length,
+                "storage_status": stmt.excluded.storage_status,
                 "fetched_at": stmt.excluded.fetched_at,
             },
         )
@@ -446,6 +452,40 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
             {"rcept_no": meta["rcept_no"], "source_type": meta["source_type"]},
         ).scalar_one()
     return int(source_doc_id)
+
+
+def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
+    backend = (settings.raw_storage_backend or "inline").strip().lower()
+    if backend in ("", "inline", "db"):
+        return {
+            "raw_content": content,
+            "storage_uri": None,
+            "content_length": len((content or "").encode("utf-8")),
+            "compressed_length": None,
+            "storage_status": "inline",
+        }
+    store = RawDocumentStore(
+        backend=backend,
+        bucket=settings.raw_storage_bucket or None,
+        prefix=settings.raw_storage_prefix or "",
+    )
+    saved = store.write(
+        corp_code=meta["corp_code"],
+        bsns_year=meta["bsns_year"],
+        source_type=meta["source_type"],
+        rcept_no=meta["rcept_no"],
+        content_type=meta.get("content_type") or "xml",
+        content=content,
+    )
+    if saved.doc_hash != doc_hash:
+        raise ValueError("raw storage hash mismatch")
+    return {
+        "raw_content": content if settings.raw_storage_keep_inline else "",
+        "storage_uri": saved.storage_uri,
+        "content_length": saved.content_length,
+        "compressed_length": saved.compressed_length,
+        "storage_status": "externalized",
+    }
 
 
 def _report_document_meta(meta: dict) -> dict:
