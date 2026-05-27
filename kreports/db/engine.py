@@ -110,10 +110,35 @@ def _migrate_existing_tables() -> None:
             except Exception:
                 pass  # 이미 존재하는 컬럼
 
+        for ddl in [
+            """
+            CREATE TABLE IF NOT EXISTS financial_facts_compact (
+              id INTEGER PRIMARY KEY,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fs_div VARCHAR(3) NOT NULL,
+              metric_key VARCHAR(50) NOT NULL,
+              metric_name VARCHAR(200) NOT NULL,
+              amount BIGINT,
+              source_account_id VARCHAR(200),
+              source_account_nm VARCHAR(300),
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_financial_facts_compact UNIQUE (corp_code, bsns_year, fs_div, metric_key)
+            )
+            """,
+        ]:
+            try:
+                conn.execute(text(ddl))
+                conn.commit()
+            except Exception:
+                pass
+
         # financial_facts 인덱스 (테이블 자체는 create_all이 생성)
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_fact_corp_year ON financial_facts(corp_code, bsns_year)",
             "CREATE INDEX IF NOT EXISTS idx_fact_sj ON financial_facts(corp_code, bsns_year, fs_div, sj_div)",
+            "CREATE INDEX IF NOT EXISTS idx_fin_compact_corp_year ON financial_facts_compact(corp_code, bsns_year)",
+            "CREATE INDEX IF NOT EXISTS idx_fin_compact_metric ON financial_facts_compact(metric_key)",
             "CREATE INDEX IF NOT EXISTS idx_subsidiary_matrix_parent_year ON subsidiary_auditor_matrix(parent_corp_code, bsns_year)",
             "CREATE INDEX IF NOT EXISTS idx_backfill_runs_key_status ON backfill_runs(task_type, year, market, status)",
             "CREATE INDEX IF NOT EXISTS idx_backfill_runs_started ON backfill_runs(started_at)",

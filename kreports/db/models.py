@@ -143,6 +143,31 @@ class FinancialFact(Base):
     )
 
 
+class FinancialFactCompact(Base):
+    """Small annual metric subset used by deployable runtime DBs."""
+    __tablename__ = "financial_facts_compact"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    fs_div = Column(String(3), nullable=False)
+    metric_key = Column(String(50), nullable=False)
+    metric_name = Column(String(200), nullable=False)
+    amount = Column(BigInteger, nullable=True)
+    source_account_id = Column(String(200), nullable=True)
+    source_account_nm = Column(String(300), nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "corp_code", "bsns_year", "fs_div", "metric_key",
+            name="uq_financial_facts_compact",
+        ),
+        Index("idx_fin_compact_corp_year", "corp_code", "bsns_year"),
+        Index("idx_fin_compact_metric", "metric_key"),
+    )
+
+
 class AuditFee(Base):
     """DS002 회계감사용역계약 체결현황 (사업보고서 기준)."""
     __tablename__ = "audit_fees"
