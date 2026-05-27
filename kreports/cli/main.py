@@ -1790,6 +1790,26 @@ def rebuild_financial_facts_compact_cmd(
     _json_print(result)
 
 
+@app.command("export-runtime-db")
+def export_runtime_db_cmd(
+    output_path: Path = typer.Option(..., "--output", help="exported SQLite DB path"),
+    year_from: int = typer.Option(..., "--year-from"),
+    year_to: int = typer.Option(..., "--year-to"),
+    profile: str = typer.Option("compact", "--profile"),
+):
+    """배포용 compact runtime DB를 생성한다."""
+    from kreports.maintenance.runtime_export import export_runtime_db
+
+    init_db()
+    result = export_runtime_db(
+        output_path=output_path,
+        year_from=year_from,
+        year_to=year_to,
+        profile=profile,
+    )
+    _json_print(result)
+
+
 @app.command("rebuild-evidence-documents")
 def rebuild_evidence_documents_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),

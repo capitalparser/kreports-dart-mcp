@@ -42,3 +42,16 @@ def test_rebuild_financial_facts_compact_maps_core_metrics(temp_engine):
             ORDER BY metric_key
         """)).all()
     assert rows == [("assets", 1000), ("revenue", 300)]
+
+
+def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path):
+    from kreports.maintenance.runtime_export import export_runtime_db
+
+    out_path = tmp_path / "runtime.db"
+    result = export_runtime_db(output_path=out_path, year_from=2024, year_to=2025, profile="compact")
+
+    assert result["ok"] is True
+    assert out_path.exists()
+    assert "financial_facts" in result["excluded_tables"]
+    assert "extraction_runs" in result["excluded_tables"]
+    assert "fetch_log" in result["excluded_tables"]
