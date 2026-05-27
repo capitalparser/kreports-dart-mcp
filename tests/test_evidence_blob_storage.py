@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy import inspect
 
 from kreports.storage.evidence_blobs import EvidenceBlobStore, sha1_text
@@ -34,3 +35,48 @@ def test_long_text_tables_have_evidence_blob_manifest_columns(temp_engine):
         assert "full_text_length" in columns
         assert "full_text_compressed_length" in columns
         assert "full_text_storage_status" in columns
+
+
+def test_externalize_long_evidence_text_preserves_excerpt_and_manifest(temp_engine, tmp_path, monkeypatch):
+    import kreports.maintenance.evidence_blob_migration as migration_module
+    from kreports.db.engine import get_session
+
+    monkeypatch.setattr(
+        migration_module,
+        "EvidenceBlobStore",
+        lambda **kwargs: EvidenceBlobStore(base_dir=tmp_path, **kwargs),
+    )
+    long_body = "A" * 5000
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO report_sections
+            (rcept_no, corp_code, bsns_year, source_type, section_key, section_title,
+             body_text, body_hash, body_length, ordinal, fetched_at)
+            VALUES
+            ('20250331000001', '00126380', 2024, 'audit_report', 'kam', 'KAM',
+             :body, 'oldhash', :length, 1, CURRENT_TIMESTAMP)
+        """), {"body": long_body, "length": len(long_body)})
+        session.commit()
+
+    out = migration_module.externalize_long_evidence_text(
+        table_name="report_sections",
+        text_column="body_text",
+        excerpt_chars=1000,
+        min_text_chars=2000,
+        limit=10,
+        backend="file",
+    )
+
+    assert out["externalized"] == 1
+    with get_session() as session:
+        row = session.execute(text("""
+            SELECT body_text, full_text_uri, full_text_hash, full_text_length,
+                   full_text_compressed_length, full_text_storage_status
+            FROM report_sections
+            WHERE rcept_no='20250331000001'
+        """)).mappings().one()
+    assert len(row["body_text"]) == 1000
+    assert row["full_text_uri"].startswith("file://")
+    assert row["full_text_length"] == 5000
+    assert row["full_text_compressed_length"] > 0
+    assert row["full_text_storage_status"] == "externalized"

@@ -1751,6 +1751,32 @@ def raw_storage_smoke_cmd(
     _json_print(result)
 
 
+@app.command("externalize-long-evidence-text")
+def externalize_long_evidence_text_cmd(
+    table_name: str = typer.Option(..., "--table", help="accounting_note_chapters/evidence_documents/report_sections"),
+    excerpt_chars: int = typer.Option(2000, "--excerpt-chars", help="DB에 남길 짧은 본문 길이"),
+    min_text_chars: int = typer.Option(4000, "--min-text-chars", help="외부화할 최소 본문 길이"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 행 수"),
+    backend: str = typer.Option("file", "--backend", help="file/gcs"),
+    bucket: Optional[str] = typer.Option(None, "--bucket", help="GCS bucket"),
+    prefix: str = typer.Option("evidence/full-text", "--prefix", help="blob prefix"),
+):
+    """긴 파생 evidence 본문을 GCS/file로 옮기고 DB에는 excerpt와 manifest만 남긴다."""
+    from kreports.maintenance.evidence_blob_migration import externalize_long_evidence_text
+
+    init_db()
+    result = externalize_long_evidence_text(
+        table_name=table_name,
+        excerpt_chars=excerpt_chars,
+        min_text_chars=min_text_chars,
+        limit=limit,
+        backend=backend,
+        bucket=bucket,
+        prefix=prefix,
+    )
+    _json_print(result)
+
+
 @app.command("rebuild-evidence-documents")
 def rebuild_evidence_documents_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
