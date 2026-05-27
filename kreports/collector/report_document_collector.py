@@ -1034,6 +1034,9 @@ def collect_audit_report_sections(
         FROM disclosures d
         JOIN companies c ON c.corp_code=d.corp_code
         WHERE c.stock_code IS NOT NULL
+          AND length(d.rcept_no)=14
+          AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+          AND substr(d.rcept_no, 1, 4)=strftime('%Y', d.disc_date)
           AND d.report_nm LIKE '%감사보고서%'
           AND d.report_nm NOT LIKE '%제출 지연%'
           AND d.report_nm NOT LIKE '%제출지연%'
@@ -1093,6 +1096,9 @@ def collect_business_report_sections(
         FROM disclosures d
         JOIN companies c ON c.corp_code=d.corp_code
         WHERE c.stock_code IS NOT NULL
+          AND length(d.rcept_no)=14
+          AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+          AND substr(d.rcept_no, 1, 4)=strftime('%Y', d.disc_date)
           AND d.report_nm LIKE '%사업보고서%'
           AND d.report_nm NOT LIKE '%제출기한연장%'
           AND d.report_nm NOT LIKE '%해외증권%'
@@ -1100,6 +1106,9 @@ def collect_business_report_sections(
           AND NOT EXISTS (
             SELECT 1 FROM disclosures d2
             WHERE d2.corp_code=d.corp_code
+              AND length(d2.rcept_no)=14
+              AND d2.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+              AND substr(d2.rcept_no, 1, 4)=strftime('%Y', d2.disc_date)
               AND d2.report_nm LIKE '%사업보고서%'
               AND d2.report_nm NOT LIKE '%제출기한연장%'
               AND d2.report_nm NOT LIKE '%해외증권%'

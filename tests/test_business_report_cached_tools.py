@@ -214,6 +214,56 @@ def test_business_report_backfill_targets_existing_sections_when_source_document
     assert calls == ["20250331000001"]
 
 
+def test_business_report_backfill_skips_invalid_synthetic_receipt_numbers(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="대상",
+            market="KOSPI",
+            induty_code="58221",
+        ))
+        session.add(Disclosure(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            corp_name="대상",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add(Disclosure(
+            rcept_no="2099c35fff9f04",
+            corp_code="00000001",
+            corp_name="대상",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add(Disclosure(
+            rcept_no="20990331000004",
+            corp_code="00000001",
+            corp_name="대상",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+
+    calls = []
+    monkeypatch.setattr(
+        collector_module,
+        "collect_report_sections_for_disclosure",
+        lambda rcept_no: calls.append(rcept_no) or {"ok": 1, "sections": 0},
+    )
+
+    out = collector_module.collect_business_report_sections(year=2024, missing_only=True)
+
+    assert out["total"] == 1
+    assert calls == ["20250331000001"]
+
+
 def test_business_report_backfill_targets_derived_source_document_as_raw_missing(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
