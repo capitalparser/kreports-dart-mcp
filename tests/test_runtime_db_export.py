@@ -55,3 +55,18 @@ def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path
     assert "financial_facts" in result["excluded_tables"]
     assert "extraction_runs" in result["excluded_tables"]
     assert "fetch_log" in result["excluded_tables"]
+
+
+def test_runtime_db_manifest_contains_hash_and_counts(tmp_path):
+    from kreports.maintenance.runtime_export import build_runtime_db_manifest
+
+    db_path = tmp_path / "runtime.db"
+    db_path.write_bytes(b"runtime")
+
+    manifest = build_runtime_db_manifest(db_path=db_path, profile="compact", year_from=2021, year_to=2025)
+
+    assert manifest["profile"] == "compact"
+    assert manifest["year_from"] == 2021
+    assert manifest["year_to"] == 2025
+    assert manifest["bytes"] == len(b"runtime")
+    assert len(manifest["sha256"]) == 64

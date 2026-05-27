@@ -1810,6 +1810,29 @@ def export_runtime_db_cmd(
     _json_print(result)
 
 
+@app.command("upload-runtime-db-artifact")
+def upload_runtime_db_artifact_cmd(
+    db_path: Path = typer.Option(..., "--db", help="runtime DB path"),
+    bucket: str = typer.Option(..., "--bucket", help="GCS bucket"),
+    prefix: str = typer.Option("runtime-db", "--prefix"),
+    profile: str = typer.Option("compact", "--profile"),
+    year_from: int = typer.Option(..., "--year-from"),
+    year_to: int = typer.Option(..., "--year-to"),
+):
+    """배포용 runtime DB artifact와 manifest를 GCS에 업로드한다."""
+    from kreports.maintenance.runtime_export import upload_runtime_db_artifact
+
+    result = upload_runtime_db_artifact(
+        db_path=db_path,
+        bucket=bucket,
+        prefix=prefix,
+        profile=profile,
+        year_from=year_from,
+        year_to=year_to,
+    )
+    _json_print(result)
+
+
 @app.command("rebuild-evidence-documents")
 def rebuild_evidence_documents_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),

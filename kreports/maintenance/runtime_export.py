@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import gzip
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 
@@ -96,4 +100,54 @@ def export_runtime_db(
         "copied_tables": copied,
         "excluded_tables": sorted(COMPACT_EXCLUDED_TABLES),
         "bytes": dest.stat().st_size,
+    }
+
+
+def build_runtime_db_manifest(*, db_path: str | Path, profile: str, year_from: int, year_to: int) -> dict:
+    path = Path(db_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {
+        "profile": profile,
+        "year_from": int(year_from),
+        "year_to": int(year_to),
+        "bytes": path.stat().st_size,
+        "sha256": digest,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def upload_runtime_db_artifact(
+    *,
+    db_path: str | Path,
+    bucket: str,
+    prefix: str = "runtime-db",
+    profile: str = "compact",
+    year_from: int,
+    year_to: int,
+) -> dict:
+    from google.cloud import storage
+
+    path = Path(db_path)
+    manifest = build_runtime_db_manifest(
+        db_path=path,
+        profile=profile,
+        year_from=year_from,
+        year_to=year_to,
+    )
+    compressed = gzip.compress(path.read_bytes())
+    client = storage.Client()
+    db_object = f"{prefix.strip('/')}/kreports-{profile}-{year_from}-{year_to}.db.gz"
+    manifest_object = f"{prefix.strip('/')}/kreports-{profile}-{year_from}-{year_to}.manifest.json"
+    bucket_obj = client.bucket(bucket)
+    bucket_obj.blob(db_object).upload_from_string(compressed, content_type="application/gzip")
+    bucket_obj.blob(manifest_object).upload_from_string(
+        json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        content_type="application/json",
+    )
+    return {
+        "ok": True,
+        "db_uri": f"gs://{bucket}/{db_object}",
+        "manifest_uri": f"gs://{bucket}/{manifest_object}",
+        "manifest": manifest,
+        "compressed_bytes": len(compressed),
     }
