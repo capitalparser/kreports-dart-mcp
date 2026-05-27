@@ -221,6 +221,11 @@ class AccountingNoteChapter(Base):
     body = Column(Text, nullable=False)
     body_hash = Column(String(40), nullable=True)
     body_length = Column(Integer, nullable=True)
+    full_text_uri = Column(String(500), nullable=True)
+    full_text_hash = Column(String(40), nullable=True)
+    full_text_length = Column(Integer, nullable=True)
+    full_text_compressed_length = Column(Integer, nullable=True)
+    full_text_storage_status = Column(String(30), nullable=True)
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
@@ -230,6 +235,7 @@ class AccountingNoteChapter(Base):
         ),
         Index("idx_note_chapter_corp_year", "corp_code", "bsns_year", "fs_div"),
         Index("idx_note_chapter_section_type", "section_type"),
+        Index("idx_note_chapter_full_text_uri", "full_text_uri"),
     )
 
 
@@ -324,6 +330,11 @@ class ReportSection(Base):
     body_text = Column(Text, nullable=False)
     body_hash = Column(String(40), nullable=True)
     body_length = Column(Integer, nullable=True)
+    full_text_uri = Column(String(500), nullable=True)
+    full_text_hash = Column(String(40), nullable=True)
+    full_text_length = Column(Integer, nullable=True)
+    full_text_compressed_length = Column(Integer, nullable=True)
+    full_text_storage_status = Column(String(30), nullable=True)
     ordinal = Column(SmallInteger, nullable=False, default=0)
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -331,6 +342,7 @@ class ReportSection(Base):
         UniqueConstraint("rcept_no", "source_type", "section_key", "ordinal", name="uq_report_section"),
         Index("idx_report_section_corp_year", "corp_code", "bsns_year", "source_type"),
         Index("idx_report_section_key", "source_type", "section_key"),
+        Index("idx_report_section_full_text_uri", "full_text_uri"),
     )
 
 
@@ -354,6 +366,11 @@ class EvidenceDocument(Base):
     normalized_text = Column(Text, nullable=False)
     text_hash = Column(String(40), nullable=True)
     text_length = Column(Integer, nullable=True)
+    full_text_uri = Column(String(500), nullable=True)
+    full_text_hash = Column(String(40), nullable=True)
+    full_text_length = Column(Integer, nullable=True)
+    full_text_compressed_length = Column(Integer, nullable=True)
+    full_text_storage_status = Column(String(30), nullable=True)
     source_count = Column(Integer, nullable=False, default=0)
     generated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -364,6 +381,7 @@ class EvidenceDocument(Base):
         ),
         Index("idx_evidence_doc_corp_year", "corp_code", "bsns_year", "source_type"),
         Index("idx_evidence_doc_scope", "evidence_scope"),
+        Index("idx_evidence_doc_full_text_uri", "full_text_uri"),
     )
 
 
