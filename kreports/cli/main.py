@@ -1777,6 +1777,19 @@ def externalize_long_evidence_text_cmd(
     _json_print(result)
 
 
+@app.command("rebuild-financial-facts-compact")
+def rebuild_financial_facts_compact_cmd(
+    year_from: Optional[int] = typer.Option(None, "--year-from"),
+    year_to: Optional[int] = typer.Option(None, "--year-to"),
+):
+    """5개년 runtime DB용 핵심 재무 metric 테이블을 재생성한다."""
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    init_db()
+    result = rebuild_financial_facts_compact(year_from=year_from, year_to=year_to)
+    _json_print(result)
+
+
 @app.command("rebuild-evidence-documents")
 def rebuild_evidence_documents_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
