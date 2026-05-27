@@ -3348,7 +3348,8 @@ def search_dataset(
             SELECT ed.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
                    ed.bsns_year AS year, ed.rcept_no, ed.dcm_no, ed.source_type,
                    ed.evidence_scope, ed.title, ed.normalized_text AS body,
-                   ed.text_length AS body_length, ed.source_count, ed.generated_at
+                   ed.text_length AS body_length, ed.source_count, ed.generated_at,
+                   ed.full_text_uri, ed.full_text_length, ed.full_text_storage_status
             FROM evidence_documents ed
             JOIN companies c ON c.corp_code=ed.corp_code
             WHERE {" AND ".join(where)}
@@ -3442,6 +3443,9 @@ def search_dataset(
         rows = filtered_rows
 
     for row in rows:
+        if dataset == "evidence_documents":
+            row["full_text_available"] = bool(row.get("full_text_uri"))
+            row["text_storage_status"] = row.pop("full_text_storage_status", None) or "inline_excerpt"
         if "body_text" in row:
             body = _display_text(row.pop("body_text") or "")
             if include_excerpt:

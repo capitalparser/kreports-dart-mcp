@@ -115,6 +115,55 @@ def test_search_dataset_evidence_documents_uses_compact_cache(temp_engine):
     assert "수행의무" in record["body_excerpt"]
 
 
+def test_search_dataset_returns_externalized_evidence_metadata(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000005",
+            stock_code="000005",
+            corp_name="외부근거테스트",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        session.add(EvidenceDocument(
+            corp_code="00000005",
+            bsns_year=2024,
+            source_type="business_report",
+            rcept_no="20250331000005",
+            evidence_scope="accounting_policy",
+            title="회계정책",
+            normalized_text="수익인식 회계정책 excerpt",
+            text_hash="hash",
+            text_length=12,
+            source_count=1,
+            full_text_uri="gs://bucket/evidence.txt.gz",
+            full_text_hash="fullhash",
+            full_text_length=5000,
+            full_text_compressed_length=100,
+            full_text_storage_status="externalized",
+            generated_at=datetime.utcnow(),
+        ))
+
+    out = json.loads(call_tool(
+        "search_dataset",
+        {
+            "dataset": "evidence_documents",
+            "company": "000005",
+            "year": 2024,
+            "keyword": "수익인식",
+            "limit": 1,
+        },
+    ))
+
+    record = out["companies"][0]["records"][0]
+    assert record["body_excerpt"] == "수익인식 회계정책 excerpt"
+    assert record["full_text_uri"] == "gs://bucket/evidence.txt.gz"
+    assert record["full_text_available"] is True
+    assert record["full_text_length"] == 5000
+    assert record["text_storage_status"] == "externalized"
+
+
 def test_trim_evidence_documents_prunes_years_and_caps_text(temp_engine):
     from kreports.db.engine import get_session
     from kreports.maintenance.evidence_documents import trim_evidence_documents
