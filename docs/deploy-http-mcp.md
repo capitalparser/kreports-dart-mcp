@@ -9,6 +9,11 @@ The MCP endpoint reads `kreports.db` on every tool call, so newly backfilled row
 are visible without redeploying the endpoint. Keep the endpoint read-only and run
 collection elsewhere.
 
+For public pilot deployment, prefer a compact runtime DB artifact over the full
+maintainer DB. The maintainer DB can retain full warehouse tables and extraction
+logs, while the runtime artifact excludes heavy tables such as `financial_facts`,
+`extraction_runs`, and `fetch_log`.
+
 ## Required Runtime Contract
 
 Endpoint environment:
@@ -142,6 +147,40 @@ externalized `source_documents` and writes derived rows.
 Use `scripts/run_source_documents_backfill.sh` only for explicitly selected raw
 archive expansion. On capacity-constrained machines, prefer rebuilding
 `evidence_documents` and structured facts over collecting more full XML bodies.
+
+Compact runtime artifact flow:
+
+```bash
+kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
+kreports externalize-long-evidence-text \
+  --table accounting_note_chapters \
+  --min-text-chars 8000 \
+  --excerpt-chars 2000 \
+  --limit 100 \
+  --backend gcs \
+  --bucket <gcs-bucket-name> \
+  --prefix evidence/full-text
+kreports export-runtime-db \
+  --output artifacts/kreports-runtime-2021-2025.db \
+  --year-from 2021 \
+  --year-to 2025 \
+  --profile compact
+kreports upload-runtime-db-artifact \
+  --db artifacts/kreports-runtime-2021-2025.db \
+  --bucket <gcs-bucket-name> \
+  --prefix runtime-db \
+  --profile compact \
+  --year-from 2021 \
+  --year-to 2025
+```
+
+Measured smoke result:
+
+- maintainer DB: 2.1GB
+- compact runtime DB: 729MB
+- uploaded gzip artifact: 162.8MB
+- manifest:
+  `gs://kreports-raw-documents-gen-lang-client-0171998581/runtime-db/kreports-compact-2021-2025.manifest.json`
 
 Current long-running backfills are tracked in:
 

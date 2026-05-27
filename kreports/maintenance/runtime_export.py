@@ -5,7 +5,9 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
+import tempfile
 
 from kreports.db import engine as engine_module
 
@@ -134,20 +136,29 @@ def upload_runtime_db_artifact(
         year_from=year_from,
         year_to=year_to,
     )
-    compressed = gzip.compress(path.read_bytes())
     client = storage.Client()
     db_object = f"{prefix.strip('/')}/kreports-{profile}-{year_from}-{year_to}.db.gz"
     manifest_object = f"{prefix.strip('/')}/kreports-{profile}-{year_from}-{year_to}.manifest.json"
     bucket_obj = client.bucket(bucket)
-    bucket_obj.blob(db_object).upload_from_string(compressed, content_type="application/gzip")
-    bucket_obj.blob(manifest_object).upload_from_string(
+
+    with tempfile.NamedTemporaryFile(suffix=".db.gz") as tmp:
+        with path.open("rb") as src, gzip.open(tmp.name, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
+        compressed_bytes = Path(tmp.name).stat().st_size
+        db_blob = bucket_obj.blob(db_object)
+        db_blob.chunk_size = 8 * 1024 * 1024
+        db_blob.upload_from_filename(tmp.name, content_type="application/gzip", timeout=600)
+
+    manifest_blob = bucket_obj.blob(manifest_object)
+    manifest_blob.upload_from_string(
         json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
         content_type="application/json",
+        timeout=120,
     )
     return {
         "ok": True,
         "db_uri": f"gs://{bucket}/{db_object}",
         "manifest_uri": f"gs://{bucket}/{manifest_object}",
         "manifest": manifest,
-        "compressed_bytes": len(compressed),
+        "compressed_bytes": compressed_bytes,
     }

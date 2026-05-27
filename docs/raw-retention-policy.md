@@ -13,7 +13,7 @@ or hot-year audit evidence review.
 Keep these compact tables available for public MCP responses:
 
 - `financials`
-- `financial_facts`
+- `financial_facts_compact`
 - `auditors`
 - `audit_fees`
 - `report_sections`
@@ -26,6 +26,10 @@ Keep these compact tables available for public MCP responses:
 Completeness is judged against these derived tables, not against full raw XML
 coverage.
 
+Full warehouse tables such as `financial_facts` can remain in the maintainer DB,
+but deployable runtime artifacts should use `financial_facts_compact` unless a
+workflow explicitly needs every XBRL line item.
+
 ### Tier B: Hot Raw Archive
 
 Keep raw XML/HTML only for selected hot coverage:
@@ -35,6 +39,9 @@ Keep raw XML/HTML only for selected hot coverage:
 - documents needed to debug parser gaps.
 
 Hot raw files should be compressed and addressed through `storage_uri`.
+Long derived evidence text can also be externalized. In that case the runtime DB
+keeps the excerpt plus `full_text_uri`, `full_text_hash`, `full_text_length`, and
+`full_text_compressed_length`.
 
 ### Tier C: Cold / On-Demand Raw
 
@@ -65,6 +72,16 @@ Recent measured compression:
 - 824.95MB raw XML
 - 96.31MB gzip
 - approximately 88% reduction
+
+Recent compact runtime artifact smoke:
+
+- Maintainer DB: 2.1GB
+- Compact runtime SQLite artifact: 729MB
+- Compact runtime artifact gzip uploaded to GCS: 162.8MB
+- `financial_facts_compact`: 68,770 rows
+- Externalized long accounting note chapters: 100 rows
+- Runtime DB artifact URI:
+  `gs://kreports-raw-documents-gen-lang-client-0171998581/runtime-db/kreports-compact-2021-2025.db.gz`
 
 This is still additive until inline SQLite raw content is cleared and the DB is
 rebuilt. On a nearly full disk, pause raw expansion and continue only derived
