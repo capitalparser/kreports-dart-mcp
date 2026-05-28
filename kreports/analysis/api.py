@@ -2864,6 +2864,29 @@ def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025
     return _clean_dict(result)
 
 
+def get_accounting_policy_changes(
+    company: str,
+    start_year: int = 2021,
+    end_year: int = 2025,
+    fs_div: str | None = None,
+) -> dict:
+    """Return note 2/3/4 accounting policy and estimate text-change hints."""
+    from kreports.analysis.policy_changes import accounting_policy_changes
+
+    corp_code = resolve_corp_code(company) or company
+    subject = _company_summary(corp_code)
+    if not subject:
+        return {"error": "company not found", "company": company}
+    result = accounting_policy_changes(
+        corp_code,
+        start_year=start_year,
+        end_year=end_year,
+        fs_div=fs_div,
+    )
+    result["subject"] = subject
+    return _clean_dict(result)
+
+
 _AUDIT_PROCEDURE_TYPES = {
     "internal_control",
     "substantive_test",

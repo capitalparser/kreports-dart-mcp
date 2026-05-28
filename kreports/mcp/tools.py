@@ -55,6 +55,7 @@ from kreports.analysis.api import (
     detect_restatement,
     estimate_audit_hours_proxy,
     get_accounting_policy,
+    get_accounting_policy_changes,
     get_audit_report_sections,
     get_audit_history,
     get_business_overview,
@@ -1500,6 +1501,35 @@ TOOL_GET_KAM_LIFECYCLE = Tool(
 )
 
 
+def _handle_get_accounting_policy_changes(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return get_accounting_policy_changes(
+        company=company,
+        start_year=_optional_int(args, "start_year", 2021, min_value=2000, max_value=2100) or 2021,
+        end_year=_optional_int(args, "end_year", 2025, min_value=2000, max_value=2100) or 2025,
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, None) if args.get("fs_div") is not None else None,
+    )
+
+
+TOOL_GET_ACCOUNTING_POLICY_CHANGES = Tool(
+    name="get_accounting_policy_changes",
+    description=(
+        "사업보고서 주석 2/3/4의 회계정책·추정판단 문구 변화를 5개년으로 비교한다. "
+        "정책 변경 후보, 추정 불확실성 변화, 전년 대비 문구 변경을 검토할 때 사용한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "start_year": {"type": "integer", "default": 2021, "minimum": 2000, "maximum": 2100},
+            "end_year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "fs_div": {"type": "string", "enum": ["CFS", "OFS"]},
+        },
+        "required": ["company"],
+    },
+)
+
+
 def _handle_get_audit_report_sections(args: dict) -> dict:
     company = _resolve_or_error(_require_string(args, "company"))
     section_key = args.get("section_key")
@@ -1724,6 +1754,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_SEARCH_AUDIT_PROCEDURES,
     TOOL_COMPARE_PEER_AUDIT_PROCEDURES,
     TOOL_GET_KAM_LIFECYCLE,
+    TOOL_GET_ACCOUNTING_POLICY_CHANGES,
     TOOL_GET_AUDIT_REPORT_SECTIONS,
     TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
     TOOL_BUILD_AUDIT_ACCEPTANCE_PACK,
@@ -1754,6 +1785,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "search_audit_procedures": _handle_search_audit_procedures,
     "compare_peer_audit_procedures": _handle_compare_peer_audit_procedures,
     "get_kam_lifecycle": _handle_get_kam_lifecycle,
+    "get_accounting_policy_changes": _handle_get_accounting_policy_changes,
     "get_audit_report_sections": _handle_get_audit_report_sections,
     "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,
     "build_audit_acceptance_pack": _handle_build_audit_acceptance_pack,

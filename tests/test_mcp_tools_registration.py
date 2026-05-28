@@ -43,6 +43,12 @@ def test_get_kam_lifecycle_registered():
     assert "get_kam_lifecycle" in HANDLERS
 
 
+def test_get_accounting_policy_changes_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "get_accounting_policy_changes" in names
+    assert "get_accounting_policy_changes" in HANDLERS
+
+
 def test_search_dataset_registered():
     names = [t.name for t in ALL_TOOLS]
     assert "search_dataset" in names
