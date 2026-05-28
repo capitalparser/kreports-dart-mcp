@@ -65,7 +65,20 @@ run_step() {
   fi
 }
 
+run_python_script() {
+  local label="$1"; shift
+  log "=== START: $label ==="
+  if "$PYTHON_BIN" "$@"; then
+    log "=== OK: $label ==="
+  else
+    local rc=$?
+    log "=== FAIL ($rc): $label === (continuing to next step)"
+  fi
+}
+
 run_step "collect-audit-fees (full)"  collect-audit-fees --year-from 2021 --year-to 2025
+run_python_script "retry financial errors KOSPI" scripts/backfill_error_financials.py --market KOSPI --year-from 2021 --year-to 2025
+run_python_script "retry financial errors KOSDAQ" scripts/backfill_error_financials.py --market KOSDAQ --year-from 2021 --year-to 2025
 run_step "collect-auditors (full)"    collect-auditors
 
 log "=== ALL DONE ==="

@@ -39,10 +39,15 @@ QUARTER_TO_REPRT = {v: k for k, v in REPRT_TO_QUARTER.items()}
 _LISTED_MARKETS = {"KOSPI", "KOSDAQ", "KONEX"}
 _DART_NO_DATA_STATUS = "013"
 _DART_LIMIT_MARKERS = ("사용한도", "초과", "limit")
+_DART_AUTH_MARKERS = ("등록되지 않은 인증키", "invalid api key", "invalid key")
 
 
 class DartApiLimitExceeded(RuntimeError):
     """Raised when DART reports that the API key has exhausted its call quota."""
+
+
+class DartApiAuthError(RuntimeError):
+    """Raised when DART rejects the configured API key."""
 
 
 def _is_dart_limit_response(response: dict | None) -> bool:
@@ -51,6 +56,14 @@ def _is_dart_limit_response(response: dict | None) -> bool:
     message = str(response.get("message") or "").lower()
     status = str(response.get("status") or "")
     return status != "000" and any(marker in message for marker in _DART_LIMIT_MARKERS)
+
+
+def _is_dart_auth_response(response: dict | None) -> bool:
+    if not response:
+        return False
+    message = str(response.get("message") or "").lower()
+    status = str(response.get("status") or "")
+    return status != "000" and any(marker in message for marker in _DART_AUTH_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +99,10 @@ def collect_financial(
         message = response.get("message") or "DART API limit exceeded"
         _log_fetch(corp_code, year, quarter, "error", message)
         raise DartApiLimitExceeded(str(message))
+    if _is_dart_auth_response(response):
+        message = response.get("message") or "DART API key rejected"
+        _log_fetch(corp_code, year, quarter, "error", message)
+        raise DartApiAuthError(str(message))
 
     # CFS 없으면 OFS 폴백
     if response.get("status") != "000" and fs_div == "CFS":
@@ -101,6 +118,10 @@ def collect_financial(
             message = response.get("message") or "DART API limit exceeded"
             _log_fetch(corp_code, year, quarter, "error", message)
             raise DartApiLimitExceeded(str(message))
+        if _is_dart_auth_response(response):
+            message = response.get("message") or "DART API key rejected"
+            _log_fetch(corp_code, year, quarter, "error", message)
+            raise DartApiAuthError(str(message))
 
     # acntall 양쪽 실패 시 acnt(주요계정 요약) 폴백 — KOSDAQ 소형주 갭 보완
     if response.get("status") != "000":
@@ -148,6 +169,9 @@ def _try_summary_fallback(
         if _is_dart_limit_response(response):
             message = response.get("message") or "DART API limit exceeded"
             raise DartApiLimitExceeded(str(message))
+        if _is_dart_auth_response(response):
+            message = response.get("message") or "DART API key rejected"
+            raise DartApiAuthError(str(message))
 
         if response.get("status") not in ("000", _DART_NO_DATA_STATUS):
             logger.warning(
