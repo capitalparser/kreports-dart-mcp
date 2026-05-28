@@ -2887,6 +2887,29 @@ def get_accounting_policy_changes(
     return _clean_dict(result)
 
 
+def get_quality_of_earnings_pack(
+    company: str,
+    start_year: int = 2021,
+    end_year: int = 2025,
+    fs_div: str = "CFS",
+) -> dict:
+    """Return investor-oriented quality-of-earnings diagnostics."""
+    from kreports.analysis.investor_quality import quality_of_earnings_pack
+
+    corp_code = resolve_corp_code(company) or company
+    subject = _company_summary(corp_code)
+    if not subject:
+        return {"error": "company not found", "company": company}
+    result = quality_of_earnings_pack(
+        corp_code,
+        start_year=start_year,
+        end_year=end_year,
+        fs_div=fs_div,
+    )
+    result["subject"] = subject
+    return _clean_dict(result)
+
+
 _AUDIT_PROCEDURE_TYPES = {
     "internal_control",
     "substantive_test",

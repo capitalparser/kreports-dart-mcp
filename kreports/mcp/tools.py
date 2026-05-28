@@ -63,6 +63,7 @@ from kreports.analysis.api import (
     get_industry_audit_landscape,
     get_investor_signals,
     get_kam_lifecycle,
+    get_quality_of_earnings_pack,
     get_subsidiary_auditors,
     resolve_corp_code,
     search_dataset,
@@ -1530,6 +1531,35 @@ TOOL_GET_ACCOUNTING_POLICY_CHANGES = Tool(
 )
 
 
+def _handle_get_quality_of_earnings_pack(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return get_quality_of_earnings_pack(
+        company=company,
+        start_year=_optional_int(args, "start_year", 2021, min_value=2000, max_value=2100) or 2021,
+        end_year=_optional_int(args, "end_year", 2025, min_value=2000, max_value=2100) or 2025,
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+    )
+
+
+TOOL_GET_QUALITY_OF_EARNINGS_PACK = Tool(
+    name="get_quality_of_earnings_pack",
+    description=(
+        "투자자 관점에서 5개년 이익의 질을 점검한다. 순이익-영업현금흐름 전환율, 영업마진 변동성, "
+        "음의 영업현금흐름, 감사보고서 matter 신호를 함께 반환한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "start_year": {"type": "integer", "default": 2021, "minimum": 2000, "maximum": 2100},
+            "end_year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "fs_div": {"type": "string", "enum": ["CFS", "OFS"], "default": "CFS"},
+        },
+        "required": ["company"],
+    },
+)
+
+
 def _handle_get_audit_report_sections(args: dict) -> dict:
     company = _resolve_or_error(_require_string(args, "company"))
     section_key = args.get("section_key")
@@ -1755,6 +1785,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_COMPARE_PEER_AUDIT_PROCEDURES,
     TOOL_GET_KAM_LIFECYCLE,
     TOOL_GET_ACCOUNTING_POLICY_CHANGES,
+    TOOL_GET_QUALITY_OF_EARNINGS_PACK,
     TOOL_GET_AUDIT_REPORT_SECTIONS,
     TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
     TOOL_BUILD_AUDIT_ACCEPTANCE_PACK,
@@ -1786,6 +1817,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "compare_peer_audit_procedures": _handle_compare_peer_audit_procedures,
     "get_kam_lifecycle": _handle_get_kam_lifecycle,
     "get_accounting_policy_changes": _handle_get_accounting_policy_changes,
+    "get_quality_of_earnings_pack": _handle_get_quality_of_earnings_pack,
     "get_audit_report_sections": _handle_get_audit_report_sections,
     "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,
     "build_audit_acceptance_pack": _handle_build_audit_acceptance_pack,
