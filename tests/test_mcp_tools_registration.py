@@ -61,6 +61,12 @@ def test_get_dcf_input_candidates_registered():
     assert "get_dcf_input_candidates" in HANDLERS
 
 
+def test_search_disclosure_events_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "search_disclosure_events" in names
+    assert "search_disclosure_events" in HANDLERS
+
+
 def test_search_dataset_registered():
     names = [t.name for t in ALL_TOOLS]
     assert "search_dataset" in names

@@ -536,3 +536,24 @@ class BackfillRun(Base):
         Index("idx_backfill_runs_key_status", "task_type", "year", "market", "status"),
         Index("idx_backfill_runs_started", "started_at"),
     )
+
+
+class DisclosureEvent(Base):
+    """Investor/auditor-relevant event indexed from DART disclosure titles."""
+    __tablename__ = "disclosure_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(14), nullable=False)
+    corp_code = Column(String(8), nullable=False)
+    event_date = Column(DateTime, nullable=False)
+    event_type = Column(String(50), nullable=False)
+    event_title = Column(String(500), nullable=False)
+    severity_hint = Column(String(20), nullable=False, default="info")
+    source_report_nm = Column(String(500), nullable=False)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("rcept_no", "event_type", name="uq_disclosure_event"),
+        Index("idx_disclosure_event_corp_date", "corp_code", "event_date"),
+        Index("idx_disclosure_event_type_date", "event_type", "event_date"),
+    )

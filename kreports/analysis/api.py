@@ -2933,6 +2933,37 @@ def get_dcf_input_candidates(
     return _clean_dict(result)
 
 
+def search_disclosure_events(
+    *,
+    company: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    event_types: list[str] | None = None,
+    market: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Search indexed event disclosures by company, period, event type, and market."""
+    from kreports.analysis.disclosure_events import search_disclosure_events as _search_events
+
+    corp_code = None
+    subject = None
+    if company:
+        corp_code = resolve_corp_code(company) or company
+        subject = _company_summary(corp_code)
+        if not subject:
+            return {"error": "company not found", "company": company}
+    result = _search_events(
+        company=corp_code,
+        start_date=start_date,
+        end_date=end_date,
+        event_types=event_types,
+        market=market,
+        limit=limit,
+    )
+    result["subject"] = subject
+    return _clean_dict(result)
+
+
 _AUDIT_PROCEDURE_TYPES = {
     "internal_control",
     "substantive_test",

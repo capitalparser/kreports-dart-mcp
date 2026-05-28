@@ -1687,6 +1687,18 @@ def rebuild_audit_matter_items_cmd(
     _json_print(rebuild_audit_matter_items(year=year, limit=limit))
 
 
+@app.command("rebuild-disclosure-events")
+def rebuild_disclosure_events_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 공시 제출연도"),
+    market: Optional[str] = typer.Option(None, "--market", help="시장 필터: KOSPI/KOSDAQ/KONEX"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 공시 수"),
+):
+    """수시공시 제목을 투자자/감사인 이벤트 레이어로 인덱싱한다."""
+    from kreports.collector.disclosure_event_indexer import rebuild_disclosure_events
+
+    _json_print(rebuild_disclosure_events(year=year, market=market, limit=limit))
+
+
 @app.command("migrate-raw-documents-to-storage")
 def migrate_raw_documents_to_storage_cmd(
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),

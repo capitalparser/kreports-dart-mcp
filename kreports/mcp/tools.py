@@ -71,6 +71,7 @@ from kreports.analysis.api import (
     search_audit_procedures,
     search_audit_report_matters,
     select_peer_group,
+    search_disclosure_events,
     score_going_concern,
     search_company,
 )
@@ -1590,6 +1591,44 @@ TOOL_GET_DCF_INPUT_CANDIDATES = Tool(
 )
 
 
+def _handle_search_disclosure_events(args: dict) -> dict:
+    event_types = args.get("event_types")
+    if event_types is not None and (not isinstance(event_types, list) or not all(isinstance(x, str) for x in event_types)):
+        raise ValueError("event_types must be an array of strings")
+    return search_disclosure_events(
+        company=_optional_string(args, "company"),
+        start_date=_optional_string(args, "start_date"),
+        end_date=_optional_string(args, "end_date"),
+        event_types=event_types,
+        market=_optional_string(args, "market"),
+        limit=_optional_int(args, "limit", 50, min_value=1, max_value=500) or 50,
+    )
+
+
+TOOL_SEARCH_DISCLOSURE_EVENTS = Tool(
+    name="search_disclosure_events",
+    description=(
+        "유상증자, 전환사채, 소송, 최대주주 변경, 횡령배임, 주요 계약, 자산거래, 감사관련 공시 이벤트를 "
+        "회사/기간/시장/이벤트 유형으로 검색한다. 원문 확인은 fetch_disclosure_on_demand와 연결한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+            "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+            "event_types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "capital_raise/litigation/control_change/fraud/major_contract/asset_deal/audit_related",
+            },
+            "market": {"type": "string"},
+            "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
+        },
+    },
+)
+
+
 def _handle_get_audit_report_sections(args: dict) -> dict:
     company = _resolve_or_error(_require_string(args, "company"))
     section_key = args.get("section_key")
@@ -1817,6 +1856,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_GET_ACCOUNTING_POLICY_CHANGES,
     TOOL_GET_QUALITY_OF_EARNINGS_PACK,
     TOOL_GET_DCF_INPUT_CANDIDATES,
+    TOOL_SEARCH_DISCLOSURE_EVENTS,
     TOOL_GET_AUDIT_REPORT_SECTIONS,
     TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
     TOOL_BUILD_AUDIT_ACCEPTANCE_PACK,
@@ -1850,6 +1890,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "get_accounting_policy_changes": _handle_get_accounting_policy_changes,
     "get_quality_of_earnings_pack": _handle_get_quality_of_earnings_pack,
     "get_dcf_input_candidates": _handle_get_dcf_input_candidates,
+    "search_disclosure_events": _handle_search_disclosure_events,
     "get_audit_report_sections": _handle_get_audit_report_sections,
     "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,
     "build_audit_acceptance_pack": _handle_build_audit_acceptance_pack,
