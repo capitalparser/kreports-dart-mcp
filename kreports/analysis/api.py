@@ -2910,6 +2910,29 @@ def get_quality_of_earnings_pack(
     return _clean_dict(result)
 
 
+def get_dcf_input_candidates(
+    company: str,
+    start_year: int = 2021,
+    end_year: int = 2025,
+    fs_div: str = "CFS",
+) -> dict:
+    """Return evidence-backed DCF input candidates."""
+    from kreports.analysis.dcf_inputs import dcf_input_candidates
+
+    corp_code = resolve_corp_code(company) or company
+    subject = _company_summary(corp_code)
+    if not subject:
+        return {"error": "company not found", "company": company}
+    result = dcf_input_candidates(
+        corp_code,
+        start_year=start_year,
+        end_year=end_year,
+        fs_div=fs_div,
+    )
+    result["subject"] = subject
+    return _clean_dict(result)
+
+
 _AUDIT_PROCEDURE_TYPES = {
     "internal_control",
     "substantive_test",

@@ -60,6 +60,7 @@ from kreports.analysis.api import (
     get_audit_history,
     get_business_overview,
     get_financial_snapshot,
+    get_dcf_input_candidates,
     get_industry_audit_landscape,
     get_investor_signals,
     get_kam_lifecycle,
@@ -1560,6 +1561,35 @@ TOOL_GET_QUALITY_OF_EARNINGS_PACK = Tool(
 )
 
 
+def _handle_get_dcf_input_candidates(args: dict) -> dict:
+    company = _resolve_or_error(_require_string(args, "company"))
+    return get_dcf_input_candidates(
+        company=company,
+        start_year=_optional_int(args, "start_year", 2021, min_value=2000, max_value=2100) or 2021,
+        end_year=_optional_int(args, "end_year", 2025, min_value=2000, max_value=2100) or 2025,
+        fs_div=_optional_enum(args, "fs_div", _FS_DIVS, "CFS"),
+    )
+
+
+TOOL_GET_DCF_INPUT_CANDIDATES = Tool(
+    name="get_dcf_input_candidates",
+    description=(
+        "5개년 재무 실제값에서 DCF 입력 후보를 산출한다. 매출성장률, 영업마진, 현금전환율 등 "
+        "관측값 기반 후보와 WACC/세율/CAPEX 등 별도 판단이 필요한 누락 입력을 분리한다."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "company": {"type": "string"},
+            "start_year": {"type": "integer", "default": 2021, "minimum": 2000, "maximum": 2100},
+            "end_year": {"type": "integer", "default": 2025, "minimum": 2000, "maximum": 2100},
+            "fs_div": {"type": "string", "enum": ["CFS", "OFS"], "default": "CFS"},
+        },
+        "required": ["company"],
+    },
+)
+
+
 def _handle_get_audit_report_sections(args: dict) -> dict:
     company = _resolve_or_error(_require_string(args, "company"))
     section_key = args.get("section_key")
@@ -1786,6 +1816,7 @@ ALL_TOOLS: list[Tool] = [
     TOOL_GET_KAM_LIFECYCLE,
     TOOL_GET_ACCOUNTING_POLICY_CHANGES,
     TOOL_GET_QUALITY_OF_EARNINGS_PACK,
+    TOOL_GET_DCF_INPUT_CANDIDATES,
     TOOL_GET_AUDIT_REPORT_SECTIONS,
     TOOL_ESTIMATE_AUDIT_HOURS_PROXY,
     TOOL_BUILD_AUDIT_ACCEPTANCE_PACK,
@@ -1818,6 +1849,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "get_kam_lifecycle": _handle_get_kam_lifecycle,
     "get_accounting_policy_changes": _handle_get_accounting_policy_changes,
     "get_quality_of_earnings_pack": _handle_get_quality_of_earnings_pack,
+    "get_dcf_input_candidates": _handle_get_dcf_input_candidates,
     "get_audit_report_sections": _handle_get_audit_report_sections,
     "estimate_audit_hours_proxy": _handle_estimate_audit_hours_proxy,
     "build_audit_acceptance_pack": _handle_build_audit_acceptance_pack,
