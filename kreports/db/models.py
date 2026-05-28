@@ -440,6 +440,34 @@ class AuditProcedureItem(Base):
     )
 
 
+class AuditMatterItem(Base):
+    """Structured non-KAM audit-report matter for search and peer comparison."""
+    __tablename__ = "audit_matter_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(80), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    matter_type = Column(String(50), nullable=False)
+    matter_title = Column(String(300), nullable=True)
+    matter_text = Column(Text, nullable=False)
+    matter_hash = Column(String(40), nullable=True)
+    matter_length = Column(Integer, nullable=True)
+    topic_tags = Column(Text, nullable=False, default="[]")
+    severity_hint = Column(String(20), nullable=False, default="info")
+    source_type = Column(String(30), nullable=False, default="audit_report")
+    section_ordinal = Column(SmallInteger, nullable=False, default=0)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("rcept_no", "matter_type", "section_ordinal", name="uq_audit_matter_item"),
+        Index("idx_audit_matter_corp_year", "corp_code", "bsns_year"),
+        Index("idx_audit_matter_type_year", "matter_type", "bsns_year"),
+        Index("idx_audit_matter_severity", "severity_hint"),
+    )
+
+
 class BusinessAffiliateAuditor(Base):
     """Subsidiary/equity affiliate auditor matrix cached from business reports."""
     __tablename__ = "subsidiary_auditor_matrix"

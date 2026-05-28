@@ -191,6 +191,18 @@ def _has_db_column(table_name: str, column_name: str) -> bool:
         return False
 
 
+def _has_db_table(table_name: str) -> bool:
+    try:
+        with _engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"),
+                {"name": table_name},
+            ).first()
+        return row is not None
+    except Exception:
+        return False
+
+
 def _cached_years_for_sections(corp_code: str, source_type: str, section_key: str | None = None) -> list[int]:
     where = "corp_code=:corp_code AND source_type=:source_type"
     params: dict[str, Any] = {"corp_code": corp_code, "source_type": source_type}
@@ -2689,24 +2701,50 @@ def search_audit_report_matters(
         where.append("c.induty_code LIKE :induty_prefix")
         params["induty_prefix"] = f"{induty_prefix}%"
 
-    dcm_select = "rs.dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
-    sql = text(
-        f"""
-        SELECT rs.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
-               rs.bsns_year, rs.rcept_no, {dcm_select}, rs.section_key,
-               rs.section_title, rs.body_text, rs.body_length, rs.ordinal
-        FROM report_sections rs
-        JOIN companies c ON c.corp_code=rs.corp_code
-        WHERE {" AND ".join(where)}
-        ORDER BY rs.bsns_year DESC, c.market, c.induty_code, c.corp_name, rs.section_key, rs.ordinal
-        LIMIT :row_limit
-        """
-    ).bindparams(bindparam("section_keys", expanding=True))
     params["row_limit"] = int(limit) * 10
+    rows: list[dict] = []
+    row_source = "audit_matter_items"
+    if _has_db_table("audit_matter_items"):
+        matter_where = [
+            condition.replace("rs.section_key", "ami.matter_type").replace("rs.", "ami.")
+            for condition in where
+            if condition != "rs.source_type='audit_report'"
+        ]
+        matter_sql = text(
+            f"""
+            SELECT ami.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   ami.bsns_year, ami.rcept_no, ami.dcm_no, ami.matter_type AS section_key,
+                   ami.matter_title AS section_title, ami.matter_text AS body_text,
+                   ami.matter_length AS body_length, ami.section_ordinal AS ordinal,
+                   ami.topic_tags, ami.severity_hint
+            FROM audit_matter_items ami
+            JOIN companies c ON c.corp_code=ami.corp_code
+            WHERE {" AND ".join(matter_where)}
+            ORDER BY ami.bsns_year DESC, c.market, c.induty_code, c.corp_name, ami.matter_type, ami.section_ordinal
+            LIMIT :row_limit
+            """
+        ).bindparams(bindparam("section_keys", expanding=True))
+        with _engine.connect() as conn:
+            rows = [dict(r) for r in conn.execute(matter_sql, params).mappings().all()]
 
-    with _engine.connect() as conn:
-        rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
-    row_source = "report_sections.audit_report"
+    if not rows:
+        dcm_select = "rs.dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
+        sql = text(
+            f"""
+            SELECT rs.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                   rs.bsns_year, rs.rcept_no, {dcm_select}, rs.section_key,
+                   rs.section_title, rs.body_text, rs.body_length, rs.ordinal
+            FROM report_sections rs
+            JOIN companies c ON c.corp_code=rs.corp_code
+            WHERE {" AND ".join(where)}
+            ORDER BY rs.bsns_year DESC, c.market, c.induty_code, c.corp_name, rs.section_key, rs.ordinal
+            LIMIT :row_limit
+            """
+        ).bindparams(bindparam("section_keys", expanding=True))
+
+        with _engine.connect() as conn:
+            rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
+        row_source = "report_sections.audit_report"
     if not rows:
         company_where = ["1=1"]
         company_params: dict[str, object] = {}

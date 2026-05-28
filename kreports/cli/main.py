@@ -1676,6 +1676,17 @@ def index_audit_procedures_cmd(
             typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
 
 
+@app.command("rebuild-audit-matter-items")
+def rebuild_audit_matter_items_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 섹션 수"),
+):
+    """감사보고서 강조사항/기타사항/계속기업 문단을 검색용 정형 테이블로 재생성한다."""
+    from kreports.collector.audit_matter_indexer import rebuild_audit_matter_items
+
+    _json_print(rebuild_audit_matter_items(year=year, limit=limit))
+
+
 @app.command("migrate-raw-documents-to-storage")
 def migrate_raw_documents_to_storage_cmd(
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 문서 수"),
