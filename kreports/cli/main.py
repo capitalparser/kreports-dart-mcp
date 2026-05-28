@@ -1443,6 +1443,22 @@ def audit_disclosure_window_cmd(
             )
 
 
+@app.command("raw-annual-report-coverage")
+def raw_annual_report_coverage_cmd(
+    start_filing_year: int = typer.Option(2022, "--start-filing-year"),
+    end_filing_year: int = typer.Option(2026, "--end-filing-year"),
+    market: list[str] = typer.Option(["KOSPI", "KOSDAQ"], "--market"),
+):
+    """5개년 최신 사업보고서 원문 GCS 적재율을 요약한다."""
+    from kreports.analysis.raw_coverage import raw_annual_report_coverage
+
+    _json_print(raw_annual_report_coverage(
+        start_filing_year=start_filing_year,
+        end_filing_year=end_filing_year,
+        markets=list(market),
+    ))
+
+
 # ---------------------------------------------------------------------------
 # collect-auditors (감사인 이력 수집)
 # ---------------------------------------------------------------------------
