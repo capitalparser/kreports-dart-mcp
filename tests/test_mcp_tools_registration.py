@@ -37,6 +37,12 @@ def test_search_audit_report_matters_registered():
     assert "search_audit_report_matters" in HANDLERS
 
 
+def test_get_kam_lifecycle_registered():
+    names = [t.name for t in ALL_TOOLS]
+    assert "get_kam_lifecycle" in names
+    assert "get_kam_lifecycle" in HANDLERS
+
+
 def test_search_dataset_registered():
     names = [t.name for t in ALL_TOOLS]
     assert "search_dataset" in names

@@ -2851,6 +2851,19 @@ def search_audit_report_matters(
     })
 
 
+def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025) -> dict:
+    """Return 5-year KAM lifecycle for a resolved company identifier."""
+    from kreports.analysis.kam_lifecycle import kam_lifecycle_for_company
+
+    corp_code = resolve_corp_code(company) or company
+    subject = _company_summary(corp_code)
+    if not subject:
+        return {"error": "company not found", "company": company}
+    result = kam_lifecycle_for_company(corp_code, start_year=start_year, end_year=end_year)
+    result["subject"] = subject
+    return _clean_dict(result)
+
+
 _AUDIT_PROCEDURE_TYPES = {
     "internal_control",
     "substantive_test",
