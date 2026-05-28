@@ -1710,7 +1710,42 @@ def select_peer_group(
                 reasons.append("asset_size_bucket")
             if row["audit_fee_m"] is not None:
                 reasons.append("audit_fee_available")
-            peers.append({**dict(row), "include_reasons": reasons})
+            reason_components = {
+                "industry_match": {
+                    "matched": True,
+                    "basis": "same_ksic_prefix",
+                    "matched_prefix_len": pr.matched_prefix_len,
+                    "subject_induty_code": subject_row[3],
+                    "peer_induty_code": row["induty_code"],
+                },
+                "sector_match": {
+                    "matched": True,
+                    "basis": f"sector_group:{pr.sector_group.value}",
+                },
+                "size_bucket_match": {
+                    "matched": bool(size_bucket_decade is not None),
+                    "basis": "asset_size_bucket" if size_bucket_decade is not None else "not_requested",
+                },
+                "audit_evidence_available": {
+                    "matched": row["audit_fee_m"] is not None,
+                    "audit_fee_m": row["audit_fee_m"],
+                    "audit_hours": row["audit_hours"],
+                    "nas_ratio": row["nas_ratio"],
+                },
+                "business_text_overlap": {
+                    "matched": None,
+                    "basis": "not_indexed_for_peer_scoring",
+                },
+                "kam_topic_overlap": {
+                    "matched": None,
+                    "basis": "not_indexed_for_peer_scoring",
+                },
+                "audit_matter_overlap": {
+                    "matched": None,
+                    "basis": "not_indexed_for_peer_scoring",
+                },
+            }
+            peers.append({**dict(row), "include_reasons": reasons, "reason_components": reason_components})
 
     return {
         "subject": {
@@ -1729,6 +1764,10 @@ def select_peer_group(
             "fs_strategy": fs_strategy,
             "fs_div_used": fs_div_used,
             "resolved_year": pr.resolved_year,
+            "reason_component_note": (
+                "industry/sector/audit availability are populated now; business text, KAM topic, "
+                "and audit matter overlap are exposed as nullable components until those indexes are fully backfilled."
+            ),
         },
         "peer_count": pr.n_peers,
         "returned_peer_count": len(peers),

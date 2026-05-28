@@ -35,6 +35,9 @@ def test_select_peer_group_returns_reason_codes_for_real_db():
     assert "corp_code" in first
     assert "include_reasons" in first
     assert "same_ksic_prefix" in first["include_reasons"]
+    assert "reason_components" in first
+    assert "industry_match" in first["reason_components"]
+    assert "kam_topic_overlap" in first["reason_components"]
     assert "selection_policy" in out
 
 
