@@ -219,6 +219,10 @@ def _render_audit_report_matters(result: dict) -> str:
     return "\n".join(lines)
 
 
+def render_audit_matter_search(result: dict) -> str:
+    return _render_audit_report_matters(result)
+
+
 def _render_audit_procedures(result: dict) -> str:
     query = result.get("query") or {}
     subject = _subject_label(result)
@@ -247,6 +251,122 @@ def _render_audit_procedures(result: dict) -> str:
     data_quality = result.get("data_quality") or {}
     lines.append(f"- 출처: {data_quality.get('source') or 'audit_procedure_items'}")
     lines.append(f"- {data_quality.get('interpretation') or data_quality.get('coverage_note') or 'KAM 본문에서 rule 기반으로 분리한 절차 힌트입니다.'}")
+    return "\n".join(lines)
+
+
+def _render_kam_lifecycle(result: dict) -> str:
+    subject = _subject_label(result)
+    events = result.get("events") or []
+    changed = [event for event in events if event.get("status") == "repeated_changed"]
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} KAM lifecycle 조회 결과입니다. {result.get('start_year')}~{result.get('end_year')}년 범위에서 KAM 이벤트 {len(events)}건이 확인됩니다.",
+        "",
+        "근거:",
+    ]
+    if events:
+        for event in events[:5]:
+            lines.append(f"- {event.get('year')}년 {event.get('topic')}: {event.get('status')} / {event.get('title') or 'KAM'}")
+    else:
+        lines.append("- 현재 로컬 캐시에서 KAM 본문을 찾지 못했습니다.")
+    lines.append("")
+    lines.append("왜 중요한가:")
+    lines.append(f"- KAM 변경 이벤트는 {len(changed)}건입니다. 반복 KAM의 문구 변화는 감사위험 또는 공시 표현 변화의 검토 후보입니다.")
+    data_quality = result.get("data_quality") or {}
+    lines.append("")
+    lines.append("데이터 한계:")
+    lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
+    lines.append(f"- {data_quality.get('interpretation') or '원 감사보고서 확인이 필요합니다.'}")
+    return "\n".join(lines)
+
+
+def _render_policy_changes(result: dict) -> str:
+    subject = _subject_label(result)
+    changed = result.get("changed_items") or []
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} 회계정책/추정 주석 변화 조회 결과입니다. {result.get('start_year')}~{result.get('end_year')}년 범위에서 변경 후보 {len(changed)}건이 확인됩니다.",
+        "",
+        "근거:",
+    ]
+    for item in changed[:5]:
+        lines.append(f"- {item.get('year')}년 주석 {item.get('note_no')} {item.get('section_type')}: similarity={item.get('similarity_to_previous')}")
+    if not changed:
+        lines.append("- 현재 비교 가능한 주석 변화 후보가 제한적입니다.")
+    lines.append("")
+    lines.append("데이터 한계:")
+    data_quality = result.get("data_quality") or {}
+    lines.append(f"- 출처: {data_quality.get('source') or 'accounting_note_chapters'}")
+    lines.append(f"- {data_quality.get('interpretation') or '문구 변화는 정책 변경 결론이 아니라 검토 후보입니다.'}")
+    return "\n".join(lines)
+
+
+def _render_quality_of_earnings(result: dict) -> str:
+    subject = _subject_label(result)
+    signals = result.get("signals") or []
+    lines = [
+        f"판정: {result.get('verdict') or _status(result)}",
+        "",
+        f"{subject} 이익의 질 점검 결과입니다. 질문은 '{result.get('investment_question') or '보고이익이 현금흐름으로 뒷받침되는가?'}'입니다.",
+        "",
+        "근거:",
+    ]
+    if signals:
+        for signal in signals[:5]:
+            lines.append(f"- {signal.get('signal')}: {signal.get('meaning') or signal.get('severity')}")
+    else:
+        metrics = result.get("metrics") or {}
+        lines.append(f"- 확인 연도 {metrics.get('years')}개년, 낮은 현금전환 연도 {metrics.get('low_cash_conversion_years')}건")
+    lines.append("")
+    lines.append("데이터 한계:")
+    for limitation in (result.get("limitations") or [])[:3]:
+        lines.append(f"- {limitation}")
+    return "\n".join(lines)
+
+
+def _render_dcf_inputs(result: dict) -> str:
+    subject = _subject_label(result)
+    assumptions = result.get("candidate_assumptions") or {}
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} DCF 입력 후보입니다. 이 결과는 valuation 결론이 아니라 공시 기반 입력값 후보입니다.",
+        "",
+        "근거:",
+    ]
+    for key in ("revenue_growth", "operating_margin", "cash_conversion"):
+        item = assumptions.get(key) or {}
+        lines.append(f"- {key}: {item.get('value')} ({item.get('basis') or 'basis 없음'})")
+    missing = result.get("missing_inputs") or []
+    if missing:
+        lines.append("")
+        lines.append("추가 판단 필요:")
+        lines.append("- " + ", ".join(str(x) for x in missing[:8]))
+    lines.append("")
+    lines.append("데이터 한계:")
+    for limitation in (result.get("limitations") or [])[:3]:
+        lines.append(f"- {limitation}")
+    return "\n".join(lines)
+
+
+def _render_disclosure_events(result: dict) -> str:
+    query = result.get("query") or {}
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{query.get('start_date') or ''}~{query.get('end_date') or ''} 공시 이벤트 검색 결과입니다. 이벤트 {result.get('total_events', 0)}건이 확인됩니다.",
+        "",
+        "근거:",
+    ]
+    for event in (result.get("events") or [])[:5]:
+        lines.append(f"- {event.get('event_date')} {event.get('corp_name')}: {event.get('event_type')} / {event.get('event_title')}")
+    if not result.get("events"):
+        lines.append("- 현재 조건에 맞는 이벤트를 찾지 못했습니다.")
+    lines.append("")
+    lines.append("다음 행동:")
+    lines.append("- 중요한 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문을 확인하세요.")
     return "\n".join(lines)
 
 
@@ -289,6 +409,16 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         return _render_audit_report_matters(result)
     if tool_name in {"search_audit_procedures", "compare_peer_audit_procedures"}:
         return _render_audit_procedures(result)
+    if tool_name == "get_kam_lifecycle":
+        return _render_kam_lifecycle(result)
+    if tool_name == "get_accounting_policy_changes":
+        return _render_policy_changes(result)
+    if tool_name == "get_quality_of_earnings_pack":
+        return _render_quality_of_earnings(result)
+    if tool_name == "get_dcf_input_candidates":
+        return _render_dcf_inputs(result)
+    if tool_name == "search_disclosure_events":
+        return _render_disclosure_events(result)
     if tool_name == "build_audit_acceptance_pack":
         return _render_acceptance_pack(result)
     return _render_generic(tool_name, result)
