@@ -11,6 +11,14 @@ DEFAULT_YEARS_BACK = 5
 CORE_COVERAGE_THRESHOLD = 95.0
 COMPLETENESS_THRESHOLD = 95.0
 FEATURE_COVERAGE_THRESHOLD = 50.0
+INVESTOR_CORE_METRICS = (
+    "revenue",
+    "profit_loss",
+    "operating_cash_flow",
+    "assets",
+    "liabilities",
+    "equity",
+)
 
 
 def pct(numerator: int | float | None, denominator: int | float | None) -> float:
@@ -651,6 +659,154 @@ def dataset_completeness_snapshot(
             "Backfill auditors to 5-year coverage for listed companies.",
             "Backfill or classify missing audit_fee_m/audit_hours values by DART no_data vs parser gap.",
             "Fix financial 5-year denominator by listed-at-year/no_data status before claiming completeness.",
+        ],
+    }
+
+
+def investor_dataset_readiness_snapshot(
+    year: int = 2025,
+    years_back: int = DEFAULT_YEARS_BACK,
+    market: str | None = None,
+) -> dict:
+    """Investor-facing runtime readiness.
+
+    Regular reports and financial facts are preload data. Ad-hoc disclosure
+    bodies are not: the runtime DB only needs the disclosure list and title
+    classification index. Source bodies are fetched through the user-keyed
+    on-demand tool when a user asks to inspect one receipt in detail.
+    """
+    years = required_years(year, years_back)
+    params: dict[str, object] = {
+        "start_year": years[0],
+        "year": int(year),
+        "metric_count": len(INVESTOR_CORE_METRICS),
+    }
+    market_filter = ""
+    if market:
+        market_filter = " AND c.market=:market"
+        params["market"] = market
+
+    metric_placeholders = ", ".join(f":metric_{idx}" for idx, _ in enumerate(INVESTOR_CORE_METRICS))
+    for idx, metric in enumerate(INVESTOR_CORE_METRICS):
+        params[f"metric_{idx}"] = metric
+
+    with engine.connect() as conn:
+        listed = int(conn.execute(
+            text(
+                "SELECT COUNT(*) FROM companies c "
+                "WHERE c.stock_code IS NOT NULL AND c.market IN ('KOSPI','KOSDAQ')"
+                + market_filter
+            ),
+            params,
+        ).scalar() or 0)
+        yearly_rows = conn.execute(
+            text(
+                f"""
+                WITH years(y) AS (
+                  SELECT :start_year
+                  UNION ALL
+                  SELECT y + 1 FROM years WHERE y < :year
+                ),
+                listed AS (
+                  SELECT c.corp_code
+                  FROM companies c
+                  WHERE c.stock_code IS NOT NULL
+                    AND c.market IN ('KOSPI','KOSDAQ')
+                    {market_filter}
+                ),
+                fin_metric AS (
+                  SELECT ffc.bsns_year, ffc.corp_code,
+                         COUNT(DISTINCT ffc.metric_key) metric_count
+                  FROM financial_facts_compact ffc
+                  JOIN listed l ON l.corp_code=ffc.corp_code
+                  WHERE ffc.bsns_year BETWEEN :start_year AND :year
+                    AND ffc.fs_div='CFS'
+                    AND ffc.metric_key IN ({metric_placeholders})
+                  GROUP BY ffc.bsns_year, ffc.corp_code
+                ),
+                disc AS (
+                  SELECT CAST(strftime('%Y', d.disc_date) AS INTEGER) filing_year,
+                         d.corp_code
+                  FROM disclosures d
+                  JOIN listed l ON l.corp_code=d.corp_code
+                  WHERE CAST(strftime('%Y', d.disc_date) AS INTEGER) BETWEEN :start_year AND :year
+                  GROUP BY filing_year, d.corp_code
+                ),
+                events AS (
+                  SELECT CAST(strftime('%Y', de.event_date) AS INTEGER) event_year,
+                         de.corp_code,
+                         COUNT(*) event_count
+                  FROM disclosure_events de
+                  JOIN listed l ON l.corp_code=de.corp_code
+                  WHERE CAST(strftime('%Y', de.event_date) AS INTEGER) BETWEEN :start_year AND :year
+                  GROUP BY event_year, de.corp_code
+                ),
+                event_yearly AS (
+                  SELECT event_year,
+                         COUNT(DISTINCT corp_code) event_companies,
+                         SUM(event_count) event_rows
+                  FROM events
+                  GROUP BY event_year
+                )
+                SELECT y.y year,
+                       :listed listed,
+                       COUNT(DISTINCT CASE WHEN fm.metric_count >= :metric_count THEN fm.corp_code END) compact_core_companies,
+                       COUNT(DISTINCT disc.corp_code) disclosure_list_companies,
+                       COALESCE(MAX(ey.event_companies), 0) disclosure_event_companies,
+                       COALESCE(MAX(ey.event_rows), 0) disclosure_event_rows
+                FROM years y
+                LEFT JOIN fin_metric fm ON fm.bsns_year=y.y
+                LEFT JOIN disc ON disc.filing_year=y.y
+                LEFT JOIN event_yearly ey ON ey.event_year=y.y
+                GROUP BY y.y
+                ORDER BY y.y
+                """
+            ),
+            {**params, "listed": listed},
+        ).mappings().all()
+        on_demand_cached_bodies = int(conn.execute(
+            text(
+                "SELECT COUNT(*) FROM source_documents sd JOIN companies c ON c.corp_code=sd.corp_code "
+                "WHERE sd.source_type='event_disclosure' AND sd.bsns_year BETWEEN :start_year AND :year"
+                + market_filter
+            ),
+            params,
+        ).scalar() or 0)
+
+    rows = []
+    required_gaps: list[str] = []
+    recommended_gaps: list[str] = []
+    for row in yearly_rows:
+        row_dict = dict(row)
+        row_dict["compact_core_coverage_pct"] = pct(row_dict["compact_core_companies"], listed)
+        row_dict["disclosure_list_coverage_pct"] = pct(row_dict["disclosure_list_companies"], listed)
+        row_dict["event_company_coverage_pct"] = pct(row_dict["disclosure_event_companies"], listed)
+        rows.append(row_dict)
+        if row_dict["compact_core_coverage_pct"] < CORE_COVERAGE_THRESHOLD:
+            required_gaps.append(f"financial_compact_core_{row_dict['year']}")
+        if row_dict["disclosure_list_coverage_pct"] < CORE_COVERAGE_THRESHOLD:
+            required_gaps.append(f"disclosure_list_{row_dict['year']}")
+        if row_dict["disclosure_event_rows"] == 0:
+            recommended_gaps.append(f"disclosure_event_index_{row_dict['year']}")
+
+    return {
+        "verdict": "pass" if not required_gaps else "fail",
+        "year": int(year),
+        "years_back": int(years_back),
+        "required_years": years,
+        "market": market,
+        "listed_companies": listed,
+        "core_financial_metrics": list(INVESTOR_CORE_METRICS),
+        "disclosure_body_storage_policy": "on_demand_user_key",
+        "disclosure_body_required_for_runtime": False,
+        "on_demand_cached_disclosure_bodies": on_demand_cached_bodies,
+        "yearly": rows,
+        "required_gaps": required_gaps,
+        "recommended_gaps": recommended_gaps,
+        "recommended_next": [
+            "Backfill disclosures list metadata for years with disclosure_list gaps; do not preload all ad-hoc disclosure bodies.",
+            "Run rebuild-disclosure-events for years with disclosure_event_index gaps.",
+            "Use fetch_disclosure_on_demand with the caller's DART API key only when a receipt body needs source review.",
         ],
     }
 

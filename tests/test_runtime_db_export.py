@@ -1,5 +1,10 @@
+import sqlite3
+from datetime import date
+
 from sqlalchemy import inspect
 from sqlalchemy import text
+
+from kreports.db.models import Disclosure, SourceDocument
 
 
 def test_financial_facts_compact_schema(temp_engine):
@@ -55,6 +60,42 @@ def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path
     assert "financial_facts" in result["excluded_tables"]
     assert "extraction_runs" in result["excluded_tables"]
     assert "fetch_log" in result["excluded_tables"]
+
+
+def test_export_runtime_db_keeps_disclosure_list_but_excludes_on_demand_bodies(temp_engine, tmp_path):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.runtime_export import export_runtime_db
+
+    with get_session() as session:
+        session.add(Disclosure(
+            rcept_no="20250101000001",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2025, 1, 1),
+            disc_type="B",
+            report_nm="주요사항보고서(유상증자결정)",
+            flr_nm="삼성전자",
+        ))
+        session.add(SourceDocument(
+            rcept_no="20250101000001",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="event_disclosure",
+            report_nm="주요사항보고서(유상증자결정)",
+            content_type="xml",
+            raw_content="<DOCUMENT>user keyed on-demand body</DOCUMENT>",
+            doc_hash="hash",
+        ))
+
+    out_path = tmp_path / "runtime.db"
+    result = export_runtime_db(output_path=out_path, year_from=2024, year_to=2025, profile="compact")
+
+    assert result["table_filters"]["source_documents"] == "source_type <> 'event_disclosure'"
+    with sqlite3.connect(out_path) as conn:
+        disclosure_count = conn.execute("SELECT COUNT(*) FROM disclosures").fetchone()[0]
+        source_count = conn.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]
+    assert disclosure_count == 1
+    assert source_count == 0
 
 
 def test_runtime_db_manifest_contains_hash_and_counts(tmp_path):

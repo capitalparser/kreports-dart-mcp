@@ -18,6 +18,12 @@ COMPACT_EXCLUDED_TABLES = {
     "fetch_log",
 }
 
+COMPACT_TABLE_WHERE = {
+    # User-keyed ad-hoc disclosure bodies are session/on-demand cache, not
+    # preloaded runtime data. The disclosure list and title event index remain.
+    "source_documents": "source_type <> 'event_disclosure'",
+}
+
 
 def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -67,7 +73,11 @@ def export_runtime_db(
                     copied.append(table)
                     continue
                 col_csv = ", ".join(_quote_ident(col) for col in columns)
-                rows = src_conn.exec_driver_sql(f"SELECT {col_csv} FROM {_quote_ident(table)}").fetchall()
+                where = COMPACT_TABLE_WHERE.get(table)
+                query = f"SELECT {col_csv} FROM {_quote_ident(table)}"
+                if where:
+                    query += f" WHERE {where}"
+                rows = src_conn.exec_driver_sql(query).fetchall()
                 if rows:
                     placeholders = ", ".join(["?"] * len(columns))
                     dest_conn.executemany(
@@ -101,6 +111,7 @@ def export_runtime_db(
         "year_to": int(year_to),
         "copied_tables": copied,
         "excluded_tables": sorted(COMPACT_EXCLUDED_TABLES),
+        "table_filters": COMPACT_TABLE_WHERE,
         "bytes": dest.stat().st_size,
     }
 

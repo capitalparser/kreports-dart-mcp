@@ -736,6 +736,41 @@ def dataset_auditor_readiness_cmd(
             typer.echo(f"  {cmd}")
 
 
+@app.command("investor-dataset-readiness")
+def investor_dataset_readiness_cmd(
+    year: int = typer.Option(2025, "--year", help="기준 연도"),
+    years_back: int = typer.Option(5, "--years-back", help="직전 N개년 데이터셋 커버리지 기준"),
+    market: Optional[str] = typer.Option(None, "--market", help="시장 필터: KOSPI/KOSDAQ"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """투자자 관점 runtime DB readiness를 점검한다. 수시공시 원문은 온디맨드 대상이다."""
+    from kreports.analysis.readiness import investor_dataset_readiness_snapshot
+
+    snapshot = investor_dataset_readiness_snapshot(year=year, years_back=years_back, market=market)
+    if json_output:
+        _json_print(snapshot)
+        return
+
+    typer.echo(f"Investor dataset readiness: {snapshot['verdict']}")
+    typer.echo(f"required_years: {', '.join(str(y) for y in snapshot['required_years'])}")
+    typer.echo(f"listed_companies: {snapshot['listed_companies']:,}")
+    typer.echo(
+        "disclosure_body_policy: "
+        f"{snapshot['disclosure_body_storage_policy']} "
+        f"(required_for_runtime={snapshot['disclosure_body_required_for_runtime']})"
+    )
+    for row in snapshot["yearly"]:
+        typer.echo(
+            f"- {row['year']}: compact_core {row['compact_core_companies']}/{row['listed']} "
+            f"({row['compact_core_coverage_pct']}%), "
+            f"disclosure_list {row['disclosure_list_companies']}/{row['listed']} "
+            f"({row['disclosure_list_coverage_pct']}%), "
+            f"event_index rows {row['disclosure_event_rows']}"
+        )
+    typer.echo(f"required_gaps: {', '.join(snapshot['required_gaps']) or '-'}")
+    typer.echo(f"recommended_gaps: {', '.join(snapshot['recommended_gaps']) or '-'}")
+
+
 @app.command("dataset-completeness")
 def dataset_completeness_cmd(
     year: int = typer.Option(2025, "--year", help="기준 사업연도"),
