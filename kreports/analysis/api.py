@@ -395,6 +395,131 @@ def _investor_signal_evidence(
     return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
 
 
+def _audit_section_source(
+    subject: dict | None,
+    record: dict,
+    *,
+    default_section_title: str,
+    source_table: str,
+) -> dict:
+    return {
+        "corp_code": record.get("corp_code") or (subject or {}).get("corp_code"),
+        "corp_name": record.get("corp_name") or (subject or {}).get("corp_name") or record.get("corp_code"),
+        "report_nm": "감사보고서" if record.get("source_type") == "audit_report" or source_table != "report_sections.business_report" else "사업보고서",
+        "bsns_year": record.get("bsns_year") or record.get("year"),
+        "rcept_no": record.get("rcept_no"),
+        "section_title": record.get("section_title") or default_section_title,
+        "section_key": record.get("section_key"),
+        "source_table": source_table,
+    }
+
+
+def _audit_report_sections_evidence(result: dict) -> dict:
+    subject = result.get("subject") if isinstance(result.get("subject"), dict) else None
+    facts: list[dict] = []
+    for section in (result.get("sections") or [])[:4]:
+        title = section.get("section_title") or section.get("section_key") or "감사보고서 섹션"
+        excerpt = str(section.get("body_excerpt") or "").strip()[:260]
+        if not excerpt:
+            continue
+        facts.append({
+            "statement": f"{result.get('year')}년 감사보고서 {title} 본문에서 다음 내용이 확인됩니다: {excerpt}",
+            "source": _audit_section_source(
+                subject,
+                section,
+                default_section_title=title,
+                source_table=result.get("data_quality", {}).get("source") or "report_sections",
+            ),
+            "excerpt": excerpt,
+        })
+    analysis = [{
+        "perspective": "auditor",
+        "statement": "감사보고서 본문 섹션은 감사위험 식별, KAM 선정 이유, 감사절차 대응을 확인하는 1차 증거입니다.",
+    }]
+    next_checks = [
+        "KAM 본문에서는 선정 이유와 수행한 감사절차가 모두 추출되었는지 확인하세요.",
+        "사업보고서 주석의 회계정책·추정 문단과 감사보고서 KAM 대응절차를 대조하세요.",
+    ]
+    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+
+
+def _audit_matters_evidence(result: dict) -> dict:
+    facts: list[dict] = []
+    for company in (result.get("companies") or [])[:4]:
+        subject = {
+            "corp_code": company.get("corp_code"),
+            "corp_name": company.get("corp_name"),
+        }
+        for section in (company.get("sections") or [])[:2]:
+            title = section.get("section_title") or section.get("section_key") or "감사보고서 matter"
+            excerpt = str(section.get("body_excerpt") or "").strip()[:260]
+            facts.append({
+                "statement": (
+                    f"{company.get('corp_name') or company.get('corp_code')} {section.get('bsns_year')}년 "
+                    f"감사보고서에서 {title} 문단이 확인됩니다."
+                    + (f" 주요 내용: {excerpt}" if excerpt else "")
+                ),
+                "source": _audit_section_source(
+                    subject,
+                    {**section, "corp_code": company.get("corp_code"), "corp_name": company.get("corp_name"), "source_type": "audit_report"},
+                    default_section_title=title,
+                    source_table=result.get("data_quality", {}).get("source") or "audit_matter_items",
+                ),
+                "excerpt": excerpt,
+            })
+            if len(facts) >= 6:
+                break
+        if len(facts) >= 6:
+            break
+    analysis = [{
+        "perspective": "auditor",
+        "statement": "강조사항·기타사항·계속기업 문단은 감사의견 자체와 별도로 수임위험, 계속기업, 후속사건, 범위제한 가능성을 점검하는 근거입니다.",
+    }]
+    next_checks = [
+        "해당 문단이 감사의견 변형, 강조사항, 기타사항, 계속기업 관련 중요한 불확실성 중 무엇인지 원문 기준으로 확인하세요.",
+        "동종업종 내 반복적으로 나타나는 matter인지 peer 검색 결과와 비교하세요.",
+    ]
+    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+
+
+def _audit_procedures_evidence(result: dict) -> dict:
+    facts: list[dict] = []
+    for company in (result.get("companies") or [])[:4]:
+        subject = {
+            "corp_code": company.get("corp_code"),
+            "corp_name": company.get("corp_name"),
+        }
+        for record in (company.get("records") or [])[:2]:
+            excerpt = str(record.get("procedure_excerpt") or "").strip()[:260]
+            facts.append({
+                "statement": (
+                    f"{company.get('corp_name') or company.get('corp_code')} {record.get('year')}년 KAM 감사절차에서 "
+                    f"{record.get('procedure_type') or 'procedure'} 유형 절차가 확인됩니다."
+                    + (f" 절차 내용: {excerpt}" if excerpt else "")
+                ),
+                "source": _audit_section_source(
+                    subject,
+                    {**record, "corp_code": company.get("corp_code"), "corp_name": company.get("corp_name")},
+                    default_section_title="KAM 감사절차",
+                    source_table=result.get("data_quality", {}).get("source") or "audit_procedure_items",
+                ),
+                "excerpt": excerpt,
+            })
+            if len(facts) >= 6:
+                break
+        if len(facts) >= 6:
+            break
+    analysis = [{
+        "perspective": "auditor",
+        "statement": "감사절차 유형은 KAM 위험요인에 대한 감사인의 대응 방식이 충분히 구체적인지, peer 대비 절차 밀도가 낮지 않은지 비교하는 데 사용됩니다.",
+    }]
+    next_checks = [
+        "절차 문구가 단순 확인인지, 통제테스트·실증절차·전문가 활용·추정 검토 등으로 충분히 구분되는지 확인하세요.",
+        "동일 KAM topic에서 peer 감사절차 유형 분포와 비교하세요.",
+    ]
+    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+
+
 def _has_db_column(table_name: str, column_name: str) -> bool:
     try:
         with _engine.connect() as conn:
@@ -2732,7 +2857,7 @@ def get_audit_report_sections(
             "It does not prove the filing lacks that audit report section."
         ),
     }
-    return _clean_dict({
+    result = {
         "subject": comp,
         "year": year,
         "section_key": section_key,
@@ -2742,7 +2867,9 @@ def get_audit_report_sections(
         "alternative_sections": alternative_rows,
         "data_quality": section_quality,
         "coverage_note": coverage_note,
-    })
+    }
+    result.update(_audit_report_sections_evidence(result))
+    return _clean_dict(result)
 
 
 _AUDIT_MATTER_KEYS = ("other_matter", "emphasis", "going_concern", "basis_for_opinion")
@@ -3089,7 +3216,7 @@ def search_audit_report_matters(
     )
     company_rows = company_rows[:limit]
 
-    return _clean_dict({
+    result = {
         "query": {
             "company": company,
             "year": year,
@@ -3111,7 +3238,9 @@ def search_audit_report_matters(
                 "not proof that the filing has no such matter."
             ),
         },
-    })
+    }
+    result.update(_audit_matters_evidence(result))
+    return _clean_dict(result)
 
 
 def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025) -> dict:
@@ -3433,7 +3562,7 @@ def search_audit_procedures(
             topic_key = record.get("kam_topic") or "unknown"
             type_counts[type_key] = type_counts.get(type_key, 0) + 1
             topic_counts[topic_key] = topic_counts.get(topic_key, 0) + 1
-    return _clean_dict({
+    result = {
         "query": {
             "company": company,
             "year": year,
@@ -3459,7 +3588,9 @@ def search_audit_procedures(
                 "They support comparison and search, but do not replace reading the full audit report."
             ),
         },
-    })
+    }
+    result.update(_audit_procedures_evidence(result))
+    return _clean_dict(result)
 
 
 def compare_peer_audit_procedures(

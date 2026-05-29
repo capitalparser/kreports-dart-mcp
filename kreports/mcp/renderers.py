@@ -191,6 +191,9 @@ def _render_audit_report_sections(result: dict) -> str:
     data_quality = result.get("data_quality") or {}
     lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
     lines.append(f"- {data_quality.get('interpretation') or '로컬 캐시 기준이며 원 공시 확인이 필요합니다.'}")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 
@@ -218,6 +221,9 @@ def _render_audit_report_matters(result: dict) -> str:
     data_quality = result.get("data_quality") or {}
     lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
     lines.append(f"- {data_quality.get('interpretation') or '없음은 공시 부재가 아니라 캐시 부재일 수 있습니다.'}")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 
@@ -253,6 +259,9 @@ def _render_audit_procedures(result: dict) -> str:
     data_quality = result.get("data_quality") or {}
     lines.append(f"- 출처: {data_quality.get('source') or 'audit_procedure_items'}")
     lines.append(f"- {data_quality.get('interpretation') or data_quality.get('coverage_note') or 'KAM 본문에서 rule 기반으로 분리한 절차 힌트입니다.'}")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 

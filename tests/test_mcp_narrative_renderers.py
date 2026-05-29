@@ -134,3 +134,54 @@ def test_investor_signals_renderer_uses_user_facing_language():
     assert "투자자 신호 요약" in text
     assert "`_meta`" not in text
     assert "공시에서 확인되는 내용" in text
+
+
+def test_auditor_renderers_print_confirmed_facts_with_source_lines():
+    fact = {
+        "statement": "감사보고서 핵심감사사항 본문에서 수익인식 관련 감사절차가 확인되었습니다.",
+        "source": {
+            "corp_name": "A",
+            "report_nm": "감사보고서",
+            "section_title": "핵심감사사항",
+            "rcept_no": "20260311000001",
+        },
+    }
+    cases = [
+        ("get_audit_report_sections", {
+            "subject": {"corp_name": "A"},
+            "year": 2025,
+            "section_key": "kam",
+            "section_count": 1,
+            "sections": [{"section_title": "핵심감사사항", "body_excerpt": "수익인식은 핵심감사사항입니다."}],
+            "data_quality": {"status": "usable", "source": "report_sections"},
+            "confirmed_facts": [fact],
+            "analysis": [{"perspective": "auditor", "statement": "KAM은 감사위험 식별과 감사절차 설계의 출발점입니다."}],
+            "next_checks": ["감사절차 문단과 회계정책 주석을 대조하세요."],
+        }),
+        ("search_audit_report_matters", {
+            "query": {"year": 2025},
+            "total_companies": 1,
+            "total_sections": 1,
+            "companies": [{"corp_name": "A", "matter_counts": {"emphasis": 1}, "sections": []}],
+            "data_quality": {"status": "usable", "source": "audit_matter_items"},
+            "confirmed_facts": [fact],
+            "analysis": [{"perspective": "auditor", "statement": "강조사항은 감사의견 변형은 아니지만 수임위험 검토 대상입니다."}],
+            "next_checks": ["강조사항 원문을 확인하세요."],
+        }),
+        ("search_audit_procedures", {
+            "subject": {"corp_name": "A"},
+            "total_procedures": 1,
+            "procedure_type_counts": {"substantive_test": 1},
+            "companies": [{"corp_name": "A", "records": [{"procedure_type": "substantive_test", "procedure_excerpt": "문서검사 수행"}]}],
+            "data_quality": {"status": "usable", "source": "audit_procedure_items"},
+            "confirmed_facts": [fact],
+            "analysis": [{"perspective": "auditor", "statement": "절차 유형 분포는 peer 감사접근 비교에 사용됩니다."}],
+            "next_checks": ["절차가 위험요인과 대응되는지 확인하세요."],
+        }),
+    ]
+
+    for tool_name, payload in cases:
+        text = render_answer(tool_name, payload)
+        assert "공시에서 확인되는 내용" in text
+        assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260311000001" in text
+        assert "감사인 관점 해석" in text

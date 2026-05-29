@@ -1,6 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 
-from kreports.db.models import Company, Disclosure, DisclosureEvent
+from kreports.db.models import AuditProcedureItem, Company, Disclosure, DisclosureEvent, ReportSection
 
 
 def _seed_company_and_business_report(session):
@@ -149,3 +149,86 @@ def test_investor_signals_api_adds_confirmed_facts(temp_engine, monkeypatch):
     assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20250318001234"
     assert any(fact["source"].get("rcept_no") == "20250101000001" for fact in out["confirmed_facts"])
     assert out["analysis"][0]["perspective"] == "investor"
+
+
+def test_audit_report_sections_api_adds_confirmed_facts(temp_engine):
+    from kreports.analysis.api import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add(ReportSection(
+            rcept_no="20260311000001",
+            corp_code="001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="수익인식은 핵심감사사항입니다. 우리는 매출 거래 문서검사를 수행하였습니다.",
+            body_hash="x",
+            body_length=50,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000001"
+    assert out["confirmed_facts"][0]["source"]["section_title"] == "핵심감사사항"
+    assert out["analysis"][0]["perspective"] == "auditor"
+
+
+def test_audit_matters_api_adds_confirmed_facts(temp_engine):
+    from kreports.analysis.api import search_audit_report_matters
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add(ReportSection(
+            rcept_no="20260311000002",
+            corp_code="001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="emphasis",
+            section_title="강조사항",
+            body_text="계속기업 존속능력에 중요한 불확실성이 존재합니다.",
+            body_hash="x",
+            body_length=40,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = search_audit_report_matters(company="000001", year=2025, section_keys=["emphasis"], limit=5)
+
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000002"
+    assert out["confirmed_facts"][0]["source"]["section_title"] == "강조사항"
+    assert out["analysis"][0]["perspective"] == "auditor"
+
+
+def test_audit_procedures_api_adds_confirmed_facts(temp_engine):
+    from kreports.analysis.api import search_audit_procedures
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add(AuditProcedureItem(
+            corp_code="001",
+            bsns_year=2025,
+            rcept_no="20260311000003",
+            dcm_no=None,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="substantive_test",
+            procedure_text="매출 거래 표본에 대해 문서검사를 수행하였습니다.",
+            procedure_hash="x",
+            procedure_length=30,
+            section_ordinal=0,
+            procedure_ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = search_audit_procedures(company="000001", year=2025, procedure_type="substantive_test", limit=5)
+
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000003"
+    assert out["confirmed_facts"][0]["source"]["section_title"] == "KAM 감사절차"
+    assert out["analysis"][0]["perspective"] == "auditor"
