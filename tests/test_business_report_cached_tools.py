@@ -716,6 +716,47 @@ def test_get_business_overview_falls_back_to_cached_full_text_without_dart(temp_
     assert "신재생에너지 개발" in out["sections"]["full_text"]["body_text"]
 
 
+def test_get_business_overview_returns_confirmed_facts_with_sources(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="대상",
+            market="KOSPI",
+            induty_code="411",
+        ))
+        session.add(Disclosure(
+            rcept_no="20260316001520",
+            corp_code="00000001",
+            corp_name="대상",
+            disc_date=date(2026, 3, 16),
+            disc_type="A",
+            report_nm="사업보고서 (2025.12)",
+        ))
+        session.add(ReportSection(
+            rcept_no="20260316001520",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="business_report",
+            section_key="business_overview",
+            section_title="1. 사업의 개요",
+            body_text="태양광, 풍력, 연료전지 및 ESS 사업을 영위합니다.",
+            body_hash="h",
+            body_length=32,
+            ordinal=0,
+        ))
+
+    out = get_business_overview("000001", bsns_year=2025)
+
+    fact = out["confirmed_facts"][0]
+    assert "태양광" in fact["statement"]
+    assert fact["source"]["report_nm"] == "사업보고서 (2025.12)"
+    assert fact["source"]["rcept_no"] == "20260316001520"
+    assert fact["source"]["dart_url"].endswith("20260316001520")
+
+
 def test_subsidiary_auditors_reads_persistent_cache_without_dart(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session

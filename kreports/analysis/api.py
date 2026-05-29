@@ -4350,6 +4350,76 @@ def get_business_overview(
             }
         bsns_year = years[0]  # 가장 최근
 
+    def _business_report_source(section_key: str, section: dict) -> dict:
+        rcept_no = section.get("rcept_no")
+        report_nm = None
+        if rcept_no:
+            with _engine.connect() as conn:
+                disclosure_row = conn.execute(
+                    text("SELECT report_nm FROM disclosures WHERE rcept_no=:rcept_no LIMIT 1"),
+                    {"rcept_no": rcept_no},
+                ).mappings().first()
+            if disclosure_row:
+                report_nm = disclosure_row["report_nm"]
+        from kreports.analysis.evidence import dart_filing_url
+
+        return {
+            "corp_code": corp_code,
+            "corp_name": corp_name,
+            "report_nm": report_nm or "사업보고서",
+            "bsns_year": bsns_year,
+            "rcept_no": rcept_no,
+            "section_key": section_key,
+            "section_title": section.get("title") or section_key,
+            "dart_url": dart_filing_url(rcept_no),
+            "source_table": "report_sections",
+        }
+
+    def _business_overview_evidence(sections: dict) -> tuple[list[dict], list[dict], list[str]]:
+        facts: list[dict] = []
+        fact_specs = [
+            ("business_overview", "사업 개요"),
+            ("business_description", "사업 내용"),
+            ("risk_management", "위험관리"),
+            ("management_plan", "경영진단"),
+        ]
+        for section_key, label in fact_specs:
+            section = sections.get(section_key)
+            if not isinstance(section, dict):
+                continue
+            body = str(section.get("body_text") or "").strip()
+            if not body:
+                continue
+            excerpt = body[:260].replace("\n", " ")
+            facts.append({
+                "statement": f"{label} 섹션에서 {excerpt}",
+                "source": _business_report_source(section_key, section),
+                "excerpt": excerpt,
+            })
+            if len(facts) >= 4:
+                break
+
+        analysis: list[dict] = []
+        if "risk_management" in sections:
+            analysis.append({
+                "perspective": "auditor",
+                "statement": "위험관리 섹션이 확인되므로 차입금, 유동성, 환위험, 파생상품 공시와 관련 계정의 완전성·평가 검토가 필요합니다.",
+                "basis": ["위험관리 섹션"],
+                "risk_level": "watch",
+            })
+        if "business_description" in sections or "business_overview" in sections:
+            analysis.append({
+                "perspective": "investor",
+                "statement": "사업 포트폴리오와 주요 제품·서비스 기재는 성장성 판단의 출발점이지만, 투자 판단에는 수익성·현금흐름·재무구조 확인이 함께 필요합니다.",
+                "basis": ["사업의 내용", "사업의 개요"],
+                "risk_level": "watch",
+            })
+        next_checks = [
+            "중요 문단은 공시 링크에서 원문 위치와 표 수치를 재확인하세요.",
+            "감사인 관점 검토에는 감사보고서 KAM 본문과 감사절차를 함께 확인하세요.",
+        ]
+        return facts, analysis, next_checks
+
     section_keys = {
         "business_overview",
         "business_description",
@@ -4362,7 +4432,7 @@ def get_business_overview(
         rows = conn.execute(
             text(
                 """
-                SELECT section_key, section_title, body_text, body_length
+                SELECT rcept_no, section_key, section_title, body_text, body_length
                 FROM report_sections
                 WHERE corp_code=:corp_code
                   AND bsns_year=:bsns_year
@@ -4380,6 +4450,7 @@ def get_business_overview(
 
     raw = {
         row["section_key"]: {
+            "rcept_no": row["rcept_no"],
             "title": row["section_title"],
             "body_text": _display_text(row["body_text"]),
             "length": row["body_length"],
@@ -4392,7 +4463,7 @@ def get_business_overview(
             full_text_row = conn.execute(
                 text(
                     """
-                    SELECT section_key, section_title, body_text, body_length
+                    SELECT rcept_no, section_key, section_title, body_text, body_length
                     FROM report_sections
                     WHERE corp_code=:corp_code
                       AND bsns_year=:bsns_year
@@ -4413,12 +4484,14 @@ def get_business_overview(
                 body = body[:3000] + "\n... (이하 생략)"
             raw = {
                 "full_text": {
+                    "rcept_no": full_text_row["rcept_no"],
                     "title": full_text_row["section_title"] or "사업보고서 본문",
                     "body_text": body,
                     "length": full_text_row["body_length"] or len(body),
                 }
             }
             from kreports.analysis.business_insights import generate_business_insights
+            confirmed_facts, analysis, next_checks = _business_overview_evidence(raw)
 
             return _clean_dict({
                 "corp_code": corp_code,
@@ -4436,6 +4509,9 @@ def get_business_overview(
                 "section_count": 1,
                 "available_sections": ["full_text"],
                 "missing_sections": sorted(section_keys),
+                "confirmed_facts": confirmed_facts,
+                "analysis": analysis,
+                "next_checks": next_checks,
                 "data_quality": {
                     "status": "limited",
                     "source": "local_report_sections",
@@ -4500,6 +4576,7 @@ def get_business_overview(
     # 인사이트
     from kreports.analysis.business_insights import generate_business_insights
     insights = generate_business_insights(raw, induty_code=induty_code)
+    confirmed_facts, analysis, next_checks = _business_overview_evidence(raw)
 
     return _clean_dict({
         "corp_code": corp_code,
@@ -4517,6 +4594,9 @@ def get_business_overview(
         "section_count": len(sections_clean),
         "available_sections": sorted(sections_clean),
         "missing_sections": sorted(section_keys - set(sections_clean)),
+        "confirmed_facts": confirmed_facts,
+        "analysis": analysis,
+        "next_checks": next_checks,
         "data_quality": {
             "status": "usable",
             "source": "local_report_sections",
