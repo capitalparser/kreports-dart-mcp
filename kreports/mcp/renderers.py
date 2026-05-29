@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from kreports.analysis.evidence import source_line
+
 
 def _status(result: dict) -> str:
     data_quality = result.get("data_quality")
@@ -370,6 +372,57 @@ def _render_disclosure_events(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _analysis_heading(perspective: str | None) -> str:
+    if perspective == "auditor":
+        return "감사인 관점 해석"
+    if perspective == "investor":
+        return "투자자 관점 해석"
+    return "분석"
+
+
+def _render_evidence_grounded_sections(result: dict) -> str:
+    """Render confirmed facts and analysis without rigid numbered fact labels."""
+    confirmed_facts = result.get("confirmed_facts") or []
+    analysis_items = result.get("analysis") or []
+    next_checks = result.get("next_checks") or []
+    if not confirmed_facts and not analysis_items and not next_checks:
+        return ""
+
+    lines: list[str] = []
+    if confirmed_facts:
+        lines.extend(["", "공시에서 확인되는 내용:"])
+        for fact in confirmed_facts[:6]:
+            if not isinstance(fact, dict):
+                continue
+            statement = str(fact.get("statement") or "").strip()
+            if statement:
+                lines.append(f"- {statement}")
+            source = fact.get("source")
+            if isinstance(source, dict):
+                rendered_source = source_line(source)
+                for source_part in rendered_source.splitlines():
+                    lines.append(f"  {source_part}")
+
+    if analysis_items:
+        grouped: dict[str, list[dict]] = {}
+        for item in analysis_items:
+            if isinstance(item, dict):
+                grouped.setdefault(str(item.get("perspective") or "both"), []).append(item)
+        for perspective, items in grouped.items():
+            lines.extend(["", f"{_analysis_heading(perspective)}:"])
+            for item in items[:5]:
+                statement = str(item.get("statement") or "").strip()
+                if statement:
+                    lines.append(f"- {statement}")
+
+    if next_checks:
+        lines.extend(["", "확인 한계와 다음 확인:"])
+        for check in next_checks[:6]:
+            lines.append(f"- {check}")
+
+    return "\n".join(lines)
+
+
 def _render_generic(tool_name: str, result: dict) -> str:
     status = _status(result)
     subject = _subject_label(result)
@@ -392,6 +445,9 @@ def _render_generic(tool_name: str, result: dict) -> str:
     lines.append("")
     lines.append("데이터 한계:")
     lines.append("- 현재 결과는 로컬 kreports.db 캐시 기준입니다.")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 

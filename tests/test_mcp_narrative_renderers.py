@@ -31,3 +31,32 @@ def test_render_new_tools_have_answers():
         text = render_answer(tool_name, payload)
         assert text
         assert "판정" in text
+
+
+def test_generic_renderer_prints_confirmed_facts_with_source_lines():
+    text = render_answer("get_business_overview", {
+        "corp_name": "SK이터닉스",
+        "data_quality": {"status": "usable"},
+        "confirmed_facts": [{
+            "statement": "SK이터닉스는 태양광, 풍력, 연료전지 및 ESS를 주요 사업으로 설명합니다.",
+            "source": {
+                "corp_name": "SK이터닉스",
+                "report_nm": "사업보고서 (2025.12)",
+                "section_title": "II. 사업의 내용",
+                "rcept_no": "20260316001520",
+            },
+        }],
+        "analysis": [{
+            "perspective": "auditor",
+            "statement": "EPC와 장기 프로젝트 매출은 진행률과 총공사원가 추정 검토가 필요합니다.",
+        }],
+        "next_checks": ["감사보고서 KAM 본문과 감사절차를 추가 확인하세요."],
+    })
+
+    assert "공시에서 확인되는 내용" in text
+    assert "SK이터닉스는 태양광" in text
+    assert "출처: SK이터닉스 사업보고서 (2025.12), II. 사업의 내용, 접수번호 20260316001520" in text
+    assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260316001520" in text
+    assert "감사인 관점 해석" in text
+    assert "1번 근거" not in text
+    assert "[Fact" not in text
