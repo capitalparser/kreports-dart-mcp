@@ -661,6 +661,61 @@ def test_get_business_overview_reads_cached_management_sections_without_dart(tem
     assert "해외 매출" in out["sections"]["management_plan"]["body_text"]
 
 
+def test_get_business_overview_falls_back_to_cached_full_text_without_dart(temp_engine, monkeypatch):
+    import kreports.collector.fetcher as fetcher_module
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    def fail_dart_call(*_args, **_kwargs):
+        raise AssertionError("get_business_overview must not call DART for full_text fallback")
+
+    monkeypatch.setattr(fetcher_module, "fetch_document_xml", fail_dart_call)
+    monkeypatch.setattr(collector_module, "fetch_document_xml", fail_dart_call)
+    monkeypatch.setattr(collector_module, "fetch_document_zip_files", fail_dart_call)
+
+    full_text = (
+        "II. 사업의 내용\n"
+        "신재생에너지 개발과 ESS 사업을 영위합니다.\n"
+        "5. 위험관리 및 파생거래\n"
+        "시장위험, 신용위험 및 유동성위험을 관리합니다."
+    )
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="대상",
+            market="KOSPI",
+            induty_code="411",
+        ))
+        session.add(ReportSection(
+            rcept_no="20260331000001",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="business_report",
+            section_key="full_text",
+            section_title="사업보고서 본문",
+            body_text=full_text,
+            body_hash="full_text",
+            body_length=len(full_text),
+            ordinal=0,
+        ))
+
+    out = get_business_overview("000001", bsns_year=2025)
+
+    assert out["data_quality"]["status"] == "limited"
+    assert out["data_quality"]["fallback_used"] == "full_text"
+    assert out["section_count"] == 1
+    assert set(out["missing_sections"]) == {
+        "business_overview",
+        "business_description",
+        "risk_management",
+        "management_plan",
+        "rd_activities",
+        "key_contracts",
+    }
+    assert "신재생에너지 개발" in out["sections"]["full_text"]["body_text"]
+
+
 def test_subsidiary_auditors_reads_persistent_cache_without_dart(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session

@@ -50,3 +50,37 @@ def test_section_title_variants_are_recognized():
     assert sections["risk_management"]["title"] == "2. 시장위험과 위험관리"
     assert sections["rd_activities"]["title"] == "3. 연구개발비용"
     assert sections["key_contracts"]["title"] == "4. 경영상의 주요계약"
+
+
+def test_viewer_html_section_anchor_titles_are_recognized():
+    html = """
+    <HTML>
+      <BODY>
+        <h1>II. 사업의 내용</h1>
+        <P class='section-1'><A name='toc1'>II. 사업의 내용</A></P>
+        <P class='section-2'><A name='toc2'>1. 사업의 개요</A></P>
+        <P>신재생에너지 개발과 ESS 사업을 영위합니다.</P>
+        <P class='section-2'><A name='toc3'>2. 주요 제품 및 서비스</A></P>
+        <P>태양광, 풍력, 연료전지, ESS 서비스를 제공합니다.</P>
+        <P class='section-2'><A name='toc4'>5. 위험관리 및 파생거래</A></P>
+        <P>시장위험, 신용위험 및 유동성위험을 관리합니다.</P>
+        <P class='section-2'><A name='toc5'>6. 주요계약 및 연구개발활동</A></P>
+        <P>주요 약정 현황과 연구개발 담당조직을 설명합니다.</P>
+        <h1>IV. 이사의 경영진단 및 분석의견</h1>
+        <P class='section-1'><A name='toc6'>IV. 이사의 경영진단 및 분석의견</A></P>
+        <P>매출액과 영업이익 등 경영성과를 분석합니다.</P>
+      </BODY>
+    </HTML>
+    """
+
+    sections = extract_report_sections(html)
+
+    assert sections["business_description"]["title"] == "II. 사업의 내용"
+    assert "태양광" in sections["business_description"]["body_text"]
+    assert "시장위험" in sections["business_description"]["body_text"]
+    assert sections["business_overview"]["title"] == "1. 사업의 개요"
+    assert sections["risk_management"]["title"] == "5. 위험관리 및 파생거래"
+    assert sections["key_contracts"]["title"] == "6. 주요계약 및 연구개발활동"
+    assert sections["rd_activities"]["title"] == "6. 주요계약 및 연구개발활동"
+    assert sections["management_plan"]["title"] == "IV. 이사의 경영진단 및 분석의견"
+    assert "경영성과" in sections["management_plan"]["body_text"]

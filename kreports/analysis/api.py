@@ -4388,6 +4388,73 @@ def get_business_overview(
     }
 
     if not raw or not isinstance(raw, dict):
+        with _engine.connect() as conn:
+            full_text_row = conn.execute(
+                text(
+                    """
+                    SELECT section_key, section_title, body_text, body_length
+                    FROM report_sections
+                    WHERE corp_code=:corp_code
+                      AND bsns_year=:bsns_year
+                      AND source_type='business_report'
+                      AND section_key='full_text'
+                    ORDER BY ordinal
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "corp_code": corp_code,
+                    "bsns_year": bsns_year,
+                },
+            ).mappings().first()
+        if full_text_row:
+            body = _display_text(full_text_row["body_text"] or "")
+            if len(body) > 3000:
+                body = body[:3000] + "\n... (이하 생략)"
+            raw = {
+                "full_text": {
+                    "title": full_text_row["section_title"] or "사업보고서 본문",
+                    "body_text": body,
+                    "length": full_text_row["body_length"] or len(body),
+                }
+            }
+            from kreports.analysis.business_insights import generate_business_insights
+
+            return _clean_dict({
+                "corp_code": corp_code,
+                "corp_name": corp_name,
+                "induty_code": induty_code,
+                "industry_name": industry_name,
+                "bsns_year": bsns_year,
+                "report_meta": {},
+                "sections": raw,
+                "insights": generate_business_insights(raw, induty_code=induty_code),
+                "audit_focus": [],
+                "investment_focus": [],
+                "risk_distribution": None,
+                "total_chars": full_text_row["body_length"] or len(body),
+                "section_count": 1,
+                "available_sections": ["full_text"],
+                "missing_sections": sorted(section_keys),
+                "data_quality": {
+                    "status": "limited",
+                    "source": "local_report_sections",
+                    "requested_year": bsns_year,
+                    "available_business_report_years": _cached_years_for_sections(corp_code, "business_report"),
+                    "fallback_used": "full_text",
+                    "missing_reason": (
+                        "사업보고서 원문 본문은 캐시되어 있으나 business_overview/business_description 등 "
+                        "경영정보 세부 섹션으로 아직 분리되지 않았습니다."
+                    ),
+                    "interpretation": (
+                        "The response uses cached full_text as a limited fallback. "
+                        "It supports reading and keyword screening, but section-specific analysis may be incomplete."
+                    ),
+                },
+                "note": (
+                    f"{bsns_year}년 사업보고서 세부 경영정보 섹션이 없어 full_text 캐시를 제한적으로 반환합니다."
+                ),
+            })
         return {
             "corp_code": corp_code, "corp_name": corp_name,
             "induty_code": induty_code, "industry_name": industry_name,
@@ -4448,6 +4515,8 @@ def get_business_overview(
         "risk_distribution": None,
         "total_chars": total_chars,
         "section_count": len(sections_clean),
+        "available_sections": sorted(sections_clean),
+        "missing_sections": sorted(section_keys - set(sections_clean)),
         "data_quality": {
             "status": "usable",
             "source": "local_report_sections",

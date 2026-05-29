@@ -6,6 +6,7 @@ DART 사업보고서 ZIP 내 본문 XML에서 핵심 경영 정보 섹션을 추
 이 모듈은 본문(사업의 개요, 사업의 내용, 위험관리 등)을 파싱한다.
 """
 import re
+from html import unescape
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,12 @@ SECTION_LABELS: dict[str, str] = {
 }
 
 _TITLE_RE = re.compile(r'<TITLE[^>]*>([^<]{1,300})</TITLE>', re.IGNORECASE)
+_VIEWER_ANCHOR_TITLE_RE = re.compile(
+    r"<P\b[^>]*class\s*=\s*['\"]section-\d+['\"][^>]*>\s*"
+    r"<A\b[^>]*>(.*?)</A>\s*</P>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HEADING_TITLE_RE = re.compile(r"<h[1-6]\b[^>]*>(.*?)</h[1-6]>", re.IGNORECASE | re.DOTALL)
 
 # 본문 XML 파일 식별 키워드 — 주석/감사보고서가 아닌 본문
 _MAIN_BODY_KEYWORDS = [
@@ -164,8 +171,18 @@ def _xml_to_html(xml_content: str) -> str:
 
 def _clean_title(title_text: str) -> str:
     """TITLE 텍스트의 공백과 장식 문자를 정규화한다."""
-    text = re.sub(r'\s+', ' ', title_text or '').strip()
+    text = re.sub(r'<[^>]+>', ' ', title_text or '')
+    text = unescape(text)
+    text = text.replace("\xa0", " ")
+    text = re.sub(r'\s+', ' ', text).strip()
     return text.strip("-ㆍ·. ")
+
+
+def _iter_title_matches(xml_content: str):
+    """Yield XML TITLE and DART viewer HTML heading-like nodes in document order."""
+    for pattern in (_TITLE_RE, _VIEWER_ANCHOR_TITLE_RE, _HEADING_TITLE_RE):
+        for match in pattern.finditer(xml_content or ""):
+            yield match.start(), match.end(), _clean_title(match.group(1))
 
 
 def _title_level(title_text: str) -> int:
@@ -220,9 +237,12 @@ def _section_end_index(
             return min(title_positions[matched_idx + 1][0], max_end)
         return max_end
 
+    current_title = _clean_title(title_text)
     for start, _, next_title, next_level in title_positions[matched_idx + 1:]:
         if start >= max_end:
             break
+        if _clean_title(next_title) == current_title:
+            continue
         if any(kw in next_title for kw in _MAIN_BOUNDARY_KEYWORDS):
             return start
         if level != 99 and next_level <= level:
@@ -274,9 +294,10 @@ def extract_report_sections(xml_content: str) -> dict[str, dict]:
 
     # 모든 TITLE 위치 인덱싱
     title_positions: list[tuple[int, int, str, int]] = []
-    for m in _TITLE_RE.finditer(xml_content):
-        title_text = m.group(1).strip()
-        title_positions.append((m.start(), m.end(), title_text, _title_level(title_text)))
+    for start, end, title_text in _iter_title_matches(xml_content):
+        if title_text:
+            title_positions.append((start, end, title_text, _title_level(title_text)))
+    title_positions.sort(key=lambda item: item[0])
 
     if not title_positions:
         return result
