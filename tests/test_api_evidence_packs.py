@@ -178,6 +178,49 @@ def test_audit_report_sections_api_adds_confirmed_facts(temp_engine):
     assert out["analysis"][0]["perspective"] == "auditor"
 
 
+def test_audit_report_sections_dedupes_repeated_attachment_facts(temp_engine):
+    from kreports.analysis.api import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    repeated_body = "핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다."
+    with get_session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add_all([
+            ReportSection(
+                rcept_no="20260311000001_001_xml",
+                corp_code="001",
+                bsns_year=2025,
+                source_type="audit_report",
+                section_key="kam",
+                section_title="핵심감사사항",
+                body_text=repeated_body,
+                body_hash="same",
+                body_length=len(repeated_body),
+                ordinal=0,
+                fetched_at=datetime.utcnow(),
+            ),
+            ReportSection(
+                rcept_no="20260311000001_002_xml",
+                corp_code="001",
+                bsns_year=2025,
+                source_type="audit_report",
+                section_key="kam",
+                section_title="핵심감사사항",
+                body_text=repeated_body,
+                body_hash="same",
+                body_length=len(repeated_body),
+                ordinal=0,
+                fetched_at=datetime.utcnow(),
+            ),
+        ])
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["section_count"] == 2
+    assert len(out["confirmed_facts"]) == 1
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000001_001_xml"
+
+
 def test_audit_matters_api_adds_confirmed_facts(temp_engine):
     from kreports.analysis.api import search_audit_report_matters
     from kreports.db.engine import get_session

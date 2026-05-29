@@ -28,6 +28,7 @@ from kreports.analysis.peer import (
     resolve_fs_div_for_company,
     resolve_peers,
 )
+from kreports.analysis.evidence import parent_rcept_no
 from kreports.storage.raw_documents import RawDocumentStore
 
 
@@ -182,6 +183,30 @@ def _company_summary(corp_code: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _dedupe_confirmed_facts(facts: list[dict]) -> list[dict]:
+    """Collapse repeated evidence facts that differ only by attachment/viewer id."""
+    seen: set[tuple[str, ...]] = set()
+    deduped: list[dict] = []
+    for fact in facts:
+        source = fact.get("source") if isinstance(fact, dict) else {}
+        source = source if isinstance(source, dict) else {}
+        raw_rcept = source.get("rcept_no")
+        receipt_key = parent_rcept_no(str(raw_rcept)) or str(raw_rcept or "")
+        excerpt = re.sub(r"\s+", " ", str(fact.get("excerpt") or fact.get("statement") or "")).strip()[:160]
+        key = (
+            str(source.get("corp_code") or source.get("corp_name") or ""),
+            str(source.get("bsns_year") or ""),
+            receipt_key,
+            str(source.get("section_title") or source.get("section_key") or ""),
+            excerpt,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(fact)
+    return deduped
+
+
 def _annual_report_source(
     corp_code: str,
     subject: dict | None,
@@ -299,7 +324,7 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
             "사업보고서 사업부문·수주·시장위험 문단을 이용해 과거 중앙값이 미래 추정에 적합한지 검토하세요.",
         ])
 
-    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
 def _disclosure_event_evidence(result: dict) -> dict:
@@ -328,7 +353,7 @@ def _disclosure_event_evidence(result: dict) -> dict:
         "중요 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문 본문을 확인하세요.",
         "자본조달, 전환사채, 최대주주 변경, 소송, 횡령·배임 이벤트는 희석·지배구조·현금흐름 리스크로 연결해 검토하세요.",
     ]
-    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
 def _investor_signal_evidence(
@@ -392,7 +417,7 @@ def _investor_signal_evidence(
         "품질 체크가 낮거나 리스크 verdict가 warning 이상이면 사업보고서 주석과 감사보고서 KAM/강조사항을 함께 확인하세요.",
         "최근 자본조달·CB·합병·소송 이벤트는 접수번호 기준 원문을 열어 조건과 재무효과를 확인하세요.",
     ]
-    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
 def _audit_section_source(
@@ -440,7 +465,7 @@ def _audit_report_sections_evidence(result: dict) -> dict:
         "KAM 본문에서는 선정 이유와 수행한 감사절차가 모두 추출되었는지 확인하세요.",
         "사업보고서 주석의 회계정책·추정 문단과 감사보고서 KAM 대응절차를 대조하세요.",
     ]
-    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
 def _audit_matters_evidence(result: dict) -> dict:
@@ -479,7 +504,7 @@ def _audit_matters_evidence(result: dict) -> dict:
         "해당 문단이 감사의견 변형, 강조사항, 기타사항, 계속기업 관련 중요한 불확실성 중 무엇인지 원문 기준으로 확인하세요.",
         "동종업종 내 반복적으로 나타나는 matter인지 peer 검색 결과와 비교하세요.",
     ]
-    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
 def _audit_procedures_evidence(result: dict) -> dict:
@@ -517,7 +542,7 @@ def _audit_procedures_evidence(result: dict) -> dict:
         "절차 문구가 단순 확인인지, 통제테스트·실증절차·전문가 활용·추정 검토 등으로 충분히 구분되는지 확인하세요.",
         "동일 KAM topic에서 peer 감사절차 유형 분포와 비교하세요.",
     ]
-    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
 def _has_db_column(table_name: str, column_name: str) -> bool:

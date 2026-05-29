@@ -1,9 +1,10 @@
 """User-facing narrative renderers for MCP tool responses."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from kreports.analysis.evidence import source_line
+from kreports.analysis.evidence import parent_rcept_no, source_line
 
 
 def _status(result: dict) -> str:
@@ -42,6 +43,20 @@ def _first_record_line(company: dict) -> str | None:
         if value:
             parts.append(str(value))
     return " / ".join(parts)
+
+
+def _dedupe_display_records(records: list[dict], *, text_key: str, title_key: str = "section_title") -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for record in records:
+        title = str(record.get(title_key) or record.get("section_key") or "")
+        text = re.sub(r"\s+", " ", str(record.get(text_key) or "")).strip()[:220]
+        key = (title, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
 
 
 def _render_search_dataset(result: dict) -> str:
@@ -172,7 +187,7 @@ def _render_audit_report_sections(result: dict) -> str:
         "",
         "근거:",
     ]
-    sections = result.get("sections") or []
+    sections = _dedupe_display_records(result.get("sections") or [], text_key="body_excerpt")
     for section in sections[:3]:
         title = section.get("section_title") or section.get("section_key") or "섹션"
         excerpt = section.get("body_excerpt") or ""
@@ -436,9 +451,34 @@ def _analysis_heading(perspective: str | None) -> str:
     return "분석"
 
 
+def _dedupe_confirmed_facts_for_render(facts: list) -> list:
+    seen: set[tuple[str, ...]] = set()
+    deduped: list = []
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        source = fact.get("source")
+        source = source if isinstance(source, dict) else {}
+        raw_rcept = source.get("rcept_no")
+        receipt_key = parent_rcept_no(str(raw_rcept)) or str(raw_rcept or "")
+        excerpt = re.sub(r"\s+", " ", str(fact.get("excerpt") or fact.get("statement") or "")).strip()[:160]
+        key = (
+            str(source.get("corp_code") or source.get("corp_name") or ""),
+            str(source.get("bsns_year") or ""),
+            receipt_key,
+            str(source.get("section_title") or source.get("section_key") or ""),
+            excerpt,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(fact)
+    return deduped
+
+
 def _render_evidence_grounded_sections(result: dict) -> str:
     """Render confirmed facts and analysis without rigid numbered fact labels."""
-    confirmed_facts = result.get("confirmed_facts") or []
+    confirmed_facts = _dedupe_confirmed_facts_for_render(result.get("confirmed_facts") or [])
     analysis_items = result.get("analysis") or []
     next_checks = result.get("next_checks") or []
     if not confirmed_facts and not analysis_items and not next_checks:

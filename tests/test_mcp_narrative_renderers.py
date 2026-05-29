@@ -62,6 +62,64 @@ def test_generic_renderer_prints_confirmed_facts_with_source_lines():
     assert "[Fact" not in text
 
 
+def test_renderer_dedupes_repeated_confirmed_facts_by_parent_receipt():
+    text = render_answer("get_audit_report_sections", {
+        "subject": {"corp_name": "A"},
+        "year": 2025,
+        "section_key": "kam",
+        "section_count": 2,
+        "sections": [],
+        "data_quality": {"status": "usable", "source": "evidence_documents"},
+        "confirmed_facts": [
+            {
+                "statement": "2025년 감사보고서 핵심감사사항 본문에서 반복 내용이 확인됩니다.",
+                "source": {
+                    "corp_name": "A",
+                    "report_nm": "감사보고서",
+                    "section_title": "핵심감사사항",
+                    "rcept_no": "20260311000001_001_xml",
+                },
+                "excerpt": "반복 내용",
+            },
+            {
+                "statement": "2025년 감사보고서 핵심감사사항 본문에서 반복 내용이 확인됩니다.",
+                "source": {
+                    "corp_name": "A",
+                    "report_nm": "감사보고서",
+                    "section_title": "핵심감사사항",
+                    "rcept_no": "20260311000001_002_xml",
+                },
+                "excerpt": "반복 내용",
+            },
+        ],
+    })
+
+    assert text.count("2025년 감사보고서 핵심감사사항 본문") == 1
+    assert text.count("공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260311000001") == 1
+
+
+def test_audit_report_section_renderer_dedupes_repeated_section_lines():
+    text = render_answer("get_audit_report_sections", {
+        "subject": {"corp_name": "A"},
+        "year": 2025,
+        "section_key": "kam",
+        "section_count": 2,
+        "sections": [
+            {
+                "section_title": "핵심감사사항",
+                "body_excerpt": "핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다.",
+            },
+            {
+                "section_title": "핵심감사사항",
+                "body_excerpt": "핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다.",
+            },
+        ],
+        "data_quality": {"status": "usable", "source": "evidence_documents"},
+    })
+
+    assert text.count("핵심감사사항: 핵심감사사항은 우리의 전문가적 판단") == 1
+
+
 def test_investor_renderers_print_confirmed_facts_with_source_lines():
     fact = {
         "statement": "2024년 연결 재무요약 기준 매출과 영업현금흐름이 이익의 질 점검에 사용되었습니다.",
