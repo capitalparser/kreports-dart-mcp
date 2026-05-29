@@ -60,3 +60,77 @@ def test_generic_renderer_prints_confirmed_facts_with_source_lines():
     assert "감사인 관점 해석" in text
     assert "1번 근거" not in text
     assert "[Fact" not in text
+
+
+def test_investor_renderers_print_confirmed_facts_with_source_lines():
+    fact = {
+        "statement": "2024년 연결 재무요약 기준 매출과 영업현금흐름이 이익의 질 점검에 사용되었습니다.",
+        "source": {
+            "corp_name": "A",
+            "report_nm": "사업보고서 (2024.12)",
+            "section_title": "재무제표",
+            "rcept_no": "20250318001234",
+            "source_table": "financial_facts_compact",
+        },
+    }
+    cases = [
+        ("get_quality_of_earnings_pack", {
+            "verdict": "stable",
+            "investment_question": "보고이익이 현금흐름으로 뒷받침되는가?",
+            "metrics": {"years": 3, "low_cash_conversion_years": 0},
+            "limitations": ["한계"],
+            "confirmed_facts": [fact],
+            "analysis": [{"perspective": "investor", "statement": "현금전환율은 이익 지속성 검토의 출발점입니다."}],
+            "next_checks": ["주석에서 일회성 손익을 확인하세요."],
+        }),
+        ("get_dcf_input_candidates", {
+            "candidate_assumptions": {"revenue_growth": {"value": 0.1, "basis": "historical_median"}},
+            "missing_inputs": ["wacc"],
+            "limitations": ["한계"],
+            "data_quality": {"status": "usable"},
+            "confirmed_facts": [fact],
+            "analysis": [{"perspective": "investor", "statement": "과거 중앙값은 모델 입력 후보일 뿐입니다."}],
+            "next_checks": ["할인율과 터미널 성장률은 별도로 산정하세요."],
+        }),
+        ("search_disclosure_events", {
+            "query": {"start_date": "2025-01-01", "end_date": "2025-12-31"},
+            "total_events": 1,
+            "events": [{"event_date": "2025-01-01", "corp_name": "A", "event_type": "capital_raise", "event_title": "유상증자"}],
+            "data_quality": {"status": "usable"},
+            "confirmed_facts": [fact],
+            "analysis": [{"perspective": "investor", "statement": "자본조달 공시는 희석 가능성을 확인해야 합니다."}],
+            "next_checks": ["접수번호 기준 원문을 확인하세요."],
+        }),
+    ]
+
+    for tool_name, payload in cases:
+        text = render_answer(tool_name, payload)
+        assert "공시에서 확인되는 내용" in text
+        assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250318001234" in text
+        assert "투자자 관점 해석" in text
+
+
+def test_investor_signals_renderer_uses_user_facing_language():
+    text = render_answer("get_investor_signals", {
+        "subject": {"corp_name": "A"},
+        "has_data": True,
+        "quality_snapshot": {"passed_checks": 4, "total_checks": 6, "latest_year": 2024},
+        "accounting_risk": {"score": 20, "verdict": "watch"},
+        "event_counts": {"capital_raise": 1},
+        "takeaways": ["quality_profile_supportive"],
+        "confirmed_facts": [{
+            "statement": "2024년 연간 재무 스냅샷 기준 ROE=12.5가 확인됩니다.",
+            "source": {
+                "corp_name": "A",
+                "report_nm": "사업보고서 (2024.12)",
+                "section_title": "재무제표",
+                "rcept_no": "20250318001234",
+            },
+        }],
+        "analysis": [{"perspective": "investor", "statement": "재무 품질과 공시 이벤트를 함께 봐야 합니다."}],
+        "next_checks": ["최근 이벤트 원문을 확인하세요."],
+    })
+
+    assert "투자자 신호 요약" in text
+    assert "`_meta`" not in text
+    assert "공시에서 확인되는 내용" in text

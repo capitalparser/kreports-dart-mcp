@@ -325,6 +325,9 @@ def _render_quality_of_earnings(result: dict) -> str:
     lines.append("데이터 한계:")
     for limitation in (result.get("limitations") or [])[:3]:
         lines.append(f"- {limitation}")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 
@@ -350,6 +353,9 @@ def _render_dcf_inputs(result: dict) -> str:
     lines.append("데이터 한계:")
     for limitation in (result.get("limitations") or [])[:3]:
         lines.append(f"- {limitation}")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 
@@ -369,6 +375,47 @@ def _render_disclosure_events(result: dict) -> str:
     lines.append("")
     lines.append("다음 행동:")
     lines.append("- 중요한 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문을 확인하세요.")
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
+    return "\n".join(lines)
+
+
+def _render_investor_signals(result: dict) -> str:
+    subject = _subject_label(result)
+    quality = result.get("quality_snapshot") or {}
+    risk = result.get("accounting_risk") or {}
+    event_counts = result.get("event_counts") or {}
+    active_events = {key: value for key, value in event_counts.items() if value}
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} 투자자 신호 요약입니다. 재무 품질, 회계 리스크, 최근 공시 이벤트를 함께 본 1차 점검 결과입니다.",
+        "",
+        "요약:",
+        f"- 품질 체크: {quality.get('passed_checks', 0)}/{quality.get('total_checks', 0)} 통과"
+        + (f", 최근 연도 {quality.get('latest_year')}" if quality.get("latest_year") else ""),
+        f"- 회계 리스크: {risk.get('verdict') or 'unknown'}"
+        + (f" / score {risk.get('score')}" if risk.get("score") is not None else ""),
+    ]
+    if active_events:
+        event_text = ", ".join(f"{key} {value}" for key, value in active_events.items())
+        lines.append(f"- 최근 이벤트: {event_text}")
+    else:
+        lines.append("- 최근 이벤트: 주요 이벤트 분류 결과가 제한적입니다.")
+    takeaways = result.get("takeaways") or []
+    if takeaways:
+        lines.append("- 관찰 포인트: " + ", ".join(str(item) for item in takeaways[:5]))
+
+    limitations = result.get("limitations") or []
+    if limitations:
+        lines.extend(["", "데이터 한계:"])
+        for limitation in limitations[:3]:
+            lines.append(f"- {limitation}")
+
+    evidence = _render_evidence_grounded_sections(result)
+    if evidence:
+        lines.append(evidence)
     return "\n".join(lines)
 
 
@@ -475,6 +522,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         return _render_dcf_inputs(result)
     if tool_name == "search_disclosure_events":
         return _render_disclosure_events(result)
+    if tool_name == "get_investor_signals":
+        return _render_investor_signals(result)
     if tool_name == "build_audit_acceptance_pack":
         return _render_acceptance_pack(result)
     return _render_generic(tool_name, result)

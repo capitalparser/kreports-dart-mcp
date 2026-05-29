@@ -182,6 +182,219 @@ def _company_summary(corp_code: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _annual_report_source(
+    corp_code: str,
+    subject: dict | None,
+    year: int | None,
+    *,
+    section_title: str,
+    source_table: str,
+) -> dict:
+    """Best-effort source descriptor for facts derived from annual structured data."""
+    report_nm = None
+    rcept_no = None
+    params: dict[str, Any] = {"corp_code": corp_code}
+    where = "corp_code=:corp_code AND report_nm LIKE '%사업보고서%'"
+    if year:
+        where += " AND report_nm LIKE :year_pattern"
+        params["year_pattern"] = f"%({int(year)}.12)%"
+    with _engine.connect() as conn:
+        row = conn.execute(
+            text(f"""
+                SELECT rcept_no, report_nm
+                FROM disclosures
+                WHERE {where}
+                ORDER BY disc_date DESC, rcept_no DESC
+                LIMIT 1
+            """),
+            params,
+        ).mappings().first()
+        if not row and year:
+            row = conn.execute(
+                text("""
+                    SELECT rcept_no, report_nm
+                    FROM disclosures
+                    WHERE corp_code=:corp_code AND report_nm LIKE '%사업보고서%'
+                    ORDER BY disc_date DESC, rcept_no DESC
+                    LIMIT 1
+                """),
+                {"corp_code": corp_code},
+            ).mappings().first()
+    if row:
+        rcept_no = row.get("rcept_no")
+        report_nm = row.get("report_nm")
+    return {
+        "corp_code": corp_code,
+        "corp_name": (subject or {}).get("corp_name") or corp_code,
+        "report_nm": report_nm or "DART 연간 재무 데이터",
+        "bsns_year": year,
+        "rcept_no": rcept_no,
+        "section_title": section_title,
+        "source_table": source_table,
+    }
+
+
+def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: str) -> dict:
+    """Build confirmed facts and next checks for investor financial tools."""
+    corp_code = str(result.get("company") or (subject or {}).get("corp_code") or "")
+    start_year = result.get("start_year")
+    end_year = result.get("end_year")
+    source = _annual_report_source(
+        corp_code,
+        subject,
+        int(end_year) if end_year else None,
+        section_title="재무제표",
+        source_table="financial_facts_compact",
+    )
+    facts: list[dict] = []
+    analysis: list[dict] = []
+    next_checks: list[str] = []
+
+    if mode == "quality_of_earnings":
+        metrics = result.get("metrics") or {}
+        evidence_rows = result.get("evidence") or []
+        latest = evidence_rows[-1] if evidence_rows else {}
+        facts.append({
+            "statement": (
+                f"{start_year}~{end_year}년 {result.get('fs_div') or 'CFS'} 기준 "
+                f"{metrics.get('years') or len(evidence_rows)}개년 이익의 질 지표가 계산되었습니다."
+            ),
+            "source": source,
+            "excerpt": (
+                f"최근연도 {latest.get('year') or end_year}: revenue={latest.get('revenue')}, "
+                f"operating_cf={latest.get('operating_cf')}, cash_conversion={latest.get('cash_conversion')}"
+            ),
+        })
+        analysis.append({
+            "perspective": "investor",
+            "statement": "이익의 질 점검은 보고이익이 영업현금흐름과 반복 가능한 영업성과로 뒷받침되는지 보는 1차 필터입니다.",
+        })
+        if result.get("signals"):
+            analysis.append({
+                "perspective": "investor",
+                "statement": "warning 또는 monitor 신호가 있으면 손익 주석, 현금흐름표, 감사보고서 강조사항을 함께 확인해야 합니다.",
+            })
+        next_checks.extend([
+            "주석에서 일회성 손익, 손상, 충당부채, 수익인식 판단이 있었는지 확인하세요.",
+            "감사보고서 KAM과 강조사항/기타사항이 이익 품질 신호와 연결되는지 대조하세요.",
+        ])
+    elif mode == "dcf":
+        assumptions = result.get("candidate_assumptions") or {}
+        actuals = result.get("historical_actuals") or []
+        facts.append({
+            "statement": (
+                f"{start_year}~{end_year}년 과거 실적에서 DCF 입력 후보가 산출되었습니다. "
+                f"매출성장률 후보는 {((assumptions.get('revenue_growth') or {}).get('value'))}, "
+                f"영업이익률 후보는 {((assumptions.get('operating_margin') or {}).get('value'))}입니다."
+            ),
+            "source": source,
+            "excerpt": f"historical_actuals={len(actuals)}개년, basis=historical_median",
+        })
+        analysis.append({
+            "perspective": "investor",
+            "statement": "DCF 입력 후보는 valuation 결론이 아니라 모델 시작점입니다. 예측기간, 할인율, 터미널 성장률은 별도 판단이 필요합니다.",
+        })
+        next_checks.extend([
+            "DCF 핵심 입력값인 WACC, 세율, CAPEX, 운전자본 변동, 터미널 성장률을 별도로 산정하세요.",
+            "사업보고서 사업부문·수주·시장위험 문단을 이용해 과거 중앙값이 미래 추정에 적합한지 검토하세요.",
+        ])
+
+    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+
+
+def _disclosure_event_evidence(result: dict) -> dict:
+    facts: list[dict] = []
+    for event in (result.get("events") or [])[:6]:
+        facts.append({
+            "statement": (
+                f"{event.get('event_date')} {event.get('corp_name') or event.get('corp_code')}의 "
+                f"{event.get('event_title')} 공시가 {event.get('event_type')} 이벤트로 분류되었습니다."
+            ),
+            "source": {
+                "corp_code": event.get("corp_code"),
+                "corp_name": event.get("corp_name") or event.get("corp_code"),
+                "report_nm": event.get("source_report_nm") or event.get("event_title") or "공시",
+                "rcept_no": event.get("rcept_no"),
+                "section_title": "공시목록",
+                "source_table": "disclosure_events",
+            },
+            "excerpt": event.get("event_title"),
+        })
+    analysis = [{
+        "perspective": "investor",
+        "statement": "수시공시는 로컬에는 목록과 분류를 선적재하고, 본문 검토는 사용자 DART API key로 온디맨드 확인하는 구조입니다.",
+    }]
+    next_checks = [
+        "중요 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문 본문을 확인하세요.",
+        "자본조달, 전환사채, 최대주주 변경, 소송, 횡령·배임 이벤트는 희석·지배구조·현금흐름 리스크로 연결해 검토하세요.",
+    ]
+    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+
+
+def _investor_signal_evidence(
+    corp_code: str,
+    subject: dict | None,
+    rows: list[dict],
+    risk_summary: dict,
+    risk_verdict: str,
+    events: list[dict],
+) -> dict:
+    facts: list[dict] = []
+    latest = rows[-1] if rows else {}
+    latest_year = latest.get("연도")
+    if latest:
+        facts.append({
+            "statement": (
+                f"{latest_year}년 연간 재무 스냅샷 기준 ROE={latest.get('ROE')}, "
+                f"영업이익률={latest.get('영업이익률')}, FCF={latest.get('FCF')}가 확인됩니다."
+            ),
+            "source": _annual_report_source(
+                corp_code,
+                subject,
+                int(latest_year) if latest_year else None,
+                section_title="재무제표",
+                source_table="financial_facts",
+            ),
+            "excerpt": f"latest_snapshot={latest}",
+        })
+    if risk_summary.get("has_data"):
+        facts.append({
+            "statement": f"회계/거버넌스 리스크 요약 데이터가 있으며 현재 verdict는 {risk_verdict}입니다.",
+            "source": {
+                "corp_code": corp_code,
+                "corp_name": (subject or {}).get("corp_name") or corp_code,
+                "source_table": "risk_summary_views",
+                "section_title": "회계 리스크 요약",
+            },
+            "excerpt": str(risk_summary)[:300],
+        })
+    for event in events[:3]:
+        facts.append({
+            "statement": (
+                f"{event.get('disc_date')} {event.get('report_nm')} 공시가 "
+                f"{event.get('category')} 이벤트로 분류되었습니다."
+            ),
+            "source": {
+                "corp_code": corp_code,
+                "corp_name": (subject or {}).get("corp_name") or corp_code,
+                "report_nm": event.get("report_nm") or "공시",
+                "rcept_no": event.get("rcept_no"),
+                "section_title": "공시목록",
+                "source_table": "disclosures",
+            },
+            "excerpt": event.get("report_nm"),
+        })
+    analysis = [{
+        "perspective": "investor",
+        "statement": "투자자 신호는 재무 품질, 회계 리스크, 최근 공시 이벤트를 함께 보는 1차 스크리닝입니다. 개별 신호 하나만으로 투자 결론을 내리면 안 됩니다.",
+    }]
+    next_checks = [
+        "품질 체크가 낮거나 리스크 verdict가 warning 이상이면 사업보고서 주석과 감사보고서 KAM/강조사항을 함께 확인하세요.",
+        "최근 자본조달·CB·합병·소송 이벤트는 접수번호 기준 원문을 열어 조건과 재무효과를 확인하세요.",
+    ]
+    return {"confirmed_facts": facts, "analysis": analysis, "next_checks": next_checks}
+
+
 def _has_db_column(table_name: str, column_name: str) -> bool:
     try:
         with _engine.connect() as conn:
@@ -696,6 +909,7 @@ def get_investor_signals(
             "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
         }
 
+    subject = _company_summary(corp_code)
     financial = get_financial_snapshot(corp_code, years=years, annual_only=True)
     rows = financial.get("rows", [])
     latest = rows[-1] if rows else {}
@@ -735,8 +949,9 @@ def get_investor_signals(
     if event_counts.get("treasury_buy", 0):
         takeaways.append("shareholder_return_event_present")
 
-    return {
+    result = {
         "corp_code": corp_code,
+        "subject": subject,
         "has_data": bool(rows or events or risk_summary.get("has_data")),
         "unit": "억원",
         "years": years,
@@ -768,6 +983,15 @@ def get_investor_signals(
             "투자 판단 전 원 공시와 최신 수집 시각을 확인하세요.",
         ],
     }
+    result.update(_investor_signal_evidence(
+        corp_code,
+        subject,
+        rows,
+        risk_summary,
+        risk_verdict,
+        events,
+    ))
+    return _clean_dict(result)
 
 
 # ---------------------------------------------------------------------------
@@ -2946,6 +3170,7 @@ def get_quality_of_earnings_pack(
         fs_div=fs_div,
     )
     result["subject"] = subject
+    result.update(_investor_financial_evidence(result, subject, mode="quality_of_earnings"))
     return _clean_dict(result)
 
 
@@ -2969,6 +3194,7 @@ def get_dcf_input_candidates(
         fs_div=fs_div,
     )
     result["subject"] = subject
+    result.update(_investor_financial_evidence(result, subject, mode="dcf"))
     return _clean_dict(result)
 
 
@@ -3000,6 +3226,7 @@ def search_disclosure_events(
         limit=limit,
     )
     result["subject"] = subject
+    result.update(_disclosure_event_evidence(result))
     return _clean_dict(result)
 
 
