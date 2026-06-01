@@ -61,9 +61,9 @@ kreports-mcp = "kreports.mcp.server:main"
 kreports-mcp-http = "kreports.mcp.http_server:main"
 
 [project.urls]
-Homepage = "https://github.com/capitalparser/kreports"
-Repository = "https://github.com/capitalparser/kreports"
-Issues = "https://github.com/capitalparser/kreports/issues"
+Homepage = "https://github.com/capitalparser/kreports-dart-mcp"
+Repository = "https://github.com/capitalparser/kreports-dart-mcp"
+Issues = "https://github.com/capitalparser/kreports-dart-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kreports"]

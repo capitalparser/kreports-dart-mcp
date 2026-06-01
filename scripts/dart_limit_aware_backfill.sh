@@ -6,7 +6,7 @@ ENV_FILE="${KREPORTS_COLLECTOR_ENV:-$HOME/.config/kreports/collector.env}"
 LOCK_DIR="${KREPORTS_BACKFILL_LOCK_DIR:-$PROJECT_DIR/.dart-backfill.lock}"
 LOG_DIR="$PROJECT_DIR/logs"
 LOG_FILE="$LOG_DIR/dart-limit-aware-backfill.log"
-BACKFILL_SCRIPT="${KREPORTS_BACKFILL_SCRIPT:-scripts/run_derived_dataset_backfill.sh}"
+BACKFILL_SCRIPT="${KREPORTS_BACKFILL_SCRIPT:-scripts/run_complete_dataset_backfill.sh}"
 
 mkdir -p "$LOG_DIR"
 

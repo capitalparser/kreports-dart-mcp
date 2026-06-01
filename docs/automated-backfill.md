@@ -9,8 +9,7 @@ endpoint remains read-only and must not have `DART_API_KEY`.
 - It exits when another live backfill is already running.
 - It closes stale `backfill_runs` records whose PID no longer exists.
 - It probes DART once before starting the configured backfill script.
-- The default script is `scripts/run_derived_dataset_backfill.sh`, not a raw
-  source-document expansion job.
+- The default script is `scripts/run_complete_dataset_backfill.sh`.
 - If DART returns usage-limit status `020`, it logs and waits for the next
   scheduled run instead of failing loudly.
 
@@ -83,13 +82,14 @@ tail -f logs/derived-dataset-backfill.log
 
 ## Backfill Policy
 
-Default unattended runs are derived-data-first:
+Default unattended runs target the complete runtime dataset:
 
-- refresh parsers from already cached/externalized raw documents;
-- rebuild `evidence_documents`;
+- collect listed-company disclosure lists;
+- rebuild disclosure event indexes;
 - collect compact structured data such as financials, auditors, audit fees, and
   audit hours;
-- avoid expanding `source_documents.raw_content` unless explicitly requested.
+- collect business-report and audit-report sections;
+- rebuild `evidence_documents`, KAM matters, and audit procedure indexes.
 
 Raw source collection remains available through
 `scripts/run_source_documents_backfill.sh`, but it should be treated as a manual

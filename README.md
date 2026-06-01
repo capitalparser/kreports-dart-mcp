@@ -34,6 +34,22 @@ KReports turns that raw disclosure pile into questions you can ask Claude:
 
 KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). It covers 3,900+ KOSPI/KOSDAQ/KONEX listed companies and converts filings into structured financial intelligence.
 
+### Open source scope
+
+This repository is the public implementation of the KReports collector, parser,
+runtime database, MCP stdio/HTTP servers, and optional dashboard. It is intended
+to be useful beyond one private workflow:
+
+- Korea-focused analysts can query DART through a standard MCP interface.
+- Audit and accounting professionals can inspect audit-report evidence,
+  accounting policies, auditor changes, audit fees, and peer risk patterns.
+- MCP client builders can reuse the document-first DART ingestion, provenance,
+  and narrative rendering patterns for other regulated disclosure systems.
+
+The public server surface is read-only by default. Maintainer-side collection
+jobs use private DART API keys and can publish compact runtime databases without
+exposing those keys to MCP users.
+
 ### Two workflows
 
 KReports serves two audiences from the same DART source: investors who need fast judgment signals, and audit/accounting professionals who need evidence and risk coverage.
@@ -126,22 +142,21 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Beneish M-Score for this company — earnings manipulation risk"
 ```
 
-### MCP Tools (12)
+### MCP Tools (31)
 
-| Tool | Best for | What it returns |
-|------|----------|-----------------|
-| `search_company` | Everyone | Corp code, market, stock code |
-| `get_investor_signals` | Investors | Quality checks, accounting risk score, recent investor-relevant disclosure events |
-| `get_financial_snapshot` | Investors / analysts | Revenue, OP, NI, FCF, ROIC, CCC by year |
-| `compare_to_industry` | Investors / analysts | KSIC P25/P50/P75 vs. peers (single metric) |
-| `compare_to_industry_multi` | Investors / analysts | Multi-metric × multi-year P25/P50/P75 matrix + subject percentile. Adaptive ladder (p3→p2) + sector mutual exclusion + opt-in size bucket |
-| `get_business_overview` | Investors / auditors | Business report narrative (overview, risk, MD&A) |
-| `score_going_concern` | Audit / credit risk | 6-factor 100-pt deduction scorecard + grade |
-| `detect_restatement` | Audit / accounting risk | Prior period adjustments across annual filings |
-| `get_accounting_policy` | Accounting / audit planning | 15 standard K-IFRS policy items from footnotes |
-| `get_audit_history` | Audit / governance | Auditor, opinion, change flag, consecutive years |
-| `get_subsidiary_auditors` | Group audit / governance | Group audit matrix across subsidiaries |
-| `get_industry_audit_landscape` | Audit / governance | Industry audit market: auditor share (count + asset-weighted), Big4 share, non-qualified opinion rate (N-yr), avg tenure, subject's auditor |
+KReports exposes 31 read-oriented MCP tools. The tools are grouped around the
+maintenance questions that usually force analysts and auditors back into DART:
+
+| Area | Representative tools | What it returns |
+|------|----------------------|-----------------|
+| Company lookup | `search_company` | Corp code, market, stock code, name disambiguation |
+| Investor first pass | `get_investor_signals`, `get_quality_of_earnings_pack`, `get_dcf_input_candidates` | Quality checks, accounting risk, disclosure events, DCF input candidates |
+| Financials and peer benchmarking | `get_financial_snapshot`, `compare_to_industry`, `compare_to_industry_multi`, `select_peer_group` | Multi-year financial facts, KSIC peer percentiles, peer group selection |
+| Disclosure monitoring | `search_disclosure_events`, `fetch_disclosure_on_demand`, `search_dataset` | Indexed event search plus optional user-keyed live DART fetches |
+| Audit risk | `score_going_concern`, `detect_restatement`, `build_audit_acceptance_pack`, `estimate_audit_hours_proxy` | Going-concern score, restatement candidates, acceptance risk pack, audit-hour proxy |
+| Auditor and group audit | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | Auditor tenure, opinion history, group auditor matrix, audit fee/NAS peer view |
+| Audit report evidence | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | Audit report sections, KAM matters, audit procedures, year-to-year KAM lifecycle |
+| Accounting policies | `get_accounting_policy`, `compare_peer_accounting_policies`, `get_accounting_policy_changes` | K-IFRS policy notes, peer policy comparison, policy change candidates |
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
@@ -228,13 +243,13 @@ Grades: **Stable** (80+) / **Caution** (60–79) / **Warning** (40–59) / **Dan
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP servers (10 tools)
-├── analysis/    Public Python API (11 functions, JSON-safe)
-├── collector/   DART API collectors (9 modules)
+├── mcp/         MCP stdio + HTTP servers (31 tools)
+├── analysis/    Public Python API and evidence-grounded answer layer
+├── collector/   DART API collectors and document-first backfill runners
 ├── processor/   XBRL/XML parsers
 ├── judge/       Risk flag engine (Beneish, Going Concern)
-├── db/          SQLAlchemy models (8 tables, SQLite)
-└── cli/         Typer CLI (17 commands)
+├── db/          SQLAlchemy models for runtime facts, evidence, and provenance
+└── cli/         Typer CLI for collection, readiness checks, and MCP serving
 
 dashboard/       Optional Streamlit UI (9 pages)
 ```
@@ -295,6 +310,21 @@ KReports는 그 일을 Claude가 바로 물어볼 수 있는 형태로 바꿉니
 ### 무엇을 하나
 
 KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. KOSPI/KOSDAQ/KONEX 상장사 3,900여 개의 공시와 재무 데이터를 투자자가 질문하기 쉬운 인텔리전스로 제공합니다.
+
+### 오픈소스 범위
+
+이 저장소는 KReports의 수집기, 파서, 런타임 데이터베이스, MCP
+stdio/HTTP 서버, 선택형 대시보드를 공개 구현으로 제공합니다. 개인용
+스크립트가 아니라 다음 사용자에게 재사용 가능한 도구로 설계했습니다.
+
+- 한국 상장사 공시를 표준 MCP 인터페이스로 조회하려는 투자자/분석가
+- 감사보고서 근거, 회계정책, 감사인 교체, 감사보수, 피어 리스크를
+  확인하려는 감사·회계 실무자
+- 규제 공시 시스템을 MCP 도구로 바꾸려는 개발자
+
+공개 MCP 표면은 기본적으로 읽기 전용입니다. 수집 작업은 메인테이너의
+비공개 DART API 키로 수행하고, MCP 사용자는 API 키 없이 compact runtime
+DB 또는 배포된 엔드포인트를 조회하는 구조를 목표로 합니다.
 
 ### 두 가지 관점
 
@@ -388,20 +418,21 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
 ```
 
-### MCP 도구 (10개)
+### MCP 도구 (31개)
 
-| 도구 | 주 사용 관점 | 반환 |
-|------|-------------|------|
-| `search_company` | 공통 | corp_code, 시장, 종목코드 |
-| `get_investor_signals` | 투자자 | 퀄리티 체크·회계 리스크 점수·투자자 관련 최근 공시 이벤트 |
-| `get_financial_snapshot` | 투자자 / 애널리스트 | 연도별 매출·영업이익·FCF·ROIC·CCC |
-| `compare_to_industry` | 투자자 / 애널리스트 | KSIC 업종 P25/P50/P75 비교 |
-| `get_business_overview` | 투자자 / 감사인 | 사업보고서 핵심 섹션 (사업개요·위험·경영계획) |
-| `score_going_concern` | 감사 / 신용위험 | 6인자 100점 감점 스코어카드 + 등급 |
-| `detect_restatement` | 감사 / 회계위험 | 사업보고서 간 전기 금액 변동 감지 |
-| `get_accounting_policy` | 회계 / 감사계획 | K-IFRS 표준 15개 항목 주석 발췌 |
-| `get_audit_history` | 감사 / 지배구조 | 감사인·의견·교체·연속연수 이력 |
-| `get_subsidiary_auditors` | 그룹감사 / 지배구조 | 연결그룹 종속회사 감사인 매트릭스 |
+KReports는 읽기 중심 MCP 도구 31개를 제공합니다. 투자자와 감사인이
+DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
+
+| 영역 | 대표 도구 | 반환 |
+|------|-----------|------|
+| 회사 검색 | `search_company` | corp_code, 시장, 종목코드, 동명이인 후보 |
+| 투자자 1차 점검 | `get_investor_signals`, `get_quality_of_earnings_pack`, `get_dcf_input_candidates` | 퀄리티 체크, 회계 리스크, 공시 이벤트, DCF 입력 후보 |
+| 재무·피어 비교 | `get_financial_snapshot`, `compare_to_industry`, `compare_to_industry_multi`, `select_peer_group` | 다개년 재무 fact, KSIC 피어 분위수, 피어그룹 |
+| 공시 모니터링 | `search_disclosure_events`, `fetch_disclosure_on_demand`, `search_dataset` | 공시 이벤트 검색, 사용자 API 키 기반 실시간 DART 조회 |
+| 감사 위험 | `score_going_concern`, `detect_restatement`, `build_audit_acceptance_pack`, `estimate_audit_hours_proxy` | 계속기업 점수, 전기재작성 후보, 감사수임 위험 pack, 감사시간 proxy |
+| 감사인·그룹감사 | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | 감사인 연속연수, 의견 이력, 그룹 감사인 매트릭스, 보수/NAS 피어 비교 |
+| 감사보고서 근거 | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | 감사보고서 본문, KAM, 감사절차, KAM 연도별 변화 |
+| 회계정책 | `get_accounting_policy`, `compare_peer_accounting_policies`, `get_accounting_policy_changes` | K-IFRS 주석, 피어 정책 비교, 정책 변경 후보 |
 
 회사명, 종목코드(6자리), corp_code(8자리) 중 아무거나 입력 가능합니다.
 
@@ -472,13 +503,13 @@ K-IFRS 감사기준 기반 100점 감점 방식:
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP 서버 (10개 도구)
-├── analysis/    Python 공개 API (11개 함수, JSON-safe)
-├── collector/   DART API 수집기 (9개 모듈)
+├── mcp/         MCP stdio + HTTP 서버 (31개 도구)
+├── analysis/    Python 공개 API와 근거 기반 응답 레이어
+├── collector/   DART API 수집기와 문서 우선 백필 러너
 ├── processor/   XBRL/XML 파서
 ├── judge/       위험 플래그 엔진 (Beneish, Going Concern)
-├── db/          SQLAlchemy 모델 (8개 테이블, SQLite)
-└── cli/         Typer CLI (17개 명령)
+├── db/          런타임 fact, evidence, provenance용 SQLAlchemy 모델
+└── cli/         수집, readiness 점검, MCP serving용 Typer CLI
 
 dashboard/       Streamlit 분석 대시보드 (선택, 9페이지)
 ```
