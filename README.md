@@ -34,21 +34,29 @@ KReports turns that raw disclosure pile into questions you can ask Claude:
 
 KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). It covers 3,900+ KOSPI/KOSDAQ/KONEX listed companies and converts filings into structured financial intelligence.
 
-### Open source scope
+### What makes it different
 
-This repository is the public implementation of the KReports collector, parser,
-runtime database, MCP stdio/HTTP servers, and optional dashboard. It is intended
-to be useful beyond one private workflow:
+KReports is not a thin wrapper around the DART API. It is a filing intelligence
+layer built around the questions analysts actually ask after opening an annual
+report.
 
-- Korea-focused analysts can query DART through a standard MCP interface.
-- Audit and accounting professionals can inspect audit-report evidence,
-  accounting policies, auditor changes, audit fees, and peer risk patterns.
-- MCP client builders can reuse the document-first DART ingestion, provenance,
-  and narrative rendering patterns for other regulated disclosure systems.
-
-The public server surface is read-only by default. Maintainer-side collection
-jobs use private DART API keys and can publish compact runtime databases without
-exposing those keys to MCP users.
+- **Document-first evidence**: stores and normalizes business reports, audit
+  reports, KAM sections, accounting policy notes, and disclosure events so MCP
+  answers can point back to source filings.
+- **Investor lens**: combines financial quality, cash conversion, peer
+  benchmarking, accounting risk, disclosure events, and DCF input candidates.
+- **Auditor lens**: tracks going-concern signals, auditor changes, audit fees,
+  non-audit service ratios, group-audit perimeter, KAM topics, audit procedures,
+  and accounting policy changes.
+- **Peer-group comparison**: selects comparable companies from Korean industry
+  codes and compares margins, leverage, cash flow, audit fees, KAM topics, and
+  policy patterns.
+- **Runtime-ready MCP**: separates private collection jobs from read-only MCP
+  serving, so users can query a compact runtime dataset without needing a DART
+  API key.
+- **Source-grounded answers**: returns prose-oriented MCP responses with
+  confirmed facts, analysis, next checks, and filing provenance instead of only
+  raw JSON dumps.
 
 ### Two workflows
 
@@ -311,20 +319,26 @@ KReports는 그 일을 Claude가 바로 물어볼 수 있는 형태로 바꿉니
 
 KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. KOSPI/KOSDAQ/KONEX 상장사 3,900여 개의 공시와 재무 데이터를 투자자가 질문하기 쉬운 인텔리전스로 제공합니다.
 
-### 오픈소스 범위
+### 무엇이 다른가
 
-이 저장소는 KReports의 수집기, 파서, 런타임 데이터베이스, MCP
-stdio/HTTP 서버, 선택형 대시보드를 공개 구현으로 제공합니다. 개인용
-스크립트가 아니라 다음 사용자에게 재사용 가능한 도구로 설계했습니다.
+KReports는 DART API를 얇게 감싼 래퍼가 아닙니다. 사업보고서와
+감사보고서를 실제로 열어본 뒤 이어지는 질문을 기준으로 만든 공시
+인텔리전스 레이어입니다.
 
-- 한국 상장사 공시를 표준 MCP 인터페이스로 조회하려는 투자자/분석가
-- 감사보고서 근거, 회계정책, 감사인 교체, 감사보수, 피어 리스크를
-  확인하려는 감사·회계 실무자
-- 규제 공시 시스템을 MCP 도구로 바꾸려는 개발자
-
-공개 MCP 표면은 기본적으로 읽기 전용입니다. 수집 작업은 메인테이너의
-비공개 DART API 키로 수행하고, MCP 사용자는 API 키 없이 compact runtime
-DB 또는 배포된 엔드포인트를 조회하는 구조를 목표로 합니다.
+- **문서 우선 근거화**: 사업보고서, 감사보고서, 핵심감사사항, 회계정책
+  주석, 공시 이벤트를 원문 근거와 함께 정규화하여 MCP 답변이 출처를
+  따라갈 수 있게 합니다.
+- **투자자 관점**: 재무 퀄리티, 현금전환, 피어 벤치마킹, 회계 리스크,
+  공시 이벤트, DCF 입력 후보를 한 번에 연결합니다.
+- **감사인 관점**: 계속기업 징후, 감사인 교체, 감사보수, 비감사보수
+  비율, 그룹감사 범위, KAM 주제, 감사절차, 회계정책 변화를 추적합니다.
+- **피어그룹 비교**: 한국 업종코드 기반으로 비교회사를 선별하고,
+  이익률·부채비율·현금흐름·감사보수·KAM·회계정책을 비교합니다.
+- **런타임 MCP 구조**: 비공개 수집 작업과 읽기 전용 MCP serving을
+  분리하여, 사용자는 DART API 키 없이 compact runtime dataset을 조회할
+  수 있습니다.
+- **근거 기반 서술형 응답**: 단순 JSON 나열이 아니라 확인된 사실,
+  분석, 다음 확인사항, 공시 출처가 포함된 문장형 응답을 지향합니다.
 
 ### 두 가지 관점
 
