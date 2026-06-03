@@ -51,11 +51,11 @@ def test_derived_dataset_backfill_does_not_collect_more_raw_documents():
     assert "collect-audit-fees" in script
 
 
-def test_limit_aware_backfill_defaults_to_derived_dataset_script():
+def test_limit_aware_backfill_defaults_to_complete_dataset_script():
     script = open("scripts/dart_limit_aware_backfill.sh", encoding="utf-8").read()
 
     assert "KREPORTS_BACKFILL_SCRIPT" in script
-    assert "scripts/run_derived_dataset_backfill.sh" in script
+    assert "scripts/run_complete_dataset_backfill.sh" in script
 
 
 def test_readiness_verdict_passes_core_thresholds():

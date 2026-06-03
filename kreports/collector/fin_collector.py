@@ -202,6 +202,8 @@ def collect_financial_range(
     stock_code: str,
     year_from: int | None = None,
     year_to: int | None = None,
+    *,
+    force: bool = False,
 ) -> dict:
     """단일 종목의 연도 범위 전체 분기를 수집한다."""
     from datetime import date
@@ -212,10 +214,18 @@ def collect_financial_range(
     if year_from is None:
         year_from = year_to - settings.collect_years + 1
 
-    counts: dict = {"success": 0, "no_data": 0, "error": 0}
+    corp_code = get_corp_code(stock_code)
+    if not corp_code:
+        logger.error("종목코드 %s의 corp_code를 찾을 수 없습니다.", stock_code)
+        return {"success": 0, "no_data": 0, "error": 1, "skipped": 0}
+
+    counts: dict = {"success": 0, "no_data": 0, "error": 0, "skipped": 0}
     for year in range(year_from, year_to + 1):
         for quarter in [1, 2, 3, 4]:
             if year == current_year and quarter > _current_quarter():
+                continue
+            if not force and _financial_quarter_cached(corp_code, year, quarter):
+                counts["skipped"] += 1
                 continue
             status = collect_financial(stock_code, year, quarter)
             counts[status] = counts.get(status, 0) + 1
@@ -228,6 +238,8 @@ def collect_all_companies(
     year_to: int | None = None,
     market: str | None = None,
     progress_callback=None,
+    *,
+    force: bool = False,
 ) -> dict:
     """DB 등록 상장사 재무데이터 배치 수집."""
     from datetime import date
@@ -249,12 +261,12 @@ def collect_all_companies(
         companies = list(query.order_by(Company.market, Company.corp_name).all())
 
     total = len(companies)
-    totals: dict = {"success": 0, "no_data": 0, "error": 0}
+    totals: dict = {"success": 0, "no_data": 0, "error": 0, "skipped": 0}
 
     for idx, (stock_code, corp_name) in enumerate(companies, 1):
         if progress_callback:
             progress_callback(idx, total, corp_name)
-        result = collect_financial_range(stock_code, year_from, year_to)
+        result = collect_financial_range(stock_code, year_from, year_to, force=force)
         for k, v in result.items():
             totals[k] = totals.get(k, 0) + v
 
@@ -333,6 +345,39 @@ def _is_listed(corp_code: str) -> bool:
             return market in _LISTED_MARKETS
         # market 미설정 시 stock_code 보유 = 상장사
         return stock_code is not None
+
+
+def _financial_quarter_cached(corp_code: str, year: int, quarter: int) -> bool:
+    """Return True when a prior successful financial collection exists."""
+    reprt_code = QUARTER_TO_REPRT.get(quarter)
+    if not reprt_code:
+        return False
+
+    with get_session() as session:
+        has_full_fact = (
+            session.query(FinancialFact.id)
+            .filter(
+                FinancialFact.corp_code == corp_code,
+                FinancialFact.bsns_year == year,
+                FinancialFact.reprt_code == reprt_code,
+            )
+            .first()
+            is not None
+        )
+        if has_full_fact:
+            return True
+
+        return (
+            session.query(Financial.id)
+            .filter(
+                Financial.corp_code == corp_code,
+                Financial.year == year,
+                Financial.quarter == quarter,
+                Financial.source.in_(("acntall", "acnt")),
+            )
+            .first()
+            is not None
+        )
 
 
 def _upsert_financial_facts(facts: list[dict]) -> None:

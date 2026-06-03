@@ -1307,6 +1307,7 @@ def collect(
     stock: str = typer.Argument(..., help="종목코드 (예: 005930)"),
     year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
     year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
+    force: bool = typer.Option(False, "--force", help="이미 수집된 분기도 재수집"),
 ):
     """단일 종목 재무데이터를 수집한다."""
     if not settings.dart_api_key:
@@ -1319,8 +1320,14 @@ def collect(
 
     typer.echo(f"수집 시작: {stock} ({y_from}~{y_to}년)")
     from kreports.collector.fin_collector import collect_financial_range
-    result = collect_financial_range(stock, year_from=y_from, year_to=y_to)
-    typer.echo(f"완료 - 성공: {result['success']}, 데이터없음: {result['no_data']}, 오류: {result['error']}")
+    result = collect_financial_range(stock, year_from=y_from, year_to=y_to, force=force)
+    typer.echo(
+        "완료 - "
+        f"성공: {result['success']}, "
+        f"데이터없음: {result['no_data']}, "
+        f"건너뜀: {result.get('skipped', 0)}, "
+        f"오류: {result['error']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1339,7 @@ def collect_all(
     year_from: Optional[int] = typer.Option(None, help="수집 시작 연도"),
     year_to: Optional[int] = typer.Option(None, help="수집 종료 연도"),
     market: Optional[str] = typer.Option(None, help="시장 필터: KOSPI/KOSDAQ/KONEX. 생략 시 상장 시장 전체."),
-    force: bool = typer.Option(False, "--force", help="동일 백필 running 기록이 있어도 강제 실행"),
+    force: bool = typer.Option(False, "--force", help="동일 백필 running 기록을 무시하고 이미 수집된 분기도 재수집"),
 ):
     """전체 상장사 재무데이터를 배치 수집한다."""
     if not settings.dart_api_key:
@@ -1352,9 +1359,21 @@ def collect_all(
         params={"year_from": year_from, "year_to": year_to, "market": market},
         force=force,
     ) as run_id:
-        result = collect_all_companies(year_from, year_to, market=market, progress_callback=_progress)
+        result = collect_all_companies(
+            year_from,
+            year_to,
+            market=market,
+            progress_callback=_progress,
+            force=force,
+        )
         _finish_backfill_run(run_id, result)
-    typer.echo(f"\n완료 - 성공: {result['success']:,}, 데이터없음: {result['no_data']:,}, 오류: {result['error']:,}")
+    typer.echo(
+        "\n완료 - "
+        f"성공: {result['success']:,}, "
+        f"데이터없음: {result['no_data']:,}, "
+        f"건너뜀: {result.get('skipped', 0):,}, "
+        f"오류: {result['error']:,}"
+    )
 
 
 # ---------------------------------------------------------------------------
