@@ -12,9 +12,13 @@ METRIC_MAP = {
     "ifrs-full_Revenue": ("revenue", "매출액"),
     "ifrs-full_ProfitLoss": ("profit_loss", "당기순손익"),
     "ifrs-full_OperatingProfitLoss": ("operating_profit", "영업손익"),
+    "dart_OperatingIncomeLoss": ("operating_profit", "영업손익"),
+    "ifrs-full_IncomeTaxExpenseContinuingOperations": ("tax_expense", "법인세비용"),
     "ifrs-full_CashFlowsFromUsedInOperatingActivities": ("operating_cash_flow", "영업활동현금흐름"),
     "ifrs-full_CashFlowsFromUsedInInvestingActivities": ("investing_cash_flow", "투자활동현금흐름"),
     "ifrs-full_CashFlowsFromUsedInFinancingActivities": ("financing_cash_flow", "재무활동현금흐름"),
+    "ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities": ("purchase_ppe", "유형자산 취득"),
+    "ifrs-full_PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities": ("purchase_intangible_assets", "무형자산 취득"),
 }
 
 

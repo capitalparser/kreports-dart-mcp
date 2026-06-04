@@ -29,6 +29,18 @@ def test_full_backfill_runs_policies_before_financial_endpoint():
     assert business_pos < extractor_pos < policy_pos < financial_pos
 
 
+def test_complete_backfill_rebuilds_compact_after_financial_failure():
+    script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
+
+    financial_pos = script.index('run_step "financial facts 2021-2025"')
+    compact_pos = script.index('run_step "rebuild compact financial facts 2021-2025"')
+    exit_pos = script.index('if (( financial_exit != 0 ))')
+
+    assert "financial_exit=0" in script
+    assert "|| financial_exit=$?" in script
+    assert financial_pos < compact_pos < exit_pos
+
+
 def test_source_documents_backfill_avoids_financial_endpoint():
     script = open("scripts/run_source_documents_backfill.sh", encoding="utf-8").read()
 

@@ -39,11 +39,17 @@ for year in 2021 2022 2023 2024 2025 2026; do
 done
 
 # 2. Structured financials and compact runtime metrics.
+# Even when DART quota stops collect-all, rebuild compact facts from rows already saved.
+financial_exit=0
 run_step "financial facts 2021-2025" \
-  .venv/bin/kreports collect-all --year-from 2021 --year-to 2025
+  .venv/bin/kreports collect-all --year-from 2021 --year-to 2025 || financial_exit=$?
 
 run_step "rebuild compact financial facts 2021-2025" \
   .venv/bin/kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
+
+if (( financial_exit != 0 )); then
+  exit "$financial_exit"
+fi
 
 # 3. Annual business reports and attached audit-report bodies.
 for year in 2021 2022 2023 2024 2025; do

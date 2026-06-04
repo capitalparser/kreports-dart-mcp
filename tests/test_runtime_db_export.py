@@ -33,20 +33,31 @@ def test_rebuild_financial_facts_compact_maps_core_metrics(temp_engine):
              ord, thstrm_amount, frmtrm_amount, fetched_at)
             VALUES
             ('00126380', 2024, '11011', 'CFS', 'BS', 'ifrs-full_Assets', '자산총계', 1, 1000, 900, CURRENT_TIMESTAMP),
-            ('00126380', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 300, 250, CURRENT_TIMESTAMP)
+            ('00126380', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 300, 250, CURRENT_TIMESTAMP),
+            ('00126380', 2024, '11011', 'CFS', 'IS', 'dart_OperatingIncomeLoss', '영업이익', 2, 30, 20, CURRENT_TIMESTAMP),
+            ('00126380', 2024, '11011', 'CFS', 'IS', 'ifrs-full_IncomeTaxExpenseContinuingOperations', '법인세비용', 3, 5, 4, CURRENT_TIMESTAMP),
+            ('00126380', 2024, '11011', 'CFS', 'CF', 'ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities', '유형자산의 취득', 4, 40, 35, CURRENT_TIMESTAMP),
+            ('00126380', 2024, '11011', 'CFS', 'CF', 'ifrs-full_PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities', '무형자산의 취득', 5, 6, 5, CURRENT_TIMESTAMP)
         """))
         session.commit()
 
     out = rebuild_financial_facts_compact(year_from=2024, year_to=2024)
 
-    assert out["inserted_or_updated"] == 2
+    assert out["inserted_or_updated"] == 6
     with get_session() as session:
         rows = session.execute(text("""
             SELECT metric_key, amount FROM financial_facts_compact
             WHERE corp_code='00126380'
             ORDER BY metric_key
         """)).all()
-    assert rows == [("assets", 1000), ("revenue", 300)]
+    assert rows == [
+        ("assets", 1000),
+        ("operating_profit", 30),
+        ("purchase_intangible_assets", 6),
+        ("purchase_ppe", 40),
+        ("revenue", 300),
+        ("tax_expense", 5),
+    ]
 
 
 def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path):
