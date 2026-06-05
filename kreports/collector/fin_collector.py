@@ -12,6 +12,8 @@ import logging
 import time
 from datetime import datetime
 
+from sqlalchemy import case
+
 from kreports.config import settings
 from kreports.collector.fetcher import (
     fetch_financial_statements,
@@ -258,7 +260,13 @@ def collect_all_companies(
             query = query.filter(Company.market == market.upper())
         else:
             query = query.filter(Company.market.in_(_LISTED_MARKETS))
-        companies = list(query.order_by(Company.market, Company.corp_name).all())
+        market_priority = case(
+            (Company.market == "KOSPI", 0),
+            (Company.market == "KOSDAQ", 1),
+            (Company.market == "KONEX", 2),
+            else_=9,
+        )
+        companies = list(query.order_by(market_priority, Company.corp_name).all())
 
     total = len(companies)
     totals: dict = {"success": 0, "no_data": 0, "error": 0, "skipped": 0}

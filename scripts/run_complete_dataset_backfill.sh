@@ -27,8 +27,8 @@ log "complete dataset backfill started"
 
 # 1. Disclosure list and event index. Event bodies remain on-demand with caller DART keys.
 for market in KOSPI KOSDAQ; do
-  run_step "disclosure list 2022-2026 ${market}" \
-    .venv/bin/kreports collect-disclosures --market "$market" --start-date 20220101 --end-date 20261231
+  run_step "disclosure list 2021-2026 ${market}" \
+    .venv/bin/kreports collect-disclosures --market "$market" --start-date 20210101 --end-date 20261231
 done
 
 for year in 2021 2022 2023 2024 2025 2026; do

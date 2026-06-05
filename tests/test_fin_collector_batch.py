@@ -42,7 +42,7 @@ def test_collect_all_companies_defaults_to_listed_markets(temp_engine, monkeypat
     result = fin_collector.collect_all_companies(2023, 2023)
 
     assert result == {"success": 3, "no_data": 0, "error": 0, "skipped": 0}
-    assert called == ["000003", "000002", "000001"]
+    assert called == ["000001", "000002", "000003"]
 
 
 def test_collect_all_companies_filters_market(temp_engine, monkeypatch):

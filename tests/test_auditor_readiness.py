@@ -41,6 +41,14 @@ def test_complete_backfill_rebuilds_compact_after_financial_failure():
     assert financial_pos < compact_pos < exit_pos
 
 
+def test_complete_backfill_collects_2021_disclosure_list_for_five_year_readiness():
+    script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
+
+    assert "disclosure list 2021-2026" in script
+    assert "--start-date 20210101" in script
+    assert "--start-date 20220101" not in script
+
+
 def test_source_documents_backfill_avoids_financial_endpoint():
     script = open("scripts/run_source_documents_backfill.sh", encoding="utf-8").read()
 
