@@ -30,11 +30,13 @@ log "derived dataset backfill started"
 # - Use already cached/externalized raw documents to refresh normalized tables.
 # - Fill structured endpoint data that is compact and directly used by MCP tools.
 
-run_step "rerun business-report extractors from cached/externalized raw documents" \
-  .venv/bin/kreports run-document-extractors --source-type business_report
+for year in 2021 2022 2023 2024 2025; do
+  run_step "rerun business-report extractors ${year} from cached/externalized raw documents" \
+    .venv/bin/kreports run-document-extractors --year "$year" --source-type business_report
 
-run_step "rerun audit-report extractors from cached/externalized raw documents" \
-  .venv/bin/kreports run-document-extractors --source-type audit_report
+  run_step "rerun audit-report extractors ${year} from cached/externalized raw documents" \
+    .venv/bin/kreports run-document-extractors --year "$year" --source-type audit_report
+done
 
 run_step "trim normalized evidence documents" \
   .venv/bin/kreports trim-evidence-documents --year-from 2024 --year-to 2025 --max-text-chars 12000

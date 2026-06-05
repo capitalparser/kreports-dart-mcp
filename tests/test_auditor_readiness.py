@@ -53,6 +53,15 @@ def test_complete_backfill_runs_local_derived_steps_before_api_failure_exit():
     assert 'log "complete dataset backfill finished with API failure exit_code=$api_exit"' in script
 
 
+def test_complete_backfill_limits_document_extractors_to_five_year_window():
+    script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
+
+    assert "for year in 2021 2022 2023 2024 2025; do" in script
+    assert 'run-document-extractors --year "$year" --source-type business_report' in script
+    assert 'run-document-extractors --year "$year" --source-type audit_report' in script
+    assert "run-document-extractors --source-type business_report" not in script
+
+
 def test_complete_backfill_collects_2021_disclosure_list_for_five_year_readiness():
     script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
 
@@ -74,8 +83,8 @@ def test_derived_dataset_backfill_does_not_collect_more_raw_documents():
     script = open("scripts/run_derived_dataset_backfill.sh", encoding="utf-8").read()
 
     assert "collect-business-report-sections" not in script
-    assert "run-document-extractors --source-type business_report" in script
-    assert "run-document-extractors --source-type audit_report" in script
+    assert 'run-document-extractors --year "$year" --source-type business_report' in script
+    assert 'run-document-extractors --year "$year" --source-type audit_report' in script
     assert "trim-evidence-documents --year-from 2024 --year-to 2025" in script
     assert "rebuild-evidence-documents --year-from 2024 --year-to 2025" in script
     assert "--max-text-chars 12000" in script

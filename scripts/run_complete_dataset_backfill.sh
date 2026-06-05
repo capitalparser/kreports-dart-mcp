@@ -82,11 +82,13 @@ for year in 2021 2022 2023 2024 2025; do
 done
 
 # 4. Derived tables from the collected documents. These steps do not require more DART API calls.
-run_step "rerun business-report extractors" \
-  .venv/bin/kreports run-document-extractors --source-type business_report
+for year in 2021 2022 2023 2024 2025; do
+  run_step "rerun business-report extractors ${year}" \
+    .venv/bin/kreports run-document-extractors --year "$year" --source-type business_report
 
-run_step "rerun audit-report extractors" \
-  .venv/bin/kreports run-document-extractors --source-type audit_report
+  run_step "rerun audit-report extractors ${year}" \
+    .venv/bin/kreports run-document-extractors --year "$year" --source-type audit_report
+done
 
 run_step "rebuild audit matters" \
   .venv/bin/kreports rebuild-audit-matter-items
