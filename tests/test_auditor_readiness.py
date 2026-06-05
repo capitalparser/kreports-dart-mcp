@@ -32,13 +32,25 @@ def test_full_backfill_runs_policies_before_financial_endpoint():
 def test_complete_backfill_rebuilds_compact_after_financial_failure():
     script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
 
-    financial_pos = script.index('run_step "financial facts 2021-2025"')
+    financial_pos = script.index('run_api_step "financial facts 2021-2025"')
     compact_pos = script.index('run_step "rebuild compact financial facts 2021-2025"')
-    exit_pos = script.index('if (( financial_exit != 0 ))')
+    exit_pos = script.rindex('if (( api_exit != 0 ))')
 
-    assert "financial_exit=0" in script
-    assert "|| financial_exit=$?" in script
+    assert "api_exit=0" in script
+    assert "run_api_step()" in script
     assert financial_pos < compact_pos < exit_pos
+
+
+def test_complete_backfill_runs_local_derived_steps_before_api_failure_exit():
+    script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
+
+    compact_pos = script.index('run_step "rebuild compact financial facts 2021-2025"')
+    evidence_pos = script.index('run_step "rebuild normalized evidence documents 2021-2025"')
+    diagnostics_pos = script.index('run_step "dataset audit"')
+    exit_pos = script.rindex('if (( api_exit != 0 ))')
+
+    assert compact_pos < evidence_pos < diagnostics_pos < exit_pos
+    assert 'log "complete dataset backfill finished with API failure exit_code=$api_exit"' in script
 
 
 def test_complete_backfill_collects_2021_disclosure_list_for_five_year_readiness():

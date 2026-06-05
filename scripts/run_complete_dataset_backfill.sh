@@ -21,13 +21,31 @@ run_step() {
   fi
 }
 
+api_exit=0
+
+run_api_step() {
+  local name="$1"
+  shift
+  if (( api_exit != 0 )); then
+    log "$name skipped after API failure exit_code=$api_exit"
+    return 0
+  fi
+  if run_step "$name" "$@"; then
+    return 0
+  else
+    local code=$?
+    api_exit=$code
+    return 0
+  fi
+}
+
 export KREPORTS_RUNTIME_MODE="${KREPORTS_RUNTIME_MODE:-collector}"
 
 log "complete dataset backfill started"
 
 # 1. Disclosure list and event index. Event bodies remain on-demand with caller DART keys.
 for market in KOSPI KOSDAQ; do
-  run_step "disclosure list 2021-2026 ${market}" \
+  run_api_step "disclosure list 2021-2026 ${market}" \
     .venv/bin/kreports collect-disclosures --market "$market" --start-date 20210101 --end-date 20261231
 done
 
@@ -40,30 +58,25 @@ done
 
 # 2. Structured financials and compact runtime metrics.
 # Even when DART quota stops collect-all, rebuild compact facts from rows already saved.
-financial_exit=0
-run_step "financial facts 2021-2025" \
-  .venv/bin/kreports collect-all --year-from 2021 --year-to 2025 || financial_exit=$?
+run_api_step "financial facts 2021-2025" \
+  .venv/bin/kreports collect-all --year-from 2021 --year-to 2025
 
 run_step "rebuild compact financial facts 2021-2025" \
   .venv/bin/kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
 
-if (( financial_exit != 0 )); then
-  exit "$financial_exit"
-fi
-
 # 3. Annual business reports and attached audit-report bodies.
 for year in 2021 2022 2023 2024 2025; do
   for market in KOSPI KOSDAQ; do
-    run_step "business report sections ${year} ${market}" \
+    run_api_step "business report sections ${year} ${market}" \
       .venv/bin/kreports collect-business-report-sections --year "$year" --market "$market"
 
-    run_step "audit report sections ${year} ${market}" \
+    run_api_step "audit report sections ${year} ${market}" \
       .venv/bin/kreports collect-audit-report-sections --year "$year" --market "$market"
 
-    run_step "business-report attached audit reports ${year} ${market}" \
+    run_api_step "business-report attached audit reports ${year} ${market}" \
       .venv/bin/python scripts/backfill_business_report_audit_attachments.py --start-year "$year" --end-year "$year" --market "$market"
 
-    run_step "audit-submission sections ${year} ${market}" \
+    run_api_step "audit-submission sections ${year} ${market}" \
       .venv/bin/python scripts/backfill_audit_submission_sections.py --start-year "$year" --end-year "$year" --market "$market"
   done
 done
@@ -85,11 +98,11 @@ run_step "rebuild normalized evidence documents 2021-2025" \
   .venv/bin/kreports rebuild-evidence-documents --year-from 2021 --year-to 2025 --max-text-chars 12000
 
 # 5. Auditor and audit fee structured data.
-run_step "auditors all" \
+run_api_step "auditors all" \
   .venv/bin/kreports collect-auditors
 
 for market in KOSPI KOSDAQ; do
-  run_step "audit fees 2021-2025 ${market}" \
+  run_api_step "audit fees 2021-2025 ${market}" \
     .venv/bin/kreports collect-audit-fees --year-from 2021 --year-to 2025 --market "$market"
 done
 
@@ -111,5 +124,10 @@ run_step "auditor dataset readiness" \
 
 run_step "dataset audit" \
   .venv/bin/kreports dataset-audit --top 20
+
+if (( api_exit != 0 )); then
+  log "complete dataset backfill finished with API failure exit_code=$api_exit"
+  exit "$api_exit"
+fi
 
 log "complete dataset backfill finished"
