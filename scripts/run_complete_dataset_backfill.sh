@@ -39,11 +39,70 @@ run_api_step() {
   fi
 }
 
+sqlite_scalar() {
+  local sql="$1"
+  if [[ ! -f kreports.db ]]; then
+    echo 0
+    return 0
+  fi
+  sqlite3 kreports.db "$sql" 2>/dev/null || echo 0
+}
+
 export KREPORTS_RUNTIME_MODE="${KREPORTS_RUNTIME_MODE:-collector}"
 
 log "complete dataset backfill started"
 
-# 1. Disclosure list and event index. Event bodies remain on-demand with caller DART keys.
+# 1. Seed disclosure list only when the DB is too empty to identify report targets.
+# Established DBs must spend quota on missing report/financial gaps first.
+disclosure_rows="$(sqlite_scalar "select count(*) from disclosures;")"
+if (( disclosure_rows < 100000 )); then
+  for market in KOSPI KOSDAQ; do
+    run_api_step "initial disclosure list 2021-2026 ${market}" \
+      .venv/bin/kreports collect-disclosures --market "$market" --start-date 20210101 --end-date 20261231
+  done
+else
+  log "initial disclosure list skipped rows=${disclosure_rows}"
+fi
+
+# 2. High-gap annual report bodies. Missing-only collectors resume from current DB.
+# Order is intentionally gap-first, not chronological.
+REPORT_GAP_TARGETS=(
+  "2023 KOSDAQ"
+  "2023 KOSPI"
+  "2022 KOSDAQ"
+  "2022 KOSPI"
+  "2021 KOSDAQ"
+  "2021 KOSPI"
+  "2024 KOSDAQ"
+  "2024 KOSPI"
+  "2025 KOSDAQ"
+  "2025 KOSPI"
+)
+
+for target in "${REPORT_GAP_TARGETS[@]}"; do
+  read -r year market <<< "$target"
+  run_api_step "business report sections ${year} ${market}" \
+    .venv/bin/kreports collect-business-report-sections --year "$year" --market "$market"
+
+  run_api_step "audit report sections ${year} ${market}" \
+    .venv/bin/kreports collect-audit-report-sections --year "$year" --market "$market"
+
+  run_api_step "business-report attached audit reports ${year} ${market}" \
+    .venv/bin/python scripts/backfill_business_report_audit_attachments.py --start-year "$year" --end-year "$year" --market "$market"
+
+  run_api_step "audit-submission sections ${year} ${market}" \
+    .venv/bin/python scripts/backfill_audit_submission_sections.py --start-year "$year" --end-year "$year" --market "$market"
+done
+
+# 3. Structured financials and compact runtime metrics.
+# Even when DART quota stops collect-all, rebuild compact facts from rows already saved.
+run_api_step "financial facts 2021-2025" \
+  .venv/bin/kreports collect-all --year-from 2021 --year-to 2025
+
+run_step "rebuild compact financial facts 2021-2025" \
+  .venv/bin/kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
+
+# 4. Refresh disclosure list after the higher-impact gaps. Event bodies remain on-demand with caller DART keys.
 for market in KOSPI KOSDAQ; do
   run_api_step "disclosure list 2021-2026 ${market}" \
     .venv/bin/kreports collect-disclosures --market "$market" --start-date 20210101 --end-date 20261231
@@ -56,32 +115,7 @@ for year in 2021 2022 2023 2024 2025 2026; do
   done
 done
 
-# 2. Structured financials and compact runtime metrics.
-# Even when DART quota stops collect-all, rebuild compact facts from rows already saved.
-run_api_step "financial facts 2021-2025" \
-  .venv/bin/kreports collect-all --year-from 2021 --year-to 2025
-
-run_step "rebuild compact financial facts 2021-2025" \
-  .venv/bin/kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
-
-# 3. Annual business reports and attached audit-report bodies.
-for year in 2021 2022 2023 2024 2025; do
-  for market in KOSPI KOSDAQ; do
-    run_api_step "business report sections ${year} ${market}" \
-      .venv/bin/kreports collect-business-report-sections --year "$year" --market "$market"
-
-    run_api_step "audit report sections ${year} ${market}" \
-      .venv/bin/kreports collect-audit-report-sections --year "$year" --market "$market"
-
-    run_api_step "business-report attached audit reports ${year} ${market}" \
-      .venv/bin/python scripts/backfill_business_report_audit_attachments.py --start-year "$year" --end-year "$year" --market "$market"
-
-    run_api_step "audit-submission sections ${year} ${market}" \
-      .venv/bin/python scripts/backfill_audit_submission_sections.py --start-year "$year" --end-year "$year" --market "$market"
-  done
-done
-
-# 4. Derived tables from the collected documents. These steps do not require more DART API calls.
+# 5. Derived tables from the collected documents. These steps do not require more DART API calls.
 for year in 2021 2022 2023 2024 2025; do
   run_step "rerun business-report extractors ${year}" \
     .venv/bin/kreports run-document-extractors --year "$year" --source-type business_report
@@ -99,7 +133,7 @@ run_step "rebuild audit procedures" \
 run_step "rebuild normalized evidence documents 2021-2025" \
   .venv/bin/kreports rebuild-evidence-documents --year-from 2021 --year-to 2025 --max-text-chars 12000
 
-# 5. Auditor and audit fee structured data.
+# 6. Auditor and audit fee structured data.
 run_api_step "auditors all" \
   .venv/bin/kreports collect-auditors
 
@@ -108,7 +142,7 @@ for market in KOSPI KOSDAQ; do
     .venv/bin/kreports collect-audit-fees --year-from 2021 --year-to 2025 --market "$market"
 done
 
-# 6. Final diagnostics.
+# 7. Final diagnostics.
 run_step "raw annual report coverage" \
   .venv/bin/kreports raw-annual-report-coverage --start-filing-year 2022 --end-filing-year 2026
 

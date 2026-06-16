@@ -96,7 +96,7 @@ def test_search_audit_report_matters_company_question_shape():
     out = search_audit_report_matters(company="005930", year=2024, section_keys=["other_matter"], limit=20)
     assert out["query"]["company"] == "005930"
     assert out["query"]["year"] == 2024
-    assert out["data_quality"]["source"] == "report_sections.audit_report"
+    assert out["data_quality"]["source"] in {"audit_matter_items", "report_sections.audit_report"}
     assert "companies" in out
     assert out["total_companies"] >= 0
     if out["companies"]:

@@ -206,6 +206,44 @@ def test_collect_financial_range_skips_existing_summary_fallback_quarters(temp_e
     ]
 
 
+def test_collect_financial_range_skips_prior_no_data_quarters(temp_engine, monkeypatch):
+    from kreports.collector import fin_collector
+    from kreports.db.engine import get_session
+    from kreports.db.models import FetchLog
+
+    with get_session() as session:
+        session.add(
+            Company(corp_code="00000001", stock_code="000001", corp_name="기존회사", market="KOSDAQ")
+        )
+        session.add(
+            FetchLog(
+                task_type="financial",
+                corp_code="00000001",
+                year=2024,
+                quarter=4,
+                status="no_data",
+                fetched_at=datetime.utcnow(),
+            )
+        )
+
+    called = []
+
+    def fake_collect(stock_code, year, quarter):
+        called.append((stock_code, year, quarter))
+        return "success"
+
+    monkeypatch.setattr(fin_collector, "collect_financial", fake_collect)
+
+    result = fin_collector.collect_financial_range("000001", 2024, 2024)
+
+    assert result == {"success": 3, "no_data": 0, "error": 0, "skipped": 1}
+    assert called == [
+        ("000001", 2024, 1),
+        ("000001", 2024, 2),
+        ("000001", 2024, 3),
+    ]
+
+
 def test_collect_financial_range_force_refetches_existing_quarters(temp_engine, monkeypatch):
     from kreports.collector import fin_collector
     from kreports.db.engine import get_session

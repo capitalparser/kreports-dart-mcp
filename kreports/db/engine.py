@@ -139,6 +139,7 @@ def _migrate_existing_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_fact_sj ON financial_facts(corp_code, bsns_year, fs_div, sj_div)",
             "CREATE INDEX IF NOT EXISTS idx_fin_compact_corp_year ON financial_facts_compact(corp_code, bsns_year)",
             "CREATE INDEX IF NOT EXISTS idx_fin_compact_metric ON financial_facts_compact(metric_key)",
+            "CREATE INDEX IF NOT EXISTS idx_fetchlog_task_target_status ON fetch_log(task_type, corp_code, year, quarter, status)",
             "CREATE INDEX IF NOT EXISTS idx_subsidiary_matrix_parent_year ON subsidiary_auditor_matrix(parent_corp_code, bsns_year)",
             "CREATE INDEX IF NOT EXISTS idx_backfill_runs_key_status ON backfill_runs(task_type, year, market, status)",
             "CREATE INDEX IF NOT EXISTS idx_backfill_runs_started ON backfill_runs(started_at)",

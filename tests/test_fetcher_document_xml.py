@@ -1,3 +1,5 @@
+import pytest
+
 from kreports.collector import fetcher
 
 
@@ -57,12 +59,33 @@ def test_fetch_document_zip_files_accepts_raw_document_xml(monkeypatch):
     assert "원문입니다" in out["20250331000001.xml"]
 
 
-def test_fetch_document_xml_rejects_dart_error_xml(monkeypatch, caplog):
+def test_fetch_document_xml_raises_on_dart_limit_xml(monkeypatch):
     raw = b"<result><status>020</status><message>limit exceeded</message></result>"
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(fetcher, "_get_client", lambda: _FakeClient(_FakeResponse(raw)))
+
+    with pytest.raises(fetcher.DartApiLimitExceeded):
+        fetcher.fetch_document_xml("20250331000001")
+    with pytest.raises(fetcher.DartApiLimitExceeded):
+        fetcher.fetch_document_zip_files("20250331000001")
+
+
+def test_fetch_document_xml_rejects_non_limit_dart_error_xml(monkeypatch, caplog):
+    raw = b"<result><status>013</status><message>no data</message></result>"
     monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
     monkeypatch.setattr(fetcher, "_get_client", lambda: _FakeClient(_FakeResponse(raw)))
 
     assert fetcher.fetch_document_xml("20250331000001") is None
     assert fetcher.fetch_document_zip_files("20250331000001") == {}
-    assert "status=020" in caplog.text
-    assert "limit exceeded" in caplog.text
+    assert "status=013" in caplog.text
+    assert "no data" in caplog.text
+
+
+def test_fetch_document_zip_files_logs_non_limit_dart_error_xml(monkeypatch, caplog):
+    raw = b"<result><status>999</status><message>other error</message></result>"
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(fetcher, "_get_client", lambda: _FakeClient(_FakeResponse(raw)))
+
+    assert fetcher.fetch_document_zip_files("20250331000001") == {}
+    assert "status=999" in caplog.text
+    assert "other error" in caplog.text

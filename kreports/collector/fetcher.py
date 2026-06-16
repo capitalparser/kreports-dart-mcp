@@ -18,11 +18,16 @@ logger = logging.getLogger(__name__)
 DART_BASE = "https://opendart.fss.or.kr/api"
 DART_WEB_BASE = "https://dart.fss.or.kr"
 CORP_CODE_ZIP_URL = f"{DART_BASE}/corpCode.xml"  # zip 반환
+_DART_LIMIT_MARKERS = ("사용한도", "초과", "limit")
 
 # 로컬 캐시 경로 (30일 유효)
 _CACHE_DIR = Path(__file__).parent.parent.parent / ".cache"
 _CORP_ZIP_CACHE = _CACHE_DIR / "corp_code.zip"
 _CACHE_MAX_AGE_DAYS = 30
+
+
+class DartApiLimitExceeded(RuntimeError):
+    """Raised when DART reports that the API key has exhausted its call quota."""
 
 
 def _get_client() -> httpx.Client:
@@ -55,6 +60,18 @@ def _dart_error_from_xml(text: str) -> tuple[str | None, str | None]:
     if status == "000":
         return None, None
     return status, message
+
+
+def _is_dart_limit_error(status: str | None, message: str | None) -> bool:
+    if not status:
+        return False
+    msg = (message or "").lower()
+    return status != "000" and any(marker in msg for marker in _DART_LIMIT_MARKERS)
+
+
+def _raise_if_dart_limit(status: str | None, message: str | None) -> None:
+    if _is_dart_limit_error(status, message):
+        raise DartApiLimitExceeded(message or "DART API limit exceeded")
 
 
 def _looks_like_report_document_xml(text: str) -> bool:
@@ -347,6 +364,7 @@ def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
         text = _decode_dart_text(resp.content, resp.encoding).strip()
         status, message = _dart_error_from_xml(text)
         if status:
+            _raise_if_dart_limit(status, message)
             logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
             return {}
         logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, e)
@@ -365,6 +383,12 @@ def fetch_document_xml(rcept_no: str) -> str | None:
         with _get_client() as client:
             resp = client.get(f"{DART_BASE}/document.xml", params=params, timeout=60.0)
             resp.raise_for_status()
+            text = _decode_dart_text(resp.content, resp.encoding).strip()
+            status, message = _dart_error_from_xml(text)
+            if status:
+                _raise_if_dart_limit(status, message)
+                logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
+                return None
             content_type = resp.headers.get("content-type", "")
             _BINARY_TYPES = ("zip", "octet-stream", "x-msdownload", "application/")
             if not any(t in content_type for t in _BINARY_TYPES):
@@ -392,6 +416,13 @@ def fetch_document_xml(rcept_no: str) -> str | None:
         raw_xml = _raw_document_xml_from_response(resp.content, getattr(resp, "encoding", None)) if "resp" in locals() else None
         if raw_xml is not None:
             return raw_xml
+        if "resp" in locals():
+            text = _decode_dart_text(resp.content, getattr(resp, "encoding", None)).strip()
+            status, message = _dart_error_from_xml(text)
+            if status:
+                _raise_if_dart_limit(status, message)
+                logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
+                return None
         logger.warning("document.xml 수집 실패 [%s]: %s", rcept_no, e)
         return None
 

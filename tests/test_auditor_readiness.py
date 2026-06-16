@@ -70,6 +70,18 @@ def test_complete_backfill_collects_2021_disclosure_list_for_five_year_readiness
     assert "--start-date 20220101" not in script
 
 
+def test_complete_backfill_prioritizes_report_gaps_before_disclosure_refresh():
+    script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
+
+    assert "initial disclosure list skipped" in script
+    gap_pos = script.index('"2023 KOSDAQ"')
+    report_pos = script.index('run_api_step "business report sections ${year} ${market}"')
+    financial_pos = script.index('run_api_step "financial facts 2021-2025"')
+    disclosure_refresh_pos = script.index('run_api_step "disclosure list 2021-2026 ${market}"')
+
+    assert gap_pos < report_pos < financial_pos < disclosure_refresh_pos
+
+
 def test_source_documents_backfill_avoids_financial_endpoint():
     script = open("scripts/run_source_documents_backfill.sh", encoding="utf-8").read()
 

@@ -513,6 +513,7 @@ class FetchLog(Base):
 
     __table_args__ = (
         Index("idx_fetchlog_status", "status", "fetched_at"),
+        Index("idx_fetchlog_task_target_status", "task_type", "corp_code", "year", "quarter", "status"),
     )
 
 

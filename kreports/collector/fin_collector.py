@@ -356,7 +356,7 @@ def _is_listed(corp_code: str) -> bool:
 
 
 def _financial_quarter_cached(corp_code: str, year: int, quarter: int) -> bool:
-    """Return True when a prior successful financial collection exists."""
+    """Return True when a prior terminal financial collection exists."""
     reprt_code = QUARTER_TO_REPRT.get(quarter)
     if not reprt_code:
         return False
@@ -375,13 +375,28 @@ def _financial_quarter_cached(corp_code: str, year: int, quarter: int) -> bool:
         if has_full_fact:
             return True
 
-        return (
+        has_summary = (
             session.query(Financial.id)
             .filter(
                 Financial.corp_code == corp_code,
                 Financial.year == year,
                 Financial.quarter == quarter,
                 Financial.source.in_(("acntall", "acnt")),
+            )
+            .first()
+            is not None
+        )
+        if has_summary:
+            return True
+
+        return (
+            session.query(FetchLog.id)
+            .filter(
+                FetchLog.task_type == "financial",
+                FetchLog.corp_code == corp_code,
+                FetchLog.year == year,
+                FetchLog.quarter == quarter,
+                FetchLog.status == "no_data",
             )
             .first()
             is not None
