@@ -9,6 +9,14 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
+<p align="center">
+  <img src="docs/images/kreports-demo.gif" alt="KReports MCP demo showing a plain-language Korean filing question flowing into source-grounded investor and auditor answers" width="840">
+</p>
+
+<p align="center">
+  <sub>Ask once in Claude. KReports turns Korean DART filings into source-grounded paragraphs, tables, diagrams, and next checks for investor and auditor workflows.</sub>
+</p>
+
 ---
 
 <a id="english"></a>
