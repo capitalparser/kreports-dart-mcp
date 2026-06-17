@@ -5343,6 +5343,10 @@ def get_subsidiary_auditors(
                 bool(matched_corp_name)
                 and _normalize_entity_name(cached.get("name")) == _normalize_entity_name(matched_corp_name)
             )
+            auditor_gap_reason = None
+            if auditor and not exact_name_match:
+                auditor = None
+                auditor_gap_reason = "matched_company_name_mismatch"
             revenue_metrics = financial_metrics.get(affiliate_corp_code, {}) if exact_name_match else {}
             revenue_amount = revenue_metrics.get("revenue_amount")
             revenue_amount_m = revenue_metrics.get("revenue_amount_m")
@@ -5369,6 +5373,7 @@ def get_subsidiary_auditors(
                 "revenue_share_pct": _pct(revenue_amount_m, consolidated_revenue_m),
                 "revenue_amount_source": "matched_company_financials" if revenue_amount_m is not None else None,
                 "revenue_gap_reason": revenue_gap_reason,
+                "auditor_gap_reason": auditor_gap_reason,
                 "matched_corp_name": matched_corp_name,
                 "source": cached["source"],
                 "corp_code": cached["corp_code"],
@@ -5396,13 +5401,18 @@ def get_subsidiary_auditors(
             "entity_revenue_with_amount": sum(1 for x in items if x.get("revenue_amount_m") is not None),
             "asset_share_calculated": sum(1 for x in items if x.get("asset_share_pct") is not None),
             "revenue_share_calculated": sum(1 for x in items if x.get("revenue_share_pct") is not None),
+            "entity_auditor_with_exact_match": sum(1 for x in items if x.get("auditor") is not None),
+            "auditor_hidden_name_mismatch": sum(
+                1 for x in items if x.get("auditor_gap_reason") == "matched_company_name_mismatch"
+            ),
             "consolidated_assets_available": consolidated_assets_m is not None,
             "consolidated_revenue_available": consolidated_revenue_m is not None,
         }
         coverage_note = (
             "개별 실체 자산은 사업보고서 종속회사/타법인출자 표의 백만원 단위 금액을 사용합니다. "
             "개별 실체 매출은 해당 표에 없는 경우가 많아, corp_code가 매칭되고 연간 재무정보가 "
-            "있더라도 회사명이 정확히 일치하는 경우에만 matched_company_financials 기준으로 보조 산출합니다."
+            "있더라도 회사명이 정확히 일치하는 경우에만 matched_company_financials 기준으로 보조 산출합니다. "
+            "감사인 정보도 회사명 정확매칭이 확인된 경우에만 표시합니다."
         )
 
         return _clean_dict({

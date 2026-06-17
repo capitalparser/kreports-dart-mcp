@@ -986,7 +986,12 @@ def _normalize_company_name(value: str) -> str:
 
 
 def _match_companies_by_names_local(names: list[str]) -> dict[str, dict]:
-    """Match affiliate names against the local companies table only."""
+    """Match affiliate names against the local companies table only.
+
+    Affiliate names are often SPC names that contain a listed company's short
+    name. Partial matching can attach the wrong auditor, so this cache only
+    accepts exact normalized company-name matches.
+    """
     if not names:
         return {}
     with get_session() as session:
@@ -1008,13 +1013,6 @@ def _match_companies_by_names_local(names: list[str]) -> dict[str, dict]:
         norm = _normalize_company_name(name)
         if norm in by_norm:
             result[name] = by_norm[norm]
-            continue
-        if len(norm) < 3:
-            continue
-        for candidate_norm, info in by_norm.items():
-            if norm in candidate_norm or candidate_norm in norm:
-                result[name] = info
-                break
     return result
 
 

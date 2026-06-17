@@ -848,6 +848,9 @@ def test_subsidiary_auditors_honors_limit_auditor_filter_and_slim_from_cache(tem
 
     with get_session() as session:
         session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="감사인있는자회사A", market="KOSPI"))
+        session.add(Company(corp_code="00000003", stock_code="000003", corp_name="감사인있는자회사B", market="KOSDAQ"))
+        session.add(Company(corp_code="00000004", stock_code="000004", corp_name="감사인없는자회사", market="KOSDAQ"))
         session.add(Disclosure(
             rcept_no="20250331000002",
             corp_code="00000001",
@@ -857,9 +860,9 @@ def test_subsidiary_auditors_honors_limit_auditor_filter_and_slim_from_cache(tem
             report_nm="사업보고서 (2024.12)",
         ))
         _create_subsidiary_auditor_matrix_cache(session)
-        _insert_subsidiary_cache_row(session, name="감사인있는자회사A", auditor_nm="삼일회계법인", ordinal=0)
-        _insert_subsidiary_cache_row(session, name="감사인없는자회사", auditor_nm=None, auditor_year=None, audit_opinion=None, ordinal=1)
-        _insert_subsidiary_cache_row(session, name="감사인있는자회사B", auditor_nm="삼정회계법인", ordinal=2)
+        _insert_subsidiary_cache_row(session, name="감사인있는자회사A", corp_code="00000002", stock_code="000002", auditor_nm="삼일회계법인", ordinal=0)
+        _insert_subsidiary_cache_row(session, name="감사인없는자회사", corp_code="00000004", stock_code="000004", auditor_nm=None, auditor_year=None, audit_opinion=None, ordinal=1)
+        _insert_subsidiary_cache_row(session, name="감사인있는자회사B", corp_code="00000003", stock_code="000003", auditor_nm="삼정회계법인", ordinal=2)
 
     out = get_subsidiary_auditors("000001", limit=1, only_with_auditor=True, slim=True)
 
@@ -894,6 +897,7 @@ def test_subsidiary_auditors_full_mode_returns_cached_context_fields(temp_engine
 
     with get_session() as session:
         session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="해외제조회사", market="KOSPI"))
         session.add(Disclosure(
             rcept_no="20250331000002",
             corp_code="00000001",
@@ -1067,3 +1071,49 @@ def test_subsidiary_auditors_reject_revenue_share_when_company_name_mismatch(tem
     assert subsidiary["revenue_amount_m"] is None
     assert subsidiary["revenue_share_pct"] is None
     assert subsidiary["revenue_gap_reason"] == "matched_company_name_mismatch"
+
+
+def test_subsidiary_auditors_hide_auditor_when_company_name_mismatch(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="태양", market="KOSDAQ"))
+        session.add(Disclosure(
+            rcept_no="20250331000002",
+            corp_code="00000001",
+            corp_name="모회사",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        _create_subsidiary_auditor_matrix_cache(session)
+        _insert_subsidiary_cache_row(
+            session,
+            name="진도산월태양광발전㈜",
+            corp_code="00000002",
+            stock_code="000002",
+            auditor_nm="삼일회계법인",
+            auditor_year=2024,
+            audit_opinion="적정",
+        )
+
+    out = get_subsidiary_auditors("000001", limit=10, only_with_auditor=False, slim=False)
+
+    subsidiary = out["subsidiaries"][0]
+    assert subsidiary["matched_corp_name"] == "태양"
+    assert subsidiary["auditor"] is None
+    assert subsidiary["auditor_gap_reason"] == "matched_company_name_mismatch"
+
+
+def test_local_company_name_matching_rejects_partial_substring(temp_engine):
+    from kreports.collector.report_document_collector import _match_companies_by_names_local
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="태양", market="KOSDAQ"))
+
+    out = _match_companies_by_names_local(["진도산월태양광발전㈜", "태양"])
+
+    assert "진도산월태양광발전㈜" not in out
+    assert out["태양"]["corp_name"] == "태양"
