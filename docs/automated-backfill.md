@@ -88,13 +88,16 @@ Default unattended runs target the complete runtime dataset:
 - rebuild disclosure event indexes;
 - collect compact structured data such as financials, auditors, audit fees, and
   audit hours;
-- collect business-report and audit-report sections;
+- rerun document extractors only from already cached or externalized source
+  documents;
 - rebuild `evidence_documents`, KAM matters, and audit procedure indexes.
 
 Raw source collection remains available through
-`scripts/run_source_documents_backfill.sh`, but it should be treated as a manual
-hot-raw archive operation for selected years or companies. Do not use it as the
-default launchd target while local/Drive capacity is constrained.
+`scripts/run_source_documents_backfill.sh` or by setting
+`KREPORTS_ENABLE_RAW_BACKFILL=1` for `scripts/run_complete_dataset_backfill.sh`,
+but it should be treated as a manual hot-raw archive operation for selected years
+or companies. Do not use it as the default launchd target while local/Drive
+capacity is constrained.
 
 Uninstall:
 

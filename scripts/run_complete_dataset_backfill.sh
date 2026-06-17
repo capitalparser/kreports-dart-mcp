@@ -64,8 +64,9 @@ else
   log "initial disclosure list skipped rows=${disclosure_rows}"
 fi
 
-# 2. High-gap annual report bodies. Missing-only collectors resume from current DB.
-# Order is intentionally gap-first, not chronological.
+# 2. High-gap annual report bodies. This expands source_documents/raw_content and
+# must never run as the unattended default. Use this only for explicit hot-raw
+# archive operations after raw-storage-config/smoke has been checked.
 REPORT_GAP_TARGETS=(
   "2023 KOSDAQ"
   "2023 KOSPI"
@@ -79,20 +80,25 @@ REPORT_GAP_TARGETS=(
   "2025 KOSPI"
 )
 
-for target in "${REPORT_GAP_TARGETS[@]}"; do
-  read -r year market <<< "$target"
-  run_api_step "business report sections ${year} ${market}" \
-    .venv/bin/kreports collect-business-report-sections --year "$year" --market "$market"
+if [[ "${KREPORTS_ENABLE_RAW_BACKFILL:-0}" == "1" ]]; then
+  log "raw report section backfill enabled by KREPORTS_ENABLE_RAW_BACKFILL=1"
+  for target in "${REPORT_GAP_TARGETS[@]}"; do
+    read -r year market <<< "$target"
+    run_api_step "business report sections ${year} ${market}" \
+      .venv/bin/kreports collect-business-report-sections --year "$year" --market "$market"
 
-  run_api_step "audit report sections ${year} ${market}" \
-    .venv/bin/kreports collect-audit-report-sections --year "$year" --market "$market"
+    run_api_step "audit report sections ${year} ${market}" \
+      .venv/bin/kreports collect-audit-report-sections --year "$year" --market "$market"
 
-  run_api_step "business-report attached audit reports ${year} ${market}" \
-    .venv/bin/python scripts/backfill_business_report_audit_attachments.py --start-year "$year" --end-year "$year" --market "$market"
+    run_api_step "business-report attached audit reports ${year} ${market}" \
+      .venv/bin/python scripts/backfill_business_report_audit_attachments.py --start-year "$year" --end-year "$year" --market "$market"
 
-  run_api_step "audit-submission sections ${year} ${market}" \
-    .venv/bin/python scripts/backfill_audit_submission_sections.py --start-year "$year" --end-year "$year" --market "$market"
-done
+    run_api_step "audit-submission sections ${year} ${market}" \
+      .venv/bin/python scripts/backfill_audit_submission_sections.py --start-year "$year" --end-year "$year" --market "$market"
+  done
+else
+  log "raw report section backfill skipped; set KREPORTS_ENABLE_RAW_BACKFILL=1 only for explicit hot-raw archive operations"
+fi
 
 # 3. Structured financials and compact runtime metrics.
 # Even when DART quota stops collect-all, rebuild compact facts from rows already saved.
