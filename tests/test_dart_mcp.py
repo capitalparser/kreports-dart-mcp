@@ -188,6 +188,7 @@ class TestCallToolRealData:
         expected_keys = {
             "name", "relation", "ownership_pct", "listed_yn",
             "asset_amount_m", "asset_share_pct", "revenue_amount_m", "revenue_share_pct",
+            "is_qsc", "qsc_status", "qsc_basis",
             "corp_code", "stock_code", "market", "auditor",
         }
         if result["subsidiaries"]:

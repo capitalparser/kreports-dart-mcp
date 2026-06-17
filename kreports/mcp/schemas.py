@@ -89,6 +89,7 @@ class GetSubsidiaryAuditorsInput(BaseModel):
         default=True,
         description=(
             "True면 핵심 필드와 연결 총자산/총매출 대비 자산·매출 기여도만 반환. "
+            "QSC 판정은 연결 총자산 또는 연결 총매출 대비 10% 이상 기준. "
             "False면 사업 설명, 원천 자산 문자열 등 상세 필드 포함."
         ),
     )

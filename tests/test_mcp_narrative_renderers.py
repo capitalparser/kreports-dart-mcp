@@ -44,6 +44,10 @@ def test_subsidiary_renderer_prints_contribution_table_and_diagram():
             "revenue_amount_m": 332151.7,
             "source": "financial_facts_compact",
         },
+        "qsc_criterion": {
+            "threshold_pct": 10.0,
+            "basis": "asset_share_pct >= 10.0 OR revenue_share_pct >= 10.0",
+        },
         "subsidiaries": [{
             "name": "진도산월태양광발전㈜",
             "relation": "종속",
@@ -52,6 +56,9 @@ def test_subsidiary_renderer_prints_contribution_table_and_diagram():
             "asset_share_pct": 0.1,
             "revenue_amount_m": None,
             "revenue_share_pct": None,
+            "qsc_status": "undetermined",
+            "is_qsc": None,
+            "qsc_basis": [],
             "auditor": {"auditor_nm": "삼일회계법인"},
         }],
         "total": 1,
@@ -64,8 +71,10 @@ def test_subsidiary_renderer_prints_contribution_table_and_diagram():
     })
 
     assert "```mermaid" in text
-    assert "| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | 감사인 |" in text
+    assert "QSC 기준은 연결 총자산 또는 연결 총매출 대비 10.0% 이상입니다." in text
+    assert "| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | QSC | 감사인 |" in text
     assert "진도산월태양광발전㈜" in text
+    assert "| 진도산월태양광발전㈜ | 종속 | 100.0% | 521 | 0.1% | 미확보 | 미확보 | 미판정 | 삼일회계법인 |" in text
     assert "미확보" in text
     assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250317000875" in text
 

@@ -352,7 +352,8 @@ def get_subsidiary_auditors(
     """
     최근 사업보고서 기준 종속·관계회사별 감사인 매트릭스.
     연결 총자산·총매출 대비 각 실체의 중요도와 감사인 이원화 여부를 한 번에 파악.
-    대형 그룹은 400개 이상이므로 기본 slim=True + limit=100 + only_with_auditor=False.
+    QSC는 연결 총자산 또는 연결 총매출 대비 10% 이상인 실체로 판정.
+    대형 그룹은 400개 이상이므로 기본 QSC 우선 + slim=True + limit=100 + only_with_auditor=False.
     truncated=true면 total 참고 후 limit 증가시켜 재호출. 그룹 감사 리스크 평가에 사용.
     """
     corp_code = _resolve_or_error(company)

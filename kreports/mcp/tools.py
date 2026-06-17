@@ -668,9 +668,10 @@ TOOL_GET_SUBSIDIARY_AUDITORS = Tool(
     description=(
         "최근 사업보고서 기준 종속·관계회사별 감사인 매트릭스. "
         "연결 총자산·총매출 대비 각 실체의 자산/매출 기여도와 지분율을 함께 보여준다. "
+        "QSC는 연결 총자산 또는 연결 총매출 대비 10% 이상인 실체로 판정한다. "
         "연결그룹 내 감사인 이원화 여부, 주요 종속회사 감사 품질, 해외 자회사 감사인 정보를 "
         "한 번에 파악할 수 있다. 대형 그룹(삼성전자 등)은 400개 이상이므로 "
-        "기본값은 감사인 있는 항목 우선 + 상위 100개 + 핵심 필드만 반환한다. "
+        "기본값은 QSC 우선 + 상위 100개 + 핵심 필드만 반환한다. "
         "truncated=true면 total 참고 후 limit 증가시켜 재호출. "
         "그룹 감사 리스크 평가·PCAOB 이슈 추적에 사용."
     ),
@@ -697,7 +698,8 @@ TOOL_GET_SUBSIDIARY_AUDITORS = Tool(
                 "type": "boolean",
                 "description": "True면 핵심 필드만 반환 (name, relation, ownership_pct, "
                                "listed_yn, asset_amount_m, asset_share_pct, revenue_amount_m, "
-                               "revenue_share_pct, corp_code, stock_code, market, auditor). "
+                               "revenue_share_pct, is_qsc, qsc_status, qsc_basis, "
+                               "corp_code, stock_code, market, auditor). "
                                "False면 business 설명·assets 등 전체 필드.",
                 "default": True,
             },

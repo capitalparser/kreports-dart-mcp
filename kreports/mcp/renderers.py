@@ -29,6 +29,16 @@ def _subject_label(result: dict) -> str:
     return "대상 조건"
 
 
+def _fmt_qsc_status(value: Any) -> str:
+    if value == "qsc":
+        return "QSC"
+    if value == "not_qsc":
+        return "비QSC"
+    if value == "undetermined":
+        return "미판정"
+    return "미판정"
+
+
 def _first_record_line(company: dict) -> str | None:
     records = company.get("records") or []
     if not records:
@@ -136,15 +146,18 @@ def _render_subsidiary_auditors(result: dict) -> str:
     year = result.get("bsns_year")
     subsidiaries = result.get("subsidiaries") or []
     totals = result.get("consolidated_totals") or {}
+    qsc_criterion = result.get("qsc_criterion") or {}
     data_quality = result.get("data_quality") or {}
     rcept_no = parent_rcept_no(str(result.get("parent_rcept_no") or "")) if result.get("parent_rcept_no") else None
 
     asset_total = _fmt_amount_m(totals.get("assets_amount_m"))
     revenue_total = _fmt_amount_m(totals.get("revenue_amount_m"))
+    qsc_threshold = qsc_criterion.get("threshold_pct", 10.0)
     lines = [
         f"판정: {_status(result)}",
         "",
         f"{subject} {year or ''}년 연결·투자 실체 조회 결과입니다. 연결 총자산은 {asset_total}백만원, 연결 매출은 {revenue_total}백만원 기준으로 각 실체의 기여도를 표시합니다.",
+        f"QSC 기준은 연결 총자산 또는 연결 총매출 대비 {qsc_threshold}% 이상입니다.",
         "",
         "구조도:",
         "```mermaid",
@@ -156,15 +169,16 @@ def _render_subsidiary_auditors(result: dict) -> str:
         ownership = _fmt_ownership(item.get("ownership_pct"))
         asset_share = _fmt_pct(item.get("asset_share_pct"))
         revenue_share = _fmt_pct(item.get("revenue_share_pct"))
+        qsc_status = _fmt_qsc_status(item.get("qsc_status"))
         lines.append(
             f'  P -->|"{_mermaid_label(relation)} / 지분율 {ownership}<br/>자산 {asset_share} / 매출 {revenue_share}"| '
-            f'N{idx}["{_mermaid_label(item.get("name"))}"]'
+            f'N{idx}["{_mermaid_label(item.get("name"))}<br/>{qsc_status}"]'
         )
     if not subsidiaries:
         lines.append('  P -->|"캐시 없음"| N0["연결/투자 실체 미확보"]')
     lines.extend(["```", "", "표:"])
-    lines.append("| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | 감사인 |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+    lines.append("| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | QSC | 감사인 |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
     for item in subsidiaries[:12]:
         auditor = item.get("auditor")
         auditor_name = auditor.get("auditor_nm") if isinstance(auditor, dict) else None
@@ -176,10 +190,11 @@ def _render_subsidiary_auditors(result: dict) -> str:
             f"| {_fmt_pct(item.get('asset_share_pct'))} "
             f"| {_fmt_amount_m(item.get('revenue_amount_m'))} "
             f"| {_fmt_pct(item.get('revenue_share_pct'))} "
+            f"| {_fmt_qsc_status(item.get('qsc_status'))} "
             f"| {auditor_name or '-'} |"
         )
     if not subsidiaries:
-        lines.append("| 미확보 | - | - | 미확보 | 미확보 | 미확보 | 미확보 | - |")
+        lines.append("| 미확보 | - | - | 미확보 | 미확보 | 미확보 | 미확보 | 미판정 | - |")
 
     lines.append("")
     lines.append("근거:")

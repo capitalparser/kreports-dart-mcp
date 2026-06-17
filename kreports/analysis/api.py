@@ -5110,8 +5110,46 @@ def get_business_overview(
 _SUBSIDIARY_SLIM_FIELDS = (
     "name", "relation", "ownership_pct", "listed_yn",
     "asset_amount_m", "asset_share_pct", "revenue_amount_m", "revenue_share_pct",
+    "is_qsc", "qsc_status", "qsc_basis",
     "corp_code", "stock_code", "market", "auditor",
 )
+_QSC_THRESHOLD_PCT = 10.0
+_QSC_CRITERION = {
+    "threshold_pct": _QSC_THRESHOLD_PCT,
+    "basis": "asset_share_pct >= 10.0 OR revenue_share_pct >= 10.0",
+    "status_values": {
+        "qsc": "총자산 또는 총매출 비중이 10% 이상",
+        "not_qsc": "총자산과 총매출 비중이 모두 10% 미만",
+        "undetermined": "총자산/총매출 비중 산출에 필요한 데이터 부족",
+    },
+}
+
+
+def _classify_qsc(asset_share_pct: float | None, revenue_share_pct: float | None) -> dict:
+    """Classify Quantitatively Significant Component using the configured group-audit threshold."""
+    basis: list[str] = []
+    if asset_share_pct is not None and asset_share_pct >= _QSC_THRESHOLD_PCT:
+        basis.append(f"asset_share_pct>={_QSC_THRESHOLD_PCT}")
+    if revenue_share_pct is not None and revenue_share_pct >= _QSC_THRESHOLD_PCT:
+        basis.append(f"revenue_share_pct>={_QSC_THRESHOLD_PCT}")
+    if basis:
+        return {"is_qsc": True, "qsc_status": "qsc", "qsc_basis": basis}
+    if asset_share_pct is not None and revenue_share_pct is not None:
+        return {"is_qsc": False, "qsc_status": "not_qsc", "qsc_basis": []}
+    return {"is_qsc": None, "qsc_status": "undetermined", "qsc_basis": []}
+
+
+def _component_importance_sort_key(item: dict) -> tuple:
+    known_shares = [
+        share for share in (item.get("asset_share_pct"), item.get("revenue_share_pct"))
+        if share is not None
+    ]
+    max_share = max(known_shares) if known_shares else -1
+    return (
+        0 if item.get("qsc_status") == "qsc" else 1,
+        0 if item.get("auditor") else 1,
+        -max_share,
+    )
 
 
 def _parse_report_amount_m(value: Any) -> float | None:
@@ -5244,7 +5282,7 @@ def get_subsidiary_auditors(
     최근 사업보고서 기준 종속/관계회사별 감사인 정보.
 
     대형 그룹(삼성전자 등)은 종속회사가 400개 이상이라 MCP 응답이 수십KB로 커질 수 있다.
-    기본값은 감사인 있는 항목 우선 + 상위 100개 + 핵심 필드만 (slim 모드).
+    기본값은 QSC 우선 + 상위 100개 + 핵심 필드만 (slim 모드).
 
     Args:
         company: corp_code / stock_code / 회사명
@@ -5268,6 +5306,7 @@ def get_subsidiary_auditors(
             "corp_code": None,
             "parent_rcept_no": None,
             "bsns_year": None,
+            "qsc_criterion": _QSC_CRITERION,
             "subsidiaries": [],
             "count": 0,
             "total": 0,
@@ -5357,6 +5396,9 @@ def get_subsidiary_auditors(
                     if affiliate_corp_code and matched_corp_name and not exact_name_match
                     else "entity_revenue_not_cached"
                 )
+            asset_share_pct = _pct(asset_amount_m, consolidated_assets_m)
+            revenue_share_pct = _pct(revenue_amount_m, consolidated_revenue_m)
+            qsc_classification = _classify_qsc(asset_share_pct, revenue_share_pct)
             items.append({
                 "name": cached["name"],
                 "relation": cached["relation"],
@@ -5366,13 +5408,14 @@ def get_subsidiary_auditors(
                 "assets": cached["assets"],
                 "asset_amount": int(round(asset_amount_m * 1_000_000)) if asset_amount_m is not None else None,
                 "asset_amount_m": asset_amount_m,
-                "asset_share_pct": _pct(asset_amount_m, consolidated_assets_m),
+                "asset_share_pct": asset_share_pct,
                 "asset_amount_source": "business_report_affiliate_table" if asset_amount_m is not None else None,
                 "revenue_amount": revenue_amount,
                 "revenue_amount_m": revenue_amount_m,
-                "revenue_share_pct": _pct(revenue_amount_m, consolidated_revenue_m),
+                "revenue_share_pct": revenue_share_pct,
                 "revenue_amount_source": "matched_company_financials" if revenue_amount_m is not None else None,
                 "revenue_gap_reason": revenue_gap_reason,
+                **qsc_classification,
                 "auditor_gap_reason": auditor_gap_reason,
                 "matched_corp_name": matched_corp_name,
                 "source": cached["source"],
@@ -5383,7 +5426,7 @@ def get_subsidiary_auditors(
             })
 
         total = len(items)
-        items_sorted = sorted(items, key=lambda x: 0 if x.get("auditor") else 1)
+        items_sorted = sorted(items, key=_component_importance_sort_key)
         if only_with_auditor:
             items_sorted = [x for x in items_sorted if x.get("auditor")]
         truncated = False
@@ -5405,6 +5448,9 @@ def get_subsidiary_auditors(
             "auditor_hidden_name_mismatch": sum(
                 1 for x in items if x.get("auditor_gap_reason") == "matched_company_name_mismatch"
             ),
+            "qsc_count": sum(1 for x in items if x.get("is_qsc") is True),
+            "qsc_classified": sum(1 for x in items if x.get("qsc_status") in {"qsc", "not_qsc"}),
+            "qsc_undetermined": sum(1 for x in items if x.get("qsc_status") == "undetermined"),
             "consolidated_assets_available": consolidated_assets_m is not None,
             "consolidated_revenue_available": consolidated_revenue_m is not None,
         }
@@ -5427,6 +5473,7 @@ def get_subsidiary_auditors(
                 "revenue_amount_m": consolidated_totals.get("revenue_amount_m"),
                 "source": consolidated_totals.get("source"),
             },
+            "qsc_criterion": _QSC_CRITERION,
             "subsidiaries": items_sorted,
             "count": len(items_sorted),
             "total": total,
@@ -5443,6 +5490,7 @@ def get_subsidiary_auditors(
             "corp_code": corp_code,
             "parent_rcept_no": None,
             "bsns_year": None,
+            "qsc_criterion": _QSC_CRITERION,
             "subsidiaries": [],
             "count": 0,
             "total": 0,
@@ -5463,6 +5511,7 @@ def get_subsidiary_auditors(
         "corp_code": corp_code,
         "parent_rcept_no": row.rcept_no,
         "bsns_year": bsns_year,
+        "qsc_criterion": _QSC_CRITERION,
         "subsidiaries": [],
         "count": 0,
         "total": 0,

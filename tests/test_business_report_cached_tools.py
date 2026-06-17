@@ -884,6 +884,9 @@ def test_subsidiary_auditors_honors_limit_auditor_filter_and_slim_from_cache(tem
         "asset_share_pct",
         "revenue_amount_m",
         "revenue_share_pct",
+        "is_qsc",
+        "qsc_status",
+        "qsc_basis",
         "corp_code",
         "stock_code",
         "market",
@@ -939,6 +942,7 @@ def test_subsidiary_auditors_include_consolidated_asset_and_revenue_shares(temp_
     with get_session() as session:
         session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
         session.add(Company(corp_code="00000002", stock_code="000002", corp_name="자회사", market="KOSDAQ"))
+        session.add(Company(corp_code="00000003", stock_code="000003", corp_name="경미회사", market="KOSDAQ"))
         session.add(Disclosure(
             rcept_no="20250331000002",
             corp_code="00000001",
@@ -972,6 +976,14 @@ def test_subsidiary_auditors_include_consolidated_asset_and_revenue_shares(temp_
                 metric_name="매출액",
                 amount=50_000_000,
             ),
+            FinancialFactCompact(
+                corp_code="00000003",
+                bsns_year=2024,
+                fs_div="CFS",
+                metric_key="revenue",
+                metric_name="매출액",
+                amount=20_000_000,
+            ),
         ])
         _create_subsidiary_auditor_matrix_cache(session)
         _insert_subsidiary_cache_row(
@@ -986,13 +998,23 @@ def test_subsidiary_auditors_include_consolidated_asset_and_revenue_shares(temp_
         )
         _insert_subsidiary_cache_row(
             session,
+            name="경미회사",
+            corp_code="00000003",
+            assets="40",
+            auditor_nm=None,
+            auditor_year=None,
+            audit_opinion=None,
+            ordinal=1,
+        )
+        _insert_subsidiary_cache_row(
+            session,
             name="매출미확보회사",
             corp_code=None,
             assets="-",
             auditor_nm=None,
             auditor_year=None,
             audit_opinion=None,
-            ordinal=1,
+            ordinal=2,
         )
 
     out = get_subsidiary_auditors("000001", limit=10, only_with_auditor=False, slim=True)
@@ -1005,8 +1027,20 @@ def test_subsidiary_auditors_include_consolidated_asset_and_revenue_shares(temp_
         "revenue_amount_m": 500.0,
         "source": "financial_facts_compact",
     }
-    assert out["data_quality"]["coverage"]["entity_assets_with_amount"] == 1
-    assert out["data_quality"]["coverage"]["entity_revenue_with_amount"] == 1
+    assert out["qsc_criterion"] == {
+        "threshold_pct": 10.0,
+        "basis": "asset_share_pct >= 10.0 OR revenue_share_pct >= 10.0",
+        "status_values": {
+            "qsc": "총자산 또는 총매출 비중이 10% 이상",
+            "not_qsc": "총자산과 총매출 비중이 모두 10% 미만",
+            "undetermined": "총자산/총매출 비중 산출에 필요한 데이터 부족",
+        },
+    }
+    assert out["data_quality"]["coverage"]["entity_assets_with_amount"] == 2
+    assert out["data_quality"]["coverage"]["entity_revenue_with_amount"] == 2
+    assert out["data_quality"]["coverage"]["qsc_count"] == 1
+    assert out["data_quality"]["coverage"]["qsc_classified"] == 2
+    assert out["data_quality"]["coverage"]["qsc_undetermined"] == 1
     assert "개별 실체 매출은" in out["data_quality"]["coverage_note"]
 
     subsidiary = out["subsidiaries"][0]
@@ -1014,11 +1048,76 @@ def test_subsidiary_auditors_include_consolidated_asset_and_revenue_shares(temp_
     assert subsidiary["asset_share_pct"] == 10.0
     assert subsidiary["revenue_amount_m"] == 50.0
     assert subsidiary["revenue_share_pct"] == 10.0
+    assert subsidiary["is_qsc"] is True
+    assert subsidiary["qsc_status"] == "qsc"
+    assert subsidiary["qsc_basis"] == ["asset_share_pct>=10.0", "revenue_share_pct>=10.0"]
 
-    missing_revenue = out["subsidiaries"][1]
+    minor = out["subsidiaries"][1]
+    assert minor["asset_share_pct"] == 4.0
+    assert minor["revenue_share_pct"] == 4.0
+    assert minor["is_qsc"] is False
+    assert minor["qsc_status"] == "not_qsc"
+    assert minor["qsc_basis"] == []
+
+    missing_revenue = out["subsidiaries"][2]
     assert missing_revenue["asset_amount_m"] is None
     assert missing_revenue["revenue_amount_m"] is None
     assert missing_revenue["revenue_share_pct"] is None
+    assert missing_revenue["is_qsc"] is None
+    assert missing_revenue["qsc_status"] == "undetermined"
+
+
+def test_subsidiary_auditors_prioritizes_qsc_components_before_source_order(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="경미회사", market="KOSDAQ"))
+        session.add(Company(corp_code="00000003", stock_code="000003", corp_name="중요회사", market="KOSDAQ"))
+        session.add(Disclosure(
+            rcept_no="20250331000002",
+            corp_code="00000001",
+            corp_name="모회사",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add(FinancialFactCompact(
+            corp_code="00000001",
+            bsns_year=2024,
+            fs_div="CFS",
+            metric_key="assets",
+            metric_name="자산총계",
+            amount=1_000_000_000,
+        ))
+        _create_subsidiary_auditor_matrix_cache(session)
+        _insert_subsidiary_cache_row(
+            session,
+            name="경미회사",
+            corp_code="00000002",
+            assets="40",
+            auditor_nm=None,
+            auditor_year=None,
+            audit_opinion=None,
+            ordinal=0,
+        )
+        _insert_subsidiary_cache_row(
+            session,
+            name="중요회사",
+            corp_code="00000003",
+            assets="120",
+            auditor_nm=None,
+            auditor_year=None,
+            audit_opinion=None,
+            ordinal=1,
+        )
+
+    out = get_subsidiary_auditors("000001", limit=1, only_with_auditor=False, slim=True)
+
+    assert out["truncated"] is True
+    assert out["subsidiaries"][0]["name"] == "중요회사"
+    assert out["subsidiaries"][0]["qsc_status"] == "qsc"
+    assert out["subsidiaries"][0]["qsc_basis"] == ["asset_share_pct>=10.0"]
 
 
 def test_subsidiary_auditors_reject_revenue_share_when_company_name_mismatch(temp_engine):
