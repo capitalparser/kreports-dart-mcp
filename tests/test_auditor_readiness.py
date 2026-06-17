@@ -74,6 +74,8 @@ def test_complete_backfill_guards_raw_report_expansion_by_default():
     script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
 
     assert "initial disclosure list skipped" in script
+    assert "source scripts/raw_backfill_guard.sh" in script
+    assert "require_external_raw_backfill" in script
     guard_pos = script.index('KREPORTS_ENABLE_RAW_BACKFILL:-0')
     gap_pos = script.index('"2023 KOSDAQ"')
     report_pos = script.index('run_api_step "business report sections ${year} ${market}"')
@@ -82,6 +84,30 @@ def test_complete_backfill_guards_raw_report_expansion_by_default():
 
     assert gap_pos < guard_pos < report_pos < skip_pos < financial_pos
     assert "only for explicit hot-raw archive operations" in script
+
+
+def test_legacy_raw_backfill_scripts_require_external_storage_guard():
+    guarded_scripts = [
+        "scripts/run_full_dataset_backfill.sh",
+        "scripts/run_document_first_backfill.sh",
+        "scripts/run_2023_expansion_backfill.sh",
+        "scripts/run_business_report_cache_backfill.sh",
+        "scripts/run_source_documents_backfill.sh",
+    ]
+
+    for path in guarded_scripts:
+        script = open(path, encoding="utf-8").read()
+        assert "source scripts/raw_backfill_guard.sh" in script, path
+        assert "collect-business-report-sections" in script, path
+        assert "require_external_raw_backfill" in script, path
+
+
+def test_raw_backfill_guard_rejects_inline_storage_by_default():
+    script = open("scripts/raw_backfill_guard.sh", encoding="utf-8").read()
+
+    assert "KREPORTS_ENABLE_RAW_BACKFILL=1" in script
+    assert "RAW_STORAGE_BACKEND=file or gcs" in script
+    assert "RAW_STORAGE_KEEP_INLINE=false" in script
 
 
 def test_source_documents_backfill_avoids_financial_endpoint():

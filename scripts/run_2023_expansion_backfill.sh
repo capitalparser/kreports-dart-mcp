@@ -3,6 +3,7 @@ set -euo pipefail
 
 mkdir -p logs
 LOG_FILE="logs/2023-expansion-backfill.log"
+source scripts/raw_backfill_guard.sh
 
 log() {
   echo "===== $* $(date) =====" >> "$LOG_FILE"
@@ -42,11 +43,16 @@ run_step "audit fees 2023 KOSPI" \
 run_step "audit fees 2023 KOSDAQ" \
   .venv/bin/kreports collect-audit-fees --year-from 2023 --year-to 2023 --market KOSDAQ --force
 
-run_step "business report sections 2023 KOSPI" \
-  .venv/bin/kreports collect-business-report-sections --year 2023 --market KOSPI --force
+if raw_backfill_enabled; then
+  require_external_raw_backfill "2023 expansion business report sections"
+  run_step "business report sections 2023 KOSPI" \
+    .venv/bin/kreports collect-business-report-sections --year 2023 --market KOSPI --force
 
-run_step "business report sections 2023 KOSDAQ" \
-  .venv/bin/kreports collect-business-report-sections --year 2023 --market KOSDAQ --force
+  run_step "business report sections 2023 KOSDAQ" \
+    .venv/bin/kreports collect-business-report-sections --year 2023 --market KOSDAQ --force
+else
+  log "business report sections 2023 skipped by raw retention policy"
+fi
 
 run_step "extract 2023 business report derived data" \
   .venv/bin/kreports run-document-extractors --year 2023 --source-type business_report

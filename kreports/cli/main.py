@@ -1581,10 +1581,19 @@ def collect_audit_report_sections_cmd(
     force: bool = typer.Option(False, "--force", help="동일 백필 running 기록이 있어도 강제 실행"),
 ):
     """감사보고서 document.xml 본문에서 KAM/의견/강조사항 등 섹션을 저장한다."""
-    from kreports.runtime import require_collector_mode
+    from kreports.runtime import require_collector_mode, require_raw_backfill_mode
     from kreports.collector.report_document_collector import collect_audit_report_sections
 
-    require_collector_mode("collect-audit-report-sections")
+    try:
+        require_collector_mode("collect-audit-report-sections")
+        require_raw_backfill_mode(
+            "collect-audit-report-sections",
+            raw_storage_backend=settings.raw_storage_backend,
+            raw_storage_keep_inline=settings.raw_storage_keep_inline,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"오류: {exc}", err=True)
+        raise typer.Exit(2)
     if not settings.dart_api_key:
         typer.echo("오류: DART_API_KEY 미설정", err=True)
         raise typer.Exit(1)
@@ -1629,10 +1638,19 @@ def collect_business_report_sections_cmd(
     force: bool = typer.Option(False, "--force", help="동일 백필 running 기록이 있어도 강제 실행"),
 ):
     """사업보고서 document.xml 안의 감사보고서/KAM 관련 섹션을 저장한다."""
-    from kreports.runtime import require_collector_mode
+    from kreports.runtime import require_collector_mode, require_raw_backfill_mode
     from kreports.collector.report_document_collector import collect_business_report_sections
 
-    require_collector_mode("collect-business-report-sections")
+    try:
+        require_collector_mode("collect-business-report-sections")
+        require_raw_backfill_mode(
+            "collect-business-report-sections",
+            raw_storage_backend=settings.raw_storage_backend,
+            raw_storage_keep_inline=settings.raw_storage_keep_inline,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"오류: {exc}", err=True)
+        raise typer.Exit(2)
     if not settings.dart_api_key:
         typer.echo("오류: DART_API_KEY 미설정", err=True)
         raise typer.Exit(1)

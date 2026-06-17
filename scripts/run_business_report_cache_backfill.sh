@@ -1,8 +1,10 @@
-#!/bin/zsh
-set -u
+#!/usr/bin/env bash
+set -euo pipefail
 
 cd /Users/kjun/vault/01_Projects/kreports_dart_mcp || exit 1
 mkdir -p logs
+source scripts/raw_backfill_guard.sh
+require_external_raw_backfill "business report cache backfill"
 
 LOG_FILE="logs/business-report-cache-backfill.log"
 echo "===== cache business report backfill restarted $(date) =====" >> "$LOG_FILE"

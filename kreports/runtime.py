@@ -24,6 +24,42 @@ def require_collector_mode(operation: str) -> None:
         )
 
 
+def raw_backfill_enabled() -> bool:
+    return os.environ.get("KREPORTS_ENABLE_RAW_BACKFILL", "").strip() == "1"
+
+
+def require_raw_backfill_mode(
+    operation: str,
+    *,
+    raw_storage_backend: str | None,
+    raw_storage_keep_inline: bool,
+) -> None:
+    """Guard DART document body collection behind explicit external storage.
+
+    Annual report body collection can expand source_documents by tens of GB.
+    The default maintainer workflow is derived-data-first, so raw collection
+    requires both an explicit operator opt-in and non-inline storage.
+    """
+    require_collector_mode(operation)
+    if not raw_backfill_enabled():
+        raise RuntimeError(
+            f"{operation} is blocked by the raw retention policy. Set "
+            "KREPORTS_ENABLE_RAW_BACKFILL=1 only for an explicit hot-raw "
+            "archive operation."
+        )
+    backend = (raw_storage_backend or "").strip().lower()
+    if backend not in {"file", "gcs"}:
+        raise RuntimeError(
+            f"{operation} must use external raw storage. Set "
+            "RAW_STORAGE_BACKEND=file or gcs; inline/db storage is not allowed."
+        )
+    if raw_storage_keep_inline:
+        raise RuntimeError(
+            f"{operation} must not keep raw bodies inline. Set "
+            "RAW_STORAGE_KEEP_INLINE=false."
+        )
+
+
 def readonly_cache_miss(dataset: str, company: str | None = None, year: Any = None) -> str:
     parts = [f"{dataset} is not available in the pre-built DB"]
     if company:

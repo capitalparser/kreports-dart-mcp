@@ -55,11 +55,15 @@ the cache status instead of pretending the raw filing is locally available.
 - Default automated backfill must not collect new `source_documents.raw_content`.
   `scripts/run_complete_dataset_backfill.sh` skips raw report section expansion
   unless `KREPORTS_ENABLE_RAW_BACKFILL=1` is explicitly set.
+- Raw report collection commands are also blocked at the CLI guard unless all
+  of the following are true:
+  - `KREPORTS_ENABLE_RAW_BACKFILL=1`
+  - `RAW_STORAGE_BACKEND=file` or `RAW_STORAGE_BACKEND=gcs`
+  - `RAW_STORAGE_KEEP_INLINE=false`
 - Use `scripts/run_source_documents_backfill.sh` only for explicit hot-raw
   archive expansion.
-- Set `RAW_STORAGE_BACKEND=file` or `RAW_STORAGE_BACKEND=gcs` before collecting
-  new hot raw documents. Otherwise the collector stores raw XML/HTML inline in
-  `source_documents.raw_content` and the SQLite DB will keep growing.
+- Legacy raw scripts source `scripts/raw_backfill_guard.sh`; they either skip
+  raw collection in default dataset backfill or fail closed for raw-only jobs.
 - Confirm the effective collector behavior with `kreports raw-storage-config`.
 - Confirm storage write/read/hash behavior with `kreports raw-storage-smoke`.
 - Before clearing inline raw XML, verify externalized storage with

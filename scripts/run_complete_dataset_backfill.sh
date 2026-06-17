@@ -3,6 +3,7 @@ set -euo pipefail
 
 mkdir -p logs
 LOG_FILE="logs/complete-dataset-backfill.log"
+source scripts/raw_backfill_guard.sh
 
 log() {
   echo "===== $* $(date) =====" >> "$LOG_FILE"
@@ -81,6 +82,7 @@ REPORT_GAP_TARGETS=(
 )
 
 if [[ "${KREPORTS_ENABLE_RAW_BACKFILL:-0}" == "1" ]]; then
+  require_external_raw_backfill "complete dataset raw report section backfill"
   log "raw report section backfill enabled by KREPORTS_ENABLE_RAW_BACKFILL=1"
   for target in "${REPORT_GAP_TARGETS[@]}"; do
     read -r year market <<< "$target"

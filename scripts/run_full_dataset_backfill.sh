@@ -3,6 +3,7 @@ set -euo pipefail
 
 mkdir -p logs
 LOG_FILE="logs/full-dataset-backfill.log"
+source scripts/raw_backfill_guard.sh
 
 log() {
   echo "===== $* $(date) =====" >> "$LOG_FILE"
@@ -25,16 +26,22 @@ export KREPORTS_RUNTIME_MODE="${KREPORTS_RUNTIME_MODE:-collector}"
 
 log "full dataset backfill started"
 
-# Canonical document anchor is the annual business report.  Fetch it first so
-# audit-report attachments, KAM body, opinions, and management sections become
-# queryable before slower financial endpoint retries finish.
-for year in 2021 2022 2023 2024 2025; do
-  run_step "business report source documents ${year} KOSPI" \
-    .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSPI
+# Canonical document body collection is not part of default full backfill.
+# It can add tens of GB if run inline, so it requires explicit hot-raw opt-in
+# plus external storage. Default runs continue from existing cached/externalized
+# documents and derived tables only.
+if raw_backfill_enabled; then
+  require_external_raw_backfill "full dataset annual report source documents"
+  for year in 2021 2022 2023 2024 2025; do
+    run_step "business report source documents ${year} KOSPI" \
+      .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSPI
 
-  run_step "business report source documents ${year} KOSDAQ" \
-    .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSDAQ
-done
+    run_step "business report source documents ${year} KOSDAQ" \
+      .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSDAQ
+  done
+else
+  log "business report source documents skipped by raw retention policy"
+fi
 
 run_step "rerun document extractors from cached source documents" \
   .venv/bin/kreports run-document-extractors --source-type business_report

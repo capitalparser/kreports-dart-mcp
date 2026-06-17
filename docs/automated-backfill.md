@@ -99,6 +99,18 @@ but it should be treated as a manual hot-raw archive operation for selected year
 or companies. Do not use it as the default launchd target while local/Drive
 capacity is constrained.
 
+Raw collection fails closed unless all of these are set:
+
+```bash
+export KREPORTS_ENABLE_RAW_BACKFILL=1
+export RAW_STORAGE_BACKEND=gcs   # or file
+export RAW_STORAGE_KEEP_INLINE=false
+```
+
+Do not run raw collection with `RAW_STORAGE_BACKEND=inline` or
+`RAW_STORAGE_KEEP_INLINE=true`; that stores DART XML/HTML in SQLite and can grow
+`kreports.db` by tens of GB.
+
 Uninstall:
 
 ```bash

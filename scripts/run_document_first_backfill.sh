@@ -3,6 +3,7 @@ set -euo pipefail
 
 mkdir -p logs
 LOG_FILE="logs/document-first-backfill.log"
+source scripts/raw_backfill_guard.sh
 
 log() {
   echo "===== $* $(date) =====" >> "$LOG_FILE"
@@ -25,13 +26,18 @@ export KREPORTS_RUNTIME_MODE="${KREPORTS_RUNTIME_MODE:-collector}"
 
 log "document-first backfill started"
 
-for year in 2021 2022 2023 2024 2025; do
-  run_step "business report source documents ${year} KOSPI" \
-    .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSPI
+if raw_backfill_enabled; then
+  require_external_raw_backfill "document-first annual report source documents"
+  for year in 2021 2022 2023 2024 2025; do
+    run_step "business report source documents ${year} KOSPI" \
+      .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSPI
 
-  run_step "business report source documents ${year} KOSDAQ" \
-    .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSDAQ
-done
+    run_step "business report source documents ${year} KOSDAQ" \
+      .venv/bin/kreports collect-business-report-sections --year "$year" --market KOSDAQ
+  done
+else
+  log "business report source documents skipped by raw retention policy"
+fi
 
 run_step "rerun business-report document extractors" \
   .venv/bin/kreports run-document-extractors --source-type business_report

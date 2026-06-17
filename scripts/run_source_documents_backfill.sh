@@ -3,6 +3,8 @@ set -euo pipefail
 
 mkdir -p logs
 LOG_FILE="logs/source-documents-backfill.log"
+source scripts/raw_backfill_guard.sh
+require_external_raw_backfill "source documents backfill"
 
 log() {
   echo "===== $* $(date) =====" >> "$LOG_FILE"

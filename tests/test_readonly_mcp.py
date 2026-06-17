@@ -2,7 +2,12 @@ import json
 import os
 import subprocess
 
-from kreports.runtime import is_readonly_mode, readonly_cache_miss, require_collector_mode
+from kreports.runtime import (
+    is_readonly_mode,
+    readonly_cache_miss,
+    require_collector_mode,
+    require_raw_backfill_mode,
+)
 
 
 def test_readonly_mode_defaults_to_true_for_mcp(monkeypatch):
@@ -23,6 +28,65 @@ def test_require_collector_mode_blocks_readonly(monkeypatch):
         assert "collect-policies requires collector mode" in str(exc)
     else:
         raise AssertionError("collector guard did not raise")
+
+
+def test_require_raw_backfill_mode_blocks_without_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.delenv("KREPORTS_ENABLE_RAW_BACKFILL", raising=False)
+
+    try:
+        require_raw_backfill_mode(
+            "collect-business-report-sections",
+            raw_storage_backend="gcs",
+            raw_storage_keep_inline=False,
+        )
+    except RuntimeError as exc:
+        assert "KREPORTS_ENABLE_RAW_BACKFILL=1" in str(exc)
+    else:
+        raise AssertionError("raw backfill guard did not raise")
+
+
+def test_require_raw_backfill_mode_blocks_inline_storage(monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+
+    try:
+        require_raw_backfill_mode(
+            "collect-business-report-sections",
+            raw_storage_backend="inline",
+            raw_storage_keep_inline=False,
+        )
+    except RuntimeError as exc:
+        assert "RAW_STORAGE_BACKEND=file or gcs" in str(exc)
+    else:
+        raise AssertionError("inline raw storage guard did not raise")
+
+
+def test_require_raw_backfill_mode_blocks_keep_inline(monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+
+    try:
+        require_raw_backfill_mode(
+            "collect-business-report-sections",
+            raw_storage_backend="gcs",
+            raw_storage_keep_inline=True,
+        )
+    except RuntimeError as exc:
+        assert "RAW_STORAGE_KEEP_INLINE=false" in str(exc)
+    else:
+        raise AssertionError("keep-inline raw storage guard did not raise")
+
+
+def test_require_raw_backfill_mode_allows_external_storage(monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+
+    require_raw_backfill_mode(
+        "collect-business-report-sections",
+        raw_storage_backend="gcs",
+        raw_storage_keep_inline=False,
+    )
 
 
 def test_readonly_cache_miss_message_does_not_request_dart_key():
