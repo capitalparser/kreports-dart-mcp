@@ -5109,8 +5109,129 @@ def get_business_overview(
 
 _SUBSIDIARY_SLIM_FIELDS = (
     "name", "relation", "ownership_pct", "listed_yn",
+    "asset_amount_m", "asset_share_pct", "revenue_amount_m", "revenue_share_pct",
     "corp_code", "stock_code", "market", "auditor",
 )
+
+
+def _parse_report_amount_m(value: Any) -> float | None:
+    """Parse DART report table amounts that are presented in KRW millions."""
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    if not text_value or text_value in {"-", "—", "N/A", "n/a"}:
+        return None
+    negative = text_value.startswith("(") and text_value.endswith(")")
+    normalized = (
+        text_value.replace(",", "")
+        .replace("백만원", "")
+        .replace("원", "")
+        .replace(" ", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if not match:
+        return None
+    try:
+        amount = float(match.group(0))
+    except ValueError:
+        return None
+    if negative:
+        amount *= -1
+    return round(amount, 3)
+
+
+def _amount_to_m(amount: int | float | None) -> float | None:
+    if amount is None:
+        return None
+    return round(float(amount) / 1_000_000, 3)
+
+
+def _normalize_entity_name(value: Any) -> str:
+    text_value = str(value or "").lower()
+    text_value = re.sub(r"\(주\d+(?:,\s*\d+)*\)", "", text_value)
+    text_value = text_value.replace("주식회사", "").replace("(주)", "").replace("㈜", "")
+    return re.sub(r"[^0-9a-z가-힣]", "", text_value)
+
+
+def _load_company_names(corp_codes: list[str]) -> dict[str, str]:
+    unique_codes = sorted({code for code in corp_codes if code})
+    if not unique_codes:
+        return {}
+    stmt = text("""
+        SELECT corp_code, corp_name
+        FROM companies
+        WHERE corp_code IN :corp_codes
+    """).bindparams(bindparam("corp_codes", expanding=True))
+    with _engine.connect() as conn:
+        rows = conn.execute(stmt, {"corp_codes": unique_codes}).mappings().all()
+    return {str(row["corp_code"]): str(row["corp_name"]) for row in rows}
+
+
+def _load_year_end_financial_metrics(corp_codes: list[str], bsns_year: int | None) -> dict[str, dict]:
+    """Load annual CFS/OFS asset and revenue metrics for parent/affiliate companies."""
+    if not corp_codes or bsns_year is None:
+        return {}
+    unique_codes = sorted({code for code in corp_codes if code})
+    if not unique_codes:
+        return {}
+
+    metrics: dict[str, dict[str, dict[str, Any]]] = {}
+    if _has_db_table("financial_facts_compact"):
+        stmt = text("""
+            SELECT corp_code, bsns_year, fs_div, metric_key, amount
+            FROM financial_facts_compact
+            WHERE corp_code IN :corp_codes
+              AND bsns_year=:bsns_year
+              AND fs_div IN ('CFS', 'OFS')
+              AND metric_key IN ('assets', 'revenue')
+        """).bindparams(bindparam("corp_codes", expanding=True))
+        with _engine.connect() as conn:
+            rows = conn.execute(stmt, {"corp_codes": unique_codes, "bsns_year": bsns_year}).mappings().all()
+        for row in rows:
+            code = str(row["corp_code"])
+            fs_div = str(row["fs_div"])
+            slot = metrics.setdefault(code, {}).setdefault(fs_div, {"fs_div": fs_div, "source": "financial_facts_compact"})
+            if row["metric_key"] == "assets":
+                slot["assets_amount"] = row["amount"]
+            elif row["metric_key"] == "revenue":
+                slot["revenue_amount"] = row["amount"]
+
+    missing_codes = [code for code in unique_codes if code not in metrics]
+    if missing_codes and _has_db_table("financials"):
+        stmt = text("""
+            SELECT corp_code, fs_div, revenue, total_assets
+            FROM financials
+            WHERE corp_code IN :corp_codes
+              AND year=:bsns_year
+              AND quarter=4
+              AND fs_div IN ('CFS', 'OFS')
+        """).bindparams(bindparam("corp_codes", expanding=True))
+        with _engine.connect() as conn:
+            rows = conn.execute(stmt, {"corp_codes": missing_codes, "bsns_year": bsns_year}).mappings().all()
+        for row in rows:
+            code = str(row["corp_code"])
+            fs_div = str(row["fs_div"])
+            metrics.setdefault(code, {})[fs_div] = {
+                "fs_div": fs_div,
+                "source": "financials",
+                "assets_amount": row["total_assets"],
+                "revenue_amount": row["revenue"],
+            }
+
+    selected: dict[str, dict] = {}
+    for code, by_fs in metrics.items():
+        data = by_fs.get("CFS") or by_fs.get("OFS")
+        if not data:
+            continue
+        data = dict(data)
+        data.setdefault("assets_amount", None)
+        data.setdefault("revenue_amount", None)
+        data["assets_amount_m"] = _amount_to_m(data.get("assets_amount"))
+        data["revenue_amount_m"] = _amount_to_m(data.get("revenue_amount"))
+        selected[code] = data
+    return selected
 
 
 def get_subsidiary_auditors(
@@ -5197,6 +5318,15 @@ def get_subsidiary_auditors(
             .first()
         )
     if cached_rows:
+        affiliate_corp_codes = [row.get("corp_code") for row in cached_rows if row.get("corp_code")]
+        financial_metrics = _load_year_end_financial_metrics(
+            [corp_code] + affiliate_corp_codes,
+            latest_year,
+        )
+        matched_company_names = _load_company_names(affiliate_corp_codes)
+        consolidated_totals = financial_metrics.get(corp_code, {})
+        consolidated_assets_m = consolidated_totals.get("assets_amount_m")
+        consolidated_revenue_m = consolidated_totals.get("revenue_amount_m")
         items = []
         for cached in cached_rows:
             auditor = None
@@ -5206,6 +5336,23 @@ def get_subsidiary_auditors(
                     "bsns_year": cached["auditor_year"],
                     "audit_opinion": cached["audit_opinion"],
                 }
+            asset_amount_m = _parse_report_amount_m(cached.get("assets"))
+            affiliate_corp_code = cached.get("corp_code") or ""
+            matched_corp_name = matched_company_names.get(affiliate_corp_code)
+            exact_name_match = (
+                bool(matched_corp_name)
+                and _normalize_entity_name(cached.get("name")) == _normalize_entity_name(matched_corp_name)
+            )
+            revenue_metrics = financial_metrics.get(affiliate_corp_code, {}) if exact_name_match else {}
+            revenue_amount = revenue_metrics.get("revenue_amount")
+            revenue_amount_m = revenue_metrics.get("revenue_amount_m")
+            revenue_gap_reason = None
+            if revenue_amount_m is None:
+                revenue_gap_reason = (
+                    "matched_company_name_mismatch"
+                    if affiliate_corp_code and matched_corp_name and not exact_name_match
+                    else "entity_revenue_not_cached"
+                )
             items.append({
                 "name": cached["name"],
                 "relation": cached["relation"],
@@ -5213,6 +5360,16 @@ def get_subsidiary_auditors(
                 "listed_yn": cached["listed_yn"],
                 "business": cached["business"],
                 "assets": cached["assets"],
+                "asset_amount": int(round(asset_amount_m * 1_000_000)) if asset_amount_m is not None else None,
+                "asset_amount_m": asset_amount_m,
+                "asset_share_pct": _pct(asset_amount_m, consolidated_assets_m),
+                "asset_amount_source": "business_report_affiliate_table" if asset_amount_m is not None else None,
+                "revenue_amount": revenue_amount,
+                "revenue_amount_m": revenue_amount_m,
+                "revenue_share_pct": _pct(revenue_amount_m, consolidated_revenue_m),
+                "revenue_amount_source": "matched_company_financials" if revenue_amount_m is not None else None,
+                "revenue_gap_reason": revenue_gap_reason,
+                "matched_corp_name": matched_corp_name,
                 "source": cached["source"],
                 "corp_code": cached["corp_code"],
                 "stock_code": cached["stock_code"],
@@ -5233,11 +5390,33 @@ def get_subsidiary_auditors(
                 {k: x.get(k) for k in _SUBSIDIARY_SLIM_FIELDS}
                 for x in items_sorted
             ]
+        coverage = {
+            "total_entities": total,
+            "entity_assets_with_amount": sum(1 for x in items if x.get("asset_amount_m") is not None),
+            "entity_revenue_with_amount": sum(1 for x in items if x.get("revenue_amount_m") is not None),
+            "asset_share_calculated": sum(1 for x in items if x.get("asset_share_pct") is not None),
+            "revenue_share_calculated": sum(1 for x in items if x.get("revenue_share_pct") is not None),
+            "consolidated_assets_available": consolidated_assets_m is not None,
+            "consolidated_revenue_available": consolidated_revenue_m is not None,
+        }
+        coverage_note = (
+            "개별 실체 자산은 사업보고서 종속회사/타법인출자 표의 백만원 단위 금액을 사용합니다. "
+            "개별 실체 매출은 해당 표에 없는 경우가 많아, corp_code가 매칭되고 연간 재무정보가 "
+            "있더라도 회사명이 정확히 일치하는 경우에만 matched_company_financials 기준으로 보조 산출합니다."
+        )
 
         return _clean_dict({
             "corp_code": corp_code,
             "parent_rcept_no": cached_rows[0]["parent_rcept_no"],
             "bsns_year": latest_year,
+            "consolidated_totals": {
+                "fs_div": consolidated_totals.get("fs_div"),
+                "assets_amount": consolidated_totals.get("assets_amount"),
+                "assets_amount_m": consolidated_totals.get("assets_amount_m"),
+                "revenue_amount": consolidated_totals.get("revenue_amount"),
+                "revenue_amount_m": consolidated_totals.get("revenue_amount_m"),
+                "source": consolidated_totals.get("source"),
+            },
             "subsidiaries": items_sorted,
             "count": len(items_sorted),
             "total": total,
@@ -5245,6 +5424,8 @@ def get_subsidiary_auditors(
             "data_quality": {
                 "status": "usable",
                 "source": "local_subsidiary_auditor_matrix",
+                "coverage": coverage,
+                "coverage_note": coverage_note,
             },
         })
     if row is None:

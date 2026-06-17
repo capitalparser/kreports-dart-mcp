@@ -343,15 +343,15 @@ def get_subsidiary_auditors(
         bool,
         Field(
             description=(
-                "True면 핵심 8개 필드만 (name, relation, ownership_pct, listed_yn, "
-                "corp_code, stock_code, market, auditor). False면 전체 필드."
+                "True면 핵심 필드와 연결 총자산/총매출 대비 자산·매출 기여도만 반환. "
+                "False면 사업 설명, 원천 자산 문자열 등 전체 필드."
             )
         ),
     ] = True,
 ) -> KReportsToolResponse:
     """
     최근 사업보고서 기준 종속·관계회사별 감사인 매트릭스.
-    연결그룹 내 감사인 이원화 여부, 주요 종속회사 감사 품질, 해외 자회사 감사인 정보를 한 번에 파악.
+    연결 총자산·총매출 대비 각 실체의 중요도와 감사인 이원화 여부를 한 번에 파악.
     대형 그룹은 400개 이상이므로 기본 slim=True + limit=100 + only_with_auditor=False.
     truncated=true면 total 참고 후 limit 증가시켜 재호출. 그룹 감사 리스크 평가에 사용.
     """

@@ -33,6 +33,43 @@ def test_render_new_tools_have_answers():
         assert "판정" in text
 
 
+def test_subsidiary_renderer_prints_contribution_table_and_diagram():
+    text = render_answer("get_subsidiary_auditors", {
+        "corp_code": "01817081",
+        "parent_rcept_no": "20250317000875",
+        "bsns_year": 2024,
+        "consolidated_totals": {
+            "fs_div": "CFS",
+            "assets_amount_m": 731694.7,
+            "revenue_amount_m": 332151.7,
+            "source": "financial_facts_compact",
+        },
+        "subsidiaries": [{
+            "name": "진도산월태양광발전㈜",
+            "relation": "종속",
+            "ownership_pct": 100.0,
+            "asset_amount_m": 521.0,
+            "asset_share_pct": 0.1,
+            "revenue_amount_m": None,
+            "revenue_share_pct": None,
+            "auditor": {"auditor_nm": "삼일회계법인"},
+        }],
+        "total": 1,
+        "count": 1,
+        "truncated": False,
+        "data_quality": {
+            "status": "usable",
+            "coverage_note": "개별 실체 매출은 매칭된 회사 재무정보가 있는 경우만 산출합니다.",
+        },
+    })
+
+    assert "```mermaid" in text
+    assert "| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | 감사인 |" in text
+    assert "진도산월태양광발전㈜" in text
+    assert "미확보" in text
+    assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250317000875" in text
+
+
 def test_generic_renderer_prints_confirmed_facts_with_source_lines():
     text = render_answer("get_business_overview", {
         "corp_name": "SK이터닉스",

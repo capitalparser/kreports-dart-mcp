@@ -7,7 +7,14 @@ from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
     run_document_extractors,
 )
-from kreports.db.models import Auditor, Company, Disclosure, ReportSection, SourceDocument
+from kreports.db.models import (
+    Auditor,
+    Company,
+    Disclosure,
+    FinancialFactCompact,
+    ReportSection,
+    SourceDocument,
+)
 
 
 def _create_subsidiary_auditor_matrix_cache(session):
@@ -21,6 +28,7 @@ def _create_subsidiary_auditor_matrix_cache(session):
             relation VARCHAR(50),
             ownership_pct FLOAT,
             business TEXT,
+            assets TEXT,
             listed_yn VARCHAR(1),
             corp_code VARCHAR(8),
             stock_code VARCHAR(6),
@@ -44,6 +52,7 @@ def _insert_subsidiary_cache_row(session, **overrides):
         "relation": "subsidiary",
         "ownership_pct": 100.0,
         "business": "소프트웨어",
+        "assets": "100",
         "listed_yn": "Y",
         "corp_code": "00000002",
         "stock_code": "000002",
@@ -59,12 +68,12 @@ def _insert_subsidiary_cache_row(session, **overrides):
     session.execute(text("""
         INSERT INTO subsidiary_auditor_matrix (
             parent_corp_code, parent_rcept_no, bsns_year, name, relation,
-            ownership_pct, business, listed_yn, corp_code, stock_code, market,
+            ownership_pct, business, assets, listed_yn, corp_code, stock_code, market,
             auditor_nm, auditor_year, audit_opinion, source, ordinal, fetched_at
         )
         VALUES (
             :parent_corp_code, :parent_rcept_no, :bsns_year, :name, :relation,
-            :ownership_pct, :business, :listed_yn, :corp_code, :stock_code, :market,
+            :ownership_pct, :business, :assets, :listed_yn, :corp_code, :stock_code, :market,
             :auditor_nm, :auditor_year, :audit_opinion, :source, :ordinal, :fetched_at
         )
     """), values)
@@ -854,7 +863,9 @@ def test_subsidiary_auditors_honors_limit_auditor_filter_and_slim_from_cache(tem
 
     out = get_subsidiary_auditors("000001", limit=1, only_with_auditor=True, slim=True)
 
-    assert out["data_quality"] == {"status": "usable", "source": "local_subsidiary_auditor_matrix"}
+    assert out["data_quality"]["status"] == "usable"
+    assert out["data_quality"]["source"] == "local_subsidiary_auditor_matrix"
+    assert "coverage" in out["data_quality"]
     assert out["parent_rcept_no"] == "20250331000002"
     assert out["bsns_year"] == 2024
     assert out["total"] == 3
@@ -866,6 +877,10 @@ def test_subsidiary_auditors_honors_limit_auditor_filter_and_slim_from_cache(tem
         "relation",
         "ownership_pct",
         "listed_yn",
+        "asset_amount_m",
+        "asset_share_pct",
+        "revenue_amount_m",
+        "revenue_share_pct",
         "corp_code",
         "stock_code",
         "market",
@@ -912,3 +927,143 @@ def test_subsidiary_auditors_full_mode_returns_cached_context_fields(temp_engine
         "bsns_year": 2024,
         "audit_opinion": "적정",
     }
+
+
+def test_subsidiary_auditors_include_consolidated_asset_and_revenue_shares(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="자회사", market="KOSDAQ"))
+        session.add(Disclosure(
+            rcept_no="20250331000002",
+            corp_code="00000001",
+            corp_name="모회사",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add_all([
+            FinancialFactCompact(
+                corp_code="00000001",
+                bsns_year=2024,
+                fs_div="CFS",
+                metric_key="assets",
+                metric_name="자산총계",
+                amount=1_000_000_000,
+            ),
+            FinancialFactCompact(
+                corp_code="00000001",
+                bsns_year=2024,
+                fs_div="CFS",
+                metric_key="revenue",
+                metric_name="매출액",
+                amount=500_000_000,
+            ),
+            FinancialFactCompact(
+                corp_code="00000002",
+                bsns_year=2024,
+                fs_div="CFS",
+                metric_key="revenue",
+                metric_name="매출액",
+                amount=50_000_000,
+            ),
+        ])
+        _create_subsidiary_auditor_matrix_cache(session)
+        _insert_subsidiary_cache_row(
+            session,
+            name="자회사",
+            corp_code="00000002",
+            assets="100",
+            auditor_nm=None,
+            auditor_year=None,
+            audit_opinion=None,
+            ordinal=0,
+        )
+        _insert_subsidiary_cache_row(
+            session,
+            name="매출미확보회사",
+            corp_code=None,
+            assets="-",
+            auditor_nm=None,
+            auditor_year=None,
+            audit_opinion=None,
+            ordinal=1,
+        )
+
+    out = get_subsidiary_auditors("000001", limit=10, only_with_auditor=False, slim=True)
+
+    assert out["consolidated_totals"] == {
+        "fs_div": "CFS",
+        "assets_amount": 1_000_000_000,
+        "assets_amount_m": 1000.0,
+        "revenue_amount": 500_000_000,
+        "revenue_amount_m": 500.0,
+        "source": "financial_facts_compact",
+    }
+    assert out["data_quality"]["coverage"]["entity_assets_with_amount"] == 1
+    assert out["data_quality"]["coverage"]["entity_revenue_with_amount"] == 1
+    assert "개별 실체 매출은" in out["data_quality"]["coverage_note"]
+
+    subsidiary = out["subsidiaries"][0]
+    assert subsidiary["asset_amount_m"] == 100.0
+    assert subsidiary["asset_share_pct"] == 10.0
+    assert subsidiary["revenue_amount_m"] == 50.0
+    assert subsidiary["revenue_share_pct"] == 10.0
+
+    missing_revenue = out["subsidiaries"][1]
+    assert missing_revenue["asset_amount_m"] is None
+    assert missing_revenue["revenue_amount_m"] is None
+    assert missing_revenue["revenue_share_pct"] is None
+
+
+def test_subsidiary_auditors_reject_revenue_share_when_company_name_mismatch(temp_engine):
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="모회사", market="KOSPI"))
+        session.add(Company(corp_code="00000002", stock_code="000002", corp_name="전혀다른상장사", market="KOSPI"))
+        session.add(Disclosure(
+            rcept_no="20250331000002",
+            corp_code="00000001",
+            corp_name="모회사",
+            disc_date=date(2025, 3, 31),
+            disc_type="F",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add_all([
+            FinancialFactCompact(
+                corp_code="00000001",
+                bsns_year=2024,
+                fs_div="CFS",
+                metric_key="revenue",
+                metric_name="매출액",
+                amount=1_000_000_000,
+            ),
+            FinancialFactCompact(
+                corp_code="00000002",
+                bsns_year=2024,
+                fs_div="CFS",
+                metric_key="revenue",
+                metric_name="매출액",
+                amount=900_000_000,
+            ),
+        ])
+        _create_subsidiary_auditor_matrix_cache(session)
+        _insert_subsidiary_cache_row(
+            session,
+            name="투자신탁일호",
+            corp_code="00000002",
+            assets="100",
+            auditor_nm=None,
+            auditor_year=None,
+            audit_opinion=None,
+        )
+
+    out = get_subsidiary_auditors("000001", limit=10, only_with_auditor=False, slim=False)
+
+    subsidiary = out["subsidiaries"][0]
+    assert subsidiary["matched_corp_name"] == "전혀다른상장사"
+    assert subsidiary["revenue_amount_m"] is None
+    assert subsidiary["revenue_share_pct"] is None
+    assert subsidiary["revenue_gap_reason"] == "matched_company_name_mismatch"

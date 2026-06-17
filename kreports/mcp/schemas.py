@@ -85,7 +85,13 @@ class GetSubsidiaryAuditorsInput(BaseModel):
     company: CompanyIdent
     limit: Annotated[int, Field(ge=1, le=1000)] = 100
     only_with_auditor: bool = False
-    slim: bool = True
+    slim: bool = Field(
+        default=True,
+        description=(
+            "True면 핵심 필드와 연결 총자산/총매출 대비 자산·매출 기여도만 반환. "
+            "False면 사업 설명, 원천 자산 문자열 등 상세 필드 포함."
+        ),
+    )
 
 
 class CompareToIndustryInput(BaseModel):

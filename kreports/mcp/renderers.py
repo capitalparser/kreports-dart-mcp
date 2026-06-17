@@ -96,6 +96,108 @@ def _render_search_dataset(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_amount_m(value: Any) -> str:
+    if value is None:
+        return "미확보"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number) >= 100:
+        return f"{number:,.0f}"
+    return f"{number:,.1f}"
+
+
+def _fmt_pct(value: Any) -> str:
+    if value is None:
+        return "미확보"
+    try:
+        return f"{float(value):,.1f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_ownership(value: Any) -> str:
+    return _fmt_pct(value) if value is not None else "미기재"
+
+
+def _mermaid_label(value: Any) -> str:
+    text = str(value or "-")
+    return (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "<br/>")
+        .replace("|", "/")
+    )
+
+
+def _render_subsidiary_auditors(result: dict) -> str:
+    subject = _subject_label(result)
+    year = result.get("bsns_year")
+    subsidiaries = result.get("subsidiaries") or []
+    totals = result.get("consolidated_totals") or {}
+    data_quality = result.get("data_quality") or {}
+    rcept_no = parent_rcept_no(str(result.get("parent_rcept_no") or "")) if result.get("parent_rcept_no") else None
+
+    asset_total = _fmt_amount_m(totals.get("assets_amount_m"))
+    revenue_total = _fmt_amount_m(totals.get("revenue_amount_m"))
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} {year or ''}년 연결·투자 실체 조회 결과입니다. 연결 총자산은 {asset_total}백만원, 연결 매출은 {revenue_total}백만원 기준으로 각 실체의 기여도를 표시합니다.",
+        "",
+        "구조도:",
+        "```mermaid",
+        "flowchart TD",
+        f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]',
+    ]
+    for idx, item in enumerate(subsidiaries[:8], start=1):
+        relation = item.get("relation") or "-"
+        ownership = _fmt_ownership(item.get("ownership_pct"))
+        asset_share = _fmt_pct(item.get("asset_share_pct"))
+        revenue_share = _fmt_pct(item.get("revenue_share_pct"))
+        lines.append(
+            f'  P -->|"{_mermaid_label(relation)} / 지분율 {ownership}<br/>자산 {asset_share} / 매출 {revenue_share}"| '
+            f'N{idx}["{_mermaid_label(item.get("name"))}"]'
+        )
+    if not subsidiaries:
+        lines.append('  P -->|"캐시 없음"| N0["연결/투자 실체 미확보"]')
+    lines.extend(["```", "", "표:"])
+    lines.append("| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | 감사인 |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+    for item in subsidiaries[:12]:
+        auditor = item.get("auditor")
+        auditor_name = auditor.get("auditor_nm") if isinstance(auditor, dict) else None
+        lines.append(
+            f"| {item.get('name') or '-'} "
+            f"| {item.get('relation') or '-'} "
+            f"| {_fmt_ownership(item.get('ownership_pct'))} "
+            f"| {_fmt_amount_m(item.get('asset_amount_m'))} "
+            f"| {_fmt_pct(item.get('asset_share_pct'))} "
+            f"| {_fmt_amount_m(item.get('revenue_amount_m'))} "
+            f"| {_fmt_pct(item.get('revenue_share_pct'))} "
+            f"| {auditor_name or '-'} |"
+        )
+    if not subsidiaries:
+        lines.append("| 미확보 | - | - | 미확보 | 미확보 | 미확보 | 미확보 | - |")
+
+    lines.append("")
+    lines.append("근거:")
+    if rcept_no:
+        lines.append(f"- 접수번호: {rcept_no}")
+        lines.append(f"- 공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}")
+    lines.append(f"- 반환 {result.get('count', len(subsidiaries))}건 / 전체 {result.get('total', len(subsidiaries))}건")
+    if result.get("truncated"):
+        lines.append("- 결과가 잘렸습니다. 전체 구조 확인이 필요하면 limit을 늘려 재조회해야 합니다.")
+
+    coverage_note = data_quality.get("coverage_note")
+    lines.append("")
+    lines.append("데이터 한계:")
+    lines.append(f"- 출처: {data_quality.get('source') or 'local_subsidiary_auditor_matrix'}")
+    lines.append(f"- {coverage_note or '현재 결과는 로컬 사업보고서 파생 캐시 기준입니다.'}")
+    return "\n".join(lines)
+
+
 def _render_kam_topics(result: dict) -> str:
     status = _status(result)
     subject = _subject_label(result)
@@ -553,6 +655,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         return None
     if tool_name == "search_dataset":
         return _render_search_dataset(result)
+    if tool_name == "get_subsidiary_auditors":
+        return _render_subsidiary_auditors(result)
     if tool_name == "compare_peer_kam_topics":
         return _render_kam_topics(result)
     if tool_name in {"get_audit_report_sections"}:

@@ -667,6 +667,7 @@ TOOL_GET_SUBSIDIARY_AUDITORS = Tool(
     name="get_subsidiary_auditors",
     description=(
         "최근 사업보고서 기준 종속·관계회사별 감사인 매트릭스. "
+        "연결 총자산·총매출 대비 각 실체의 자산/매출 기여도와 지분율을 함께 보여준다. "
         "연결그룹 내 감사인 이원화 여부, 주요 종속회사 감사 품질, 해외 자회사 감사인 정보를 "
         "한 번에 파악할 수 있다. 대형 그룹(삼성전자 등)은 400개 이상이므로 "
         "기본값은 감사인 있는 항목 우선 + 상위 100개 + 핵심 필드만 반환한다. "
@@ -694,8 +695,9 @@ TOOL_GET_SUBSIDIARY_AUDITORS = Tool(
             },
             "slim": {
                 "type": "boolean",
-                "description": "True면 핵심 8개 필드만 반환 (name, relation, ownership_pct, "
-                               "listed_yn, corp_code, stock_code, market, auditor). "
+                "description": "True면 핵심 필드만 반환 (name, relation, ownership_pct, "
+                               "listed_yn, asset_amount_m, asset_share_pct, revenue_amount_m, "
+                               "revenue_share_pct, corp_code, stock_code, market, auditor). "
                                "False면 business 설명·assets 등 전체 필드.",
                 "default": True,
             },
