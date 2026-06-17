@@ -299,14 +299,17 @@ def _data_freshness(corp_code: str) -> dict:
         "accounting_policy": AccountingPolicyItem,
     }
     with get_session() as session:
-        return {
-            key: _to_iso(
-                session.query(func.max(model.fetched_at))
-                .filter(model.corp_code == corp_code)
-                .scalar()
-            )
-            for key, model in table_map.items()
-        }
+        freshness = {}
+        for key, model in table_map.items():
+            try:
+                freshness[key] = _to_iso(
+                    session.query(func.max(model.fetched_at))
+                    .filter(model.corp_code == corp_code)
+                    .scalar()
+                )
+            except Exception:
+                freshness[key] = None
+        return freshness
 
 
 def _attach_meta(name: str, result: Any) -> Any:

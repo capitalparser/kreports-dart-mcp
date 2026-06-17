@@ -827,6 +827,112 @@ _ANNUAL_FIELDS = [
     "DIO", "DSO", "DPO", "CCC",
 ]
 
+_COMPACT_FINANCIAL_FIELD_MAP = {
+    "revenue": "매출액",
+    "operating_profit": "영업이익",
+    "profit_loss": "순이익",
+    "assets": "자산총계",
+    "liabilities": "부채총계",
+    "equity": "자본총계",
+    "operating_cash_flow": "영업CF",
+}
+
+
+def _pct(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator in (None, 0):
+        return None
+    return round(numerator / denominator * 100, 1)
+
+
+def _ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator in (None, 0):
+        return None
+    return round(numerator / denominator, 2)
+
+
+def _financial_snapshot_from_compact(
+    corp_code: str,
+    fs_div: str,
+    years: Optional[int],
+) -> dict:
+    fs_div_used = fs_div
+    with _engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT bsns_year, fs_div, metric_key, amount
+            FROM financial_facts_compact
+            WHERE corp_code=:corp_code AND fs_div=:fs_div
+            ORDER BY bsns_year, metric_key
+        """), {"corp_code": corp_code, "fs_div": fs_div}).mappings().all()
+        if not rows and fs_div == "CFS":
+            rows = conn.execute(text("""
+                SELECT bsns_year, fs_div, metric_key, amount
+                FROM financial_facts_compact
+                WHERE corp_code=:corp_code AND fs_div='OFS'
+                ORDER BY bsns_year, metric_key
+            """), {"corp_code": corp_code}).mappings().all()
+            if rows:
+                fs_div_used = "OFS"
+
+    grouped: dict[int, dict[str, float | None]] = {}
+    for row in rows:
+        year = int(row["bsns_year"])
+        metric = str(row["metric_key"])
+        amount = row["amount"]
+        grouped.setdefault(year, {})
+        grouped[year][metric] = (float(amount) / 1e8) if amount is not None else None
+
+    out_rows: list[dict] = []
+    previous_revenue: float | None = None
+    for year in sorted(grouped):
+        metrics = grouped[year]
+        item: dict[str, Any] = {"연도": year, "분기": 4, "구분": fs_div_used}
+        for metric, field in _COMPACT_FINANCIAL_FIELD_MAP.items():
+            item[field] = metrics.get(metric)
+        capex_parts = [
+            metrics.get("purchase_ppe"),
+            metrics.get("purchase_intangible_assets"),
+        ]
+        capex_values = [abs(value) for value in capex_parts if value is not None]
+        item["CapEx"] = sum(capex_values) if capex_values else None
+        item["영업이익률"] = _pct(item.get("영업이익"), item.get("매출액"))
+        item["순이익률"] = _pct(item.get("순이익"), item.get("매출액"))
+        item["부채비율"] = _pct(item.get("부채총계"), item.get("자본총계"))
+        item["ROE"] = _pct(item.get("순이익"), item.get("자본총계"))
+        item["ROA"] = _pct(item.get("순이익"), item.get("자산총계"))
+        item["매출성장률"] = _pct(
+            (item.get("매출액") - previous_revenue) if previous_revenue not in (None, 0) and item.get("매출액") is not None else None,
+            previous_revenue,
+        )
+        previous_revenue = item.get("매출액")
+        item["FCF"] = (
+            item["영업CF"] - item["CapEx"]
+            if item.get("영업CF") is not None and item.get("CapEx") is not None
+            else None
+        )
+        item["FCF마진"] = _pct(item.get("FCF"), item.get("매출액"))
+        item["CapEx_OCF"] = _pct(item.get("CapEx"), item.get("영업CF"))
+        item["CFO_NI"] = _ratio(item.get("영업CF"), item.get("순이익"))
+        out_rows.append(item)
+
+    if years is not None:
+        out_rows = out_rows[-int(years):]
+
+    out_df = pd.DataFrame(out_rows)
+    selected_cols = [c for c in _ANNUAL_FIELDS if c in out_df.columns] if not out_df.empty else []
+    return {
+        "corp_code": corp_code,
+        "fs_div": fs_div_used,
+        "unit": "억원",
+        "rows": _df_to_records(out_df[selected_cols]) if selected_cols else [],
+        "row_count": len(out_rows),
+        "data_quality": {
+            "status": "usable" if out_rows else "missing",
+            "source": "financial_facts_compact",
+            "year_count": len(out_rows),
+            "coverage_note": "Compact runtime DB uses annual core metrics; full account-level financial_facts are not bundled.",
+        },
+    }
+
 
 def get_financial_snapshot(
     company: str,
@@ -863,10 +969,22 @@ def get_financial_snapshot(
             "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
         }
 
+    compact_available = _has_db_table("financial_facts_compact")
+    if not _has_db_table("financial_facts") and compact_available:
+        return _financial_snapshot_from_compact(corp_code, fs_div, years)
+
     df = _queries.get_financials_extended(corp_code, fs_div=fs_div)
+    if df.empty and compact_available:
+        compact = _financial_snapshot_from_compact(corp_code, fs_div, years)
+        if compact["row_count"]:
+            return compact
     if df.empty and fs_div == "CFS":
         df = _queries.get_financials_extended(corp_code, fs_div="OFS")
         fs_div = "OFS"
+    if df.empty and compact_available:
+        compact = _financial_snapshot_from_compact(corp_code, fs_div, years)
+        if compact["row_count"]:
+            return compact
 
     if df.empty:
         return {

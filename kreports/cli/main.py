@@ -1889,6 +1889,7 @@ def export_runtime_db_cmd(
     year_from: int = typer.Option(..., "--year-from"),
     year_to: int = typer.Option(..., "--year-to"),
     profile: str = typer.Option("compact", "--profile"),
+    vacuum: bool = typer.Option(True, "--vacuum/--no-vacuum", help="VACUUM exported DB after copy"),
 ):
     """배포용 compact runtime DB를 생성한다."""
     from kreports.maintenance.runtime_export import export_runtime_db
@@ -1899,6 +1900,7 @@ def export_runtime_db_cmd(
         year_from=year_from,
         year_to=year_to,
         profile=profile,
+        vacuum=vacuum,
     )
     _json_print(result)
 

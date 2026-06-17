@@ -24,9 +24,20 @@ COMPACT_TABLE_WHERE = {
     "source_documents": "source_type <> 'event_disclosure'",
 }
 
+COPY_BATCH_SIZE = 1000
+
 
 def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
+
+
+def _compact_select_expression(table: str, column: str) -> str:
+    if table == "source_documents" and column == "raw_content":
+        return (
+            "CASE WHEN content_type='derived_report_sections' "
+            "THEN raw_content ELSE '' END AS raw_content"
+        )
+    return _quote_ident(column)
 
 
 def export_runtime_db(
@@ -35,6 +46,7 @@ def export_runtime_db(
     year_from: int,
     year_to: int,
     profile: str = "compact",
+    vacuum: bool = True,
 ) -> dict:
     if profile != "compact":
         raise ValueError("only compact profile is supported")
@@ -73,17 +85,19 @@ def export_runtime_db(
                     copied.append(table)
                     continue
                 col_csv = ", ".join(_quote_ident(col) for col in columns)
+                select_csv = ", ".join(_compact_select_expression(table, col) for col in columns)
                 where = COMPACT_TABLE_WHERE.get(table)
-                query = f"SELECT {col_csv} FROM {_quote_ident(table)}"
+                query = f"SELECT {select_csv} FROM {_quote_ident(table)}"
                 if where:
                     query += f" WHERE {where}"
-                rows = src_conn.exec_driver_sql(query).fetchall()
-                if rows:
-                    placeholders = ", ".join(["?"] * len(columns))
-                    dest_conn.executemany(
-                        f"INSERT INTO {_quote_ident(table)} ({col_csv}) VALUES ({placeholders})",
-                        rows,
-                    )
+                result = src_conn.exec_driver_sql(query)
+                placeholders = ", ".join(["?"] * len(columns))
+                insert_sql = f"INSERT INTO {_quote_ident(table)} ({col_csv}) VALUES ({placeholders})"
+                while True:
+                    rows = result.fetchmany(COPY_BATCH_SIZE)
+                    if not rows:
+                        break
+                    dest_conn.executemany(insert_sql, rows)
                 copied.append(table)
 
             indexes = src_conn.exec_driver_sql(
@@ -99,7 +113,8 @@ def export_runtime_db(
                     pass
 
         dest_conn.commit()
-        dest_conn.execute("VACUUM")
+        if vacuum:
+            dest_conn.execute("VACUUM")
     finally:
         dest_conn.close()
 
@@ -112,6 +127,7 @@ def export_runtime_db(
         "copied_tables": copied,
         "excluded_tables": sorted(COMPACT_EXCLUDED_TABLES),
         "table_filters": COMPACT_TABLE_WHERE,
+        "vacuum": bool(vacuum),
         "bytes": dest.stat().st_size,
     }
 
