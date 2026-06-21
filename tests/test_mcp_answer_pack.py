@@ -61,6 +61,22 @@ def test_attach_meta_adds_subsidiary_answer_pack_with_mermaid_and_contribution_t
     assert table["rows"][0]["qsc_status"] == "qsc"
 
 
+def test_answer_pack_uses_meta_company_when_result_has_no_subject():
+    result = {
+        "_meta": {"company": {"corp_name": "SK하이닉스", "corp_code": "00164779"}},
+        "bsns_year": 2024,
+        "subsidiaries": [{"name": "B", "qsc_status": "undetermined"}],
+        "data_quality": {"status": "usable", "source": "local_subsidiary_auditor_matrix"},
+    }
+
+    out = _attach_meta("get_subsidiary_auditors", result)
+
+    pack = out["answer_pack"]
+    assert pack["summary"]["title"] == "SK하이닉스 연결실체 구조"
+    assert 'P["SK하이닉스<br/>2024년 연결실체"]' in pack["diagrams"][0]["definition"]
+    assert "미판정" in pack["diagrams"][0]["definition"]
+
+
 def test_attach_meta_adds_disclosure_event_timeline_pack():
     result = {
         "query": {"start_date": "2025-01-01", "end_date": "2025-12-31"},

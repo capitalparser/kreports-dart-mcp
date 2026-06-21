@@ -67,6 +67,16 @@ def _subject_label(result: dict[str, Any]) -> str:
     company = result.get("company")
     if isinstance(company, dict):
         return str(company.get("corp_name") or company.get("stock_code") or company.get("corp_code") or "대상 회사")
+    meta = result.get("_meta")
+    if isinstance(meta, dict):
+        meta_company = meta.get("company")
+        if isinstance(meta_company, dict):
+            return str(
+                meta_company.get("corp_name")
+                or meta_company.get("stock_code")
+                or meta_company.get("corp_code")
+                or "대상 회사"
+            )
     query = result.get("query")
     if isinstance(query, dict):
         return str(query.get("company") or query.get("market") or "대상 조건")
@@ -334,7 +344,7 @@ def _subsidiary_mermaid(subject: str, year: Any, subsidiaries: list[dict[str, An
             f"{item.get('relation') or '-'} / 지분율 {_fmt_pct(item.get('ownership_pct'))}<br/>"
             f"자산 {_fmt_pct(item.get('asset_share_pct'))} / 매출 {_fmt_pct(item.get('revenue_share_pct'))}"
         )
-        qsc = item.get("qsc_status") or "undetermined"
+        qsc = _qsc_label(item.get("qsc_status"))
         lines.append(
             f'  P -->|"{_mermaid_label(label)}"| N{idx}["{_mermaid_label(item.get("name"))}<br/>{_mermaid_label(qsc)}"]'
         )
@@ -360,6 +370,14 @@ def _fmt_pct(value: Any) -> str:
         return f"{float(value):,.1f}%"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _qsc_label(value: Any) -> str:
+    if value == "qsc":
+        return "QSC"
+    if value == "not_qsc":
+        return "비QSC"
+    return "미판정"
 
 
 def _build_disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:

@@ -560,6 +560,68 @@ def _render_investor_signals(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_peer_benchmark(result: dict) -> str:
+    subject = _subject_label(result)
+    results = result.get("results") or {}
+    rows: list[dict[str, Any]] = []
+    for year in sorted(results.keys(), key=lambda value: str(value)):
+        metrics = results.get(year) or {}
+        if not isinstance(metrics, dict):
+            continue
+        for metric, values in metrics.items():
+            if not isinstance(values, dict):
+                continue
+            rows.append({
+                "year": year,
+                "metric": metric,
+                "subject_value": values.get("subject_value"),
+                "percentile": values.get("percentile"),
+                "p25": values.get("p25"),
+                "p50": values.get("p50"),
+                "p75": values.get("p75"),
+                "n": values.get("n"),
+            })
+
+    lines = [
+        f"판정: {_status(result)}",
+        "",
+        f"{subject} Peer 벤치마크 결과입니다. 동종업종 peer {result.get('n_peers', 0)}개 기준으로 대상회사 값과 업종 사분위·백분위를 비교합니다.",
+    ]
+    if result.get("confidence"):
+        lines.append(f"Peer 선정 신뢰도는 {result.get('confidence')}입니다.")
+    lines.extend([
+        "",
+        "표:",
+        "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | Peer 수 |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|",
+    ])
+    for row in rows[:24]:
+        lines.append(
+            f"| {row.get('year')} "
+            f"| {row.get('metric')} "
+            f"| {row.get('subject_value')} "
+            f"| {row.get('percentile')} "
+            f"| {row.get('p25')} "
+            f"| {row.get('p50')} "
+            f"| {row.get('p75')} "
+            f"| {row.get('n')} |"
+        )
+    if not rows:
+        lines.append("| 미확보 | - | - | - | - | - | - | - |")
+
+    lines.extend([
+        "",
+        "그래픽 렌더링 후보:",
+        "- `answer_pack.charts.peer_percentile_matrix`: 연도×지표 백분위 heatmap",
+        "- `answer_pack.charts.peer_band`: 대상회사 값과 peer P25/P50/P75 band 비교",
+        "",
+        "데이터 한계:",
+        "- 현재 결과는 로컬 kreports.db의 재무/업종 캐시 기준입니다.",
+        "- peer 비교는 투자판단 결론이 아니라 업종 내 상대 위치를 확인하는 screening입니다.",
+    ])
+    return "\n".join(lines)
+
+
 def _analysis_heading(perspective: str | None) -> str:
     if perspective == "auditor":
         return "감사인 관점 해석"
@@ -692,6 +754,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         return _render_disclosure_events(result)
     if tool_name == "get_investor_signals":
         return _render_investor_signals(result)
+    if tool_name == "compare_to_industry_multi":
+        return _render_peer_benchmark(result)
     if tool_name == "build_audit_acceptance_pack":
         return _render_acceptance_pack(result)
     return _render_generic(tool_name, result)

@@ -33,6 +33,27 @@ def test_render_new_tools_have_answers():
         assert "판정" in text
 
 
+def test_compare_to_industry_multi_renderer_prints_peer_benchmark_table():
+    text = render_answer("compare_to_industry_multi", {
+        "subject": {"corp_name": "A"},
+        "years": [2025],
+        "metrics": ["ROE", "영업이익률"],
+        "n_peers": 30,
+        "confidence": "high",
+        "results": {
+            2025: {
+                "ROE": {"subject_value": 0.12, "percentile": 70, "p25": 0.05, "p50": 0.1, "p75": 0.15, "n": 30},
+                "영업이익률": {"subject_value": 0.2, "percentile": 90, "p25": 0.03, "p50": 0.08, "p75": 0.11, "n": 30},
+            }
+        },
+    })
+
+    assert "Peer 벤치마크" in text
+    assert "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | Peer 수 |" in text
+    assert "| 2025 | ROE | 0.12 | 70" in text
+    assert "Generic" not in text
+
+
 def test_subsidiary_renderer_prints_contribution_table_and_diagram():
     text = render_answer("get_subsidiary_auditors", {
         "corp_code": "01817081",
