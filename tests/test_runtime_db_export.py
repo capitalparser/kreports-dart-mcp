@@ -4,7 +4,7 @@ from datetime import date
 from sqlalchemy import inspect
 from sqlalchemy import text
 
-from kreports.db.models import Company, Disclosure, SourceDocument
+from kreports.db.models import Company, Disclosure, Financial, SourceDocument
 
 
 def test_financial_facts_compact_schema(temp_engine):
@@ -57,6 +57,48 @@ def test_rebuild_financial_facts_compact_maps_core_metrics(temp_engine):
         ("purchase_ppe", 40),
         ("revenue", 300),
         ("tax_expense", 5),
+    ]
+
+
+def test_rebuild_financial_facts_compact_falls_back_to_annual_financials(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.add(Financial(
+            corp_code="00126380",
+            year=2024,
+            quarter=4,
+            fs_div="CFS",
+            revenue=300,
+            operating_profit=30,
+            net_income=20,
+            total_assets=1000,
+            total_debt=400,
+            total_equity=600,
+            operating_cf=25,
+            source="summary_fallback",
+        ))
+
+    out = rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    assert out["summary_source_rows"] == 1
+    assert out["summary_inserted_or_updated"] == 7
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT metric_key, metric_name, amount, source_account_id
+            FROM financial_facts_compact
+            WHERE corp_code='00126380'
+            ORDER BY metric_key
+        """)).all()
+    assert rows == [
+        ("assets", "자산총계", 1000, "financials.total_assets"),
+        ("equity", "자본총계", 600, "financials.total_equity"),
+        ("liabilities", "부채총계", 400, "financials.total_debt"),
+        ("operating_cash_flow", "영업활동현금흐름", 25, "financials.operating_cf"),
+        ("operating_profit", "영업손익", 30, "financials.operating_profit"),
+        ("profit_loss", "당기순손익", 20, "financials.net_income"),
+        ("revenue", "매출액", 300, "financials.revenue"),
     ]
 
 
