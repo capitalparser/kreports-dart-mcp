@@ -502,6 +502,19 @@ def _report_document_meta(meta: dict) -> dict:
 
 def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
     """Run normalized extractors from a cached source document body."""
+    if not (content or "").strip():
+        return {
+            "sections": 0,
+            "auditors": 0,
+            "affiliate_auditors": 0,
+            "accounting_note_chapters": 0,
+            "accounting_policy_items": 0,
+            "audit_procedure_items": 0,
+            "rows_written": 0,
+            "skipped": True,
+            "skip_reason": "empty_source_document_content",
+        }
+
     sections = extract_audit_report_sections(content)
     if meta.get("source_type") == "business_report":
         sections = {**sections, **extract_report_sections(content)}
@@ -1212,7 +1225,7 @@ def run_document_extractors(
     with get_session() as session:
         rows = session.execute(text(stmt), params).all()
 
-    totals = {"total": len(rows), "ok": 0, "failed": 0, "rows_written": 0, "errors": []}
+    totals = {"total": len(rows), "ok": 0, "skipped": 0, "failed": 0, "rows_written": 0, "errors": []}
     for idx, row in enumerate(rows, 1):
         source_document_id, rcept_no, dcm_no, corp_code, bsns_year, src_type, report_nm, doc_hash, storage_uri, _content_type = row
         if progress_callback:
@@ -1231,6 +1244,18 @@ def run_document_extractors(
                 storage_uri=storage_uri,
                 doc_hash=doc_hash,
             )
+            if not (content or "").strip():
+                _log_extraction_run(
+                    source_document_id=source_document_id,
+                    meta=meta,
+                    extractor_name=extractor,
+                    source_doc_hash=doc_hash,
+                    status="skipped",
+                    rows_written=0,
+                    error_msg="empty_source_document_content",
+                )
+                totals["skipped"] += 1
+                continue
             if extractor == "sections":
                 before = extract_document_features_from_content(meta, content=content)
                 rows_written = int(before.get("sections") or 0)

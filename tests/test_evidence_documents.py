@@ -327,3 +327,46 @@ def test_rebuild_evidence_documents_merges_existing_evidence_when_sections_missi
         assert "## report_section/kam: 수익인식" in doc.normalized_text
         assert "## audit_procedure/revenue/substantive_test" in doc.normalized_text
         assert doc.source_count == 2
+
+
+def test_restore_report_sections_from_evidence_upserts_markdown_blocks(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.evidence_documents import restore_report_sections_from_evidence
+
+    with get_session() as session:
+        session.add(EvidenceDocument(
+            corp_code="00000005",
+            bsns_year=2025,
+            source_type="audit_report",
+            rcept_no="20260331000005_00760_xml",
+            dcm_no="00760",
+            evidence_scope="auditor_view",
+            title="2025 audit report evidence",
+            normalized_text=(
+                "# Evidence document\n"
+                "## report_section/kam: 수익인식\n"
+                "수익인식 관련 핵심감사사항 본문입니다.\n"
+                "## report_section/other_matter: 기타사항\n"
+                "비교표시 재무제표는 전임감사인이 감사하였습니다.\n"
+                "## audit_procedure/revenue/substantive\n"
+                "표본검사를 수행하였습니다."
+            ),
+            text_hash="x",
+            text_length=220,
+            source_count=3,
+        ))
+
+    out = restore_report_sections_from_evidence(year=2025, source_type="audit_report")
+
+    assert out["documents"] == 1
+    assert out["documents_with_sections"] == 1
+    assert out["sections_upserted"] == 2
+    with get_session() as session:
+        sections = (
+            session.query(ReportSection)
+            .order_by(ReportSection.ordinal.asc())
+            .all()
+        )
+        assert [section.section_key for section in sections] == ["kam", "other_matter"]
+        assert sections[0].section_title == "수익인식"
+        assert "핵심감사사항" in sections[0].body_text

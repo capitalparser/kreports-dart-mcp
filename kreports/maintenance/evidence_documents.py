@@ -121,6 +121,120 @@ def _blocks_from_existing_evidence(text: str, source_type: str) -> list[Evidence
     return blocks
 
 
+def _report_section_rows_from_evidence(doc: EvidenceDocument) -> list[dict]:
+    """Parse report_section markdown blocks back into ReportSection rows."""
+    text = doc.normalized_text or ""
+    matches = list(re.finditer(
+        r"^##\s+report_section/([^:\n]+)(?::\s*(.*))?$",
+        text,
+        flags=re.MULTILINE,
+    ))
+    rows: list[dict] = []
+    for ordinal, match in enumerate(matches):
+        section_key = match.group(1).strip()
+        section_title = _clean_text(match.group(2) or "") or None
+        start = match.end()
+        end = matches[ordinal + 1].start() if ordinal + 1 < len(matches) else len(text)
+        body = _clean_text(text[start:end])
+        if not body or body == "... (truncated)":
+            continue
+        if body.endswith("\n... (truncated)"):
+            body = body[: -len("\n... (truncated)")].rstrip()
+        rows.append({
+            "rcept_no": doc.rcept_no,
+            "dcm_no": doc.dcm_no,
+            "corp_code": doc.corp_code,
+            "bsns_year": doc.bsns_year,
+            "source_type": doc.source_type,
+            "section_key": section_key,
+            "section_title": section_title,
+            "body_text": body,
+            "body_hash": _sha1(body),
+            "body_length": len(body),
+            "ordinal": ordinal,
+            "fetched_at": datetime.utcnow(),
+        })
+    return rows
+
+
+def restore_report_sections_from_evidence(
+    *,
+    year: int | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    source_type: str | None = None,
+    corp_code: str | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Restore compact report_sections rows from evidence_documents.
+
+    This is a recovery path for runtime DBs where raw source bodies are no
+    longer local. It never deletes existing report_sections; it only upserts
+    section blocks already present in evidence_documents.
+    """
+    where = ["evidence_scope='auditor_view'", "normalized_text LIKE '%## report_section/%'"]
+    params: dict[str, object] = {}
+    if year is not None:
+        where.append("bsns_year=:year")
+        params["year"] = int(year)
+    if year_from is not None:
+        where.append("bsns_year>=:year_from")
+        params["year_from"] = int(year_from)
+    if year_to is not None:
+        where.append("bsns_year<=:year_to")
+        params["year_to"] = int(year_to)
+    if source_type is not None:
+        where.append("source_type=:source_type")
+        params["source_type"] = source_type
+    if corp_code is not None:
+        where.append("corp_code=:corp_code")
+        params["corp_code"] = corp_code
+    limit_sql = "LIMIT :limit" if limit is not None else ""
+    if limit is not None:
+        params["limit"] = int(limit)
+
+    with get_session() as session:
+        docs = session.execute(text(f"""
+            SELECT id
+            FROM evidence_documents
+            WHERE {' AND '.join(where)}
+            ORDER BY bsns_year, source_type, rcept_no
+            {limit_sql}
+        """), params).scalars().all()
+
+    result = {
+        "documents": len(docs),
+        "documents_with_sections": 0,
+        "sections_upserted": 0,
+        "skipped": 0,
+    }
+    for doc_id in docs:
+        with get_session() as session:
+            doc = session.query(EvidenceDocument).filter_by(id=doc_id).one()
+            rows = _report_section_rows_from_evidence(doc)
+            if not rows:
+                result["skipped"] += 1
+                continue
+            stmt = sqlite_insert(ReportSection).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["rcept_no", "source_type", "section_key", "ordinal"],
+                set_={
+                    "corp_code": stmt.excluded.corp_code,
+                    "dcm_no": stmt.excluded.dcm_no,
+                    "bsns_year": stmt.excluded.bsns_year,
+                    "section_title": stmt.excluded.section_title,
+                    "body_text": stmt.excluded.body_text,
+                    "body_hash": stmt.excluded.body_hash,
+                    "body_length": stmt.excluded.body_length,
+                    "fetched_at": stmt.excluded.fetched_at,
+                },
+            )
+            session.execute(stmt)
+            result["documents_with_sections"] += 1
+            result["sections_upserted"] += len(rows)
+    return result
+
+
 def build_evidence_text(
     *,
     corp_code: str,

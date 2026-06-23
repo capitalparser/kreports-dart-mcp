@@ -1711,7 +1711,8 @@ def run_document_extractors_cmd(
     )
     typer.echo(
         f"완료 - 처리 {result['total']:,} | 성공 {result['ok']:,} | "
-        f"실패 {result['failed']:,} | rows_written {result['rows_written']:,}"
+        f"skip {result.get('skipped', 0):,} | 실패 {result['failed']:,} | "
+        f"rows_written {result['rows_written']:,}"
     )
     if result["errors"]:
         typer.echo("실패 샘플:")
@@ -1997,6 +1998,30 @@ def evidence_document_readiness_cmd():
 
     init_db()
     _json_print(evidence_document_readiness())
+
+
+@app.command("restore-report-sections-from-evidence")
+def restore_report_sections_from_evidence_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    year_from: Optional[int] = typer.Option(None, "--year-from", help="시작 사업연도"),
+    year_to: Optional[int] = typer.Option(None, "--year-to", help="종료 사업연도"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    corp_code: Optional[str] = typer.Option(None, "--corp-code", help="대상 DART corp_code"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 evidence 문서 수"),
+):
+    """evidence_documents의 report_section 블록을 report_sections로 복원한다."""
+    from kreports.maintenance.evidence_documents import restore_report_sections_from_evidence
+
+    init_db()
+    result = restore_report_sections_from_evidence(
+        year=year,
+        year_from=year_from,
+        year_to=year_to,
+        source_type=source_type,
+        corp_code=corp_code,
+        limit=limit,
+    )
+    _json_print(result)
 
 
 @app.command("hydrate-source-documents-from-sections")

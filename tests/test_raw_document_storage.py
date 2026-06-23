@@ -466,3 +466,41 @@ def test_clear_cold_derived_inline_content_requires_derived_evidence(temp_engine
         assert cleared.raw_content == ""
         assert cleared.storage_status == "derived_only"
         assert preserved.raw_content == "<DOCUMENT>파생 없음</DOCUMENT>"
+
+
+def test_run_document_extractors_skips_empty_source_without_deleting_sections(temp_engine):
+    from kreports.collector.report_document_collector import run_document_extractors
+    from kreports.db.engine import get_session
+    from kreports.db.models import ReportSection, SourceDocument
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no="20260331000001",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            report_nm="감사보고서",
+            content_type="xml",
+            raw_content="",
+            doc_hash="empty",
+            storage_status="derived_only",
+        ))
+        session.add(ReportSection(
+            rcept_no="20260331000001",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="기존 KAM 섹션은 보존되어야 합니다.",
+            ordinal=0,
+        ))
+
+    out = run_document_extractors(year=2025, source_type="audit_report")
+
+    assert out["total"] == 1
+    assert out["skipped"] == 1
+    assert out["failed"] == 0
+    with get_session() as session:
+        section = session.query(ReportSection).one()
+        assert section.body_text == "기존 KAM 섹션은 보존되어야 합니다."
