@@ -199,6 +199,11 @@ def extract_audit_report_sections(xml_content: str) -> dict[str, dict]:
                 "length": len(body),
             }
         result.update(_extract_by_text_headings(full_text))
+        if "kam" in result:
+            recovered = recover_kam_detail_body(full_text, result["kam"]["body_text"])
+            if recovered != result["kam"]["body_text"]:
+                result["kam"]["body_text"] = recovered
+                result["kam"]["length"] = len(recovered)
         return result
 
     for section_key, keywords in SECTION_KEYWORDS.items():
@@ -226,6 +231,12 @@ def extract_audit_report_sections(xml_content: str) -> dict[str, dict]:
     # while TITLE only contains "독립된 감사인의 감사보고서" and attachments.
     for key, section in _extract_by_text_headings(full_text).items():
         result.setdefault(key, section)
+
+    if "kam" in result:
+        recovered = recover_kam_detail_body(full_text, result["kam"]["body_text"])
+        if recovered != result["kam"]["body_text"]:
+            result["kam"]["body_text"] = recovered
+            result["kam"]["length"] = len(recovered)
 
     return result
 
@@ -329,13 +340,52 @@ _KAM_PROCEDURE_HINTS = (
 
 _PROCEDURE_TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "internal_control": ("내부통제", "통제", "프로세스", "승인"),
+    "external_confirmation": ("조회", "외부조회", "확인서", "채권조회", "회수 여부"),
     "substantive_test": ("문서검사", "표본", "대사", "확인", "검사", "입증"),
     "estimation_assumption": ("추정", "가정", "민감도", "회수가능", "평가"),
-    "external_confirmation": ("조회", "외부조회", "확인서", "채권조회"),
     "valuation_specialist": ("전문가", "평가법인", "감정", "외부평가기관"),
     "analytics": ("분석적", "추세", "비교분석", "분석"),
     "cutoff": ("cutoff", "기간귀속", "마감", "발생사실"),
 }
+
+_PROCEDURE_ZONE_MARKERS = (
+    "핵심감사사항이 감사에서 다루어진 방법",
+    "핵심 감사사항이 감사에서 다루어진 방법",
+    "감사에서 다루어진 방법",
+    "감사인의 대응",
+    "감사인의 감사절차",
+    "우리가 수행한 주요 감사절차",
+    "주요 감사절차",
+    "다음의 감사절차",
+    "다음을 포함한 감사절차",
+    "감사절차",
+)
+
+_GENERIC_AUDITOR_RESPONSIBILITY_PHRASES = (
+    "재무제표감사에 대한 감사인의 책임",
+    "중요왜곡표시위험에 대응하는 감사절차를 설계하고 수행",
+    "핵심감사사항을 결정합니다",
+    "감사보고서에 이러한 사항들을 기술합니다",
+)
+
+_PROCEDURE_INTRO_PHRASES = (
+    "다음을 포함한 감사절차를 수행",
+    "다음의 감사절차를 수행",
+    "다음 감사절차를 수행",
+    "우리는 다음의 감사절차",
+)
+
+_PROCEDURE_BULLET_RE = re.compile(
+    r"\n+|(?:^|\s)[·•ㆍ-]\s*|(?:^|\s)[가-하]\.\s*|(?:^|\s)\(\d+\)\s*|(?:^|\s)\d+\.\s*"
+)
+
+_KAM_DETAIL_START_HINTS = (
+    "핵심감사사항으로 선정한 이유",
+    "핵심 감사사항으로 선정한 이유",
+    "핵심감사사항이 감사에서 다루어진 방법",
+    "감사에서 다루어진 방법",
+    "감사인의 대응",
+)
 
 
 def _sentence_windows(text: str) -> list[str]:
@@ -392,18 +442,47 @@ def classify_audit_procedure_type(text: str) -> str:
     return "other"
 
 
+def _looks_like_generic_auditor_responsibility(text: str) -> bool:
+    body = xml_to_text(text)
+    return any(phrase in body for phrase in _GENERIC_AUDITOR_RESPONSIBILITY_PHRASES)
+
+
 def _procedure_zone(text: str) -> str:
     body = xml_to_text(text)
-    candidates = [
-        "핵심감사사항이 감사에서 다루어진 방법",
-        "감사에서 다루어진 방법",
-        "주요 감사절차",
-        "감사절차",
-    ]
-    positions = [body.find(marker) for marker in candidates if body.find(marker) >= 0]
+    if _looks_like_generic_auditor_responsibility(body):
+        return ""
+    positions = [body.find(marker) for marker in _PROCEDURE_ZONE_MARKERS if body.find(marker) >= 0]
     if not positions:
         return body
     return body[min(positions):]
+
+
+def recover_kam_detail_body(full_text: str, extracted_body: str) -> str:
+    """Recover detailed KAM text when the extracted section is only the intro."""
+    body = (extracted_body or "").strip()
+    if len(body) >= 300 and any(hint in body for hint in _KAM_DETAIL_START_HINTS):
+        return body
+    text_value = xml_to_text(full_text)
+    kam_pos = _find_heading_candidate(text_value, "kam", "핵심감사사항")
+    if kam_pos < 0:
+        return body
+    end = len(text_value)
+    for section_key in (
+        "management_responsibility",
+        "auditor_responsibility",
+        "basis_for_opinion",
+        "emphasis",
+        "other_matter",
+    ):
+        for keyword in SECTION_KEYWORDS[section_key]:
+            pos = _find_heading_candidate(text_value[kam_pos + 1:], section_key, keyword)
+            if pos >= 0:
+                end = min(end, kam_pos + 1 + pos)
+                break
+    recovered = _trim_section_body("kam", text_value[kam_pos:end].strip())
+    if len(recovered) > max(len(body), 120) and any(hint in recovered for hint in _KAM_DETAIL_START_HINTS):
+        return recovered
+    return body
 
 
 def extract_audit_procedure_items(kam_body: str) -> list[dict]:
@@ -411,21 +490,18 @@ def extract_audit_procedure_items(kam_body: str) -> list[dict]:
     zone = _procedure_zone(kam_body)
     if not zone:
         return []
-    pieces = re.split(r"\n+|(?:^|\s)[·•ㆍ\-]\s*|(?:^|\s)\(\d+\)\s*", zone)
+    pieces = _PROCEDURE_BULLET_RE.split(zone)
     items: list[dict] = []
     seen: set[str] = set()
     for piece in pieces:
         text = re.sub(r"\s+", " ", piece or "").strip(" ;·•ㆍ-")
         if len(text) < 12:
             continue
-        if text in {
-            "핵심감사사항이 감사에서 다루어진 방법",
-            "감사에서 다루어진 방법",
-            "주요 감사절차",
-            "감사절차",
-        }:
+        if text in set(_PROCEDURE_ZONE_MARKERS):
             continue
-        if "다음을 포함한 감사절차" in text:
+        if any(marker in text and len(text) < len(marker) + 18 for marker in _PROCEDURE_ZONE_MARKERS):
+            continue
+        if any(phrase in text for phrase in _PROCEDURE_INTRO_PHRASES):
             continue
         if not any(
             hint in text

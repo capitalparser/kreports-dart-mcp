@@ -137,6 +137,61 @@ def test_extract_audit_procedure_items_handles_korean_middle_dot_bullets():
     assert "할인율과 비교" in items[-1]["procedure_text"]
 
 
+def test_extract_audit_procedure_items_handles_auditor_response_heading():
+    body = """
+    수익인식
+    핵심감사사항으로 선정한 이유
+    계약 조건과 기간귀속 판단이 중요합니다.
+    감사인의 대응
+    우리는 다음의 감사절차를 수행하였습니다.
+    가. 계약서 원본과 세금계산서 대사
+    나. 보고기간 전후 매출의 기간귀속 테스트
+    다. 매출채권 회수 여부 확인
+    """
+
+    items = extract_audit_procedure_items(body)
+
+    assert len(items) == 3
+    assert items[0]["procedure_type"] == "substantive_test"
+    assert "기간귀속 테스트" in items[1]["procedure_text"]
+    assert items[2]["procedure_type"] == "external_confirmation"
+
+
+def test_extract_audit_procedure_items_excludes_generic_auditor_responsibility():
+    body = """
+    재무제표감사에 대한 감사인의 책임
+    우리는 중요왜곡표시위험에 대응하는 감사절차를 설계하고 수행합니다.
+    우리는 지배기구와 커뮤니케이션한 사항 중 핵심감사사항을 결정합니다.
+    """
+
+    assert extract_audit_procedure_items(body) == []
+
+
+def test_extract_audit_report_sections_recovers_detail_after_short_kam_intro():
+    xml = """
+    <DOCUMENT>
+      <P>감사의견</P>
+      <P>우리는 재무제표가 적정하게 표시되어 있다고 판단합니다.</P>
+      <P>핵심감사사항</P>
+      <P>핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다.</P>
+      <P>수익인식</P>
+      <P>핵심감사사항으로 선정한 이유: 계약 조건 판단과 기간귀속에 중요한 왜곡표시위험이 존재합니다.</P>
+      <P>핵심감사사항이 감사에서 다루어진 방법</P>
+      <P>ㆍ계약서와 세금계산서 대사를 수행하였습니다.</P>
+      <P>ㆍ보고기간 전후 매출의 기간귀속 테스트를 수행하였습니다.</P>
+      <P>재무제표에 대한 경영진의 책임</P>
+      <P>경영진은 재무제표 작성 책임이 있습니다.</P>
+    </DOCUMENT>
+    """
+
+    sections = extract_audit_report_sections(xml)
+
+    assert "kam" in sections
+    assert "계약 조건 판단" in sections["kam"]["body_text"]
+    assert "기간귀속 테스트" in sections["kam"]["body_text"]
+    assert sections["kam"]["length"] > 120
+
+
 def test_extract_audit_report_sections_does_not_treat_auditor_responsibility_phrase_as_kam():
     xml = """
     <DOCUMENT>
