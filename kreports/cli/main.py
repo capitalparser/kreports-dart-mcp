@@ -910,6 +910,47 @@ def audit_kam_quality_cmd(
         typer.echo(f"- {item}")
 
 
+@app.command("audit-procedure-evidence-map")
+def audit_procedure_evidence_map_cmd(
+    year: int = typer.Option(2025, "--year", help="기준 사업연도"),
+    company: Optional[str] = typer.Option(None, "--company", help="corp_code, stock_code, or 회사명"),
+    market: Optional[str] = typer.Option(None, "--market", help="시장 필터: KOSPI/KOSDAQ"),
+    limit: int = typer.Option(100, "--limit", help="샘플 최대 행 수"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """감사절차가 어떤 공시/주석/계정 근거와 연결되는지 진단한다."""
+    from kreports.analysis.audit_procedure_evidence import build_audit_procedure_evidence_map
+
+    snapshot = build_audit_procedure_evidence_map(
+        year=year,
+        company=company,
+        market=market,
+        limit=limit,
+    )
+    if json_output:
+        _json_print(snapshot)
+        return
+
+    typer.echo(f"Audit procedure evidence map: {snapshot['verdict']}")
+    typer.echo(
+        f"year: {snapshot['year']} | company: {snapshot['company'] or '-'} | "
+        f"market: {snapshot['market'] or '-'}"
+    )
+    typer.echo("counts:")
+    for key, value in snapshot["counts"].items():
+        typer.echo(f"- {key}: {value}")
+    typer.echo("rates:")
+    for key, value in snapshot["rates"].items():
+        typer.echo(f"- {key}: {value}%")
+    typer.echo(f"required_gaps: {', '.join(snapshot['required_gaps']) or '-'}")
+    for row in snapshot["samples"][:10]:
+        linkage_labels = ", ".join(link["label"] for link in row["linkages"][:4]) or "-"
+        typer.echo(
+            f"  {row['stock_code'] or row['corp_code']} {row['corp_name']} "
+            f"len={row['body_length']} procedures={row['procedure_count']} links={linkage_labels}"
+        )
+
+
 @app.command("repair-kam-sections")
 def repair_kam_sections_cmd(
     year: int = typer.Option(2025, "--year", help="기준 사업연도"),
