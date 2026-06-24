@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 import kreports.db.engine as engine_module
 
@@ -136,6 +136,45 @@ def build_audit_procedure_evidence_map(
 
     engine = engine_module.engine
     with engine.connect() as conn:
+        kam_summary = dict(
+            conn.execute(
+                text(f"""
+                    SELECT
+                        COUNT(*) AS kam_sections,
+                        COALESCE(SUM(
+                            CASE
+                                WHEN COALESCE(rs.body_length, LENGTH(rs.body_text)) < 300 THEN 1
+                                ELSE 0
+                            END
+                        ), 0) AS short_kam_sections
+                    FROM report_sections rs
+                    JOIN companies c ON c.corp_code=rs.corp_code
+                    WHERE rs.bsns_year=:year
+                      AND rs.source_type='audit_report'
+                      AND rs.section_key='kam'
+                      {company_filter}
+                      {market_filter}
+                """),
+                params,
+            ).mappings().first()
+            or {}
+        )
+        procedure_summary = dict(
+            conn.execute(
+                text(f"""
+                    SELECT
+                        COUNT(*) AS procedure_items,
+                        COUNT(DISTINCT api.rcept_no) AS procedure_receipts
+                    FROM audit_procedure_items api
+                    JOIN companies c ON c.corp_code=api.corp_code
+                    WHERE api.bsns_year=:year
+                      {company_filter}
+                      {market_filter}
+                """),
+                params,
+            ).mappings().first()
+            or {}
+        )
         kam_rows = [
             dict(r)
             for r in conn.execute(
@@ -156,8 +195,26 @@ def build_audit_procedure_evidence_map(
                 params,
             ).mappings().all()
         ]
-
-        procedure_rows = [
+        sample_receipts = [str(row.get("rcept_no")) for row in kam_rows if row.get("rcept_no")]
+        if sample_receipts:
+            procedure_stmt = text("""
+                SELECT api.corp_code, api.rcept_no, api.dcm_no, api.kam_topic,
+                       api.procedure_type, api.procedure_text, api.procedure_length
+                FROM audit_procedure_items api
+                WHERE api.bsns_year=:year
+                  AND api.rcept_no IN :sample_receipts
+                ORDER BY api.corp_code, api.rcept_no, api.procedure_ordinal
+            """).bindparams(bindparam("sample_receipts", expanding=True))
+            procedure_rows = [
+                dict(r)
+                for r in conn.execute(
+                    procedure_stmt,
+                    {"year": params["year"], "sample_receipts": sample_receipts},
+                ).mappings().all()
+            ]
+        else:
+            procedure_rows = []
+        linkage_probe_rows = [
             dict(r)
             for r in conn.execute(
                 text(f"""
@@ -179,7 +236,18 @@ def build_audit_procedure_evidence_map(
     for row in procedure_rows:
         procedures_by_receipt.setdefault(str(row.get("rcept_no")), []).append(row)
 
-    short_count = sum(1 for row in kam_rows if int(row.get("body_length") or 0) < 300)
+    total_kam_sections = int(kam_summary.get("kam_sections") or 0)
+    short_count = int(kam_summary.get("short_kam_sections") or 0)
+    procedure_item_count = int(procedure_summary.get("procedure_items") or 0)
+    procedure_receipt_count = int(procedure_summary.get("procedure_receipts") or 0)
+    linked_probe_count = sum(
+        1
+        for row in linkage_probe_rows
+        if classify_audit_procedure_linkages(
+            str(row.get("procedure_text") or ""),
+            kam_topic=row.get("kam_topic"),
+        )
+    )
     samples: list[dict[str, Any]] = []
     for row in kam_rows:
         procedures = procedures_by_receipt.get(str(row.get("rcept_no")), [])
@@ -202,17 +270,23 @@ def build_audit_procedure_evidence_map(
         })
 
     counts = {
-        "kam_sections": len(kam_rows),
+        "kam_sections": total_kam_sections,
         "short_kam_sections": short_count,
-        "procedure_items": len(procedure_rows),
-        "procedure_receipts": len({row.get("rcept_no") for row in procedure_rows}),
+        "procedure_items": procedure_item_count,
+        "procedure_receipts": procedure_receipt_count,
+        "linked_procedure_items_sampled": linked_probe_count,
+    }
+    sample = {
+        "kam_sections": len(kam_rows),
+        "procedure_items_for_sample_receipts": len(procedure_rows),
+        "procedure_items_for_linkage_probe": len(linkage_probe_rows),
     }
     required_gaps: list[str] = []
     if short_count:
         required_gaps.append("short_kam_body")
-    if len(procedure_rows) == 0:
+    if procedure_item_count == 0:
         required_gaps.append("audit_procedure_items")
-    if not any(sample["linkages"] for sample in samples):
+    if procedure_item_count > 0 and linked_probe_count == 0:
         required_gaps.append("procedure_evidence_linkages")
 
     if "short_kam_body" in required_gaps or "audit_procedure_items" in required_gaps:
@@ -228,9 +302,15 @@ def build_audit_procedure_evidence_map(
         "company": company,
         "market": market,
         "counts": counts,
+        "sample": sample,
         "rates": {
-            "short_kam_rate": round(short_count * 100.0 / len(kam_rows), 1) if kam_rows else 0.0,
-            "procedure_to_kam_rate": round(len(procedure_rows) * 100.0 / len(kam_rows), 1) if kam_rows else 0.0,
+            "short_kam_rate": round(short_count * 100.0 / total_kam_sections, 1) if total_kam_sections else 0.0,
+            "procedure_receipt_to_kam_rate": (
+                round(procedure_receipt_count * 100.0 / total_kam_sections, 1) if total_kam_sections else 0.0
+            ),
+            "procedure_linkage_sample_rate": (
+                round(linked_probe_count * 100.0 / len(linkage_probe_rows), 1) if linkage_probe_rows else 0.0
+            ),
         },
         "required_gaps": required_gaps,
         "samples": samples,

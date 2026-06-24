@@ -76,3 +76,49 @@ def test_build_audit_procedure_evidence_map_reports_short_kam_and_linkages(temp_
     assert result["counts"]["procedure_items"] == 1
     assert result["samples"][0]["linkages"][0]["category"] == "audit_report_kam"
     assert "short_kam_body" in result["required_gaps"]
+
+
+def test_build_audit_procedure_evidence_map_separates_totals_from_sample_limit(temp_engine):
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
+        session.add(Company(corp_code="00164779", stock_code="000660", corp_name="SK하이닉스", market="KOSPI"))
+        for idx, corp_code in enumerate(["00126380", "00164779"], start=1):
+            session.add(
+                ReportSection(
+                    corp_code=corp_code,
+                    bsns_year=2025,
+                    rcept_no=f"2026030100000{idx}_100",
+                    dcm_no="100",
+                    source_type="audit_report",
+                    section_key="kam",
+                    section_title="핵심감사사항",
+                    body_text="핵심감사사항은 우리의 전문가적 판단에 따라 당기",
+                    body_length=26,
+                    ordinal=1,
+                    fetched_at=datetime(2026, 3, 1),
+                )
+            )
+        for ordinal, topic in enumerate(["revenue", "inventory", "impairment"], start=1):
+            session.add(
+                AuditProcedureItem(
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    rcept_no="20260301000001_100",
+                    dcm_no="100",
+                    source_type="audit_report",
+                    section_ordinal=1,
+                    kam_topic=topic,
+                    procedure_type="substantive_test",
+                    procedure_text="매출 계약서 문서검사와 기간귀속 테스트를 수행하였습니다.",
+                    procedure_hash=f"p{ordinal}",
+                    procedure_length=32,
+                    procedure_ordinal=ordinal,
+                    fetched_at=datetime(2026, 3, 1),
+                )
+            )
+
+    result = build_audit_procedure_evidence_map(year=2025, limit=1)
+
+    assert result["counts"]["kam_sections"] == 2
+    assert result["counts"]["procedure_items"] == 3
+    assert result["sample"]["kam_sections"] == 1
