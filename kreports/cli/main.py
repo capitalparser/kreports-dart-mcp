@@ -761,9 +761,11 @@ def investor_dataset_readiness_cmd(
     )
     for row in snapshot["yearly"]:
         typer.echo(
-            f"- {row['year']}: compact_core {row['compact_core_companies']}/{row['listed']} "
+            f"- {row['year']}: compact_core "
+            f"{row['compact_core_companies']}/{row['financial_eligible_companies']} "
             f"({row['compact_core_coverage_pct']}%), "
-            f"disclosure_list {row['disclosure_list_companies']}/{row['listed']} "
+            f"disclosure_list "
+            f"{row['disclosure_list_companies']}/{row['disclosure_eligible_companies']} "
             f"({row['disclosure_list_coverage_pct']}%), "
             f"event_index rows {row['disclosure_event_rows']}"
         )

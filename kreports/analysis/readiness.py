@@ -714,15 +714,65 @@ def investor_dataset_readiness_snapshot(
                     AND c.market IN ('KOSPI','KOSDAQ')
                     {market_filter}
                 ),
-                fin_metric AS (
-                  SELECT ffc.bsns_year, ffc.corp_code,
+                annual_report AS (
+                  SELECT CAST(substr(d.report_nm, instr(d.report_nm, '(') + 1, 4) AS INTEGER) bsns_year,
+                         d.corp_code
+                  FROM disclosures d
+                  JOIN listed l ON l.corp_code=d.corp_code
+                  WHERE d.report_nm LIKE '%사업보고서 (%'
+                    AND d.report_nm NOT LIKE '%제출기한연장%'
+                    AND instr(d.report_nm, '(') > 0
+                  GROUP BY bsns_year, d.corp_code
+                ),
+                fin_fs AS (
+                  SELECT ffc.bsns_year, ffc.corp_code, ffc.fs_div,
                          COUNT(DISTINCT ffc.metric_key) metric_count
                   FROM financial_facts_compact ffc
                   JOIN listed l ON l.corp_code=ffc.corp_code
                   WHERE ffc.bsns_year BETWEEN :start_year AND :year
-                    AND ffc.fs_div='CFS'
+                    AND ffc.fs_div IN ('CFS', 'OFS')
                     AND ffc.metric_key IN ({metric_placeholders})
-                  GROUP BY ffc.bsns_year, ffc.corp_code
+                  GROUP BY ffc.bsns_year, ffc.corp_code, ffc.fs_div
+                ),
+                fin_metric AS (
+                  SELECT bsns_year, corp_code,
+                         MAX(CASE WHEN metric_count >= :metric_count THEN 1 ELSE 0 END) has_core
+                  FROM fin_fs
+                  GROUP BY bsns_year, corp_code
+                ),
+                financial_eligible AS (
+                  SELECT y.y year, l.corp_code
+                  FROM years y
+                  JOIN listed l
+                  LEFT JOIN annual_report ar ON ar.bsns_year=y.y AND ar.corp_code=l.corp_code
+                  LEFT JOIN fin_metric fm ON fm.bsns_year=y.y AND fm.corp_code=l.corp_code
+                  WHERE ar.corp_code IS NOT NULL OR fm.corp_code IS NOT NULL
+                  GROUP BY y.y, l.corp_code
+                ),
+                financial_eligible_yearly AS (
+                  SELECT year, COUNT(DISTINCT corp_code) financial_eligible_companies
+                  FROM financial_eligible
+                  GROUP BY year
+                ),
+                disclosure_first AS (
+                  SELECT d.corp_code,
+                         MIN(CAST(strftime('%Y', d.disc_date) AS INTEGER)) first_filing_year
+                  FROM disclosures d
+                  JOIN listed l ON l.corp_code=d.corp_code
+                  GROUP BY d.corp_code
+                ),
+                disclosure_eligible AS (
+                  SELECT y.y year, l.corp_code
+                  FROM years y
+                  JOIN listed l
+                  JOIN disclosure_first df ON df.corp_code=l.corp_code
+                  WHERE df.first_filing_year <= y.y
+                  GROUP BY y.y, l.corp_code
+                ),
+                disclosure_eligible_yearly AS (
+                  SELECT year, COUNT(DISTINCT corp_code) disclosure_eligible_companies
+                  FROM disclosure_eligible
+                  GROUP BY year
                 ),
                 disc AS (
                   SELECT CAST(strftime('%Y', d.disc_date) AS INTEGER) filing_year,
@@ -750,12 +800,16 @@ def investor_dataset_readiness_snapshot(
                 )
                 SELECT y.y year,
                        :listed listed,
-                       COUNT(DISTINCT CASE WHEN fm.metric_count >= :metric_count THEN fm.corp_code END) compact_core_companies,
+                       COALESCE(MAX(fey.financial_eligible_companies), 0) financial_eligible_companies,
+                       COALESCE(MAX(dey.disclosure_eligible_companies), 0) disclosure_eligible_companies,
+                       COUNT(DISTINCT CASE WHEN fm.has_core = 1 THEN fm.corp_code END) compact_core_companies,
                        COUNT(DISTINCT disc.corp_code) disclosure_list_companies,
                        COALESCE(MAX(ey.event_companies), 0) disclosure_event_companies,
                        COALESCE(MAX(ey.event_rows), 0) disclosure_event_rows
                 FROM years y
                 LEFT JOIN fin_metric fm ON fm.bsns_year=y.y
+                LEFT JOIN financial_eligible_yearly fey ON fey.year=y.y
+                LEFT JOIN disclosure_eligible_yearly dey ON dey.year=y.y
                 LEFT JOIN disc ON disc.filing_year=y.y
                 LEFT JOIN event_yearly ey ON ey.event_year=y.y
                 GROUP BY y.y
@@ -778,13 +832,15 @@ def investor_dataset_readiness_snapshot(
     recommended_gaps: list[str] = []
     for row in yearly_rows:
         row_dict = dict(row)
-        row_dict["compact_core_coverage_pct"] = pct(row_dict["compact_core_companies"], listed)
-        row_dict["disclosure_list_coverage_pct"] = pct(row_dict["disclosure_list_companies"], listed)
-        row_dict["event_company_coverage_pct"] = pct(row_dict["disclosure_event_companies"], listed)
+        financial_denominator = row_dict["financial_eligible_companies"]
+        disclosure_denominator = row_dict["disclosure_eligible_companies"]
+        row_dict["compact_core_coverage_pct"] = pct(row_dict["compact_core_companies"], financial_denominator)
+        row_dict["disclosure_list_coverage_pct"] = pct(row_dict["disclosure_list_companies"], disclosure_denominator)
+        row_dict["event_company_coverage_pct"] = pct(row_dict["disclosure_event_companies"], disclosure_denominator)
         rows.append(row_dict)
-        if row_dict["compact_core_coverage_pct"] < CORE_COVERAGE_THRESHOLD:
+        if financial_denominator and row_dict["compact_core_coverage_pct"] < CORE_COVERAGE_THRESHOLD:
             required_gaps.append(f"financial_compact_core_{row_dict['year']}")
-        if row_dict["disclosure_list_coverage_pct"] < CORE_COVERAGE_THRESHOLD:
+        if disclosure_denominator and row_dict["disclosure_list_coverage_pct"] < CORE_COVERAGE_THRESHOLD:
             required_gaps.append(f"disclosure_list_{row_dict['year']}")
         if row_dict["disclosure_event_rows"] == 0:
             recommended_gaps.append(f"disclosure_event_index_{row_dict['year']}")
