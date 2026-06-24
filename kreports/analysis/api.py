@@ -29,6 +29,7 @@ from kreports.analysis.peer import (
     resolve_peers,
 )
 from kreports.analysis.evidence import parent_rcept_no
+from kreports.analysis.audit_procedure_evidence import classify_audit_procedure_linkages
 from kreports.storage.raw_documents import RawDocumentStore
 
 
@@ -3696,6 +3697,10 @@ def search_audit_procedures(
         text_value = _display_text(row.pop("procedure_text") or "")
         if include_excerpt:
             row["procedure_excerpt"] = text_value[:900]
+        row["linkages"] = classify_audit_procedure_linkages(
+            text_value,
+            kam_topic=row.get("kam_topic"),
+        )
     companies = _group_company_records(rows, limit=limit)
     type_counts: dict[str, int] = {}
     topic_counts: dict[str, int] = {}
@@ -3727,8 +3732,9 @@ def search_audit_procedures(
             "status": "usable" if companies else "missing",
             "source": row_source,
             "interpretation": (
-                "Procedure items are parsed hints from cached KAM audit-response paragraphs. "
-                "They support comparison and search, but do not replace reading the full audit report."
+                "Procedure items are parsed hints from cached audit-report KAM response paragraphs. "
+                "The linkages explain which audit-report KAM, financial-statement account, "
+                "accounting note, or disclosure-event evidence should be checked with the procedure."
             ),
         },
     }
