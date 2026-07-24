@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no, source_line
+from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
 
 
 def _status(result: dict) -> str:
@@ -726,36 +727,110 @@ def _render_generic(tool_name: str, result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | None = None) -> str:
+    """Render the stable V1 prose sections from an AnswerEnvelopeV1."""
+    lines = ["판정:", f"- {envelope.verdict}", "", "확인된 내용 (공시에서 확인되는 내용):"]
+    if envelope.confirmed_facts:
+        for fact in _dedupe_confirmed_facts_for_render(envelope.confirmed_facts)[:6]:
+            statement = str(fact.get("statement") or "").strip()
+            if statement:
+                lines.append(f"- {statement}")
+    else:
+        lines.append("- 확인 가능한 사실이 현재 결과에 포함되지 않았습니다.")
+
+    lines.extend(["", "분석:"])
+    if envelope.analysis:
+        for item in envelope.analysis[:5]:
+            heading = _analysis_heading(item.perspective)
+            lines.append(f"- {heading}: {item.statement}")
+    else:
+        lines.append("- 추가 해석은 확인된 근거 범위 안에서만 수행해야 합니다.")
+
+    lines.extend(["", "출처:"])
+    if envelope.evidence:
+        for reference in envelope.evidence[:6]:
+            label = reference.source_label
+            if reference.section_title:
+                label = f"{label}, {reference.section_title}"
+            if reference.rcept_no:
+                label = f"{label}, 접수번호 {reference.rcept_no}"
+            lines.append(f"- 출처: {label}")
+            lines.append(f"  공시 링크: {reference.source_url}")
+    else:
+        lines.append("- 연결 가능한 공시 접수번호가 현재 결과에 포함되지 않았습니다.")
+
+    lines.extend(["", "데이터 한계:"])
+    limitations = list(dict.fromkeys(envelope.data_quality.limitations + envelope.warnings))
+    lines.append(f"- 상태: {envelope.data_quality.status}")
+    if limitations:
+        lines.extend(f"- {limitation}" for limitation in limitations[:5])
+    else:
+        lines.append("- 현재 결과의 범위와 최신성은 원 공시로 추가 확인해야 합니다.")
+
+    lines.extend(["", "추가 확인사항:"])
+    if envelope.next_checks:
+        lines.extend(f"- {check}" for check in envelope.next_checks[:6])
+    else:
+        lines.append("- 중요 판단 전 원 공시 본문과 최신 공시를 확인하세요.")
+
+    if detail:
+        lines.extend(["", "세부 결과:", detail])
+    return "\n".join(lines)
+
+
+def _sanitize_legacy_detail(detail: str) -> str:
+    """Keep legacy summaries readable without exposing implementation field names."""
+    replacements = {
+        "answer_pack.charts.peer_percentile_matrix": "연도별 지표 백분위 히트맵",
+        "answer_pack.charts.peer_band": "대상회사와 peer 사분위 비교",
+        "report_sections.audit_report": "로컬 감사보고서 캐시",
+        "audit_matter_items": "감사보고서 항목 캐시",
+        "audit_procedure_items": "감사절차 항목 캐시",
+        "financial_facts_compact": "재무 공시 캐시",
+    }
+    for internal_name, public_name in replacements.items():
+        detail = detail.replace(f"`{internal_name}`", public_name).replace(internal_name, public_name)
+    return detail.replace("`_meta`", "응답 메타데이터").replace("_meta", "응답 메타데이터")
+
+
 def render_answer(tool_name: str, result: Any) -> str | None:
     """Return Korean narrative text for a structured tool result."""
-    if not isinstance(result, dict) or result.get("error"):
+    if not isinstance(result, dict):
         return None
+    envelope = build_answer_envelope(tool_name, result)
+    legacy_result = dict(result)
+    for field in ("confirmed_facts", "analysis", "next_checks"):
+        legacy_result.pop(field, None)
+    detail: str | None = None
     if tool_name == "search_dataset":
-        return _render_search_dataset(result)
-    if tool_name == "get_subsidiary_auditors":
-        return _render_subsidiary_auditors(result)
-    if tool_name == "compare_peer_kam_topics":
-        return _render_kam_topics(result)
-    if tool_name in {"get_audit_report_sections"}:
-        return _render_audit_report_sections(result)
-    if tool_name in {"search_audit_report_matters", "compare_peer_audit_report_matters"}:
-        return _render_audit_report_matters(result)
-    if tool_name in {"search_audit_procedures", "compare_peer_audit_procedures"}:
-        return _render_audit_procedures(result)
-    if tool_name == "get_kam_lifecycle":
-        return _render_kam_lifecycle(result)
-    if tool_name == "get_accounting_policy_changes":
-        return _render_policy_changes(result)
-    if tool_name == "get_quality_of_earnings_pack":
-        return _render_quality_of_earnings(result)
-    if tool_name == "get_dcf_input_candidates":
-        return _render_dcf_inputs(result)
-    if tool_name == "search_disclosure_events":
-        return _render_disclosure_events(result)
-    if tool_name == "get_investor_signals":
-        return _render_investor_signals(result)
-    if tool_name == "compare_to_industry_multi":
-        return _render_peer_benchmark(result)
-    if tool_name == "build_audit_acceptance_pack":
-        return _render_acceptance_pack(result)
-    return _render_generic(tool_name, result)
+        detail = _render_search_dataset(legacy_result)
+    elif tool_name == "get_subsidiary_auditors":
+        detail = _render_subsidiary_auditors(legacy_result)
+    elif tool_name == "compare_peer_kam_topics":
+        detail = _render_kam_topics(legacy_result)
+    elif tool_name in {"get_audit_report_sections"}:
+        detail = _render_audit_report_sections(legacy_result)
+    elif tool_name in {"search_audit_report_matters", "compare_peer_audit_report_matters"}:
+        detail = _render_audit_report_matters(legacy_result)
+    elif tool_name in {"search_audit_procedures", "compare_peer_audit_procedures"}:
+        detail = _render_audit_procedures(legacy_result)
+    elif tool_name == "get_kam_lifecycle":
+        detail = _render_kam_lifecycle(legacy_result)
+    elif tool_name == "get_accounting_policy_changes":
+        detail = _render_policy_changes(legacy_result)
+    elif tool_name == "get_quality_of_earnings_pack":
+        detail = _render_quality_of_earnings(legacy_result)
+    elif tool_name == "get_dcf_input_candidates":
+        detail = _render_dcf_inputs(legacy_result)
+    elif tool_name == "search_disclosure_events":
+        detail = _render_disclosure_events(legacy_result)
+    elif tool_name == "get_investor_signals":
+        detail = _render_investor_signals(legacy_result)
+    elif tool_name == "compare_to_industry_multi":
+        detail = _render_peer_benchmark(legacy_result)
+    elif tool_name == "build_audit_acceptance_pack":
+        detail = _render_acceptance_pack(legacy_result)
+    return _render_professional_envelope(
+        envelope,
+        detail=_sanitize_legacy_detail(detail) if detail else None,
+    )

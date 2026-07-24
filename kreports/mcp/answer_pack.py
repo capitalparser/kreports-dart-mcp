@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no
+from kreports.mcp.contracts import build_answer_envelope
 
 
 PACK_VERSION = "answer_pack.v1"
@@ -18,6 +19,12 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     """Return a visual answer pack for known tool outputs."""
     if not isinstance(result, dict) or result.get("error"):
         return None
+
+    envelope = build_answer_envelope(tool_name, result)
+    normalized_result = dict(result)
+    normalized_quality = dict(result.get("data_quality") or {})
+    normalized_quality.update(envelope.data_quality.model_dump())
+    normalized_result["data_quality"] = normalized_quality
 
     builders = {
         "get_dcf_input_candidates": _build_dcf_pack,
@@ -29,8 +36,8 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     }
     builder = builders.get(tool_name)
     if builder is None:
-        return _build_generic_pack(tool_name, result)
-    return builder(result)
+        return _build_generic_pack(tool_name, normalized_result)
+    return builder(normalized_result)
 
 
 def _base_pack(title: str, result: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:

@@ -23,6 +23,27 @@ def dart_filing_url(rcept_no: str | None) -> str | None:
     return f"{DART_FILING_URL_PREFIX}{parent}" if parent else None
 
 
+def evidence_reference_fields(source: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a legacy fact source into public, renderer-safe evidence fields."""
+    raw_rcept_no = source.get("parent_rcept_no") or source.get("rcept_no")
+    rcept_no = parent_rcept_no(str(raw_rcept_no or ""))
+    source_url = dart_filing_url(raw_rcept_no)
+    if not source_url:
+        return None
+
+    label_parts = [
+        source.get("corp_name") or source.get("corp_code"),
+        source.get("report_nm"),
+    ]
+    label = " ".join(str(part).strip() for part in label_parts if part).strip() or "DART 공시"
+    return {
+        "source_label": label,
+        "source_url": source_url,
+        "rcept_no": rcept_no,
+        "section_title": source.get("section_title") or source.get("section_key"),
+    }
+
+
 def source_line(source: dict[str, Any]) -> str:
     """Render a compact Korean source line for a confirmed fact."""
     corp_name = source.get("corp_name") or source.get("corp_code") or "대상 회사"

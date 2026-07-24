@@ -124,3 +124,19 @@ def test_attach_meta_adds_peer_benchmark_pack():
     assert pack["summary"]["title"] == "A Peer 벤치마크"
     assert any(table["id"] == "peer_metric_matrix" for table in pack["tables"])
     assert any(chart["id"] == "peer_percentile_matrix" and chart["type"] == "heatmap" for chart in pack["charts"])
+
+
+def test_answer_pack_normalizes_legacy_quality_through_the_v1_contract():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_audit_report_sections", {
+        "confirmed_facts": [{
+            "statement": "감사보고서 본문이 확인되었습니다.",
+            "source": {"rcept_no": "20250301000001"},
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert pack is not None
+    assert pack["data_quality"]["schema_version"] == "legacy-result-adapter"
+    assert pack["sources"][0]["url"].startswith("https://dart.fss.or.kr/")
