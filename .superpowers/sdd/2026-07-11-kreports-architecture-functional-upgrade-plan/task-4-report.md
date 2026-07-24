@@ -14,7 +14,7 @@
 
 ## Review follow-up
 
-- Follow-up commit: `PENDING`
+- Follow-up implementation commit: `93dd23bc18d950f36d2f6d86510c6bd83fea2bc7`
 - Added a central `get_session()` guard for ORM unit-of-work changes and Core/text DML, including when tests monkeypatch `SessionLocal`.
 - `RawDocumentStore.write()` now enforces the same collector/raw-policy boundary directly; GCS also requires a bucket.
 - Empty manifest tables no longer pass readiness. DB inspection failures and unexpected `/readyz` gate exceptions now return a stable HTTP 503 payload with `runtime_db_unavailable`.
