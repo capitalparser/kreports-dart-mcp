@@ -17,7 +17,7 @@ PACK_VERSION = "answer_pack.v1"
 
 def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] | None:
     """Return a visual answer pack for known tool outputs."""
-    if not isinstance(result, dict) or result.get("error"):
+    if not isinstance(result, dict) or "error" in result:
         return None
 
     envelope = build_answer_envelope(tool_name, result)

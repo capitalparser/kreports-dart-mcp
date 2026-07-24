@@ -46,6 +46,7 @@ from kreports.mcp.schemas import (
     FsDiv,
     KReportsToolResponse,
 )
+from kreports.mcp.contracts import enrich_answer_response
 
 
 _FS_DIVS = {"CFS", "OFS"}
@@ -148,10 +149,11 @@ def _attach_meta(name: str, result: Any) -> Any:
 
 
 def _wrap(name: str, payload: Any) -> KReportsToolResponse:
-    """도메인 결과를 `_attach_meta` 부착 후 표준 컨테이너로 감싼다."""
+    """도메인 결과를 메타·answer pack·narrative까지 표준화해 감싼다."""
     enriched = _attach_meta(name, payload) if isinstance(payload, dict) else payload
     if not isinstance(enriched, dict):
         enriched = {"value": enriched, "_meta": {"tool": name}}
+    enriched = enrich_answer_response(name, enriched)
     return KReportsToolResponse.model_validate(enriched)
 
 

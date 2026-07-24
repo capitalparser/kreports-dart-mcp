@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from kreports.mcp.tools import call_tool
 from kreports.mcp.renderers import render_answer
 
@@ -93,3 +95,55 @@ def test_detailed_narrative_hides_internal_answer_pack_and_table_identifiers():
     assert text is not None
     assert "answer_pack" not in text
     assert "peer_percentile_matrix" not in text
+
+
+def test_missing_search_cache_suppresses_legacy_zero_count_detail_and_dataset_id():
+    text = render_answer("search_dataset", {
+        "query": {"dataset": "report_sections"},
+        "total_companies": 0,
+        "total_records": 0,
+        "companies": [],
+        "data_quality": {"status": "missing"},
+    })
+
+    assert text is not None
+    assert "0건이 확인" not in text
+    assert "report_sections" not in text
+
+
+def test_kam_event_summary_never_interpolates_raw_dict_or_list():
+    text = render_answer("compare_peer_kam_topics", {
+        "subject": {"corp_name": "A"},
+        "year": 2025,
+        "kam_topics": [],
+        "audit_report_events": {"new": ["revenue"], "repeated": 2},
+        "data_quality": {"status": "limited"},
+    })
+
+    assert text is not None
+    assert "{'new'" not in text
+    assert "['revenue']" not in text
+
+
+@pytest.mark.parametrize("tool_name,payload,internal_name", [
+    ("search_dataset", {
+        "query": {"dataset": "report_sections"},
+        "total_companies": 1,
+        "total_records": 1,
+        "companies": [],
+        "data_quality": {"status": "usable", "source": "report_sections"},
+    }, "report_sections"),
+    ("get_subsidiary_auditors", {
+        "subsidiaries": [],
+        "data_quality": {"status": "limited", "source": "local_subsidiary_auditor_matrix"},
+    }, "local_subsidiary_auditor_matrix"),
+    ("get_accounting_policy_changes", {
+        "changed_items": [],
+        "data_quality": {"status": "limited", "source": "accounting_note_chapters"},
+    }, "accounting_note_chapters"),
+])
+def test_legacy_detail_uses_public_source_labels(tool_name, payload, internal_name):
+    text = render_answer(tool_name, payload)
+
+    assert text is not None
+    assert internal_name not in text

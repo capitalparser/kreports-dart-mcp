@@ -13,7 +13,7 @@ _ADAPTER_VERSION = "legacy-result-adapter"
 
 
 class DataQualityV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     status: Literal["usable", "limited", "missing", "error"]
     grade: Literal["A", "B", "C", "D"] | None = None
@@ -25,7 +25,7 @@ class DataQualityV1(BaseModel):
 
 
 class EvidenceRefV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     source_label: str
     source_url: str
@@ -35,7 +35,7 @@ class EvidenceRefV1(BaseModel):
 
 
 class AnalysisItemV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     statement: str
     perspective: Literal["auditor", "investor", "both"] = "both"
@@ -43,7 +43,7 @@ class AnalysisItemV1(BaseModel):
 
 
 class AnswerEnvelopeV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     schema_version: Literal["1.0"] = "1.0"
     tool_name: str
@@ -106,7 +106,7 @@ def _has_partial_payload(result: dict[str, Any]) -> bool:
 def _data_quality(result: dict[str, Any]) -> DataQualityV1:
     raw_quality = result.get("data_quality")
     quality = raw_quality if isinstance(raw_quality, dict) else {}
-    is_error = bool(result.get("error"))
+    is_error = "error" in result
     if is_error:
         status = "error"
     elif quality.get("status") is not None:
@@ -124,7 +124,8 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
     if status == "missing":
         limitations.append("로컬 캐시에 확인 가능한 데이터가 없습니다. 이는 원 공시 부재를 뜻하지 않습니다.")
     if is_error:
-        limitations.insert(0, str(result["error"]))
+        error_message = str(result["error"]).strip()
+        limitations.insert(0, error_message or "도구 처리 중 오류가 발생했습니다. 원인 확인이 필요합니다.")
 
     grade = quality.get("grade")
     return DataQualityV1(
@@ -189,7 +190,7 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
     return AnswerEnvelopeV1(
         tool_name=tool_name,
-        verdict=str(result.get("verdict") or quality.status),
+        verdict=(str(result.get("verdict") or quality.status) if quality.status == "usable" else quality.status),
         answer=str(result.get("answer") or ""),
         confirmed_facts=[fact for fact in result.get("confirmed_facts") or [] if isinstance(fact, dict)],
         analysis=_analysis(result),
@@ -199,3 +200,21 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         next_checks=_string_list(result.get("next_checks")),
         answer_pack=result.get("answer_pack") if isinstance(result.get("answer_pack"), dict) else None,
     )
+
+
+def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Apply the shared answer-pack and narrative behavior after metadata is attached."""
+    enriched = dict(result)
+    # Local imports avoid an import cycle: answer_pack and renderers consume this module.
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.renderers import render_answer
+
+    if "error" not in enriched and not enriched.get("answer_pack"):
+        answer_pack = build_answer_pack(tool_name, enriched)
+        if answer_pack:
+            enriched["answer_pack"] = answer_pack
+    if not enriched.get("answer"):
+        answer = render_answer(tool_name, enriched)
+        if answer:
+            enriched["answer"] = answer
+    return enriched

@@ -40,7 +40,11 @@ def evidence_reference_fields(source: dict[str, Any]) -> dict[str, Any] | None:
         "source_label": label,
         "source_url": source_url,
         "rcept_no": rcept_no,
-        "section_title": source.get("section_title") or source.get("section_key"),
+        "section_title": (
+            str(source.get("section_title") or source.get("section_key"))
+            if source.get("section_title") or source.get("section_key")
+            else None
+        ),
     }
 
 

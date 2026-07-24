@@ -87,8 +87,7 @@ from kreports.db.models import (
     FinancialFact,
     ReportSection,
 )
-from kreports.mcp.answer_pack import build_answer_pack
-from kreports.mcp.renderers import render_answer
+from kreports.mcp.contracts import enrich_answer_response
 
 
 _FS_DIVS = {"CFS", "OFS"}
@@ -345,15 +344,7 @@ def _attach_meta(name: str, result: Any) -> Any:
         meta["result_count"] = enriched.get("count", 0)
 
     enriched["_meta"] = meta
-    if not enriched.get("answer_pack"):
-        answer_pack = build_answer_pack(name, enriched)
-        if answer_pack:
-            enriched["answer_pack"] = answer_pack
-    if not enriched.get("answer"):
-        answer = render_answer(name, enriched)
-        if answer:
-            enriched["answer"] = answer
-    return enriched
+    return enrich_answer_response(name, enriched)
 
 
 # ---------------------------------------------------------------------------

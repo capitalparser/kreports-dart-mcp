@@ -8,6 +8,23 @@ from kreports.analysis.evidence import parent_rcept_no, source_line
 from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
 
 
+_PUBLIC_SOURCE_LABELS = {
+    "accounting_note_chapters": "회계정책 주석 캐시",
+    "audit_matter_items": "감사보고서 항목 캐시",
+    "audit_procedure_items": "감사절차 항목 캐시",
+    "evidence_documents": "공시 근거 캐시",
+    "financial_facts_compact": "재무 공시 캐시",
+    "local_subsidiary_auditor_matrix": "연결실체 감사인 캐시",
+    "report_sections": "보고서 섹션 캐시",
+    "report_sections.audit_report": "감사보고서 캐시",
+    "source_documents": "원문 문서 캐시",
+}
+
+
+def _public_source_label(value: Any, fallback: str = "로컬 공시 캐시") -> str:
+    return _PUBLIC_SOURCE_LABELS.get(str(value or ""), fallback)
+
+
 def _status(result: dict) -> str:
     data_quality = result.get("data_quality")
     if isinstance(data_quality, dict) and data_quality.get("status"):
@@ -73,6 +90,7 @@ def _dedupe_display_records(records: list[dict], *, text_key: str, title_key: st
 def _render_search_dataset(result: dict) -> str:
     query = result.get("query") or {}
     dataset = query.get("dataset") or "dataset"
+    dataset_label = _public_source_label(dataset, "공시 데이터")
     status = _status(result)
     total_companies = result.get("total_companies", 0)
     total_records = result.get("total_records", 0)
@@ -81,7 +99,7 @@ def _render_search_dataset(result: dict) -> str:
     lines = [
         f"판정: {status}",
         "",
-        f"{subject} 조건으로 `{dataset}` 데이터셋을 조회한 결과, 회사 {total_companies}개와 근거 레코드 {total_records}건이 확인됩니다.",
+        f"{subject} 조건으로 {dataset_label}을 조회한 결과, 회사 {total_companies}개와 근거 레코드 {total_records}건이 확인됩니다.",
     ]
     year = query.get("year")
     if year:
@@ -102,7 +120,7 @@ def _render_search_dataset(result: dict) -> str:
     data_quality = result.get("data_quality") or {}
     lines.append("")
     lines.append("데이터 한계:")
-    lines.append(f"- 출처: {data_quality.get('source') or dataset}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or dataset)}")
     lines.append(f"- {data_quality.get('interpretation') or '현재 결과는 로컬 캐시 기준입니다.'}")
     return "\n".join(lines)
 
@@ -209,7 +227,7 @@ def _render_subsidiary_auditors(result: dict) -> str:
     coverage_note = data_quality.get("coverage_note")
     lines.append("")
     lines.append("데이터 한계:")
-    lines.append(f"- 출처: {data_quality.get('source') or 'local_subsidiary_auditor_matrix'}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'local_subsidiary_auditor_matrix')}")
     lines.append(f"- {coverage_note or '현재 결과는 로컬 사업보고서 파생 캐시 기준입니다.'}")
     return "\n".join(lines)
 
@@ -244,8 +262,13 @@ def _render_kam_topics(result: dict) -> str:
             else:
                 lines.append(f"- {topic}")
     else:
-        summary = result.get("audit_report_events") or {}
-        lines.append(f"- 감사보고서 이벤트/요약 근거: {summary}")
+        summary = result.get("audit_report_events")
+        if isinstance(summary, list):
+            lines.append(f"- 감사보고서 이벤트 요약 {len(summary)}건이 제공되었습니다. 원 공시 확인이 필요합니다.")
+        elif isinstance(summary, dict) and summary:
+            lines.append("- 감사보고서 이벤트 요약이 제공되었습니다. 세부 항목은 원 공시로 확인해야 합니다.")
+        else:
+            lines.append("- 감사보고서 이벤트 요약이 현재 캐시에 충분하지 않습니다.")
 
     lines.append("")
     lines.append("데이터 한계:")
@@ -253,7 +276,7 @@ def _render_kam_topics(result: dict) -> str:
     for limitation in (result.get("limitations") or [])[:3]:
         lines.append(f"- {limitation}")
     if len(lines) < 8:
-        lines.append("- 현재 결과는 로컬 report_sections 캐시 기준입니다.")
+        lines.append("- 현재 결과는 로컬 감사보고서 캐시 기준입니다.")
     return "\n".join(lines)
 
 
@@ -322,7 +345,7 @@ def _render_audit_report_sections(result: dict) -> str:
     lines.append("")
     lines.append("데이터 한계:")
     data_quality = result.get("data_quality") or {}
-    lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'report_sections.audit_report')}")
     lines.append(f"- {data_quality.get('interpretation') or '로컬 캐시 기준이며 원 공시 확인이 필요합니다.'}")
     evidence = _render_evidence_grounded_sections(result)
     if evidence:
@@ -352,7 +375,7 @@ def _render_audit_report_matters(result: dict) -> str:
     lines.append("")
     lines.append("데이터 한계:")
     data_quality = result.get("data_quality") or {}
-    lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'report_sections.audit_report')}")
     lines.append(f"- {data_quality.get('interpretation') or '없음은 공시 부재가 아니라 캐시 부재일 수 있습니다.'}")
     evidence = _render_evidence_grounded_sections(result)
     if evidence:
@@ -390,7 +413,7 @@ def _render_audit_procedures(result: dict) -> str:
     lines.append("")
     lines.append("데이터 한계:")
     data_quality = result.get("data_quality") or {}
-    lines.append(f"- 출처: {data_quality.get('source') or 'audit_procedure_items'}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'audit_procedure_items')}")
     lines.append(f"- {data_quality.get('interpretation') or data_quality.get('coverage_note') or 'KAM 본문에서 rule 기반으로 분리한 절차 힌트입니다.'}")
     evidence = _render_evidence_grounded_sections(result)
     if evidence:
@@ -420,7 +443,7 @@ def _render_kam_lifecycle(result: dict) -> str:
     data_quality = result.get("data_quality") or {}
     lines.append("")
     lines.append("데이터 한계:")
-    lines.append(f"- 출처: {data_quality.get('source') or 'report_sections.audit_report'}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'report_sections.audit_report')}")
     lines.append(f"- {data_quality.get('interpretation') or '원 감사보고서 확인이 필요합니다.'}")
     return "\n".join(lines)
 
@@ -442,7 +465,7 @@ def _render_policy_changes(result: dict) -> str:
     lines.append("")
     lines.append("데이터 한계:")
     data_quality = result.get("data_quality") or {}
-    lines.append(f"- 출처: {data_quality.get('source') or 'accounting_note_chapters'}")
+    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'accounting_note_chapters')}")
     lines.append(f"- {data_quality.get('interpretation') or '문구 변화는 정책 변경 결론이 아니라 검토 후보입니다.'}")
     return "\n".join(lines)
 
@@ -781,9 +804,12 @@ def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | N
 def _sanitize_legacy_detail(detail: str) -> str:
     """Keep legacy summaries readable without exposing implementation field names."""
     replacements = {
+        "accounting_note_chapters": "회계정책 주석 캐시",
         "answer_pack.charts.peer_percentile_matrix": "연도별 지표 백분위 히트맵",
         "answer_pack.charts.peer_band": "대상회사와 peer 사분위 비교",
+        "local_subsidiary_auditor_matrix": "연결실체 감사인 캐시",
         "report_sections.audit_report": "로컬 감사보고서 캐시",
+        "report_sections": "보고서 섹션 캐시",
         "audit_matter_items": "감사보고서 항목 캐시",
         "audit_procedure_items": "감사절차 항목 캐시",
         "financial_facts_compact": "재무 공시 캐시",
@@ -802,6 +828,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     for field in ("confirmed_facts", "analysis", "next_checks"):
         legacy_result.pop(field, None)
     detail: str | None = None
+    if envelope.data_quality.status in {"missing", "error"}:
+        return _render_professional_envelope(envelope)
     if tool_name == "search_dataset":
         detail = _render_search_dataset(legacy_result)
     elif tool_name == "get_subsidiary_auditors":
