@@ -2,7 +2,7 @@
 
 ## Result
 
-- Commit: `PENDING`
+- Implementation commit: `abdfc329fab98944b3ae472c8a0b1b7d69b25e11`
 - Read-only is fail-closed for DB/object-store writes. Caller-keyed on-demand DART fetches are ephemeral unless collector mode, raw opt-in, and external non-inline storage are all enabled.
 - `/readyz` now uses one read-only public-runtime gate. It fails closed for missing release manifest/schema support, investor-core coverage gaps, table accessibility failures, non-readonly mode, incorrect tool count, and stale running backfills.
 
