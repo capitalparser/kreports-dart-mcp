@@ -22,7 +22,7 @@
 
 ## Second review follow-up
 
-- Follow-up commit: `PENDING`
+- Follow-up implementation commit: `01c4b7e1b55e1cdc86c7bf4d499e9b4b3e8cd059`
 - Central SQL detection now strips leading block and line comments and detects mutating CTE text while preserving ordinary `SELECT` and `WITH ... SELECT` reads.
 - The session barrier now guards SQLAlchemy bulk persistence methods, `EvidenceBlobStore.write()` requires collector mode, and `init_db()` is a collector-only schema mutation.
 - Verification: runtime policy, raw/evidence storage, HTTP, tool, and DB-init collector regressions passed: `86 passed`; MCP doctor still passed with 31 tools.
