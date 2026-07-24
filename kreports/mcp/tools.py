@@ -1311,7 +1311,8 @@ TOOL_FETCH_DISCLOSURE_ON_DEMAND = Tool(
     name="fetch_disclosure_on_demand",
     description=(
         "사용자가 제공한 OpenDART API key로 특정 접수번호의 수시공시 원문을 온디맨드 조회하고 "
-        "source_documents에 캐시한다. 공개 MCP 서버의 DART_API_KEY는 사용하지 않으며, 사용자 key는 "
+        "읽기 전용 런타임에서는 요청 범위의 요약만 반환한다. collector의 명시적 외부 원문 저장 정책에서만 "
+        "source_documents에 캐시하며, 공개 MCP 서버의 DART_API_KEY는 사용하지 않는다. 사용자 key는 "
         "저장하거나 응답에 노출하지 않는다."
     ),
     inputSchema={

@@ -12,6 +12,7 @@ from kreports.collector.fetcher import DART_BASE, _decode_dart_text
 from kreports.collector.report_document_collector import _persist_source_document, _sha1
 from kreports.db.engine import get_session
 from kreports.db.models import Disclosure, SourceDocument
+from kreports.runtime import raw_persistence_allowed
 from kreports.storage.raw_documents import RawDocumentStore
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,33 @@ def _fetch_document_xml_with_user_key(rcept_no: str, user_dart_api_key: str) -> 
         return _decode_dart_text(resp.content)
 
 
+def _body_excerpt(content: str, limit: int = 1200) -> str:
+    """Return a bounded human-readable summary; never return raw XML wholesale."""
+    import re
+
+    body = re.sub(r"<[^>]+>", " ", content or "")
+    body = re.sub(r"\s+", " ", body).strip()
+    return body[:limit] + ("…" if len(body) > limit else "")
+
+
+def _safe_fetch_failure(exc: Exception) -> dict:
+    """Classify transport failures without reflecting request URLs or caller keys."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        kind = "http_status"
+    elif isinstance(exc, httpx.TransportError):
+        kind = "transport"
+    else:
+        kind = "unexpected"
+    return {
+        "error": f"DART document fetch failed ({kind})",
+        "data_quality": {
+            "status": "error",
+            "source": "user_keyed_dart_fetch",
+            "limitations": ["DART request details are withheld to protect caller credentials."],
+        },
+    }
+
+
 def fetch_disclosure_on_demand(
     *,
     rcept_no: str,
@@ -114,7 +142,7 @@ def fetch_disclosure_on_demand(
     corp_code: str | None = None,
     year: int | None = None,
 ) -> dict:
-    """Fetch one disclosure using the caller's DART key and cache the source body."""
+    """Fetch one disclosure using the caller's key without exposing that key."""
     rcept_no = (rcept_no or "").strip()
     if not rcept_no:
         return {"error": "rcept_no is required"}
@@ -130,6 +158,8 @@ def fetch_disclosure_on_demand(
             "bsns_year": cached.bsns_year,
             "report_nm": cached.report_nm,
             "cached": True,
+            "persisted": False,
+            "cache_policy_applied": "cache_first",
             "body_length": len(cached.raw_content or ""),
             "doc_hash": cached.doc_hash,
             "data_quality": {
@@ -161,7 +191,10 @@ def fetch_disclosure_on_demand(
             ),
         }
 
-    content = _fetch_document_xml_with_user_key(rcept_no, clean_key)
+    try:
+        content = _fetch_document_xml_with_user_key(rcept_no, clean_key)
+    except Exception as exc:
+        return {"rcept_no": rcept_no, **_safe_fetch_failure(exc)}
     if not content:
         return {
             "error": "document.xml empty",
@@ -169,17 +202,32 @@ def fetch_disclosure_on_demand(
             "data_quality": {"status": "missing", "source": "user_keyed_dart_fetch"},
         }
 
-    _persist_source_document(meta, content=content)
+    may_persist = raw_persistence_allowed()
+    if may_persist:
+        try:
+            _persist_source_document(meta, content=content)
+        except Exception as exc:
+            # Do not leak a key if a lower network/storage layer reflected it.
+            return {
+                "rcept_no": rcept_no,
+                "persisted": False,
+                "cache_policy_applied": "refresh_ephemeral",
+                **_safe_fetch_failure(exc),
+            }
     return {
         "rcept_no": rcept_no,
         "corp_code": meta["corp_code"],
         "bsns_year": meta["bsns_year"],
         "report_nm": meta["report_nm"],
         "cached": False,
+        "persisted": may_persist,
+        "cache_policy_applied": "refresh_persisted" if may_persist else "refresh_ephemeral",
         "body_length": len(content),
         "doc_hash": _sha1(content),
+        **({} if may_persist else {"body_excerpt": _body_excerpt(content)}),
         "data_quality": {
-            "status": "usable",
-            "source": "user_keyed_dart_fetch",
+            "status": "usable" if may_persist else "limited",
+            "source": "user_keyed_dart_fetch" if may_persist else "user_keyed_dart_fetch_ephemeral",
+            "limitations": ([] if may_persist else ["Fetched body was used only for this request and was not persisted."]),
         },
     }

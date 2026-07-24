@@ -44,8 +44,26 @@ from kreports.processor.audit_report_parser import (
 from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
 from kreports.processor.subsidiary_parser import extract_affiliates_from_report
+from kreports.runtime import raw_persistence_allowed, raw_storage_policy, require_raw_backfill_mode, require_runtime_write
 
 logger = logging.getLogger(__name__)
+
+
+def _raw_persistence_blocked_result(*, meta: dict | None = None) -> dict:
+    """Return an explicit no-write result before any DART raw-body fetch."""
+    return {
+        "ok": 0,
+        "documents": 0,
+        "sections": 0,
+        "error": "raw source persistence requires collector mode and explicit external storage policy",
+        "data_quality": {
+            "status": "limited",
+            "limitations": [
+                "Raw DART bodies were not fetched because this runtime cannot persist them externally.",
+            ],
+        },
+        **(meta or {}),
+    }
 
 
 def _sha1(value: str) -> str:
@@ -96,6 +114,8 @@ def _looks_unreadable_korean_audit_report(content: str) -> bool:
 
 def collect_report_sections_for_disclosure(rcept_no: str) -> dict:
     """Fetch one report document and persist useful normalized sections."""
+    if not raw_persistence_allowed():
+        return _raw_persistence_blocked_result()
     with get_session() as session:
         disc = session.query(Disclosure).filter_by(rcept_no=rcept_no).first()
         if disc is None:
@@ -315,6 +335,8 @@ def _fetch_viewer_tree_content(nodes: list[dict[str, str]], dcm_no: str) -> str 
 
 def collect_attached_audit_reports_for_disclosure(rcept_no: str) -> dict:
     """Collect only attached audit-report viewer bodies for a DART filing."""
+    if not raw_persistence_allowed():
+        return _raw_persistence_blocked_result()
     with get_session() as session:
         disc = session.query(Disclosure).filter_by(rcept_no=rcept_no).first()
         if disc is None:
@@ -395,6 +417,7 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
 
 def _persist_report_document(meta: dict, *, content: str) -> dict:
     """Persist one normalized report document and its extracted sections."""
+    require_runtime_write("persist report document")
     source_doc_id = _persist_source_document(meta, content=content)
     extraction = extract_document_features_from_content(_report_document_meta(meta), content=content)
     _log_extraction_run(
@@ -415,6 +438,13 @@ def _persist_report_document(meta: dict, *, content: str) -> dict:
 
 def _persist_source_document(meta: dict, *, content: str) -> int:
     """Persist raw source text so extractors can be rerun without DART calls."""
+    require_runtime_write("persist raw source document")
+    backend, keep_inline = raw_storage_policy()
+    require_raw_backfill_mode(
+        "persist raw source document",
+        raw_storage_backend=backend,
+        raw_storage_keep_inline=keep_inline,
+    )
     now = datetime.utcnow()
     doc_hash = _sha1(content)
     storage_payload = _raw_storage_payload(meta, content=content, doc_hash=doc_hash)
@@ -455,7 +485,7 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
 
 
 def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
-    backend = (settings.raw_storage_backend or "inline").strip().lower()
+    backend, keep_inline = raw_storage_policy()
     if backend in ("", "inline", "db"):
         return {
             "raw_content": content,
@@ -480,7 +510,7 @@ def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
     if saved.doc_hash != doc_hash:
         raise ValueError("raw storage hash mismatch")
     return {
-        "raw_content": content if settings.raw_storage_keep_inline else "",
+        "raw_content": content if keep_inline else "",
         "storage_uri": saved.storage_uri,
         "content_length": saved.content_length,
         "compressed_length": saved.compressed_length,
@@ -502,6 +532,7 @@ def _report_document_meta(meta: dict) -> dict:
 
 def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
     """Run normalized extractors from a cached source document body."""
+    require_runtime_write("persist extracted document features")
     if not (content or "").strip():
         return {
             "sections": 0,
@@ -607,6 +638,7 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
 
 def _persist_audit_procedure_items_from_sections(meta: dict, section_rows: list[dict]) -> int:
     """Persist procedure-level rows derived from KAM sections."""
+    require_runtime_write("persist audit procedure items")
     rows: list[dict] = []
     now = datetime.utcnow()
     for section in section_rows:
@@ -679,6 +711,7 @@ def _evidence_kam_body(normalized_text: str) -> str:
 
 def _persist_auditors_from_business_report(meta: dict, *, content: str) -> int:
     """Persist auditor/opinion rows parsed from a cached business report."""
+    require_runtime_write("persist auditor rows")
     if meta.get("source_type") != "business_report":
         return 0
     records = parse_auditor_from_doc_xml(content)
@@ -738,6 +771,7 @@ def _note_blocks_by_fs_div(content: str) -> list[tuple[str, str]]:
 
 def _persist_accounting_note_chapters_from_business_report(meta: dict, *, content: str) -> dict:
     """Persist note 2/3/4-style accounting chapters from cached business-report text."""
+    require_runtime_write("persist accounting note chapters")
     if meta.get("source_type") != "business_report":
         return {"chapters": 0, "policy_items": 0}
 
@@ -801,6 +835,7 @@ def _match_policy_item_key(text: str) -> str | None:
 
 def _persist_accounting_policy_items_from_note_rows(meta: dict, rows: list[dict]) -> int:
     """Derive searchable policy items from cached note chapters without DART calls."""
+    require_runtime_write("persist accounting policy items")
     now = datetime.utcnow()
     item_rows: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -858,6 +893,7 @@ def _log_extraction_run(
     rows_written: int = 0,
     error_msg: str | None = None,
 ) -> None:
+    require_runtime_write("persist extraction run")
     with get_session() as session:
         session.add(ExtractionRun(
             source_document_id=source_document_id,
@@ -875,6 +911,7 @@ def _log_extraction_run(
 
 def _persist_business_affiliate_auditors(meta: dict, *, content: str) -> dict:
     """Persist subsidiary/equity affiliate auditor matrix from a business report body."""
+    require_runtime_write("persist affiliate auditor rows")
     if meta.get("source_type") != "business_report":
         return {"count": 0}
 
@@ -1038,6 +1075,15 @@ def collect_audit_report_sections(
     progress_callback=None,
 ) -> dict:
     """Collect audit report sections for listed companies."""
+    if not raw_persistence_allowed():
+        return {
+            "total": 0,
+            "ok": 0,
+            "failed": 0,
+            "sections": 0,
+            "errors": [_raw_persistence_blocked_result()["error"]],
+            "data_quality": {"status": "limited"},
+        }
     from sqlalchemy import text
 
     stmt = """
@@ -1100,6 +1146,15 @@ def collect_business_report_sections(
     progress_callback=None,
 ) -> dict:
     """Collect embedded audit/KAM sections from business reports."""
+    if not raw_persistence_allowed():
+        return {
+            "total": 0,
+            "ok": 0,
+            "failed": 0,
+            "sections": 0,
+            "errors": [_raw_persistence_blocked_result()["error"]],
+            "data_quality": {"status": "limited"},
+        }
     from sqlalchemy import text
 
     stmt = """
@@ -1470,6 +1525,7 @@ def hydrate_source_documents_from_report_sections(
     They are useful for MCP evidence search, but do not count as original DART
     source documents and are ignored by raw-document extractor reruns.
     """
+    require_runtime_write("hydrate derived source documents")
     if source_type and source_type not in {"business_report", "audit_report"}:
         return {"total": 0, "created": 0, "updated": 0, "skipped_raw": 0, "errors": [{"error": "invalid source_type"}]}
 
@@ -1555,6 +1611,7 @@ def hydrate_source_documents_from_report_sections(
 
 
 def _log_fetch(corp_code: str, source_type: str, year: int, status: str, error_msg: str | None) -> None:
+    require_runtime_write("persist fetch log")
     with get_session() as session:
         session.add(FetchLog(
             task_type=f"{source_type}_section"[:20],

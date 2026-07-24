@@ -53,6 +53,10 @@ def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypa
             return FakeResponse()
 
     monkeypatch.setattr(on_demand.httpx, "Client", lambda timeout=60.0: FakeClient())
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "file")
+    monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
 
     with get_session() as session:
         session.add(Disclosure(
@@ -81,7 +85,32 @@ def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypa
     with get_session() as session:
         cached = session.query(SourceDocument).filter_by(rcept_no="20250101000001").one()
         assert cached.corp_code == "00126380"
-        assert "신규 시설투자" in cached.raw_content
+        assert cached.storage_status == "externalized"
+        assert cached.raw_content == ""
+
+
+def test_on_demand_transport_error_never_reflects_caller_key(temp_engine, monkeypatch, caplog):
+    request = on_demand.httpx.Request(
+        "GET",
+        "https://opendart.fss.or.kr/api/document.xml?crtfc_key=caller-key&rcept_no=20250101000001",
+    )
+    monkeypatch.setattr(
+        on_demand,
+        "_fetch_document_xml_with_user_key",
+        lambda *_: (_ for _ in ()).throw(on_demand.httpx.ConnectError("caller-key", request=request)),
+    )
+
+    out = on_demand.fetch_disclosure_on_demand(
+        rcept_no="20250101000001",
+        user_dart_api_key="caller-key",
+        corp_code="00126380",
+        year=2025,
+        cache_policy="refresh",
+    )
+
+    assert out["data_quality"]["status"] == "error"
+    assert "caller-key" not in str(out)
+    assert "caller-key" not in caplog.text
 
 
 def test_on_demand_cache_first_does_not_call_dart(temp_engine, monkeypatch):

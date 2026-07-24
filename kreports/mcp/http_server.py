@@ -21,11 +21,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
-from sqlalchemy import text
-
-from kreports.db.engine import get_session
 from kreports.mcp.server import server
 from kreports.mcp.tools import ALL_TOOLS
+from kreports.quality.release_gate import evaluate_release_gate
 
 logger = logging.getLogger("kreports.mcp.http")
 
@@ -103,32 +101,8 @@ async def _health(_: Request) -> JSONResponse:
 
 
 async def _ready(_: Request) -> JSONResponse:
-    try:
-        with get_session() as session:
-            company_count = int(session.execute(text("SELECT count(*) FROM companies")).scalar() or 0)
-            section_count = int(session.execute(text("SELECT count(*) FROM report_sections")).scalar() or 0)
-            financial_count = int(session.execute(text("SELECT count(*) FROM financials")).scalar() or 0)
-    except Exception as exc:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": str(exc),
-            },
-            status_code=503,
-        )
-
-    ok = company_count > 0
-    return JSONResponse(
-        {
-            "ok": ok,
-            "db": {
-                "companies": company_count,
-                "financials": financial_count,
-                "report_sections": section_count,
-            },
-        },
-        status_code=200 if ok else 503,
-    )
+    report = evaluate_release_gate("public_runtime")
+    return JSONResponse(report, status_code=503 if report["required_failures"] else 200)
 
 
 def create_app(
