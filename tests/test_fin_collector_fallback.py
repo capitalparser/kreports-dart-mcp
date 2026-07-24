@@ -31,6 +31,7 @@ def fresh_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test_fallback.db"
     original_db_url = os.environ.get("DB_URL")
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
 
     # engine 모듈 재초기화: settings 캐시 우회 + 새 engine 바인딩
     from importlib import reload

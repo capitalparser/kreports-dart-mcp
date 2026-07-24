@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import text
 
 from kreports.collector import on_demand
 from kreports.collector.on_demand import fetch_disclosure_on_demand
@@ -71,8 +72,6 @@ def test_readonly_orm_write_is_rejected_before_commit(temp_engine, monkeypatch):
 
 
 def test_readonly_text_insert_is_rejected_without_mutating_db(temp_engine, monkeypatch):
-    from sqlalchemy import text
-
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     with pytest.raises(RuntimeError, match="requires collector mode"):
         with get_session() as session:
@@ -80,6 +79,74 @@ def test_readonly_text_insert_is_rejected_without_mutating_db(temp_engine, monke
 
     with get_session() as session:
         assert session.query(Company).count() == 0
+
+
+@pytest.mark.parametrize("statement", [
+    "/* maintainer note */ INSERT INTO companies (corp_code, corp_name) VALUES ('00126380', '테스트')",
+    "-- maintainer note\nUPDATE companies SET corp_name='변경' WHERE corp_code='00126380'",
+    "WITH target AS (SELECT corp_code FROM companies WHERE corp_code='00126380') UPDATE companies SET corp_name='변경' WHERE corp_code IN (SELECT corp_code FROM target)",
+])
+def test_readonly_commented_text_dml_is_rejected(temp_engine, monkeypatch, statement):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="원본"))
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    with pytest.raises(RuntimeError, match="requires collector mode"):
+        with get_session() as session:
+            session.execute(text(statement))
+
+    with get_session() as session:
+        assert session.query(Company).one().corp_name == "원본"
+
+
+def test_readonly_select_and_with_select_remain_allowed(temp_engine, monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    with get_session() as session:
+        assert session.execute(text("SELECT count(*) FROM companies")).scalar() == 0
+        assert session.execute(text("WITH sample AS (SELECT 1 AS value) SELECT value FROM sample")).scalar() == 1
+
+
+@pytest.mark.parametrize("bulk_method", ["bulk_save_objects", "bulk_insert_mappings"])
+def test_readonly_bulk_inserts_are_rejected(temp_engine, monkeypatch, bulk_method):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    with pytest.raises(RuntimeError, match="requires collector mode"):
+        with get_session() as session:
+            if bulk_method == "bulk_save_objects":
+                session.bulk_save_objects([Company(corp_code="00126380", corp_name="테스트")])
+            else:
+                session.bulk_insert_mappings(Company, [{"corp_code": "00126380", "corp_name": "테스트"}])
+
+    with get_session() as session:
+        assert session.query(Company).count() == 0
+
+
+def test_readonly_bulk_update_is_rejected_without_changing_row(temp_engine, monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    with get_session() as session:
+        row = Company(corp_code="00126380", corp_name="원본")
+        session.add(row)
+        session.flush()
+        corp_code = row.corp_code
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    with pytest.raises(RuntimeError, match="requires collector mode"):
+        with get_session() as session:
+            session.bulk_update_mappings(Company, [{"corp_code": corp_code, "corp_name": "변경"}])
+
+    with get_session() as session:
+        assert session.query(Company).one().corp_name == "원본"
+
+
+def test_collector_bulk_persistence_is_allowed(temp_engine, monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    with get_session() as session:
+        session.bulk_insert_mappings(Company, [{"corp_code": "00126380", "corp_name": "테스트"}])
+
+    with get_session() as session:
+        assert session.query(Company).count() == 1
 
 
 def test_collector_session_writes_are_allowed(temp_engine, monkeypatch):
@@ -105,6 +172,32 @@ def test_raw_document_store_write_is_rejected_in_readonly_mode(tmp_path, monkeyp
         )
 
     assert list(tmp_path.rglob("*")) == []
+
+
+def test_evidence_blob_store_write_is_rejected_in_readonly_mode(tmp_path, monkeypatch):
+    from kreports.storage.evidence_blobs import EvidenceBlobStore
+
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+    store = EvidenceBlobStore(base_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="requires collector mode"):
+        store.write(table_name="evidence_documents", row_id=1, corp_code="00126380", bsns_year=2025, content="body")
+
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_init_db_is_rejected_in_readonly_before_creating_tables(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine, inspect
+    import kreports.db.engine as engine_module
+
+    isolated = create_engine(f"sqlite:///{tmp_path / 'readonly.db'}")
+    monkeypatch.setattr(engine_module, "engine", isolated)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    with pytest.raises(RuntimeError, match="requires collector mode"):
+        engine_module.init_db()
+
+    assert inspect(isolated).get_table_names() == []
 
 
 def test_release_gate_reports_stale_running_backfill_without_repairing_it(temp_engine, monkeypatch):

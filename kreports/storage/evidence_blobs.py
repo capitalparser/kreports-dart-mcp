@@ -79,6 +79,9 @@ class EvidenceBlobStore:
         bsns_year: int,
         content: str,
     ) -> StoredEvidenceBlob:
+        from kreports.runtime import require_runtime_write
+
+        require_runtime_write("persist evidence blob")
         data = (content or "").encode("utf-8")
         compressed = gzip.compress(data)
         text_hash = sha1_text(content)

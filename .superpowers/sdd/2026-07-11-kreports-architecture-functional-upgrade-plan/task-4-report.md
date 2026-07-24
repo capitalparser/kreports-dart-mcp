@@ -20,6 +20,13 @@
 - Empty manifest tables no longer pass readiness. DB inspection failures and unexpected `/readyz` gate exceptions now return a stable HTTP 503 payload with `runtime_db_unavailable`.
 - Follow-up verification: the original focused tests plus raw-storage coverage passed: `64 passed`; `uv run kreports mcp-doctor` passed with 31 tools.
 
+## Second review follow-up
+
+- Follow-up commit: `PENDING`
+- Central SQL detection now strips leading block and line comments and detects mutating CTE text while preserving ordinary `SELECT` and `WITH ... SELECT` reads.
+- The session barrier now guards SQLAlchemy bulk persistence methods, `EvidenceBlobStore.write()` requires collector mode, and `init_db()` is a collector-only schema mutation.
+- Verification: runtime policy, raw/evidence storage, HTTP, tool, and DB-init collector regressions passed: `86 passed`; MCP doctor still passed with 31 tools.
+
 ## Limitations
 
 - Task 3's versioned schema migration, manifest validation, and company-year quality ledger are not implemented in this worktree. The gate reports `schema_version: unknown` and returns HTTP 503 with `release_manifest_unavailable` rather than fabricating a validated version.

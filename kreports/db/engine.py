@@ -42,12 +42,28 @@ _TEXT_WRITE_KEYWORD = re.compile(
 )
 
 
+def _strip_leading_sql_comments(sql: str) -> str:
+    """Remove leading SQL whitespace/comments before classifying a statement."""
+    remaining = sql
+    while True:
+        remaining = remaining.lstrip()
+        if remaining.startswith("--"):
+            newline = remaining.find("\n")
+            remaining = "" if newline < 0 else remaining[newline + 1:]
+            continue
+        if remaining.startswith("/*"):
+            end = remaining.find("*/", 2)
+            remaining = "" if end < 0 else remaining[end + 2:]
+            continue
+        return remaining
+
+
 def _statement_mutates(statement: object) -> bool:
     """Return whether a Session.execute statement can change persistent state."""
     if isinstance(statement, (Insert, Update, Delete)):
         return True
     if isinstance(statement, TextClause):
-        sql = statement.text or ""
+        sql = _strip_leading_sql_comments(statement.text or "")
         return bool(
             _TEXT_WRITE_PREFIX.match(sql)
             or (sql.lstrip().upper().startswith("WITH") and _TEXT_WRITE_KEYWORD.search(sql))
@@ -88,13 +104,24 @@ def _guard_runtime_writes(session: Session) -> Session:
             _require_session_write("database ORM commit")
         return original_commit(*args, **kwargs)
 
+    def guarded_bulk(original_method, operation: str):
+        def bulk(*args, **kwargs):
+            _require_session_write(operation)
+            return original_method(*args, **kwargs)
+        return bulk
+
     session.execute = execute  # type: ignore[method-assign]
     session.flush = flush  # type: ignore[method-assign]
     session.commit = commit  # type: ignore[method-assign]
+    for method_name in ("bulk_save_objects", "bulk_insert_mappings", "bulk_update_mappings"):
+        original_method = getattr(session, method_name, None)
+        if original_method is not None:
+            setattr(session, method_name, guarded_bulk(original_method, f"database {method_name}"))
     return session
 
 
 def init_db() -> None:
+    _require_session_write("initialize database schema")
     Base.metadata.create_all(bind=engine)
     _migrate_existing_tables()
 

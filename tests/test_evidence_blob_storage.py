@@ -2,8 +2,14 @@ from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy import inspect
+import pytest
 
 from kreports.storage.evidence_blobs import EvidenceBlobStore, sha1_text
+
+
+@pytest.fixture(autouse=True)
+def _allow_intentional_evidence_blob_writes(monkeypatch):
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
 
 
 def test_evidence_blob_store_writes_and_reads_file_backend(tmp_path):

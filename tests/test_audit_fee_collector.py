@@ -15,6 +15,7 @@ def fresh_audit_fee_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test_audit_fee.db"
     original_db_url = os.environ.get("DB_URL")
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
 
     from kreports import config as _cfg
     reload(_cfg)
