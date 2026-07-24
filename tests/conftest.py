@@ -38,6 +38,7 @@ def temp_engine(monkeypatch, tmp_path):
     from kreports.storage.raw_documents import RawDocumentStore
     import kreports.collector.on_demand as on_demand_module
     import kreports.collector.report_document_collector as report_collector_module
+    import kreports.maintenance.raw_storage_migration as raw_migration_module
 
     raw_root = tmp_path / "raw_documents"
 
@@ -47,6 +48,7 @@ def temp_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(api_module, "RawDocumentStore", isolated_raw_store)
     monkeypatch.setattr(on_demand_module, "RawDocumentStore", isolated_raw_store)
     monkeypatch.setattr(report_collector_module, "RawDocumentStore", isolated_raw_store)
+    monkeypatch.setattr(raw_migration_module, "RawDocumentStore", isolated_raw_store)
     # Test fixtures seed database rows. Runtime-specific tests override this
     # explicitly to exercise the fail-closed public default.
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")

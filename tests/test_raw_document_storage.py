@@ -174,16 +174,11 @@ def test_raw_storage_smoke_roundtrips_file_backend(tmp_path, monkeypatch):
     assert out["compressed_length"] > 0
 
 
-def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, monkeypatch):
+def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path):
     import kreports.maintenance.raw_storage_migration as migration_module
     from kreports.db.engine import get_session
     from kreports.db.models import SourceDocument
 
-    monkeypatch.setattr(
-        migration_module,
-        "RawDocumentStore",
-        lambda **kwargs: RawDocumentStore(base_dir=tmp_path, **kwargs),
-    )
     raw_content = "<DOCUMENT><P>원문</P></DOCUMENT>"
 
     with get_session() as session:
@@ -205,6 +200,7 @@ def test_migrate_raw_documents_to_storage_preserves_hash(temp_engine, tmp_path, 
     with get_session() as session:
         doc = session.query(SourceDocument).one()
         assert doc.storage_uri.startswith("file://")
+        assert str((tmp_path / "raw_documents").resolve()) in doc.storage_uri
         assert doc.storage_status == "externalized"
         assert doc.raw_content == ""
         assert doc.content_length > 0
