@@ -104,3 +104,11 @@ The same full regression command now passes with the added cases:
 ```
 
 The validator now canonicalizes without DNS. It rejects percent, backslash, and control-character host forms; recognizes one-to-four-part decimal, octal, and hexadecimal IPv4 spellings deterministically; checks standard IPv6 through `ipaddress`; and accepts numeric addresses only when `is_global` is true. Non-IP hosts must be ASCII, syntactically public-looking DNS names and cannot use local/internal suffixes. The positive `https://example.com/path` case remains accepted.
+
+## Multicast follow-up
+
+Four multicast regression cases (`224.0.0.1`, `239.255.255.250`, `ff02::1`, and `ff05::2`) initially failed because their `ipaddress.is_global` value is true on this runtime. IP evidence is now accepted only when it is both global and not multicast. Public IPv4 (`8.8.8.8`) and IPv6 (`2606:4700:4700::1111`) controls remain accepted.
+
+```text
+166 passed, 1 skipped
+```

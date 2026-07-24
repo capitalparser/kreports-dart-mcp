@@ -85,7 +85,9 @@ def _canonical_public_host(hostname: str) -> str | None:
     except ValueError:
         address = _legacy_ipv4_address(host)
     if address is not None:
-        return host if address.is_global else None
+        # ipaddress marks multicast as global on some Python versions; public
+        # evidence links must still be unicast destinations.
+        return host if address.is_global and not address.is_multicast else None
 
     if not host.isascii() or not _PUBLIC_DNS_HOST_RE.fullmatch(host):
         return None

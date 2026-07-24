@@ -45,6 +45,10 @@ def test_source_line_uses_parent_receipt_for_dart_link():
     "http://192.168.1/source",
     "http://%31%32%37.0.0.1/source",
     "http://100.64.0.1/source",
+    "http://224.0.0.1/source",
+    "http://239.255.255.250/source",
+    "http://[ff02::1]/source",
+    "http://[ff05::2]/source",
 ])
 def test_evidence_reference_rejects_unsafe_explicit_urls(unsafe_url):
     assert evidence_reference_fields({"source_url": unsafe_url}) is None
@@ -52,3 +56,11 @@ def test_evidence_reference_rejects_unsafe_explicit_urls(unsafe_url):
 
 def test_evidence_reference_accepts_absolute_public_http_url():
     assert evidence_reference_fields({"source_url": "https://example.com/source"})["source_url"] == "https://example.com/source"
+
+
+@pytest.mark.parametrize("public_url", [
+    "https://8.8.8.8/path",
+    "https://[2606:4700:4700::1111]/path",
+])
+def test_evidence_reference_accepts_global_ip_urls(public_url):
+    assert evidence_reference_fields({"source_url": public_url})["source_url"] == public_url
