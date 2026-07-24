@@ -4,10 +4,14 @@ from __future__ import annotations
 import ipaddress
 import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 DART_FILING_URL_PREFIX = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
 _PLAIN_RCEPT_RE = re.compile(r"^\d{14}$")
+_PUBLIC_DNS_HOST_RE = re.compile(
+    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$",
+    re.IGNORECASE,
+)
 
 
 def parent_rcept_no(rcept_no: str | None) -> str | None:
@@ -23,6 +27,71 @@ def dart_filing_url(rcept_no: str | None) -> str | None:
     """Build a DART filing URL for a receipt number or synthetic attachment id."""
     parent = parent_rcept_no(rcept_no)
     return f"{DART_FILING_URL_PREFIX}{parent}" if parent else None
+
+
+def _legacy_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
+    """Parse legacy numeric IPv4 spellings without DNS resolution.
+
+    Browsers and URL stacks may accept one-to-four-part decimal, octal, or
+    hexadecimal forms (for example ``127.1`` and ``0x7f000001``).  Recognize
+    those forms deterministically so they are subject to the same public-IP
+    check as ordinary dotted-quad addresses.
+    """
+    parts = host.split(".")
+    if not 1 <= len(parts) <= 4 or any(not part for part in parts):
+        return None
+
+    values: list[int] = []
+    for part in parts:
+        base = 10
+        digits = part
+        if part.lower().startswith("0x"):
+            base, digits = 16, part[2:]
+            valid = "0123456789abcdefABCDEF"
+        elif len(part) > 1 and part.startswith("0"):
+            base, valid = 8, "01234567"
+        else:
+            valid = "0123456789"
+        if not digits or any(char not in valid for char in digits):
+            return None
+        values.append(int(digits, base))
+
+    limits = {1: (0xFFFFFFFF,), 2: (0xFF, 0xFFFFFF), 3: (0xFF, 0xFF, 0xFFFF), 4: (0xFF,) * 4}
+    if any(value > limit for value, limit in zip(values, limits[len(values)])):
+        return None
+    if len(values) == 1:
+        numeric = values[0]
+    elif len(values) == 2:
+        numeric = (values[0] << 24) | values[1]
+    elif len(values) == 3:
+        numeric = (values[0] << 24) | (values[1] << 16) | values[2]
+    else:
+        numeric = sum(value << (8 * (3 - index)) for index, value in enumerate(values))
+    return ipaddress.IPv4Address(numeric)
+
+
+def _canonical_public_host(hostname: str) -> str | None:
+    """Return a safe public-looking hostname after deterministic canonicalization."""
+    if "%" in hostname or "\\" in hostname or any(ord(char) < 32 or ord(char) == 127 for char in hostname):
+        return None
+    host = unquote(hostname).rstrip(".").lower()
+    if not host or "%" in host or "\\" in host or any(ord(char) < 32 or ord(char) == 127 for char in host):
+        return None
+    if host == "localhost" or host.endswith(".localhost"):
+        return None
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = _legacy_ipv4_address(host)
+    if address is not None:
+        return host if address.is_global else None
+
+    if not host.isascii() or not _PUBLIC_DNS_HOST_RE.fullmatch(host):
+        return None
+    if host.endswith((".local", ".internal", ".lan", ".home", ".test", ".invalid")):
+        return None
+    return host
 
 
 def _public_http_url(value: str) -> str | None:
@@ -45,23 +114,7 @@ def _public_http_url(value: str) -> str | None:
     if parsed.username is not None or parsed.password is not None:
         return None
 
-    host = hostname.rstrip(".").lower()
-    if host == "localhost" or host.endswith(".localhost"):
-        return None
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return value
-    if (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-    ):
-        return None
-    return value
+    return value if _canonical_public_host(hostname) else None
 
 
 def evidence_reference_fields(source: dict[str, Any]) -> dict[str, Any] | None:

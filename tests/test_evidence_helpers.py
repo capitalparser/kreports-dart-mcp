@@ -37,6 +37,14 @@ def test_source_line_uses_parent_receipt_for_dart_link():
     "http://localhost/source",
     "http://127.0.0.1/source",
     "http://[::1]/source",
+    "http://127.1/source",
+    "http://127.0.1/source",
+    "http://2130706433/source",
+    "http://0x7f000001/source",
+    "http://0177.0.0.1/source",
+    "http://192.168.1/source",
+    "http://%31%32%37.0.0.1/source",
+    "http://100.64.0.1/source",
 ])
 def test_evidence_reference_rejects_unsafe_explicit_urls(unsafe_url):
     assert evidence_reference_fields({"source_url": unsafe_url}) is None

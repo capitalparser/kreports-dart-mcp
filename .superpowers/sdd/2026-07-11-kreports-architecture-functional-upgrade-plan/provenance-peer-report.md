@@ -88,3 +88,19 @@ uv run pytest -q \
 ```
 
 Explicit non-DART evidence now requires an absolute public HTTP(S) URL with a host and without credentials, localhost, loopback, or private/reserved IP destinations. Unsafe values never become envelope evidence or renderer links. Quality now counts unresolved confirmed facts and downgrades an explicit `usable` status whenever any fact lacks resolvable evidence; the warning includes the count. Empty confirmed-fact lists retain the existing status inference.
+
+## Host canonicalization follow-up
+
+### Red evidence
+
+The added legacy-host cases produced eight observed failures before implementation. The prior validator accepted `127.1`, `127.0.1`, `2130706433`, `0x7f000001`, `0177.0.0.1`, `192.168.1`, `%31%32%37.0.0.1`, and shared-address `100.64.0.1` as evidence URLs.
+
+### Green evidence
+
+The same full regression command now passes with the added cases:
+
+```text
+160 passed, 1 skipped
+```
+
+The validator now canonicalizes without DNS. It rejects percent, backslash, and control-character host forms; recognizes one-to-four-part decimal, octal, and hexadecimal IPv4 spellings deterministically; checks standard IPv6 through `ipaddress`; and accepts numeric addresses only when `is_global` is true. Non-IP hosts must be ASCII, syntactically public-looking DNS names and cannot use local/internal suffixes. The positive `https://example.com/path` case remains accepted.
