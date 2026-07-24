@@ -585,9 +585,17 @@ def test_collect_business_report_uses_viewer_html_when_document_api_unavailable(
         ).one()
         source_content_type = source_doc.content_type
         source_raw_content = source_doc.raw_content
+        source_storage_uri = source_doc.storage_uri
+        source_doc_hash = source_doc.doc_hash
         section_body = section.body_text
     assert source_content_type == "html"
-    assert "사업보고서" in source_raw_content
+    assert source_raw_content == ""
+    assert source_storage_uri
+    stored_content = collector_module.RawDocumentStore().read(
+        source_storage_uri,
+        expected_hash=source_doc_hash,
+    )
+    assert "사업보고서" in stored_content
     assert "수익인식" in section_body
 
 

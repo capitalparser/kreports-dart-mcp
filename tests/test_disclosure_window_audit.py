@@ -60,7 +60,7 @@ def test_audit_disclosure_window_detects_missing_and_filters(monkeypatch):
     assert out["missing_samples"][0]["rcept_no"] == target_rcept_no
 
 
-def test_audit_disclosure_window_can_persist_missing(monkeypatch):
+def test_audit_disclosure_window_can_persist_missing(temp_engine, monkeypatch):
     target_rcept_no = f"2099{uuid4().hex[:8]}04"[:14]
 
     def fake_fetch(corp_code, start_date, end_date, disc_type=""):

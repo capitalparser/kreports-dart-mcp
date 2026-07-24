@@ -84,6 +84,7 @@ class TestSha1:
 @pytest.fixture
 def temp_engine(monkeypatch):
     """In-memory SQLite로 engine.engine을 교체하여 격리."""
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
     test_engine = create_engine("sqlite:///:memory:")
     monkeypatch.setattr(engine_module, "engine", test_engine)
 

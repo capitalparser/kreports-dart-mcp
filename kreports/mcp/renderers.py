@@ -733,6 +733,60 @@ def _render_evidence_grounded_sections(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_company_search(result: dict) -> str:
+    """Render public company-search fields without exposing DART identifiers."""
+    query = str(result.get("query") or "").strip()
+    matches = [item for item in result.get("results") or [] if isinstance(item, dict)]
+    lines = ["기업 검색 결과:"]
+    if query:
+        lines.append(f"- 검색어: {query}")
+    for company in matches[:10]:
+        name = str(company.get("corp_name") or "회사명 미확인")
+        stock_code = str(company.get("stock_code") or "").strip()
+        market = str(company.get("market") or "").strip()
+        descriptors = []
+        if stock_code:
+            descriptors.append(f"종목코드 {stock_code}")
+        if market:
+            descriptors.append(market)
+        suffix = f" ({', '.join(descriptors)})" if descriptors else ""
+        lines.append(f"- {name}{suffix}")
+    if not matches:
+        lines.append("- 현재 검색 조건과 일치하는 상장사를 확인하지 못했습니다.")
+    return "\n".join(lines)
+
+
+def _render_going_concern(result: dict) -> str:
+    """Render a conservative going-concern screening summary."""
+    lines = ["계속기업 위험 스크리닝:"]
+    grade = str(result.get("grade") or "").strip()
+    score = result.get("score")
+    if grade and grade != "-":
+        lines.append(f"- 스크리닝 등급: {grade}")
+    if isinstance(score, (int, float)):
+        lines.append(f"- 스크리닝 점수: {score:g}/100")
+
+    factors = [item for item in result.get("factors") or [] if isinstance(item, dict)]
+    flagged = [item for item in factors if item.get("hit") is True]
+    if flagged:
+        lines.append("- 감점 요인:")
+        for factor in flagged[:6]:
+            name = str(factor.get("name") or "위험 요인")
+            detail = str(factor.get("detail") or "").strip()
+            penalty = factor.get("penalty")
+            suffix_parts = []
+            if detail:
+                suffix_parts.append(detail)
+            if isinstance(penalty, (int, float)) and penalty > 0:
+                suffix_parts.append(f"{penalty:g}점 감점")
+            suffix = f" — {', '.join(suffix_parts)}" if suffix_parts else ""
+            lines.append(f"  - {name}{suffix}")
+    elif factors:
+        lines.append("- 현재 스크리닝에서 감점 요인은 확인되지 않았습니다.")
+    lines.append("- 이 결과는 제한된 정량 지표를 이용한 선별 결과이며, 감사인의 계속기업 결론을 대체하지 않습니다.")
+    return "\n".join(lines)
+
+
 def _render_generic(tool_name: str, result: dict) -> str:
     status = _status(result)
     subject = _subject_label(result)
@@ -843,7 +897,11 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     detail: str | None = None
     if envelope.data_quality.status in {"missing", "error"}:
         return _render_professional_envelope(envelope)
-    if tool_name == "search_dataset":
+    if tool_name == "search_company":
+        detail = _render_company_search(legacy_result)
+    elif tool_name == "score_going_concern":
+        detail = _render_going_concern(legacy_result)
+    elif tool_name == "search_dataset":
         detail = _render_search_dataset(legacy_result)
     elif tool_name == "get_subsidiary_auditors":
         detail = _render_subsidiary_auditors(legacy_result)

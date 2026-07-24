@@ -83,6 +83,54 @@ def test_generic_narrative_uses_professional_sections_without_internal_schema_la
     assert "_meta" not in text
 
 
+def test_company_search_narrative_names_matches_without_internal_identifier():
+    text = render_answer("search_company", {
+        "query": "삼성전자",
+        "count": 1,
+        "results": [{
+            "corp_code": "00126380",
+            "corp_name": "삼성전자",
+            "stock_code": "005930",
+            "market": "KOSPI",
+        }],
+    })
+
+    assert text is not None
+    assert text.startswith("판정:")
+    assert "삼성전자" in text
+    assert "종목코드 005930" in text
+    assert "00126380" not in text
+    assert "search_company" not in text
+    assert "corp_code" not in text
+
+
+def test_going_concern_narrative_keeps_limited_verdict_and_public_labels():
+    text = render_answer("score_going_concern", {
+        "corp_code": "00126380",
+        "score": 85,
+        "grade": "안정",
+        "risk": "ok",
+        "has_data": True,
+        "factors": [{
+            "name": "최근 연도 영업CF 음수",
+            "hit": True,
+            "penalty": 10,
+            "detail": "영업CF -100억원",
+        }],
+    })
+
+    assert text is not None
+    assert "판정:\n- limited" in text
+    assert "계속기업 위험 스크리닝" in text
+    assert "스크리닝 등급: 안정" in text
+    assert "최근 연도 영업CF 음수" in text
+    assert "감사인의 계속기업 결론을 대체하지 않습니다" in text
+    assert "00126380" not in text
+    assert "score_going_concern" not in text
+    assert "corp_code" not in text
+    assert "\"risk\"" not in text
+
+
 def test_detailed_narrative_hides_internal_answer_pack_and_table_identifiers():
     text = render_answer("compare_to_industry_multi", {
         "subject": {"corp_name": "A"},

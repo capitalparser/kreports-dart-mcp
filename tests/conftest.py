@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
-def temp_engine(monkeypatch):
+def temp_engine(monkeypatch, tmp_path):
     """Isolated in-memory DB for API/analysis tests."""
     import kreports.db.engine as engine_module
     from kreports.db.models import Base
@@ -31,6 +31,22 @@ def temp_engine(monkeypatch):
     monkeypatch.setattr(api_module, "_engine", test_engine)
     monkeypatch.setattr(peer_module, "engine", test_engine)
     monkeypatch.setattr(readiness_module, "engine", test_engine)
+
+    # Raw-document tests must never spill fixture artifacts into the repository's
+    # default data/raw_documents directory. Patch every module that imports the
+    # store class directly so writes and follow-up reads share a per-test root.
+    from kreports.storage.raw_documents import RawDocumentStore
+    import kreports.collector.on_demand as on_demand_module
+    import kreports.collector.report_document_collector as report_collector_module
+
+    raw_root = tmp_path / "raw_documents"
+
+    def isolated_raw_store(**kwargs):
+        return RawDocumentStore(base_dir=raw_root, **kwargs)
+
+    monkeypatch.setattr(api_module, "RawDocumentStore", isolated_raw_store)
+    monkeypatch.setattr(on_demand_module, "RawDocumentStore", isolated_raw_store)
+    monkeypatch.setattr(report_collector_module, "RawDocumentStore", isolated_raw_store)
     # Test fixtures seed database rows. Runtime-specific tests override this
     # explicitly to exercise the fail-closed public default.
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
