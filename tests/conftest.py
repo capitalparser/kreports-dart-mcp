@@ -31,6 +31,12 @@ def temp_engine(monkeypatch):
     monkeypatch.setattr(api_module, "_engine", test_engine)
     monkeypatch.setattr(peer_module, "engine", test_engine)
     monkeypatch.setattr(readiness_module, "engine", test_engine)
+    # Test fixtures seed database rows. Runtime-specific tests override this
+    # explicitly to exercise the fail-closed public default.
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "file")
+    monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
     return test_engine
 
 

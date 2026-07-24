@@ -81,6 +81,7 @@ def test_require_raw_backfill_mode_blocks_keep_inline(monkeypatch):
 def test_require_raw_backfill_mode_allows_external_storage(monkeypatch):
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
     monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+    monkeypatch.setenv("RAW_STORAGE_BUCKET", "kreports-raw-documents")
 
     require_raw_backfill_mode(
         "collect-business-report-sections",

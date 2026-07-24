@@ -12,6 +12,14 @@
 - GREEN: `uv run pytest tests/test_runtime_write_policy.py tests/test_readonly_mcp.py tests/test_on_demand_disclosure_fetch.py tests/test_http_mcp_server.py tests/test_mcp_tools_registration.py -q` passed: `41 passed`.
 - `uv run kreports mcp-doctor` passed and reported exactly `31` tools.
 
+## Review follow-up
+
+- Follow-up commit: `PENDING`
+- Added a central `get_session()` guard for ORM unit-of-work changes and Core/text DML, including when tests monkeypatch `SessionLocal`.
+- `RawDocumentStore.write()` now enforces the same collector/raw-policy boundary directly; GCS also requires a bucket.
+- Empty manifest tables no longer pass readiness. DB inspection failures and unexpected `/readyz` gate exceptions now return a stable HTTP 503 payload with `runtime_db_unavailable`.
+- Follow-up verification: the original focused tests plus raw-storage coverage passed: `64 passed`; `uv run kreports mcp-doctor` passed with 31 tools.
+
 ## Limitations
 
 - Task 3's versioned schema migration, manifest validation, and company-year quality ledger are not implemented in this worktree. The gate reports `schema_version: unknown` and returns HTTP 503 with `release_manifest_unavailable` rather than fabricating a validated version.

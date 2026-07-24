@@ -47,7 +47,7 @@ def raw_backfill_enabled() -> bool:
     return os.environ.get("KREPORTS_ENABLE_RAW_BACKFILL", "").strip() == "1"
 
 
-def raw_storage_policy() -> tuple[str, bool]:
+def raw_storage_policy() -> tuple[str, bool, str]:
     """Read raw storage policy at call time so deploy settings fail closed."""
     from kreports.config import settings
 
@@ -57,13 +57,22 @@ def raw_storage_policy() -> tuple[str, bool]:
         keep_inline_value = bool(settings.raw_storage_keep_inline)
     else:
         keep_inline_value = keep_inline.strip().lower() in {"1", "true", "yes", "on"}
-    return backend, keep_inline_value
+    bucket = os.environ.get("RAW_STORAGE_BUCKET", settings.raw_storage_bucket).strip()
+    return backend, keep_inline_value, bucket
 
 
-def raw_persistence_allowed() -> bool:
+def raw_persistence_allowed(*, backend: str | None = None, bucket: str | None = None) -> bool:
     """Return true only for explicit external, non-inline raw retention."""
-    backend, keep_inline = raw_storage_policy()
-    return runtime_write_allowed("raw persistence") and raw_backfill_enabled() and backend in {"file", "gcs"} and not keep_inline
+    configured_backend, keep_inline, configured_bucket = raw_storage_policy()
+    effective_backend = (backend or configured_backend).strip().lower()
+    effective_bucket = (bucket if bucket is not None else configured_bucket).strip()
+    return (
+        runtime_write_allowed("raw persistence")
+        and raw_backfill_enabled()
+        and effective_backend in {"file", "gcs"}
+        and not keep_inline
+        and (effective_backend != "gcs" or bool(effective_bucket))
+    )
 
 
 def require_raw_backfill_mode(
@@ -96,6 +105,12 @@ def require_raw_backfill_mode(
             f"{operation} must not keep raw bodies inline. Set "
             "RAW_STORAGE_KEEP_INLINE=false."
         )
+    if backend == "gcs":
+        _, _, bucket = raw_storage_policy()
+        if not bucket:
+            raise RuntimeError(
+                f"{operation} must set RAW_STORAGE_BUCKET for gcs raw storage."
+            )
 
 
 def readonly_cache_miss(dataset: str, company: str | None = None, year: Any = None) -> str:

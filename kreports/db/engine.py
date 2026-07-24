@@ -1,8 +1,11 @@
 import logging
+import re
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.sql.dml import Delete, Insert, Update
+from sqlalchemy.sql.elements import TextClause
 from contextlib import contextmanager
 from kreports.config import settings, BASE_DIR
 from kreports.db.models import Base  # noqa: F401 — 모든 모델 등록 트리거
@@ -28,6 +31,67 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+_TEXT_WRITE_PREFIX = re.compile(
+    r"^\s*(?:INSERT|UPDATE|DELETE|REPLACE|MERGE|CREATE|ALTER|DROP|TRUNCATE|VACUUM|PRAGMA)\b",
+    flags=re.IGNORECASE,
+)
+_TEXT_WRITE_KEYWORD = re.compile(
+    r"\b(?:INSERT|UPDATE|DELETE|REPLACE|MERGE|CREATE|ALTER|DROP|TRUNCATE|VACUUM)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _statement_mutates(statement: object) -> bool:
+    """Return whether a Session.execute statement can change persistent state."""
+    if isinstance(statement, (Insert, Update, Delete)):
+        return True
+    if isinstance(statement, TextClause):
+        sql = statement.text or ""
+        return bool(
+            _TEXT_WRITE_PREFIX.match(sql)
+            or (sql.lstrip().upper().startswith("WITH") and _TEXT_WRITE_KEYWORD.search(sql))
+        )
+    return bool(getattr(statement, "is_dml", False) or getattr(statement, "is_ddl", False))
+
+
+def _require_session_write(operation: str) -> None:
+    # Lazy import avoids making config/database initialization depend on a
+    # runtime import during module import time.
+    from kreports.runtime import require_runtime_write
+
+    require_runtime_write(operation)
+
+
+def _guard_runtime_writes(session: Session) -> Session:
+    """Install write checks on a session, including monkeypatched SessionLocal.
+
+    Reads retain normal SQLAlchemy behavior.  Core and textual DML are blocked
+    before execution; ORM unit-of-work changes are blocked before flush/commit.
+    """
+    original_execute = session.execute
+    original_flush = session.flush
+    original_commit = session.commit
+
+    def execute(statement, *args, **kwargs):
+        if _statement_mutates(statement):
+            _require_session_write("database statement")
+        return original_execute(statement, *args, **kwargs)
+
+    def flush(*args, **kwargs):
+        if session.new or session.dirty or session.deleted:
+            _require_session_write("database ORM flush")
+        return original_flush(*args, **kwargs)
+
+    def commit(*args, **kwargs):
+        if session.new or session.dirty or session.deleted:
+            _require_session_write("database ORM commit")
+        return original_commit(*args, **kwargs)
+
+    session.execute = execute  # type: ignore[method-assign]
+    session.flush = flush  # type: ignore[method-assign]
+    session.commit = commit  # type: ignore[method-assign]
+    return session
 
 
 def init_db() -> None:
@@ -192,7 +256,7 @@ def _migrate_existing_tables() -> None:
 
 @contextmanager
 def get_session() -> Session:
-    session = SessionLocal()
+    session = _guard_runtime_writes(SessionLocal())
     try:
         yield session
         session.commit()

@@ -163,6 +163,13 @@ class RawDocumentStore:
         content_type: str,
         content: str,
     ) -> StoredRawDocument:
+        from kreports.runtime import raw_persistence_allowed
+
+        if not raw_persistence_allowed(backend=self.backend, bucket=self.bucket):
+            raise RuntimeError(
+                "raw persistence requires collector mode, explicit raw opt-in, "
+                "external non-inline storage, and a GCS bucket when applicable."
+            )
         data = (content or "").encode("utf-8")
         doc_hash = sha1_text(content)
         if self.backend == "file":

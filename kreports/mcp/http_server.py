@@ -23,7 +23,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 from kreports.mcp.server import server
 from kreports.mcp.tools import ALL_TOOLS
-from kreports.quality.release_gate import evaluate_release_gate
+from kreports.quality.release_gate import evaluate_release_gate, runtime_db_unavailable_report
 
 logger = logging.getLogger("kreports.mcp.http")
 
@@ -101,7 +101,10 @@ async def _health(_: Request) -> JSONResponse:
 
 
 async def _ready(_: Request) -> JSONResponse:
-    report = evaluate_release_gate("public_runtime")
+    try:
+        report = evaluate_release_gate("public_runtime")
+    except Exception:
+        report = runtime_db_unavailable_report("public_runtime")
     return JSONResponse(report, status_code=503 if report["required_failures"] else 200)
 
 

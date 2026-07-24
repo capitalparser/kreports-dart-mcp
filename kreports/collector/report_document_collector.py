@@ -439,7 +439,7 @@ def _persist_report_document(meta: dict, *, content: str) -> dict:
 def _persist_source_document(meta: dict, *, content: str) -> int:
     """Persist raw source text so extractors can be rerun without DART calls."""
     require_runtime_write("persist raw source document")
-    backend, keep_inline = raw_storage_policy()
+    backend, keep_inline, _bucket = raw_storage_policy()
     require_raw_backfill_mode(
         "persist raw source document",
         raw_storage_backend=backend,
@@ -485,7 +485,7 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
 
 
 def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
-    backend, keep_inline = raw_storage_policy()
+    backend, keep_inline, bucket = raw_storage_policy()
     if backend in ("", "inline", "db"):
         return {
             "raw_content": content,
@@ -496,7 +496,7 @@ def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
         }
     store = RawDocumentStore(
         backend=backend,
-        bucket=settings.raw_storage_bucket or None,
+        bucket=bucket or None,
         prefix=settings.raw_storage_prefix or "",
     )
     saved = store.write(

@@ -58,12 +58,31 @@ def _runtime_schema_state() -> tuple[list[str], str, str, list[datetime], bool]:
             except Exception:
                 failures.append(f"unreadable_table:{table_name}")
 
-        # A manifest schema is not part of this task's starting state.  If a
-        # future migration supplies one, this gate can report it, but it never
-        # treats its mere existence as manifest validation.
+        # A manifest schema is not part of this task's starting state.  A pair
+        # of empty tables is not a manifest: both a recorded schema revision
+        # and a non-empty dataset version must exist and agree.
         schema_version = "unknown"
         dataset_version = "unknown"
-        manifest_available = {"schema_migrations", "dataset_manifest"}.issubset(table_names)
+        manifest_available = False
+        if {"schema_migrations", "dataset_manifest"}.issubset(table_names):
+            try:
+                migration_version = session.execute(
+                    text("SELECT revision FROM schema_migrations WHERE trim(revision) != '' ORDER BY revision DESC LIMIT 1")
+                ).scalar()
+                manifest_row = session.execute(
+                    text(
+                        "SELECT schema_version, dataset_version FROM dataset_manifest "
+                        "WHERE trim(schema_version) != '' AND trim(dataset_version) != '' "
+                        "AND generated_at IS NOT NULL "
+                        "ORDER BY generated_at DESC LIMIT 1"
+                    )
+                ).mappings().first()
+                if manifest_row and migration_version and manifest_row["schema_version"] == migration_version:
+                    schema_version = str(manifest_row["schema_version"])
+                    dataset_version = str(manifest_row["dataset_version"])
+                    manifest_available = True
+            except Exception:
+                failures.append("unreadable_release_manifest")
         for table_name, column_name in (("disclosures", "fetched_at"), ("financials", "fetched_at"), ("report_sections", "fetched_at")):
             if table_name not in table_names:
                 continue
@@ -76,7 +95,7 @@ def _runtime_schema_state() -> tuple[list[str], str, str, list[datetime], bool]:
                 # Table accessibility was checked above; a missing optional
                 # freshness column means no honest dataset version is known.
                 continue
-        if dataset_timestamps:
+        if dataset_timestamps and not manifest_available:
             dataset_version = "db-max-fetched-at:" + max(dataset_timestamps).isoformat().replace("+00:00", "Z")
 
         stale_rows: list[datetime] = []
@@ -92,12 +111,33 @@ def _runtime_schema_state() -> tuple[list[str], str, str, list[datetime], bool]:
     return failures, schema_version, dataset_version, stale_rows, manifest_available
 
 
+def runtime_db_unavailable_report(profile: str = PROFILE_PUBLIC_RUNTIME) -> dict[str, Any]:
+    """Stable fail-closed response for readiness inspection failures."""
+    try:
+        from kreports.mcp.tools import ALL_TOOLS
+        tool_count = len(ALL_TOOLS)
+    except Exception:
+        tool_count = 0
+    return {
+        "ok": False,
+        "profile": profile,
+        "schema_version": "unknown",
+        "dataset_version": "unknown",
+        "required_failures": ["runtime_db_unavailable"],
+        "degraded_features": [],
+        "tool_count": tool_count,
+    }
+
+
 def evaluate_release_gate(profile: str = PROFILE_PUBLIC_RUNTIME) -> dict[str, Any]:
     """Evaluate a no-write public runtime gate without repairing live state."""
     if profile != PROFILE_PUBLIC_RUNTIME:
         raise ValueError(f"unsupported release gate profile: {profile}")
 
-    required_failures, schema_version, dataset_version, running_started_at, manifest_available = _runtime_schema_state()
+    try:
+        required_failures, schema_version, dataset_version, running_started_at, manifest_available = _runtime_schema_state()
+    except Exception:
+        return runtime_db_unavailable_report(profile)
     if not manifest_available:
         required_failures.append("release_manifest_unavailable")
     if not is_readonly_mode():

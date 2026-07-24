@@ -1,10 +1,20 @@
 from sqlalchemy import inspect
+import pytest
 
 
 from pathlib import Path
 
 from kreports.storage.raw_documents import RawDocumentStore
 from kreports.storage.raw_documents import sha1_text
+
+
+@pytest.fixture(autouse=True)
+def _allow_intentional_raw_storage_writes(monkeypatch):
+    """Raw storage tests opt in explicitly; production still defaults readonly."""
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "file")
+    monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
 
 
 class _FakeGcsBlob:
@@ -108,8 +118,8 @@ def test_raw_document_store_requires_bucket_for_gcs():
             content_type="xml",
             content="<DOCUMENT/>",
         )
-    except ValueError as exc:
-        assert "bucket is required" in str(exc)
+    except RuntimeError as exc:
+        assert "GCS bucket" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 

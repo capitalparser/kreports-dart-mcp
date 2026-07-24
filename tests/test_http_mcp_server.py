@@ -63,3 +63,17 @@ def test_readyz_returns_503_only_for_required_failures(monkeypatch):
 
     assert ready.status_code == 503
     assert ready.json()["required_failures"] == ["stale_backfill_run"]
+
+
+def test_readyz_returns_stable_503_when_gate_raises(monkeypatch):
+    from kreports.mcp import http_server
+
+    monkeypatch.setattr(http_server, "evaluate_release_gate", lambda _profile: (_ for _ in ()).throw(OSError("db unavailable")))
+    app = create_app(token="secret")
+
+    with TestClient(app) as client:
+        ready = client.get("/readyz")
+
+    assert ready.status_code == 503
+    assert ready.json()["schema_version"] == "unknown"
+    assert ready.json()["required_failures"] == ["runtime_db_unavailable"]
