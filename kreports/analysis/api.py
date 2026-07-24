@@ -216,14 +216,21 @@ def _annual_report_source(
     section_title: str,
     source_table: str,
 ) -> dict:
-    """Best-effort source descriptor for facts derived from annual structured data."""
+    """Source descriptor for annual structured data, bound to the requested year.
+
+    A financial fact may still be locally confirmed when the filing cache is
+    incomplete, but it must never borrow a receipt number from a different
+    fiscal year merely to make the fact look citable.
+    """
     report_nm = None
     rcept_no = None
     params: dict[str, Any] = {"corp_code": corp_code}
     where = "corp_code=:corp_code AND report_nm LIKE '%사업보고서%'"
     if year:
         where += " AND report_nm LIKE :year_pattern"
-        params["year_pattern"] = f"%({int(year)}.12)%"
+        # Fiscal year ends need not be December.  DART annual report titles
+        # carry the fiscal year as ``사업보고서 (YYYY.MM)``.
+        params["year_pattern"] = f"%사업보고서 ({int(year)}.%"
     with _engine.connect() as conn:
         row = conn.execute(
             text(f"""
@@ -235,21 +242,10 @@ def _annual_report_source(
             """),
             params,
         ).mappings().first()
-        if not row and year:
-            row = conn.execute(
-                text("""
-                    SELECT rcept_no, report_nm
-                    FROM disclosures
-                    WHERE corp_code=:corp_code AND report_nm LIKE '%사업보고서%'
-                    ORDER BY disc_date DESC, rcept_no DESC
-                    LIMIT 1
-                """),
-                {"corp_code": corp_code},
-            ).mappings().first()
     if row:
         rcept_no = row.get("rcept_no")
         report_nm = row.get("report_nm")
-    return {
+    source = {
         "corp_code": corp_code,
         "corp_name": (subject or {}).get("corp_name") or corp_code,
         "report_nm": report_nm or "DART 연간 재무 데이터",
@@ -258,6 +254,15 @@ def _annual_report_source(
         "section_title": section_title,
         "source_table": source_table,
     }
+    if year and not rcept_no:
+        source.update({
+            "provenance_status": "requested_annual_report_not_cached",
+            "provenance_gap": (
+                f"요청 사업연도 {int(year)}의 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다. "
+                "다른 사업연도 공시를 대체 인용하지 않았습니다."
+            ),
+        })
+    return source
 
 
 def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: str) -> dict:
@@ -2145,6 +2150,7 @@ def select_peer_group(
     prefix_len_start: int = 3,
     size_bucket_decade: Optional[float] = None,
     exclude_other_sectors: bool = True,
+    year: int | None = None,
 ) -> dict:
     criteria = criteria or ["industry", "sector", "financial_data"]
     corp_code = resolve_corp_code(company)
@@ -2159,7 +2165,7 @@ def select_peer_group(
     if subject_row is None:
         return {"error": f"corp_code '{corp_code}' 미등록"}
 
-    fs_div_used = resolve_fs_div_for_company(corp_code, None, fs_strategy)
+    fs_div_used = resolve_fs_div_for_company(corp_code, year, fs_strategy)
     pr = resolve_peers(
         corp_code=corp_code,
         prefix_len_start=prefix_len_start,
@@ -2167,6 +2173,7 @@ def select_peer_group(
         exclude_other_sectors=exclude_other_sectors,
         size_bucket_decade=size_bucket_decade,
         fs_div=fs_div_used,
+        year=year,
     )
 
     peers: list[dict] = []
@@ -2256,6 +2263,7 @@ def select_peer_group(
             "size_bucket_decade": size_bucket_decade,
             "fs_strategy": fs_strategy,
             "fs_div_used": fs_div_used,
+            "requested_year": year,
             "resolved_year": pr.resolved_year,
             "reason_component_note": (
                 "industry/sector/audit availability are populated now; business text, KAM topic, "
@@ -2295,12 +2303,14 @@ def compare_peer_audit_fees(
     peer_limit: int = 30,
     fs_strategy: str = "auto",
     size_bucket_decade: Optional[float] = None,
+    _peer_group: dict | None = None,
 ) -> dict:
-    base = select_peer_group(
+    base = _peer_group if _peer_group is not None else select_peer_group(
         company=company,
         peer_limit=peer_limit,
         fs_strategy=fs_strategy,
         size_bucket_decade=size_bucket_decade,
+        year=year,
     )
     if "error" in base:
         return base
@@ -2387,8 +2397,11 @@ def compare_peer_risk_profile(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict:
-    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    base = _peer_group if _peer_group is not None else select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
     if "error" in base:
         return base
     corp_code = base["subject"]["corp_code"]
@@ -2492,13 +2505,16 @@ def compare_peer_accounting_policies(
     peer_limit: int = 30,
     fs_div: str = "CFS",
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict:
     """Compare cached accounting policy item coverage across selected peers.
 
     This is intentionally cache-only. It does not fetch DART documents at MCP
     runtime, so external users do not need a DART API key.
     """
-    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    base = _peer_group if _peer_group is not None else select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
     if "error" in base:
         return base
 
@@ -2624,9 +2640,12 @@ def compare_peer_kam_topics(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict:
     """Audit-report/KAM signal view from cached DART disclosures and sections."""
-    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    base = _peer_group if _peer_group is not None else select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
     if "error" in base:
         return base
 
@@ -3050,6 +3069,7 @@ def compare_peer_audit_report_matters(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict:
     """Compare non-KAM audit report matters across the selected peer group.
 
@@ -3057,7 +3077,9 @@ def compare_peer_audit_report_matters(
     paragraphs are not audit opinions by themselves. They are useful screening
     evidence for acceptance/continuance and peer disclosure comparison.
     """
-    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    base = _peer_group if _peer_group is not None else select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
     if "error" in base:
         return base
 
@@ -3747,9 +3769,12 @@ def compare_peer_audit_procedures(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict:
     """Compare KAM audit procedure patterns for a subject and its peer group."""
-    base = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    base = _peer_group if _peer_group is not None else select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
     if "error" in base:
         return base
     subject = base["subject"]
@@ -4186,15 +4211,23 @@ def estimate_audit_hours_proxy(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict:
     """Estimate public-data audit complexity proxy for planning discussion."""
+    peer_group = _peer_group if _peer_group is not None else select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
+    if "error" in peer_group:
+        return peer_group
     fee_pack = compare_peer_audit_fees(
-        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+        _peer_group=peer_group,
     )
     if "error" in fee_pack:
         return fee_pack
     risk_pack = compare_peer_risk_profile(
-        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+        _peer_group=peer_group,
     )
 
     subject_metrics = fee_pack.get("subject_metrics") or {}
@@ -4306,15 +4339,17 @@ def build_audit_acceptance_pack(
     fs_strategy: str = "auto",
 ) -> dict:
     """Build a compact DART evidence pack for acceptance/continuance screening."""
-    peer_group = select_peer_group(company=company, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    peer_group = select_peer_group(
+        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+    )
     if "error" in peer_group:
         return peer_group
-    fee_pack = compare_peer_audit_fees(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
-    risk_pack = compare_peer_risk_profile(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
-    hours_pack = estimate_audit_hours_proxy(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
-    policy_pack = compare_peer_accounting_policies(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
-    kam_pack = compare_peer_kam_topics(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
-    matter_pack = compare_peer_audit_report_matters(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy)
+    fee_pack = compare_peer_audit_fees(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy, _peer_group=peer_group)
+    risk_pack = compare_peer_risk_profile(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy, _peer_group=peer_group)
+    hours_pack = estimate_audit_hours_proxy(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy, _peer_group=peer_group)
+    policy_pack = compare_peer_accounting_policies(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy, _peer_group=peer_group)
+    kam_pack = compare_peer_kam_topics(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy, _peer_group=peer_group)
+    matter_pack = compare_peer_audit_report_matters(company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy, _peer_group=peer_group)
 
     acceptance_signals = []
     subject_fee = fee_pack.get("subject_metrics") or {}

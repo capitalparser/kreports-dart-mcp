@@ -45,3 +45,31 @@ def test_select_peer_group_mcp_dispatch():
     out = json.loads(call_tool("select_peer_group", {"company": "005930", "peer_limit": 5}))
     assert out["peer_count"] > 0
     assert out["_meta"]["tool"] == "select_peer_group"
+
+
+def test_select_peer_group_propagates_requested_year_to_cohort_resolution(temp_engine, monkeypatch):
+    from kreports.analysis import api
+    from kreports.analysis.peer import PeerResolution, SectorGroup
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", stock_code="000001", corp_name="A", induty_code="264"))
+
+    seen = {}
+
+    def fake_fs_div(corp_code, year, strategy):
+        seen["fs_year"] = year
+        return "CFS"
+
+    def fake_resolve_peers(**kwargs):
+        seen["peer_year"] = kwargs["year"]
+        return PeerResolution([], 3, SectorGroup.GENERAL, 0, resolved_year=kwargs["year"])
+
+    monkeypatch.setattr(api, "resolve_fs_div_for_company", fake_fs_div)
+    monkeypatch.setattr(api, "resolve_peers", fake_resolve_peers)
+    out = api.select_peer_group("00000001", year=2022)
+
+    assert seen == {"fs_year": 2022, "peer_year": 2022}
+    assert out["selection_policy"]["requested_year"] == 2022
+    assert out["selection_policy"]["resolved_year"] == 2022

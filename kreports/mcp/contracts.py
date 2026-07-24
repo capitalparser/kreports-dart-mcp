@@ -116,11 +116,29 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
     if status not in _QUALITY_STATUSES:
         raise ValueError(f"unsupported data quality status: {status}")
 
+    confirmed_facts = [
+        fact for fact in result.get("confirmed_facts") or []
+        if isinstance(fact, dict)
+    ]
+    has_resolvable_evidence = any(
+        isinstance(fact.get("source"), dict)
+        and evidence_reference_fields(fact["source"])
+        for fact in confirmed_facts
+    )
+    evidence_gap = bool(confirmed_facts) and not has_resolvable_evidence
+    if status == "usable" and evidence_gap:
+        status = "limited"
+
     meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
     limitations = _string_list(quality.get("limitations")) + _string_list(result.get("limitations"))
     coverage_note = quality.get("coverage_note")
     if coverage_note:
         limitations.append(str(coverage_note))
+    if evidence_gap:
+        limitations.append(
+            "확인된 사실에 대해 공개적으로 해석 가능한 근거 링크를 확인하지 못했습니다. "
+            "다른 연도 또는 다른 출처의 근거로 대체 인용하지 않았습니다."
+        )
     if status == "missing":
         limitations.append("로컬 캐시에 확인 가능한 데이터가 없습니다. 이는 원 공시 부재를 뜻하지 않습니다.")
     if is_error:

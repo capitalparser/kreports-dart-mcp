@@ -27,7 +27,10 @@ def evidence_reference_fields(source: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize a legacy fact source into public, renderer-safe evidence fields."""
     raw_rcept_no = source.get("parent_rcept_no") or source.get("rcept_no")
     rcept_no = parent_rcept_no(str(raw_rcept_no or ""))
-    source_url = dart_filing_url(raw_rcept_no)
+    # Some established facts legitimately rely on a non-DART public source.
+    # Preserve its explicit URL instead of treating it as an uncitable fact.
+    explicit_url = str(source.get("source_url") or source.get("url") or "").strip()
+    source_url = dart_filing_url(raw_rcept_no) or explicit_url
     if not source_url:
         return None
 
@@ -35,7 +38,8 @@ def evidence_reference_fields(source: dict[str, Any]) -> dict[str, Any] | None:
         source.get("corp_name") or source.get("corp_code"),
         source.get("report_nm"),
     ]
-    label = " ".join(str(part).strip() for part in label_parts if part).strip() or "DART 공시"
+    label = " ".join(str(part).strip() for part in label_parts if part).strip()
+    label = label or str(source.get("source_label") or "").strip() or "공개 출처"
     return {
         "source_label": label,
         "source_url": source_url,

@@ -86,6 +86,55 @@ def test_dcf_api_adds_confirmed_facts(temp_engine, monkeypatch):
     assert any(check.startswith("DCF") for check in out["next_checks"])
 
 
+def test_annual_financial_evidence_does_not_cite_a_different_fiscal_year(temp_engine, monkeypatch):
+    """A missing requested annual report is a provenance gap, not a latest-report citation."""
+    from kreports.analysis import investor_quality
+    from kreports.analysis.api import get_quality_of_earnings_pack
+    from kreports.db.engine import get_session
+
+    monkeypatch.setattr(investor_quality, "quality_of_earnings_pack", lambda *args, **kwargs: {
+        "company": "001", "start_year": 2022, "end_year": 2022, "fs_div": "CFS",
+        "metrics": {"years": 1}, "evidence": [{"year": 2022}], "signals": [],
+        "data_quality": {"status": "usable"},
+    })
+    with get_session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add(Disclosure(
+            rcept_no="20260318001234", corp_code="001", corp_name="A",
+            disc_date=date(2026, 3, 18), disc_type="A", report_nm="사업보고서 (2025.12)", flr_nm="A",
+        ))
+
+    out = get_quality_of_earnings_pack("001", start_year=2022, end_year=2022)
+    source = out["confirmed_facts"][0]["source"]
+
+    assert source["rcept_no"] is None
+    assert source["provenance_status"] == "requested_annual_report_not_cached"
+    assert "2022" in source["provenance_gap"]
+    assert "20260318001234" not in str(out["confirmed_facts"])
+
+
+def test_annual_financial_evidence_cites_matching_non_december_fiscal_year(temp_engine, monkeypatch):
+    from kreports.analysis import investor_quality
+    from kreports.analysis.api import get_quality_of_earnings_pack
+    from kreports.db.engine import get_session
+
+    monkeypatch.setattr(investor_quality, "quality_of_earnings_pack", lambda *args, **kwargs: {
+        "company": "001", "start_year": 2022, "end_year": 2022, "fs_div": "CFS",
+        "metrics": {"years": 1}, "evidence": [{"year": 2022}], "signals": [],
+        "data_quality": {"status": "usable"},
+    })
+    with get_session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add(Disclosure(
+            rcept_no="20230318001234", corp_code="001", corp_name="A",
+            disc_date=date(2023, 3, 18), disc_type="A", report_nm="사업보고서 (2022.03)", flr_nm="A",
+        ))
+
+    out = get_quality_of_earnings_pack("001", start_year=2022, end_year=2022)
+
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20230318001234"
+
+
 def test_disclosure_event_api_adds_confirmed_facts(temp_engine):
     from kreports.analysis.api import search_disclosure_events
     from kreports.db.engine import get_session

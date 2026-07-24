@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
 
+import pytest
+
 from kreports.analysis.api import (
     build_audit_acceptance_pack,
     compare_peer_accounting_policies,
@@ -598,3 +600,93 @@ def test_build_audit_acceptance_pack_mcp_dispatch():
     out = json.loads(call_tool("build_audit_acceptance_pack", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "build_audit_acceptance_pack"
     assert "acceptance_signals" in out
+
+
+def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeypatch):
+    from kreports.analysis import api
+
+    cohort = {
+        "subject": {"corp_code": "001", "corp_name": "A"},
+        "peers": [{"corp_code": "002"}],
+        "peer_count": 1,
+        "confidence": "insufficient",
+        "selection_policy": {"requested_year": 2022, "resolved_year": 2022, "fs_div_used": "CFS"},
+    }
+    selected_years = []
+    reused = []
+    monkeypatch.setattr(api, "select_peer_group", lambda **kwargs: (selected_years.append(kwargs["year"]) or cohort))
+
+    def child_result(name, result):
+        def child(*args, **kwargs):
+            reused.append((name, kwargs.get("_peer_group")))
+            return result
+        return child
+
+    monkeypatch.setattr(api, "compare_peer_audit_fees", child_result("fee", {"subject_metrics": {}, "benchmarks": {}}))
+    monkeypatch.setattr(api, "compare_peer_risk_profile", child_result("risk", {"subject_metrics": {}, "benchmarks": {}}))
+    monkeypatch.setattr(api, "estimate_audit_hours_proxy", child_result("hours", {"complexity_band": "low", "drivers": []}))
+    monkeypatch.setattr(api, "compare_peer_accounting_policies", child_result("policy", {"peer_count": 1, "peers_with_policy": 1, "data_quality": {"status": "usable"}}))
+    monkeypatch.setattr(api, "compare_peer_kam_topics", child_result("kam", {"audit_report_events": {}, "audit_report_sections": {}, "data_quality": {}}))
+    monkeypatch.setattr(api, "compare_peer_audit_report_matters", child_result("matter", {"matter_counts": {}, "data_quality": {}}))
+
+    out = api.build_audit_acceptance_pack("001", year=2022)
+
+    assert selected_years == [2022]
+    assert {name for name, _ in reused} == {"fee", "risk", "hours", "policy", "kam", "matter"}
+    assert all(group is cohort for _, group in reused)
+    assert out["peer_group"]["selection_policy"]["requested_year"] == 2022
+    assert out["peer_group"]["selection_policy"]["resolved_year"] == 2022
+
+
+def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):
+    from kreports.analysis import api
+
+    cohort = {
+        "subject": {"corp_code": "001", "corp_name": "A"},
+        "peers": [{"corp_code": "002"}],
+        "peer_count": 1,
+        "selection_policy": {"requested_year": 2022, "resolved_year": 2022, "fs_div_used": "CFS"},
+    }
+    selected = []
+    passed = []
+    monkeypatch.setattr(api, "select_peer_group", lambda **kwargs: (selected.append(kwargs["year"]) or cohort))
+
+    def fees(*args, **kwargs):
+        passed.append(kwargs["_peer_group"])
+        return {"subject": cohort["subject"], "peer_count": 1, "subject_metrics": {}, "benchmarks": {}, "data_quality": {}}
+
+    def risk(*args, **kwargs):
+        passed.append(kwargs["_peer_group"])
+        return {"subject_metrics": {}, "data_quality": {}}
+
+    monkeypatch.setattr(api, "compare_peer_audit_fees", fees)
+    monkeypatch.setattr(api, "compare_peer_risk_profile", risk)
+    api.estimate_audit_hours_proxy("001", year=2022)
+
+    assert selected == [2022]
+    assert passed == [cohort, cohort]
+
+
+@pytest.mark.parametrize("comparator_name", [
+    "compare_peer_audit_fees",
+    "compare_peer_risk_profile",
+    "compare_peer_accounting_policies",
+    "compare_peer_kam_topics",
+    "compare_peer_audit_report_matters",
+    "compare_peer_audit_procedures",
+])
+def test_peer_comparators_select_the_requested_year_when_no_cohort_is_supplied(monkeypatch, comparator_name):
+    """All peer comparisons must resolve their own cohort at the data year, never latest."""
+    from kreports.analysis import api
+
+    selected_years = []
+
+    def no_cohort(**kwargs):
+        selected_years.append(kwargs["year"])
+        return {"error": "stop after selection"}
+
+    monkeypatch.setattr(api, "select_peer_group", no_cohort)
+    result = getattr(api, comparator_name)("001", year=2022)
+
+    assert result == {"error": "stop after selection"}
+    assert selected_years == [2022]
