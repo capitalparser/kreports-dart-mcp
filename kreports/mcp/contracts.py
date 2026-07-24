@@ -120,12 +120,14 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
         fact for fact in result.get("confirmed_facts") or []
         if isinstance(fact, dict)
     ]
-    has_resolvable_evidence = any(
-        isinstance(fact.get("source"), dict)
-        and evidence_reference_fields(fact["source"])
+    unresolved_fact_count = sum(
+        not (
+            isinstance(fact.get("source"), dict)
+            and evidence_reference_fields(fact["source"])
+        )
         for fact in confirmed_facts
     )
-    evidence_gap = bool(confirmed_facts) and not has_resolvable_evidence
+    evidence_gap = unresolved_fact_count > 0
     if status == "usable" and evidence_gap:
         status = "limited"
 
@@ -136,7 +138,7 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
         limitations.append(str(coverage_note))
     if evidence_gap:
         limitations.append(
-            "확인된 사실에 대해 공개적으로 해석 가능한 근거 링크를 확인하지 못했습니다. "
+            f"확인된 사실 {unresolved_fact_count}개에 대해 공개적으로 해석 가능한 근거 링크를 확인하지 못했습니다. "
             "다른 연도 또는 다른 출처의 근거로 대체 인용하지 않았습니다."
         )
     if status == "missing":

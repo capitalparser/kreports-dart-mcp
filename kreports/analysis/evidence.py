@@ -1,8 +1,10 @@
 """Evidence and citation helpers for source-grounded MCP answers."""
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 DART_FILING_URL_PREFIX = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
 _PLAIN_RCEPT_RE = re.compile(r"^\d{14}$")
@@ -23,13 +25,52 @@ def dart_filing_url(rcept_no: str | None) -> str | None:
     return f"{DART_FILING_URL_PREFIX}{parent}" if parent else None
 
 
+def _public_http_url(value: str) -> str | None:
+    """Return an explicitly supplied public HTTP(S) URL, or ``None``.
+
+    Evidence links are rendered into user-facing responses.  A source URL is
+    therefore data, not a browser instruction: reject non-web schemes,
+    relative/protocol-relative values, credentials, and obvious local/private
+    destinations before it reaches a renderer.
+    """
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        # Accessing port validates malformed/out-of-range port values.
+        _ = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+
+    host = hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return value
+    if (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        return None
+    return value
+
+
 def evidence_reference_fields(source: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize a legacy fact source into public, renderer-safe evidence fields."""
     raw_rcept_no = source.get("parent_rcept_no") or source.get("rcept_no")
     rcept_no = parent_rcept_no(str(raw_rcept_no or ""))
     # Some established facts legitimately rely on a non-DART public source.
     # Preserve its explicit URL instead of treating it as an uncitable fact.
-    explicit_url = str(source.get("source_url") or source.get("url") or "").strip()
+    explicit_url = _public_http_url(str(source.get("source_url") or source.get("url") or "").strip())
     source_url = dart_filing_url(raw_rcept_no) or explicit_url
     if not source_url:
         return None

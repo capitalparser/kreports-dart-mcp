@@ -147,6 +147,44 @@ def test_explicit_non_dart_source_url_keeps_usable_quality():
     assert envelope.evidence[0].source_url == "https://example.com/source"
 
 
+def test_unsafe_explicit_source_url_is_not_rendered_and_downgrades_quality():
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.renderers import render_answer
+
+    result = {
+        "confirmed_facts": [{
+            "statement": "검증되지 않은 링크입니다.",
+            "source": {"source_url": "javascript:alert(1)"},
+        }],
+        "data_quality": {"status": "usable"},
+    }
+    envelope = build_answer_envelope("get_quality_of_earnings_pack", result)
+    rendered = render_answer("get_quality_of_earnings_pack", result)
+
+    assert envelope.data_quality.status == "limited"
+    assert envelope.evidence == []
+    assert "javascript:" not in rendered
+
+
+def test_usable_quality_is_limited_when_any_confirmed_fact_lacks_evidence():
+    from kreports.mcp.contracts import build_answer_envelope
+
+    envelope = build_answer_envelope("get_quality_of_earnings_pack", {
+        "confirmed_facts": [
+            {"statement": "인용된 사실", "source": {"rcept_no": "20250301000001"}},
+            {
+                "statement": "요청연도 출처 공백 사실",
+                "source": {"provenance_status": "requested_annual_report_not_cached"},
+            },
+        ],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert envelope.data_quality.status == "limited"
+    assert len(envelope.evidence) == 1
+    assert any("1개" in warning and "근거 링크" in warning for warning in envelope.warnings)
+
+
 def test_falsey_error_key_is_still_an_error_with_safe_limitation():
     from kreports.mcp.contracts import build_answer_envelope
 

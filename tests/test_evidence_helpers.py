@@ -1,4 +1,6 @@
-from kreports.analysis.evidence import dart_filing_url, parent_rcept_no, source_line
+import pytest
+
+from kreports.analysis.evidence import dart_filing_url, evidence_reference_fields, parent_rcept_no, source_line
 
 
 def test_dart_filing_url_uses_plain_receipt_number():
@@ -22,3 +24,23 @@ def test_source_line_uses_parent_receipt_for_dart_link():
     assert "출처: SK이터닉스 사업보고서 (2025.12), II. 사업의 내용, 접수번호 20260316001520" in line
     assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260316001520" in line
     assert "첨부문서 식별자: 20260316001520_20260316001520_00761_xml" in line
+
+
+@pytest.mark.parametrize("unsafe_url", [
+    "javascript:alert(1)",
+    "data:text/html,unsafe",
+    "file:///etc/passwd",
+    "ftp://example.com/source",
+    "//example.com/protocol-relative",
+    "https:///missing-host",
+    "https://user:password@example.com/source",
+    "http://localhost/source",
+    "http://127.0.0.1/source",
+    "http://[::1]/source",
+])
+def test_evidence_reference_rejects_unsafe_explicit_urls(unsafe_url):
+    assert evidence_reference_fields({"source_url": unsafe_url}) is None
+
+
+def test_evidence_reference_accepts_absolute_public_http_url():
+    assert evidence_reference_fields({"source_url": "https://example.com/source"})["source_url"] == "https://example.com/source"

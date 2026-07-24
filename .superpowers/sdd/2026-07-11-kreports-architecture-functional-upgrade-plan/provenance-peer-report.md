@@ -58,3 +58,33 @@ uv run pytest -q \
 - This is a bounded provenance/cohort consistency change; it does not introduce the broader Task 13 datamodel or quality ledger.
 - A missing local annual report remains a cache/provenance gap, not proof that the filing does not exist in DART.
 - Existing test warnings concern deprecated `datetime.utcnow()` use outside this task’s scope.
+
+## Follow-up review fixes
+
+### Red evidence
+
+Before the follow-up implementation, the focused URL and contract suite produced 12 failures:
+
+- Ten unsafe explicit URLs were accepted as evidence, including `javascript:`, `data:`, `file:`, `ftp:`, protocol-relative, missing-host, credential-bearing, localhost, and loopback URLs.
+- An unsafe URL was rendered while quality remained `usable`.
+- A result with one cited fact and one requested-year provenance gap remained `usable` because the previous check only required any one cited fact.
+
+### Green evidence
+
+```text
+uv run pytest -q \
+  tests/test_api_evidence_packs.py \
+  tests/test_evidence_helpers.py \
+  tests/test_peer_selection.py \
+  tests/test_auditor_peer_tools.py \
+  tests/test_mcp_contracts.py \
+  tests/test_compare_industry_multi.py \
+  tests/test_industry_aggregates.py \
+  tests/test_mcp_tools_registration.py \
+  tests/test_mcp_answer_pack.py \
+  tests/test_mcp_narrative_responses.py
+
+152 passed, 1 skipped
+```
+
+Explicit non-DART evidence now requires an absolute public HTTP(S) URL with a host and without credentials, localhost, loopback, or private/reserved IP destinations. Unsafe values never become envelope evidence or renderer links. Quality now counts unresolved confirmed facts and downgrades an explicit `usable` status whenever any fact lacks resolvable evidence; the warning includes the count. Empty confirmed-fact lists retain the existing status inference.
