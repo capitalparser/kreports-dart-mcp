@@ -147,3 +147,38 @@ def test_legacy_detail_uses_public_source_labels(tool_name, payload, internal_na
 
     assert text is not None
     assert internal_name not in text
+
+
+@pytest.mark.parametrize("tool_name,payload", [
+    ("get_quality_of_earnings_pack", {"metrics": {"years": 3}}),
+    ("compare_to_industry_multi", {"results": {2025: {"ROE": {"percentile": 50}}}}),
+    ("get_subsidiary_auditors", {"consolidated_totals": {"assets_amount_m": 1000}}),
+])
+def test_inferred_limited_quality_never_has_optimistic_legacy_detail(tool_name, payload):
+    text = render_answer(tool_name, payload)
+
+    assert text is not None
+    assert "판정: usable" not in text
+    assert "세부 결과:\n판정: limited" in text
+
+
+def test_dcf_detail_uses_public_assumption_labels_and_safe_basis_text():
+    text = render_answer("get_dcf_input_candidates", {
+        "candidate_assumptions": {
+            "revenue_growth": {"value": 0.1, "basis": "historical_median"},
+            "operating_margin": {"value": 0.2},
+            "cash_conversion": {"value": 1.1, "basis": "operating_cf_to_net_income"},
+        },
+        "data_quality": {"status": "usable"},
+    })
+
+    assert text is not None
+    assert "매출 성장률" in text
+    assert "영업이익률" in text
+    assert "현금전환" in text
+    assert "revenue_growth" not in text
+    assert "operating_margin" not in text
+    assert "cash_conversion" not in text
+    assert "historical_median" not in text
+    assert "operating_cf_to_net_income" not in text
+    assert "basis 없음" not in text

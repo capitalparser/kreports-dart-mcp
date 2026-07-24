@@ -499,6 +499,15 @@ def _render_quality_of_earnings(result: dict) -> str:
 def _render_dcf_inputs(result: dict) -> str:
     subject = _subject_label(result)
     assumptions = result.get("candidate_assumptions") or {}
+    assumption_labels = {
+        "revenue_growth": "매출 성장률",
+        "operating_margin": "영업이익률",
+        "cash_conversion": "현금전환",
+    }
+    basis_labels = {
+        "historical_median": "과거 중앙값",
+        "operating_cf_to_net_income": "영업현금흐름 대비 순이익",
+    }
     lines = [
         f"판정: {_status(result)}",
         "",
@@ -508,7 +517,9 @@ def _render_dcf_inputs(result: dict) -> str:
     ]
     for key in ("revenue_growth", "operating_margin", "cash_conversion"):
         item = assumptions.get(key) or {}
-        lines.append(f"- {key}: {item.get('value')} ({item.get('basis') or 'basis 없음'})")
+        basis = item.get("basis")
+        basis_text = basis_labels.get(str(basis), "산정 근거 미확보") if basis else "산정 근거 미확보"
+        lines.append(f"- {assumption_labels[key]}: {item.get('value')} ({basis_text})")
     missing = result.get("missing_inputs") or []
     if missing:
         lines.append("")
@@ -825,6 +836,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         return None
     envelope = build_answer_envelope(tool_name, result)
     legacy_result = dict(result)
+    legacy_result["data_quality"] = envelope.data_quality.model_dump()
+    legacy_result["verdict"] = envelope.verdict
     for field in ("confirmed_facts", "analysis", "next_checks"):
         legacy_result.pop(field, None)
     detail: str | None = None
