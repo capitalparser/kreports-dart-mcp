@@ -7,7 +7,17 @@ from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
     index_audit_procedures_from_sections,
 )
-from kreports.db.models import AuditProcedureItem, Company, Disclosure, EvidenceDocument, Financial, ReportDocument, ReportSection, SourceDocument
+from kreports.db.models import (
+    AuditProcedureItem,
+    Company,
+    Disclosure,
+    EvidenceDocument,
+    FetchLog,
+    Financial,
+    ReportDocument,
+    ReportSection,
+    SourceDocument,
+)
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
     extract_audit_procedure_items,
@@ -37,6 +47,49 @@ def test_extract_audit_report_sections_finds_kam_and_opinion():
     assert "emphasis" in sections
     assert "수익인식" in sections["kam"]["body_text"]
     assert classify_kam_topics(sections["kam"]["body_text"]) == ["revenue", "inventory"]
+
+
+def test_audit_report_fetch_error_uses_production_task_name(temp_engine, monkeypatch):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            Disclosure(
+                rcept_no="20250318000999",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2025, 3, 18),
+                disc_type="F",
+                report_nm="감사보고서 (2024.12)",
+            )
+        )
+
+    monkeypatch.setattr(collector_module, "fetch_document_xml", lambda _rcept_no: None)
+
+    result = collect_report_sections_for_disclosure("20250318000999")
+
+    assert result["ok"] == 0
+    with get_session() as session:
+        row = (
+            session.query(FetchLog)
+            .filter_by(
+                task_type="audit_report_section",
+                corp_code="00126380",
+                year=2024,
+            )
+            .one()
+        )
+        assert row.status == "error"
+        assert row.error_msg == "document.xml empty"
 
 
 def test_decode_dart_text_prefers_korean_readable_encoding_when_utf8_mojibakes():

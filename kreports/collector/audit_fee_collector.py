@@ -6,12 +6,12 @@ NAS ratio(비감사보수/감사보수) 및 독립성 위험 플래그를 계산
 """
 import logging
 import time
-from datetime import datetime, date
+from datetime import date, datetime, timezone
 
 from kreports.collector.fetcher import fetch_audit_fee
 from kreports.config import settings
 from kreports.db.engine import get_session
-from kreports.db.models import AuditFee, Company
+from kreports.db.models import AuditFee, Company, FetchLog
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +72,44 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
             if status != "000":
                 if status == _DART_NO_DATA_STATUS:
                     no_data += 1
+                    _record_audit_fee_outcome(
+                        corp_code,
+                        year,
+                        status="no_data",
+                    )
                 else:
                     logger.warning(
                         "감사보수 API 오류 [%s %d]: status=%s message=%s",
                         corp_code, year, status, data.get("message"),
                     )
                     error += 1
+                    _record_audit_fee_outcome(
+                        corp_code,
+                        year,
+                        status="error",
+                        error_msg=str(
+                            data.get("message")
+                            or f"DART status={status}"
+                        ),
+                    )
                 continue
             if not data.get("list"):
                 no_data += 1
+                _record_audit_fee_outcome(
+                    corp_code,
+                    year,
+                    status="no_data",
+                )
                 continue
 
             item = _extract_current_period(data["list"])
             if item is None:
                 no_data += 1
+                _record_audit_fee_outcome(
+                    corp_code,
+                    year,
+                    status="no_data",
+                )
                 continue
 
             auditor_nm = item.get("adtor") or item.get("nm") or item.get("auditor_nm") or None
@@ -123,6 +147,11 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                 independence_risk_flag=independence_risk_flag,
             )
             saved += 1
+            _record_audit_fee_outcome(
+                corp_code,
+                year,
+                status="success",
+            )
             logger.debug("감사보수 저장 [%s %d] %s — 보수=%s 백만원, NAS=%.2f",
                          corp_code, year, auditor_nm or "-",
                          audit_fee_m or "-", nas_ratio or 0)
@@ -130,10 +159,37 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
         except Exception as e:
             logger.warning("감사보수 수집 실패 [%s %d]: %s", corp_code, year, e)
             error += 1
+            _record_audit_fee_outcome(
+                corp_code,
+                year,
+                status="error",
+                error_msg=str(e),
+            )
 
         time.sleep(settings.request_delay)
 
     return {"saved": saved, "no_data": no_data, "error": error}
+
+
+def _record_audit_fee_outcome(
+    corp_code: str,
+    year: int,
+    *,
+    status: str,
+    error_msg: str | None = None,
+) -> None:
+    """Persist one company/year producer outcome, separate from batch totals."""
+    with get_session() as session:
+        session.add(
+            FetchLog(
+                task_type="audit_fee",
+                corp_code=corp_code,
+                year=year,
+                status=status,
+                error_msg=error_msg[:4000] if error_msg else None,
+                fetched_at=datetime.now(timezone.utc),
+            )
+        )
 
 
 def _upsert_audit_fee(corp_code: str, bsns_year: int, **kwargs) -> None:

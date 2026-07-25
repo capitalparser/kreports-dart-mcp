@@ -5,6 +5,7 @@ from sqlalchemy import func, inspect
 
 from kreports.db.engine import get_session
 from kreports.db.models import (
+    AuditProcedureItem,
     Company,
     BusinessAffiliateAuditor,
     FetchLog,
@@ -149,7 +150,14 @@ def test_summary_only_kam_is_not_procedure_ready(temp_engine):
     assert quality["statuses"]["audit_procedure"] == "missing"
 
 
-def test_kam_extraction_error_is_not_degraded_to_missing(temp_engine):
+@pytest.mark.parametrize(
+    "extractor_name",
+    ["sections", "document_features", "kam_sections"],
+)
+def test_kam_extraction_error_is_not_degraded_to_missing(
+    temp_engine,
+    extractor_name,
+):
     from kreports.quality.company_year import (
         company_year_quality,
         rebuild_company_year_quality,
@@ -180,7 +188,7 @@ def test_kam_extraction_error_is_not_degraded_to_missing(temp_engine):
                 source_document_id=source.id,
                 rcept_no=source.rcept_no,
                 source_type="audit_report",
-                extractor_name="kam_sections",
+                extractor_name=extractor_name,
                 status="error",
                 rows_written=0,
                 error_msg="parser failed",
@@ -195,7 +203,7 @@ def test_kam_extraction_error_is_not_degraded_to_missing(temp_engine):
     assert "kam_error" in quality["blockers"]
 
 
-def test_group_audit_a_requires_graph_ownership_denominators_and_qsc(temp_engine):
+def test_group_audit_withholds_a_without_persisted_qsc_evidence(temp_engine):
     from kreports.quality.company_year import (
         company_year_quality,
         rebuild_company_year_quality,
@@ -218,8 +226,8 @@ def test_group_audit_a_requires_graph_ownership_denominators_and_qsc(temp_engine
     rebuild_company_year_quality(2025, 2025)
     quality = company_year_quality("00126380", 2025)
 
-    assert quality["statuses"]["group_audit"] == "available"
-    assert quality["feature_grades"]["group_audit"] == "A"
+    assert quality["statuses"]["group_audit"] == "partial"
+    assert quality["feature_grades"]["group_audit"] == "D"
 
 
 def test_explicit_no_kam_and_source_no_data_support_auditor_a(temp_engine):
@@ -269,7 +277,7 @@ def test_explicit_no_kam_and_source_no_data_support_auditor_a(temp_engine):
         )
         session.add(
             FetchLog(
-                task_type="audit_fees",
+                task_type="audit_fee",
                 corp_code="00126380",
                 year=2025,
                 status="no_data",
@@ -391,3 +399,256 @@ def test_explicit_financial_no_data_is_not_available_not_missing(temp_engine):
     quality = company_year_quality("00126380", 2025)
 
     assert quality["statuses"]["financial_core"] == "not_available"
+
+
+def test_actual_audit_report_section_error_is_preserved(temp_engine):
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            FetchLog(
+                task_type="audit_report_section",
+                corp_code="00126380",
+                year=2025,
+                status="error",
+                error_msg="document fetch failed",
+            )
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["kam"] == "error"
+    assert quality["statuses"]["audit_procedure"] == "error"
+
+
+def test_kam_and_procedure_use_only_deterministic_current_receipt(
+    temp_engine,
+):
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add_all(
+            [
+                ReportSection(
+                    rcept_no="20240318000001",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    section_key="kam",
+                    body_text=(
+                        "핵심감사사항에 대해 다음 감사절차를 "
+                        "수행하였습니다. " * 10
+                    ),
+                ),
+                ReportSection(
+                    rcept_no="20250318000001",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    section_key="kam",
+                    body_text="핵심감사사항이 존재합니다.",
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                AuditProcedureItem(
+                    rcept_no="20240318000001",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    procedure_type="inspection",
+                    procedure_text="과거 감사절차",
+                ),
+                AuditProcedureItem(
+                    rcept_no="20250318000001",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    procedure_type="inspection",
+                    procedure_text="요약문에서 잘못 연결된 절차",
+                ),
+            ]
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["kam"] == "summary_only"
+    assert quality["statuses"]["audit_procedure"] == "missing"
+
+
+@pytest.mark.parametrize(
+    "scenario,facts",
+    [
+        (
+            "below_10_percent",
+            [
+                ("00126380", "CFS", "assets", 1_000),
+                ("00126380", "CFS", "revenue", 1_000),
+                ("00999999", "CFS", "assets", 50),
+                ("00999999", "CFS", "revenue", 50),
+            ],
+        ),
+        (
+            "above_10_percent",
+            [
+                ("00126380", "CFS", "assets", 1_000),
+                ("00126380", "CFS", "revenue", 1_000),
+                ("00999999", "CFS", "assets", 200),
+                ("00999999", "CFS", "revenue", 200),
+            ],
+        ),
+        (
+            "missing_component_revenue",
+            [
+                ("00126380", "CFS", "assets", 1_000),
+                ("00126380", "CFS", "revenue", 1_000),
+                ("00999999", "CFS", "assets", 200),
+            ],
+        ),
+        (
+            "mixed_fs_divisions",
+            [
+                ("00126380", "CFS", "assets", 1_000),
+                ("00126380", "OFS", "revenue", 1_000),
+                ("00999999", "CFS", "assets", 200),
+                ("00999999", "OFS", "revenue", 200),
+            ],
+        ),
+    ],
+)
+def test_group_audit_never_infers_qsc_from_amounts(
+    temp_engine,
+    scenario,
+    facts,
+):
+    del scenario
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            BusinessAffiliateAuditor(
+                parent_corp_code="00126380",
+                parent_rcept_no="20250318000007",
+                bsns_year=2025,
+                name="종속회사",
+                relation="종속기업",
+                ownership_pct=80.0,
+                assets="200",
+                corp_code="00999999",
+            )
+        )
+        session.add_all(
+            [
+                FinancialFactCompact(
+                    corp_code=corp_code,
+                    bsns_year=2025,
+                    fs_div=fs_div,
+                    metric_key=metric_key,
+                    metric_name=metric_key,
+                    amount=amount,
+                )
+                for corp_code, fs_div, metric_key, amount in facts
+            ]
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["group_audit"] == "partial"
+    assert quality["feature_grades"]["group_audit"] == "D"
+
+
+def test_audit_fee_quality_consumes_real_per_company_outcomes(temp_engine):
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00126380",
+                    stock_code="005930",
+                    corp_name="no-data",
+                    market="KOSPI",
+                ),
+                Company(
+                    corp_code="00999998",
+                    stock_code="999998",
+                    corp_name="error",
+                    market="KOSPI",
+                ),
+                Company(
+                    corp_code="00999999",
+                    stock_code="999999",
+                    corp_name="no-log",
+                    market="KOSPI",
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                FetchLog(
+                    task_type="audit_fee",
+                    corp_code="00126380",
+                    year=2025,
+                    status="no_data",
+                ),
+                FetchLog(
+                    task_type="audit_fee",
+                    corp_code="00999998",
+                    year=2025,
+                    status="error",
+                    error_msg="transport failed",
+                ),
+            ]
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+
+    assert company_year_quality("00126380", 2025)["statuses"][
+        "audit_fee"
+    ] == "not_available"
+    assert company_year_quality("00999998", 2025)["statuses"][
+        "audit_fee"
+    ] == "error"
+    assert company_year_quality("00999999", 2025)["statuses"][
+        "audit_fee"
+    ] == "missing"

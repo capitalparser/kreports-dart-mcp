@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timezone
 import json
-import re
 from typing import Any
 
 from sqlalchemy import func
@@ -27,6 +26,7 @@ from kreports.db.models import (
     ExtractionRun,
     FetchLog,
     FinancialFactCompact,
+    ReportDocument,
     ReportSection,
     SourceDocument,
 )
@@ -319,13 +319,51 @@ def _kam_and_procedure_status(corp_code: str, year: int) -> tuple[str, str]:
     fetch_outcome = _fetch_outcome(
         corp_code,
         year,
-        ("kam", "kam_sections", "audit_report_sections"),
+        (
+            "kam",
+            "kam_sections",
+            "audit_report_sections",
+            "audit_report_section",
+        ),
     )
     if fetch_outcome == "error":
         return "error", "error"
     with get_session() as session:
+        receipt_candidates = [
+            value
+            for value in (
+                session.query(func.max(ReportDocument.rcept_no))
+                .filter(
+                    ReportDocument.corp_code == corp_code,
+                    ReportDocument.bsns_year == year,
+                    ReportDocument.source_type == "audit_report",
+                )
+                .scalar(),
+                session.query(func.max(ReportSection.rcept_no))
+                .filter(
+                    ReportSection.corp_code == corp_code,
+                    ReportSection.bsns_year == year,
+                    ReportSection.source_type == "audit_report",
+                )
+                .scalar(),
+                session.query(func.max(SourceDocument.rcept_no))
+                .filter(
+                    SourceDocument.corp_code == corp_code,
+                    SourceDocument.bsns_year == year,
+                    SourceDocument.source_type == "audit_report",
+                )
+                .scalar(),
+            )
+            if value is not None
+        ]
+        selected_receipt = (
+            max(str(value) for value in receipt_candidates)
+            if receipt_candidates
+            else None
+        )
         extraction_error = bool(
-            session.query(ExtractionRun.id)
+            selected_receipt
+            and session.query(ExtractionRun.id)
             .join(
                 SourceDocument,
                 SourceDocument.id == ExtractionRun.source_document_id,
@@ -334,8 +372,14 @@ def _kam_and_procedure_status(corp_code: str, year: int) -> tuple[str, str]:
                 SourceDocument.corp_code == corp_code,
                 SourceDocument.bsns_year == year,
                 SourceDocument.source_type == "audit_report",
+                SourceDocument.rcept_no == selected_receipt,
                 ExtractionRun.extractor_name.in_(
-                    ("kam_sections", "audit_procedure_items")
+                    (
+                        "sections",
+                        "document_features",
+                        "kam_sections",
+                        "audit_procedure_items",
+                    )
                 ),
                 ExtractionRun.status == "error",
             )
@@ -349,6 +393,7 @@ def _kam_and_procedure_status(corp_code: str, year: int) -> tuple[str, str]:
                     ReportSection.corp_code == corp_code,
                     ReportSection.bsns_year == year,
                     ReportSection.source_type == "audit_report",
+                    ReportSection.rcept_no == selected_receipt,
                     ReportSection.section_key.in_(
                         ("kam", "key_audit_matters", "kam_matters")
                     ),
@@ -361,6 +406,7 @@ def _kam_and_procedure_status(corp_code: str, year: int) -> tuple[str, str]:
             .filter(
                 AuditProcedureItem.corp_code == corp_code,
                 AuditProcedureItem.bsns_year == year,
+                AuditProcedureItem.rcept_no == selected_receipt,
             )
             .scalar()
             or 0
@@ -382,7 +428,11 @@ def _kam_and_procedure_status(corp_code: str, year: int) -> tuple[str, str]:
         for body in bodies
     )
     kam_status = "full_body" if has_full_body else "summary_only"
-    procedure_status = "available" if procedure_count else "missing"
+    procedure_status = (
+        "available"
+        if kam_status == "full_body" and procedure_count
+        else "missing"
+    )
     return kam_status, procedure_status
 
 
@@ -419,18 +469,6 @@ def _auditor_grade(
     return "D"
 
 
-def _parse_numeric_text(value: str | None) -> float | None:
-    if value is None:
-        return None
-    normalized = re.sub(r"[^0-9.\-]", "", str(value))
-    if normalized in {"", "-", ".", "-."}:
-        return None
-    try:
-        return float(normalized)
-    except ValueError:
-        return None
-
-
 def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
     fetch_outcome = _fetch_outcome(
         corp_code,
@@ -440,52 +478,22 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
     if fetch_outcome == "error":
         return "error", "D"
     with get_session() as session:
-        components = (
-            session.query(
-                BusinessAffiliateAuditor.ownership_pct,
-                BusinessAffiliateAuditor.assets,
-            )
+        component_count = int(
+            session.query(func.count(BusinessAffiliateAuditor.id))
             .filter(
                 BusinessAffiliateAuditor.parent_corp_code == corp_code,
                 BusinessAffiliateAuditor.bsns_year == year,
             )
-            .all()
+            .scalar()
+            or 0
         )
-        parent_metrics = {
-            str(metric_key): amount
-            for metric_key, amount in (
-                session.query(
-                    FinancialFactCompact.metric_key,
-                    FinancialFactCompact.amount,
-                )
-                .filter(
-                    FinancialFactCompact.corp_code == corp_code,
-                    FinancialFactCompact.bsns_year == year,
-                    FinancialFactCompact.metric_key.in_(("assets", "revenue")),
-                    FinancialFactCompact.amount.is_not(None),
-                )
-                .all()
-            )
-        }
-    if not components:
+    if not component_count:
         return fetch_outcome or "missing", "D"
-    ownership_available = all(
-        ownership_pct is not None for ownership_pct, _ in components
-    )
-    denominator_metrics_available = (
-        parent_metrics.get("assets") not in (None, 0)
-        and parent_metrics.get("revenue") is not None
-    )
-    qsc_classification_available = bool(
-        denominator_metrics_available
-        and all(_parse_numeric_text(assets) is not None for _, assets in components)
-    )
-    if (
-        ownership_available
-        and denominator_metrics_available
-        and qsc_classification_available
-    ):
-        return "available", "A"
+    # QSC classifications currently exist only as transient API calculations.
+    # The affiliate ledger has no receipt-bound qsc/not_qsc field, component
+    # revenue, or FS-division denominator identity.  Amounts therefore cannot
+    # prove a classification, and Group A is withheld until canonical evidence
+    # is persisted.
     return "partial", "D"
 
 

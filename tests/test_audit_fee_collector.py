@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from kreports.db.models import AuditFee
+from kreports.db.models import AuditFee, FetchLog
 
 
 CORP_CODE = "00126380"
@@ -118,6 +118,17 @@ def test_collect_audit_fee_distinguishes_no_data(fresh_audit_fee_db):
     assert result == {"saved": 0, "no_data": 1, "error": 0}
     with eng.get_session() as session:
         assert session.query(AuditFee).count() == 0
+        outcome = (
+            session.query(FetchLog)
+            .filter_by(
+                task_type="audit_fee",
+                corp_code=CORP_CODE,
+                year=2024,
+            )
+            .one()
+        )
+        assert outcome.status == "no_data"
+        assert outcome.error_msg is None
 
 
 def test_collect_audit_fee_counts_transport_failure_as_error(fresh_audit_fee_db):
@@ -133,3 +144,14 @@ def test_collect_audit_fee_counts_transport_failure_as_error(fresh_audit_fee_db)
     assert result == {"saved": 0, "no_data": 0, "error": 1}
     with eng.get_session() as session:
         assert session.query(AuditFee).count() == 0
+        outcome = (
+            session.query(FetchLog)
+            .filter_by(
+                task_type="audit_fee",
+                corp_code=CORP_CODE,
+                year=2024,
+            )
+            .one()
+        )
+        assert outcome.status == "error"
+        assert outcome.error_msg == "Server disconnected"

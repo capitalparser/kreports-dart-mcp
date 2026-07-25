@@ -56,11 +56,14 @@ def test_dataset_manifest_records_schema_version_counts_and_year_range(temp_engi
         "dataset_version": "compact-2025.07.25",
         "generated_at": result["generated_at"],
         "year_from": 2021,
-        "year_to": 2025,
+        "year_to": 2024,
         "company_count": 2,
         "disclosure_count": 2,
         "evidence_document_count": 2,
-        "quality_snapshot_json": "{}",
+        "quality_snapshot_json": (
+            '{"coverage_year": null, "coverage_year_row_count": 0, '
+            '"quality_version": null, "row_count": 0}'
+        ),
         "notes": "release candidate",
     }
 
@@ -82,8 +85,13 @@ def test_dataset_manifest_records_schema_version_counts_and_year_range(temp_engi
     assert stored_values["company_count"] == 2
     assert stored_values["disclosure_count"] == 2
     assert stored_values["evidence_document_count"] == 2
-    assert (stored_values["year_from"], stored_values["year_to"]) == (2021, 2025)
-    assert json.loads(stored_values["quality_snapshot_json"]) == {}
+    assert (stored_values["year_from"], stored_values["year_to"]) == (2021, 2024)
+    assert json.loads(stored_values["quality_snapshot_json"]) == {
+        "coverage_year": None,
+        "coverage_year_row_count": 0,
+        "quality_version": None,
+        "row_count": 0,
+    }
 
 
 def test_dataset_manifest_allows_empty_dataset_with_unknown_year_range(temp_engine):
@@ -191,3 +199,54 @@ def test_dataset_manifest_writer_is_rejected_in_readonly_mode(
 
     with pytest.raises(RuntimeError, match="requires collector mode"):
         write_dataset_manifest("readonly-v1")
+
+
+def test_manifest_uses_business_year_and_snapshots_quality_ledger(
+    temp_engine,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality, Disclosure
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(company_factory())
+        session.add(
+            Disclosure(
+                rcept_no="20260318000001",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2026, 3, 18),
+                disc_type="A",
+                report_nm="사업보고서 (2025.12)",
+            )
+        )
+        session.add(
+            CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=2025,
+                market="KOSPI",
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v1",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    result = write_dataset_manifest("quality-v1")
+
+    assert (result["year_from"], result["year_to"]) == (2025, 2025)
+    assert json.loads(result["quality_snapshot_json"]) == {
+        "coverage_year": 2025,
+        "coverage_year_row_count": 1,
+        "quality_version": "v1",
+        "row_count": 1,
+    }

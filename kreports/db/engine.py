@@ -1,8 +1,7 @@
+import json
 import logging
 import re
 from datetime import date, datetime, timezone
-from pathlib import Path
-
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker, Session
@@ -13,6 +12,7 @@ from kreports.config import settings, BASE_DIR
 from kreports.db.models import (
     Base,
     Company,
+    CompanyYearQuality,
     DatasetManifest,
     Disclosure,
     EvidenceDocument,
@@ -382,6 +382,58 @@ def write_dataset_manifest(
             evidence_document_count = session.scalar(
                 select(func.count()).select_from(EvidenceDocument)
             )
+            quality_row_count = int(
+                session.scalar(
+                    select(func.count()).select_from(CompanyYearQuality)
+                )
+                or 0
+            )
+            quality_coverage_year = session.scalar(
+                select(func.max(CompanyYearQuality.bsns_year))
+            )
+            quality_versions = list(
+                session.scalars(
+                    select(CompanyYearQuality.quality_version)
+                    .distinct()
+                    .order_by(CompanyYearQuality.quality_version)
+                )
+            )
+            if quality_row_count and len(quality_versions) != 1:
+                raise RuntimeError(
+                    "company-year quality ledger must have one quality_version "
+                    "before writing a dataset manifest"
+                )
+            quality_coverage_year_row_count = (
+                int(
+                    session.scalar(
+                        select(func.count())
+                        .select_from(CompanyYearQuality)
+                        .where(
+                            CompanyYearQuality.bsns_year
+                            == quality_coverage_year
+                        )
+                    )
+                    or 0
+                )
+                if quality_coverage_year is not None
+                else 0
+            )
+            quality_snapshot = {
+                "coverage_year": (
+                    int(quality_coverage_year)
+                    if quality_coverage_year is not None
+                    else None
+                ),
+                "coverage_year_row_count": (
+                    quality_coverage_year_row_count
+                ),
+                "quality_version": (
+                    str(quality_versions[0])
+                    if quality_versions
+                    else None
+                ),
+                "row_count": quality_row_count,
+            }
             year_bounds = (
                 session.execute(
                     select(func.min(Financial.year), func.max(Financial.year))
@@ -394,14 +446,14 @@ def write_dataset_manifest(
                 ).one(),
                 session.execute(
                     select(
-                        func.min(Disclosure.disc_date),
-                        func.max(Disclosure.disc_date),
+                        func.min(EvidenceDocument.bsns_year),
+                        func.max(EvidenceDocument.bsns_year),
                     )
                 ).one(),
                 session.execute(
                     select(
-                        func.min(EvidenceDocument.bsns_year),
-                        func.max(EvidenceDocument.bsns_year),
+                        func.min(CompanyYearQuality.bsns_year),
+                        func.max(CompanyYearQuality.bsns_year),
                     )
                 ).one(),
             )
@@ -421,7 +473,11 @@ def write_dataset_manifest(
                 company_count=int(company_count or 0),
                 disclosure_count=int(disclosure_count or 0),
                 evidence_document_count=int(evidence_document_count or 0),
-                quality_snapshot_json="{}",
+                quality_snapshot_json=json.dumps(
+                    quality_snapshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 notes=notes,
             )
             session.add(manifest)

@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 import json
 
+import pytest
+
 from kreports.db.engine import get_session
 from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
 from kreports.db.models import Company, CompanyYearQuality, DatasetManifest
@@ -8,23 +10,12 @@ from typer.testing import CliRunner
 
 
 def _seed_valid_manifest(temp_engine, *, year: int = 2025) -> None:
+    from kreports.db.engine import write_dataset_manifest
+
     with temp_engine.begin() as connection:
         apply_schema_migrations(connection)
-    with get_session() as session:
-        session.add(
-            DatasetManifest(
-                manifest_id="release-v1",
-                schema_version=MIGRATIONS[-1].revision,
-                dataset_version="release-v1",
-                generated_at=datetime.now(timezone.utc),
-                year_from=year,
-                year_to=year,
-                company_count=0,
-                disclosure_count=0,
-                evidence_document_count=0,
-                quality_snapshot_json="{}",
-            )
-        )
+    result = write_dataset_manifest("release-v1")
+    assert result["year_to"] in {None, year}
 
 
 def _seed_quality_row(
@@ -74,7 +65,6 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
 ):
     from kreports.quality.release_gate import evaluate_release_gate
 
-    _seed_valid_manifest(temp_engine)
     for index in range(20):
         _seed_quality_row(
             corp_code=f"{index + 1:08d}",
@@ -92,6 +82,7 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
         market="KONEX",
         stock_code="900002",
     )
+    _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
     report = evaluate_release_gate("public_runtime")
@@ -117,7 +108,6 @@ def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
 ):
     from kreports.quality.release_gate import evaluate_release_gate
 
-    _seed_valid_manifest(temp_engine)
     for index in range(20):
         _seed_quality_row(
             corp_code=f"{index + 1:08d}",
@@ -126,6 +116,7 @@ def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
             policy_status="missing" if index < 2 else "full_body",
             procedure_status="missing" if index < 2 else "available",
         )
+    _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
     public = evaluate_release_gate("public_runtime")
@@ -150,7 +141,6 @@ def test_explicit_no_kam_is_excluded_from_procedure_denominator(
 ):
     from kreports.quality.release_gate import evaluate_release_gate
 
-    _seed_valid_manifest(temp_engine)
     for index in range(20):
         no_kam = index >= 18
         _seed_quality_row(
@@ -162,6 +152,7 @@ def test_explicit_no_kam_is_excluded_from_procedure_denominator(
             ),
             kam_status="explicit_no_kam" if no_kam else "full_body",
         )
+    _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
     report = evaluate_release_gate("auditor_full")
@@ -216,8 +207,8 @@ def test_release_gate_is_read_only_and_does_not_require_dart_key(
     import kreports.db.engine as engine_module
     from kreports.quality.release_gate import evaluate_release_gate
 
-    _seed_valid_manifest(temp_engine)
     _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     monkeypatch.delenv("DART_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -360,3 +351,286 @@ def test_rebuild_company_year_quality_cli_supports_json_and_human(
     assert human_result.exit_code == 0
     assert "Rows written: 4" in human_result.stdout
     assert "market=KOSPI" in human_result.stdout
+
+
+def test_release_gate_rejects_recorded_migration_checksum_mismatch(
+    temp_engine,
+    monkeypatch,
+):
+    from sqlalchemy import text
+
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with temp_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE schema_migrations SET checksum=:checksum "
+                "WHERE revision=:revision"
+            ),
+            {
+                "checksum": "0" * 64,
+                "revision": MIGRATIONS[0].revision,
+            },
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "schema_migration_contract_mismatch" in report[
+        "required_failures"
+    ]
+    assert "release_manifest_unavailable" in report["required_failures"]
+
+
+@pytest.mark.parametrize(
+    "count_dimension",
+    ["company", "disclosure", "evidence_document"],
+)
+def test_release_gate_rejects_manifest_live_count_mismatch(
+    temp_engine,
+    monkeypatch,
+    count_dimension,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+    from tests.factories import disclosure_factory, evidence_document_factory
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        if count_dimension == "company":
+            session.add(
+                Company(
+                    corp_code="00999999",
+                    stock_code="999999",
+                    corp_name="추가회사",
+                    market="KOSPI",
+                )
+            )
+        elif count_dimension == "disclosure":
+            session.add(
+                disclosure_factory(
+                    rcept_no="20250318000999",
+                    corp_code="00126380",
+                )
+            )
+        else:
+            session.add(
+                evidence_document_factory(
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    rcept_no="20250318000999",
+                )
+            )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "release_manifest_counts_mismatch" in report[
+        "required_failures"
+    ]
+    assert "release_manifest_unavailable" in report["required_failures"]
+
+
+def test_release_gate_rejects_quality_snapshot_version_mismatch(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.quality_version = "v2"
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "quality_snapshot_mismatch" in report["required_failures"]
+    assert "release_manifest_unavailable" in report["required_failures"]
+
+
+def test_release_gate_rejects_quality_snapshot_row_count_mismatch(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=2024,
+                market="KOSPI",
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v1",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "quality_snapshot_mismatch" in report["required_failures"]
+    assert "release_manifest_counts_mismatch" not in report[
+        "required_failures"
+    ]
+
+
+def test_release_gate_rejects_quality_snapshot_coverage_year_mismatch(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        old = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert old is not None
+        session.delete(old)
+        session.add(
+            CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=2026,
+                market="KOSPI",
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v1",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "quality_snapshot_mismatch" in report["required_failures"]
+    assert "release_manifest_year_mismatch" in report[
+        "required_failures"
+    ]
+
+
+def test_release_gate_rejects_missing_code_migration_revision(
+    temp_engine,
+    monkeypatch,
+):
+    from sqlalchemy import text
+
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with temp_engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM schema_migrations "
+                "WHERE revision=:revision"
+            ),
+            {"revision": MIGRATIONS[0].revision},
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "schema_migration_contract_mismatch" in report[
+        "required_failures"
+    ]
+
+
+def test_public_runtime_does_not_round_1899_of_1999_up_to_threshold(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    now = datetime.now(timezone.utc)
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code=f"{index + 1:08d}",
+                    stock_code=f"{index + 1:06d}",
+                    corp_name=f"회사-{index + 1}",
+                    market="KOSPI",
+                )
+                for index in range(1999)
+            ]
+        )
+        session.add_all(
+            [
+                CompanyYearQuality(
+                    corp_code=f"{index + 1:08d}",
+                    bsns_year=2025,
+                    market="KOSPI",
+                    financial_core_status="available",
+                    auditor_status="available",
+                    audit_fee_status="available",
+                    policy_status="full_body",
+                    kam_status="full_body",
+                    audit_procedure_status="available",
+                    group_audit_status="missing",
+                    investor_grade="A" if index < 1899 else "D",
+                    auditor_grade="A",
+                    group_audit_grade="D",
+                    blockers_json="[]",
+                    quality_version="v1",
+                    updated_at=now,
+                )
+                for index in range(1999)
+            ]
+        )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert report["coverage"]["investor_core"]["coverage_pct"] == 95.0
+    assert "investor_core_coverage" in report["required_failures"]

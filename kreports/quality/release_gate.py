@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any, TypedDict
 
 from sqlalchemy import inspect, text
@@ -11,6 +12,7 @@ from kreports.analysis.readiness import (
     investor_dataset_readiness_snapshot,
 )
 from kreports.db.engine import get_session
+from kreports.db.migrations import MIGRATIONS, _checksum
 from kreports.runtime import is_readonly_mode
 
 
@@ -19,6 +21,7 @@ PROFILE_AUDITOR_FULL = "auditor_full"
 SUPPORTED_PROFILES = (PROFILE_PUBLIC_RUNTIME, PROFILE_AUDITOR_FULL)
 EXPECTED_TOOL_COUNT = 31
 FEATURE_COVERAGE_THRESHOLD_PCT = 95.0
+FEATURE_COVERAGE_THRESHOLD_BASIS_POINTS = 9500
 STALE_BACKFILL_AGE = timedelta(hours=1)
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
 REQUIRED_TABLES = (
@@ -27,6 +30,7 @@ REQUIRED_TABLES = (
     "financials",
     "financial_facts_compact",
     "report_sections",
+    "evidence_documents",
     "backfill_runs",
     "company_year_quality",
 )
@@ -103,6 +107,26 @@ def _runtime_schema_state() -> tuple[
         coverage_year: int | None = None
         if {"schema_migrations", "dataset_manifest"}.issubset(table_names):
             try:
+                recorded_migrations = [
+                    (str(row["revision"]), str(row["checksum"]))
+                    for row in session.execute(
+                        text(
+                            "SELECT revision, checksum "
+                            "FROM schema_migrations ORDER BY revision"
+                        )
+                    ).mappings()
+                ]
+                expected_migrations = [
+                    (migration.revision, _checksum(migration))
+                    for migration in MIGRATIONS
+                ]
+                migration_contract_valid = (
+                    recorded_migrations == expected_migrations
+                )
+                if not migration_contract_valid:
+                    failures.append(
+                        "schema_migration_contract_mismatch"
+                    )
                 migration_version = session.execute(
                     text(
                         "SELECT revision FROM schema_migrations "
@@ -113,7 +137,9 @@ def _runtime_schema_state() -> tuple[
                 manifest_row = session.execute(
                     text(
                         "SELECT manifest_id, schema_version, dataset_version, "
-                        "generated_at, year_to "
+                        "generated_at, year_to, company_count, "
+                        "disclosure_count, evidence_document_count, "
+                        "quality_snapshot_json "
                         "FROM dataset_manifest "
                         "WHERE trim(schema_version) != '' "
                         "AND trim(dataset_version) != '' "
@@ -126,9 +152,130 @@ def _runtime_schema_state() -> tuple[
                     if manifest_row
                     else None
                 )
+                live_counts = (
+                    int(
+                        session.execute(
+                            text("SELECT COUNT(*) FROM companies")
+                        ).scalar()
+                        or 0
+                    ),
+                    int(
+                        session.execute(
+                            text("SELECT COUNT(*) FROM disclosures")
+                        ).scalar()
+                        or 0
+                    ),
+                    int(
+                        session.execute(
+                            text(
+                                "SELECT COUNT(*) FROM evidence_documents"
+                            )
+                        ).scalar()
+                        or 0
+                    ),
+                )
+                manifest_counts = (
+                    (
+                        int(manifest_row["company_count"]),
+                        int(manifest_row["disclosure_count"]),
+                        int(manifest_row["evidence_document_count"]),
+                    )
+                    if manifest_row
+                    else None
+                )
+                counts_valid = manifest_counts == live_counts
+                if manifest_row and not counts_valid:
+                    failures.append("release_manifest_counts_mismatch")
+                quality_row_count = int(
+                    session.execute(
+                        text(
+                            "SELECT COUNT(*) "
+                            "FROM company_year_quality"
+                        )
+                    ).scalar()
+                    or 0
+                )
+                live_coverage_year_value = session.execute(
+                    text(
+                        "SELECT MAX(bsns_year) "
+                        "FROM company_year_quality"
+                    )
+                ).scalar()
+                live_coverage_year = (
+                    int(live_coverage_year_value)
+                    if live_coverage_year_value is not None
+                    else None
+                )
+                coverage_year_row_count = (
+                    int(
+                        session.execute(
+                            text(
+                                "SELECT COUNT(*) "
+                                "FROM company_year_quality "
+                                "WHERE bsns_year=:year"
+                            ),
+                            {"year": live_coverage_year},
+                        ).scalar()
+                        or 0
+                    )
+                    if live_coverage_year is not None
+                    else 0
+                )
+                quality_versions = [
+                    str(value)
+                    for value in session.execute(
+                        text(
+                            "SELECT DISTINCT quality_version "
+                            "FROM company_year_quality "
+                            "ORDER BY quality_version"
+                        )
+                    ).scalars()
+                ]
+                live_quality_snapshot = {
+                    "coverage_year": live_coverage_year,
+                    "coverage_year_row_count": coverage_year_row_count,
+                    "quality_version": (
+                        quality_versions[0]
+                        if len(quality_versions) == 1
+                        else None
+                    ),
+                    "row_count": quality_row_count,
+                }
+                try:
+                    manifest_quality_snapshot = (
+                        json.loads(
+                            str(manifest_row["quality_snapshot_json"])
+                        )
+                        if manifest_row
+                        else None
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    manifest_quality_snapshot = None
+                quality_snapshot_valid = (
+                    len(quality_versions) <= 1
+                    and manifest_quality_snapshot
+                    == live_quality_snapshot
+                )
+                if manifest_row and not quality_snapshot_valid:
+                    failures.append("quality_snapshot_mismatch")
+                manifest_year = (
+                    int(manifest_row["year_to"])
+                    if manifest_row
+                    and manifest_row["year_to"] is not None
+                    else None
+                )
+                coverage_year_aligned = (
+                    manifest_year == live_coverage_year
+                )
+                if manifest_row and not coverage_year_aligned:
+                    failures.append("release_manifest_year_mismatch")
                 if (
                     manifest_row
                     and migration_version
+                    and migration_contract_valid
+                    and counts_valid
+                    and quality_snapshot_valid
+                    and coverage_year_aligned
                     and generated_at is not None
                     and generated_at <= datetime.now(timezone.utc)
                     and manifest_row["schema_version"] == migration_version
@@ -137,11 +284,7 @@ def _runtime_schema_state() -> tuple[
                 ):
                     schema_version = str(manifest_row["schema_version"])
                     dataset_version = str(manifest_row["dataset_version"])
-                    coverage_year = (
-                        int(manifest_row["year_to"])
-                        if manifest_row["year_to"] is not None
-                        else None
-                    )
+                    coverage_year = live_coverage_year
                     manifest_available = True
             except Exception:
                 failures.append("unreadable_release_manifest")
@@ -374,7 +517,11 @@ def _below_threshold(result: CoverageResult | None) -> bool:
     return (
         result is None
         or result["denominator"] <= 0
-        or result["coverage_pct"] < result["threshold_pct"]
+        or (
+            result["numerator"] * 10_000
+            < result["denominator"]
+            * FEATURE_COVERAGE_THRESHOLD_BASIS_POINTS
+        )
     )
 
 
