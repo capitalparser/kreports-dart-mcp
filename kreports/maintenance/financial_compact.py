@@ -3,32 +3,29 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from kreports.db.engine import get_session
+from kreports.semantic.metrics import (
+    FINANCIAL_SUMMARY_FIELD_METRICS,
+    compact_metric_definitions,
+    metric_definition,
+)
 
 
 METRIC_MAP = {
-    "ifrs-full_Assets": ("assets", "자산총계"),
-    "ifrs-full_Liabilities": ("liabilities", "부채총계"),
-    "ifrs-full_Equity": ("equity", "자본총계"),
-    "ifrs-full_Revenue": ("revenue", "매출액"),
-    "ifrs-full_ProfitLoss": ("profit_loss", "당기순손익"),
-    "ifrs-full_OperatingProfitLoss": ("operating_profit", "영업손익"),
-    "dart_OperatingIncomeLoss": ("operating_profit", "영업손익"),
-    "ifrs-full_IncomeTaxExpenseContinuingOperations": ("tax_expense", "법인세비용"),
-    "ifrs-full_CashFlowsFromUsedInOperatingActivities": ("operating_cash_flow", "영업활동현금흐름"),
-    "ifrs-full_CashFlowsFromUsedInInvestingActivities": ("investing_cash_flow", "투자활동현금흐름"),
-    "ifrs-full_CashFlowsFromUsedInFinancingActivities": ("financing_cash_flow", "재무활동현금흐름"),
-    "ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities": ("purchase_ppe", "유형자산 취득"),
-    "ifrs-full_PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities": ("purchase_intangible_assets", "무형자산 취득"),
+    account_id: (definition.key, definition.label_ko)
+    for definition in compact_metric_definitions()
+    for account_id in definition.source_account_ids
+}
+SUMMARY_METRIC_MAP = {
+    source_field: (metric_key, metric_definition(metric_key).label_ko)
+    for source_field, metric_key in FINANCIAL_SUMMARY_FIELD_METRICS.items()
 }
 
-SUMMARY_METRIC_MAP = {
-    "revenue": ("revenue", "매출액"),
-    "operating_profit": ("operating_profit", "영업손익"),
-    "net_income": ("profit_loss", "당기순손익"),
-    "total_assets": ("assets", "자산총계"),
-    "total_debt": ("liabilities", "부채총계"),
-    "total_equity": ("equity", "자본총계"),
-    "operating_cf": ("operating_cash_flow", "영업활동현금흐름"),
+# The source-account tuple is ordered most-preferred first.  Inserting lower
+# precedence rows first retains that precedence under the compact upsert.
+_ACCOUNT_PRECEDENCE = {
+    account_id: position
+    for definition in compact_metric_definitions()
+    for position, account_id in enumerate(definition.source_account_ids)
 }
 
 
@@ -57,6 +54,7 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
     summary_inserted_or_updated = 0
     with get_session() as session:
         rows = session.execute(sql, params).mappings().all()
+        rows.sort(key=lambda row: _ACCOUNT_PRECEDENCE[row["account_id"]], reverse=True)
         for row in rows:
             metric_key, metric_name = METRIC_MAP[row["account_id"]]
             session.execute(text("""

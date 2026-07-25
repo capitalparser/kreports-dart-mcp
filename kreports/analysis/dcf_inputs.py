@@ -4,6 +4,7 @@ from __future__ import annotations
 from statistics import median
 
 from kreports.analysis.investor_quality import _financial_series, _safe_div
+from kreports.semantic.metrics import DCF_SUPPORT_METRICS, METRIC_OUTPUT_ALIASES
 
 
 def _growth(current: int | float | None, previous: int | float | None) -> float | None:
@@ -98,8 +99,9 @@ def dcf_input_candidates(
     missing_inputs.extend(["working_capital_delta", "wacc"])
 
     missing_core_metrics = [
-        metric for metric in ("revenue", "operating_profit", "net_income", "operating_cf")
-        if all(row.get(metric) is None for row in series)
+        METRIC_OUTPUT_ALIASES.get(metric, metric)
+        for metric in DCF_SUPPORT_METRICS[:4]
+        if all(row.get(METRIC_OUTPUT_ALIASES.get(metric, metric)) is None for row in series)
     ]
     if missing_core_metrics:
         status = "incomplete_core_metrics"

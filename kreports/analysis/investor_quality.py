@@ -6,6 +6,7 @@ from statistics import pstdev
 from sqlalchemy import bindparam, text
 
 from kreports.db.engine import engine
+from kreports.semantic.metrics import CORE_FINANCIAL_METRICS, metric_output_key
 
 
 def _safe_div(num: int | float | None, den: int | float | None) -> float | None:
@@ -15,18 +16,7 @@ def _safe_div(num: int | float | None, den: int | float | None) -> float | None:
 
 
 def _financial_series(company: str, start_year: int, end_year: int, fs_div: str = "CFS") -> list[dict]:
-    metric_keys = [
-        "revenue",
-        "operating_profit",
-        "profit_loss",
-        "operating_cash_flow",
-        "tax_expense",
-        "purchase_ppe",
-        "purchase_intangible_assets",
-        "assets",
-        "liabilities",
-        "equity",
-    ]
+    metric_keys = CORE_FINANCIAL_METRICS
     stmt = text("""
         SELECT bsns_year, metric_key, amount
         FROM financial_facts_compact
@@ -46,12 +36,7 @@ def _financial_series(company: str, start_year: int, end_year: int, fs_div: str 
             "metric_keys": metric_keys,
         }).mappings():
             item = by_year.setdefault(int(row["bsns_year"]), {"bsns_year": int(row["bsns_year"])})
-            key = row["metric_key"]
-            if key == "profit_loss":
-                key = "net_income"
-            elif key == "operating_cash_flow":
-                key = "operating_cf"
-            item[key] = row["amount"]
+            item[metric_output_key(row["metric_key"])] = row["amount"]
     return [by_year[year] for year in sorted(by_year)]
 
 
