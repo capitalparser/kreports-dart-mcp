@@ -17,7 +17,10 @@ def test_schema_migrations_are_idempotent(temp_engine):
         first = apply_schema_migrations(conn)
         second = apply_schema_migrations(conn)
 
-    assert first == ["20260711_01_quality_contract"]
+    assert first == [
+        "20260711_01_quality_contract",
+        "20260711_02_company_year_quality",
+    ]
     assert second == []
 
 
@@ -36,14 +39,17 @@ def test_schema_migration_records_stable_sha256_and_current_version(temp_engine)
     ).hexdigest()
 
     with temp_engine.begin() as conn:
-        assert apply_schema_migrations(conn) == [migration.revision]
+        assert apply_schema_migrations(conn) == [
+            item.revision for item in MIGRATIONS
+        ]
         row = conn.execute(
             text(
                 "SELECT revision, checksum, description, applied_at "
-                "FROM schema_migrations"
-            )
+                "FROM schema_migrations WHERE revision=:revision"
+            ),
+            {"revision": migration.revision},
         ).mappings().one()
-        assert current_schema_version(conn) == migration.revision
+        assert current_schema_version(conn) == MIGRATIONS[-1].revision
 
     assert row["revision"] == "20260711_01_quality_contract"
     assert row["checksum"] == expected_checksum

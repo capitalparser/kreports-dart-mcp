@@ -3,7 +3,6 @@ import os
 import json
 import platform
 import shutil
-import sys
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -20,8 +19,7 @@ from kreports.config import settings
 from kreports.db.engine import init_db, get_session
 from kreports.db.models import (
     Company, Financial, Disclosure, Auditor, AuditFee, FetchLog,
-    AccountingPolicyItem, ReportDocument, ReportSection, BackfillRun,
-    SourceDocument, ExtractionRun,
+    AccountingPolicyItem, BackfillRun,
 )
 
 app = typer.Typer(
@@ -1605,7 +1603,7 @@ def collect_auditors_cmd(
             force=force,
         ) as run_id:
             result = collect_all_auditors(progress_callback=_progress)
-            typer.echo(f"\n플래그 계산 중...")
+            typer.echo("\n플래그 계산 중...")
             compute_all_auditor_flags()
             _finish_backfill_run(run_id, result)
         typer.echo(f"완료 - 저장: {result['saved']:,}, 스킵: {result['skipped']:,}")
@@ -1943,6 +1941,90 @@ def rebuild_financial_facts_compact_cmd(
     init_db()
     result = rebuild_financial_facts_compact(year_from=year_from, year_to=year_to)
     _json_print(result)
+
+
+@app.command("rebuild-company-year-quality")
+def rebuild_company_year_quality_cmd(
+    year_from: int = typer.Option(..., "--year-from", help="시작 사업연도"),
+    year_to: int = typer.Option(..., "--year-to", help="종료 사업연도"),
+    market: Optional[str] = typer.Option(
+        None,
+        "--market",
+        help="KOSPI/KOSDAQ 등 대상 시장",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """기존 파생 데이터로 회사-연도별 기능 품질 원장을 재생성한다."""
+    from kreports.quality.company_year import rebuild_company_year_quality
+
+    init_db()
+    result = rebuild_company_year_quality(
+        year_from=year_from,
+        year_to=year_to,
+        market=market,
+    )
+    if json_output:
+        _json_print(result)
+        return
+    typer.echo(
+        "Company-year quality rebuild: "
+        f"{result['year_from']}-{result['year_to']} "
+        f"market={result['market'] or 'ALL'}"
+    )
+    typer.echo(f"Companies evaluated: {result['companies_evaluated']}")
+    typer.echo(f"Rows written: {result['rows_written']}")
+    typer.echo(f"Quality version: {result['quality_version']}")
+
+
+@app.command("quality-release-gate")
+def quality_release_gate_cmd(
+    profile: str = typer.Option(
+        "public_runtime",
+        "--profile",
+        help="public_runtime 또는 auditor_full",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """준비된 데이터셋의 배포 게이트를 읽기 전용으로 평가한다."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    report = evaluate_release_gate(profile)
+    if json_output:
+        _json_print(report)
+    else:
+        typer.echo(
+            f"Release gate: {'PASS' if report['ok'] else 'FAIL'} "
+            f"(profile={report['profile']})"
+        )
+        typer.echo(f"Schema version: {report['schema_version']}")
+        typer.echo(f"Dataset version: {report['dataset_version']}")
+        typer.echo(f"Tool count: {report['tool_count']}")
+        typer.echo(
+            "Required failures: "
+            + (", ".join(report["required_failures"]) or "none")
+        )
+        typer.echo(
+            "Degraded features: "
+            + (", ".join(report["degraded_features"]) or "none")
+        )
+        typer.echo("Coverage and exact denominators:")
+        for feature, values in sorted(report["coverage"].items()):
+            typer.echo(
+                f"- {feature}: {values['numerator']}/"
+                f"{values['denominator']} "
+                f"({values['coverage_pct']}%, "
+                f"threshold {values['threshold_pct']}%)"
+            )
+        typer.echo("Excluded populations:")
+        for feature, values in sorted(
+            report["excluded_populations"].items()
+        ):
+            formatted = ", ".join(
+                f"{key}={value}" for key, value in sorted(values.items())
+            )
+            typer.echo(f"- {feature}: {formatted or 'none'}")
+    if not report["ok"]:
+        raise typer.Exit(1)
 
 
 @app.command("export-runtime-db")

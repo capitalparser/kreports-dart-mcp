@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger, Boolean, Column, Date, DateTime, Float, Integer,
     SmallInteger, String, Text, UniqueConstraint, Index,
@@ -33,6 +33,37 @@ class DatasetManifest(Base):
     evidence_document_count = Column(Integer, nullable=False)
     quality_snapshot_json = Column(Text, nullable=False, default="{}")
     notes = Column(Text, nullable=True)
+
+
+class CompanyYearQuality(Base):
+    """Factual feature coverage and deterministic product grades by year."""
+
+    __tablename__ = "company_year_quality"
+
+    corp_code = Column(String(8), primary_key=True)
+    bsns_year = Column(SmallInteger, primary_key=True)
+    market = Column(String(10), nullable=True)
+    financial_core_status = Column(String(24), nullable=False)
+    auditor_status = Column(String(24), nullable=False)
+    audit_fee_status = Column(String(24), nullable=False)
+    policy_status = Column(String(24), nullable=False)
+    kam_status = Column(String(24), nullable=False)
+    audit_procedure_status = Column(String(24), nullable=False)
+    group_audit_status = Column(String(24), nullable=False)
+    investor_grade = Column(String(1), nullable=False)
+    auditor_grade = Column(String(1), nullable=False)
+    group_audit_grade = Column(String(1), nullable=False)
+    blockers_json = Column(Text, nullable=False, default="[]")
+    quality_version = Column(String(20), nullable=False, default="v1")
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("idx_company_year_quality_year_market", "bsns_year", "market"),
+    )
 
 
 class Company(Base):

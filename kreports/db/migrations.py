@@ -53,6 +53,37 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_02_company_year_quality",
+        description="Add company-year feature quality ledger",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS company_year_quality (
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              market VARCHAR(10),
+              financial_core_status VARCHAR(24) NOT NULL,
+              auditor_status VARCHAR(24) NOT NULL,
+              audit_fee_status VARCHAR(24) NOT NULL,
+              policy_status VARCHAR(24) NOT NULL,
+              kam_status VARCHAR(24) NOT NULL,
+              audit_procedure_status VARCHAR(24) NOT NULL,
+              group_audit_status VARCHAR(24) NOT NULL,
+              investor_grade VARCHAR(1) NOT NULL,
+              auditor_grade VARCHAR(1) NOT NULL,
+              group_audit_grade VARCHAR(1) NOT NULL,
+              blockers_json TEXT NOT NULL DEFAULT '[]',
+              quality_version VARCHAR(20) NOT NULL DEFAULT 'v1',
+              updated_at DATETIME NOT NULL,
+              PRIMARY KEY (corp_code, bsns_year)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_company_year_quality_year_market
+            ON company_year_quality (bsns_year, market)
+            """,
+        ),
+    ),
 )
 
 
