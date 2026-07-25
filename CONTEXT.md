@@ -1,8 +1,32 @@
 # CONTEXT.md — kreports_dart_mcp
 
 ## Project Profile
+
 - 개요: DART 공시를 수집, 파싱하고 MCP/CLI/API 형태로 제공하는 한국 공시 데이터 도구 프로젝트입니다.
 - 목적: 감사, 재무분석, 공시 검토 업무에서 DART 자료 접근과 구조화 비용을 줄이고 다른 에이전트가 재사용할 수 있는 인터페이스를 제공합니다.
+
+## Domain Vocabulary
+
+- **Filing**: A disclosure submitted to Korea's DART system and identified by
+  its receipt number. It may include structured facts, attachments, and raw
+  source content.
+- **Company**: A DART-registered reporting entity identified by `corp_code`;
+  stock code, market, and industry metadata are optional.
+- **Investor signal**: A reproducible observation derived from filing or
+  financial facts to support analysis. It is not investment advice.
+- **Audit signal**: Extracted audit evidence or clearly labeled interpretation
+  useful to accounting professionals. Evidence and risk interpretation remain
+  separate.
+- **Source filing**: The authoritative DART submission or attachment behind a
+  structured fact or signal. Derived outputs retain receipt-level traceability.
+- **Hosted mode**: A maintained, read-only deployment backed by a prepared
+  dataset artifact and no required server-side DART API key.
+- **Self-hosted mode**: A user-operated deployment running the same read-only
+  semantics or explicitly enabled collector workflows with the operator's own
+  credentials and storage.
+
+Hosted and self-hosted modes share domain semantics. Only collector mode may
+mutate the database or persist raw filing content.
 
 ## Current Scope
 

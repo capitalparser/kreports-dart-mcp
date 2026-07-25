@@ -10,6 +10,31 @@ class Base(DeclarativeBase):
     pass
 
 
+class SchemaMigration(Base):
+    __tablename__ = "schema_migrations"
+
+    revision = Column(String(40), primary_key=True)
+    checksum = Column(String(64), nullable=False)
+    description = Column(String(300), nullable=False)
+    applied_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class DatasetManifest(Base):
+    __tablename__ = "dataset_manifest"
+
+    manifest_id = Column(String(80), primary_key=True)
+    schema_version = Column(String(40), nullable=False)
+    dataset_version = Column(String(80), nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+    year_from = Column(SmallInteger, nullable=True)
+    year_to = Column(SmallInteger, nullable=True)
+    company_count = Column(Integer, nullable=False)
+    disclosure_count = Column(Integer, nullable=False)
+    evidence_document_count = Column(Integer, nullable=False)
+    quality_snapshot_json = Column(Text, nullable=False, default="{}")
+    notes = Column(Text, nullable=True)
+
+
 class Company(Base):
     __tablename__ = "companies"
 

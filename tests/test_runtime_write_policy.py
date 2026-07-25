@@ -247,15 +247,11 @@ def test_release_gate_makes_investor_core_gap_required(temp_engine, monkeypatch)
 
 
 def test_empty_manifest_tables_do_not_make_release_manifest_available(temp_engine, monkeypatch):
-    from sqlalchemy import text
     from kreports.quality import release_gate
 
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     monkeypatch.setattr(release_gate, "investor_dataset_readiness_snapshot", lambda: {"required_gaps": []})
     monkeypatch.setattr(release_gate, "auditor_feature_readiness_snapshot", lambda: {"feature_status": {}})
-    with temp_engine.begin() as conn:
-        conn.execute(text("CREATE TABLE schema_migrations (revision TEXT, checksum TEXT)"))
-        conn.execute(text("CREATE TABLE dataset_manifest (schema_version TEXT, dataset_version TEXT, generated_at TEXT)"))
 
     report = release_gate.evaluate_release_gate("public_runtime")
 
