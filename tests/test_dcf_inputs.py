@@ -21,6 +21,26 @@ def test_dcf_input_candidates_separates_actuals_and_assumptions(monkeypatch):
     assert out["limitations"]
 
 
+def test_dcf_requests_registry_support_metrics_and_uses_tax_expense(monkeypatch):
+    """Removing the DCF registry query or tax expense use breaks the tax-rate candidate."""
+    from kreports.analysis import dcf_inputs
+    from kreports.semantic.metrics import DCF_SUPPORT_METRICS
+
+    def series(*args, metric_keys, **kwargs):
+        assert metric_keys == DCF_SUPPORT_METRICS
+        return [
+            {"bsns_year": 2024, "revenue": 100, "operating_profit": 10,
+             "operating_cf": 9, "net_income": 8, "tax_expense": 2,
+             "purchase_ppe": 4},
+        ]
+
+    monkeypatch.setattr(dcf_inputs, "_financial_series", series)
+
+    out = dcf_inputs.dcf_input_candidates("001", start_year=2024, end_year=2024)
+
+    assert out["candidate_assumptions"]["tax_rate"]["value"] == 0.2
+
+
 def test_dcf_input_candidates_marks_missing_operating_profit_as_incomplete(monkeypatch):
     monkeypatch.setattr("kreports.analysis.dcf_inputs._financial_series", lambda *args, **kwargs: [
         {"bsns_year": 2022, "revenue": 100, "operating_cf": 9, "net_income": 8},

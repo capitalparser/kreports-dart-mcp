@@ -3,11 +3,7 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from kreports.db.engine import get_session
-from kreports.semantic.metrics import (
-    FINANCIAL_SUMMARY_FIELD_METRICS,
-    compact_metric_definitions,
-    metric_definition,
-)
+from kreports.semantic.metrics import FINANCIAL_SUMMARY_FIELD_METRICS, compact_metric_definitions, metric_definition
 
 
 METRIC_MAP = {
@@ -20,13 +16,52 @@ SUMMARY_METRIC_MAP = {
     for source_field, metric_key in FINANCIAL_SUMMARY_FIELD_METRICS.items()
 }
 
-# The source-account tuple is ordered most-preferred first.  Inserting lower
-# precedence rows first retains that precedence under the compact upsert.
-_ACCOUNT_PRECEDENCE = {
-    account_id: position
-    for definition in compact_metric_definitions()
-    for position, account_id in enumerate(definition.source_account_ids)
-}
+_COMPACT_METRICS = {definition.key: definition for definition in compact_metric_definitions()}
+
+
+def _compact_rows(rows: list[dict]) -> list[dict]:
+    """Resolve registered source groups into one deterministic compact row each."""
+    candidates: dict[tuple[str, int, str, str], dict[str, list[dict]]] = {}
+    for row in rows:
+        metric_key, _ = METRIC_MAP[row["account_id"]]
+        key = (row["corp_code"], int(row["bsns_year"]), row["fs_div"], metric_key)
+        candidates.setdefault(key, {}).setdefault(row["account_id"], []).append(dict(row))
+
+    compact_rows: list[dict] = []
+    for (corp_code, bsns_year, fs_div, metric_key), by_account in candidates.items():
+        definition = _COMPACT_METRICS[metric_key]
+        selected: list[dict] = []
+        for account_group in definition.source_account_groups:
+            selected = [
+                by_account[account_id][0]
+                for account_id in account_group
+                if by_account.get(account_id) and by_account[account_id][0]["thstrm_amount"] is not None
+            ]
+            if selected:
+                break
+        if not selected:
+            continue
+
+        if definition.aggregation == "sum":
+            amount = sum(row["thstrm_amount"] for row in selected)
+            source_account_id = "+".join(row["account_id"] for row in selected)
+            source_account_nm = " + ".join(row["account_nm"] for row in selected)
+        else:
+            source = selected[0]
+            amount = source["thstrm_amount"]
+            source_account_id = source["account_id"]
+            source_account_nm = source["account_nm"]
+        compact_rows.append({
+            "corp_code": corp_code,
+            "bsns_year": bsns_year,
+            "fs_div": fs_div,
+            "metric_key": metric_key,
+            "metric_name": definition.label_ko,
+            "amount": amount,
+            "source_account_id": source_account_id,
+            "source_account_nm": source_account_nm,
+        })
+    return compact_rows
 
 
 def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: int | None = None) -> dict:
@@ -54,9 +89,7 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
     summary_inserted_or_updated = 0
     with get_session() as session:
         rows = session.execute(sql, params).mappings().all()
-        rows.sort(key=lambda row: _ACCOUNT_PRECEDENCE[row["account_id"]], reverse=True)
-        for row in rows:
-            metric_key, metric_name = METRIC_MAP[row["account_id"]]
+        for row in _compact_rows(rows):
             session.execute(text("""
                 INSERT INTO financial_facts_compact
                 (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
@@ -70,14 +103,7 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
                   source_account_nm=excluded.source_account_nm,
                   fetched_at=excluded.fetched_at
             """), {
-                "corp_code": row["corp_code"],
-                "bsns_year": row["bsns_year"],
-                "fs_div": row["fs_div"],
-                "metric_key": metric_key,
-                "metric_name": metric_name,
-                "amount": row["thstrm_amount"],
-                "source_account_id": row["account_id"],
-                "source_account_nm": row["account_nm"],
+                **row,
             })
             inserted_or_updated += 1
 

@@ -21,10 +21,10 @@ class DatasetDefinition:
 
 
 _DATASETS = {
-    "financial_facts": DatasetDefinition("financial_facts", "company-year-report-fs-account", ("corp_code", "bsns_year", "reprt_code", "fs_div", "account_id"), "bsns_year", "dart_api", "cache_absence_not_filing_absence"),
+    "financial_facts": DatasetDefinition("financial_facts", "company-year-report-fs-statement-account", ("corp_code", "bsns_year", "reprt_code", "fs_div", "sj_div", "account_id"), "bsns_year", "dart_api", "cache_absence_not_filing_absence"),
     "financial_facts_compact": DatasetDefinition("financial_facts_compact", "company-year-fs-metric", ("corp_code", "bsns_year", "fs_div", "metric_key"), "bsns_year", "derived_from_cache", "cache_absence_not_filing_absence"),
     "audit_fees": DatasetDefinition("audit_fees", "company-year", ("corp_code", "bsns_year"), "bsns_year", "dart_api", "cache_absence_not_filing_absence"),
-    "audit_matter_items": DatasetDefinition("audit_matter_items", "company-year-receipt-matter", ("rcept_no", "matter_type", "ordinal"), "bsns_year", "derived_from_filing", "cache_absence_not_filing_absence"),
+    "audit_matter_items": DatasetDefinition("audit_matter_items", "company-year-receipt-matter", ("rcept_no", "matter_type", "section_ordinal"), "bsns_year", "derived_from_filing", "cache_absence_not_filing_absence"),
 }
 
 DATASETS: Mapping[str, DatasetDefinition] = MappingProxyType(_DATASETS)

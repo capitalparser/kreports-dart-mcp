@@ -13,6 +13,7 @@ TATA만 Financial.operating_cf(compute_cf_flags 이후 설정)를 활용.
 import logging
 from kreports.db.engine import get_session
 from kreports.db.models import Financial, FinancialFact
+from kreports.semantic.metrics import metric_definition
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,7 @@ _REPRT_CODE_ANNUAL = "11011"
 
 # XBRL 계정 ID 우선순위 (앞에서부터 첫 매칭 사용)
 _XBRL_IDS: dict[str, list[str]] = {
-    "revenue": [
-        "ifrs-full_Revenue",
-        "dart_Revenue",
-        "ifrs-full_RevenueFromContractsWithCustomers",
-        "dart_TotalRevenue",
-    ],
+    "revenue": list(metric_definition("revenue").source_account_ids),
     "cogs": [
         "ifrs-full_CostOfSales",
         "dart_CostOfSales",
@@ -35,12 +31,7 @@ _XBRL_IDS: dict[str, list[str]] = {
         "ifrs-full_GrossProfit",
         "dart_GrossProfit",
     ],
-    "receivables": [
-        "ifrs-full_TradeAndOtherCurrentReceivables",
-        "ifrs-full_CurrentTradeReceivables",
-        "dart_TradeAndOtherReceivables",
-        "ifrs-full_TradeReceivables",
-    ],
+    "receivables": list(metric_definition("trade_receivables").source_account_ids),
     "total_assets": [
         "ifrs-full_Assets",
         "dart_Assets",
@@ -53,11 +44,7 @@ _XBRL_IDS: dict[str, list[str]] = {
         "ifrs-full_PropertyPlantAndEquipment",
         "dart_PropertyPlantAndEquipment",
     ],
-    "depreciation": [
-        "ifrs-full_DepreciationAndAmortisationExpense",
-        "dart_DepreciationAndAmortization",
-        "ifrs-full_DepreciationAmortisationAndImpairmentLoss",
-    ],
+    "depreciation": list(metric_definition("depreciation_amortization").source_account_ids),
     "sga": [
         "dart_SellingExpensesAndAdministrativeExpenses",
         "ifrs-full_SellingGeneralAndAdministrativeExpense",

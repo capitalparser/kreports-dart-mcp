@@ -7,7 +7,6 @@ test_beneish.py — Beneish M-Score 계산 검증.
 - 삼성전자 DB 데이터로 역검증 (M < -1.78 확인)
 - 컴포넌트 미달 시 M-Score None 처리 확인
 """
-import math
 import pytest
 
 
@@ -151,3 +150,30 @@ class TestSamsungBeneishIntegration:
             if row["operating_cf"] is not None:
                 assert row["operating_cf"] > 0, \
                     f"{row['year']}년 영업CF={row['operating_cf']:,} (양수 기대)"
+
+
+def test_beneish_uses_registered_revenue_alternative(temp_engine):
+    """Removing a registered revenue alternative causes Beneish SGI to disappear."""
+    from kreports.db.engine import get_session
+    from kreports.db.models import Financial, FinancialFact
+    from kreports.judge.beneish import compute_beneish
+
+    with get_session() as session:
+        session.add(Financial(
+            corp_code="00126380", year=2024, quarter=4, fs_div="CFS",
+            revenue=999, total_assets=500,
+        ))
+        session.add(FinancialFact(
+            corp_code="00126380", bsns_year=2024, reprt_code="11011", fs_div="CFS",
+            sj_div="IS", account_id="ifrs-full_RevenueFromSaleOfGoods",
+            account_nm="상품매출", thstrm_amount=120, frmtrm_amount=100,
+        ))
+
+    compute_beneish("00126380", 2024, "CFS")
+
+    with get_session() as session:
+        financial = session.query(Financial).filter_by(
+            corp_code="00126380", year=2024, quarter=4, fs_div="CFS",
+        ).one()
+        actual_sgi = financial.beneish_sgi
+    assert actual_sgi == 1.2

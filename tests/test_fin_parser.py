@@ -11,7 +11,6 @@ import pytest
 from kreports.processor.fin_parser import (
     parse_all_accounts,
     compute_summary_from_facts,
-    parse_financials,
     parse_summary_response,
     _parse_amount,
     REPRT_TO_QUARTER,
@@ -76,6 +75,20 @@ class TestParseAllAccounts:
 
 
 class TestComputeSummaryFromFacts:
+    def test_revenue_sale_of_goods_alternative_remains_supported(self):
+        """Removing the registered sale-of-goods revenue alternative loses a valid summary."""
+        facts = [{
+            "corp_code": CORP_CODE, "bsns_year": YEAR, "reprt_code": REPRT_CODE,
+            "fs_div": FS_DIV, "sj_div": "IS",
+            "account_id": "ifrs-full_RevenueFromSaleOfGoods", "account_nm": "상품매출",
+            "ord": 1, "thstrm_amount": 123, "frmtrm_amount": 100,
+            "bfefrmtrm_amount": None, "thstrm_add_amount": None,
+        }]
+
+        summary = compute_summary_from_facts(facts, CORP_CODE, YEAR, REPRT_CODE, FS_DIV)
+
+        assert summary["revenue"] == 123
+
     def test_all_six_fields_extracted(self, dart_response_samsung_2024):
         facts = parse_all_accounts(dart_response_samsung_2024, CORP_CODE, YEAR, REPRT_CODE, FS_DIV)
         summary = compute_summary_from_facts(facts, CORP_CODE, YEAR, REPRT_CODE, FS_DIV)

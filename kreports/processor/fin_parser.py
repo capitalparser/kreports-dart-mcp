@@ -1,5 +1,6 @@
 import logging
 from kreports.processor.account_map import normalize_account
+from kreports.semantic.metrics import financial_summary_account_map
 
 logger = logging.getLogger(__name__)
 
@@ -11,29 +12,8 @@ REPRT_TO_QUARTER = {
     "11011": 4,  # 사업보고서
 }
 
-# XBRL element ID → 요약 필드 매핑 (account_id 기준)
-# K-IFRS 및 DART 확장 taxonomy 포함
-_XBRL_TO_SUMMARY: dict[str, str] = {
-    # 매출액
-    "ifrs-full_Revenue": "revenue",
-    "ifrs-full_RevenueFromContractsWithCustomers": "revenue",
-    "dart_Revenue": "revenue",
-    "ifrs-full_RevenueFromRenderingOfServices": "revenue",
-    "ifrs-full_RevenueFromSaleOfGoods": "revenue",
-    # 영업이익 — DART 확장 element (K-IFRS는 별도 의무 아님)
-    "dart_OperatingIncomeLoss": "operating_profit",
-    "ifrs-full_ProfitLossFromOperatingActivities": "operating_profit",
-    # 당기순이익
-    "ifrs-full_ProfitLoss": "net_income",
-    "ifrs-full_ProfitLossAttributableToOwnersOfParent": "net_income",
-    # 자산총계
-    "ifrs-full_Assets": "total_assets",
-    # 부채총계
-    "ifrs-full_Liabilities": "total_debt",
-    # 자본총계
-    "ifrs-full_Equity": "total_equity",
-    "ifrs-full_EquityAttributableToOwnersOfParent": "total_equity",
-}
+# XBRL element ID → 요약 필드는 semantic registry에서 파생한다.
+_XBRL_TO_SUMMARY: dict[str, str] = financial_summary_account_map()
 
 # 요약 필드가 속하는 재무제표 종류
 _SUMMARY_SJ = {

@@ -15,8 +15,13 @@ def _safe_div(num: int | float | None, den: int | float | None) -> float | None:
     return round(float(num) / float(den), 4)
 
 
-def _financial_series(company: str, start_year: int, end_year: int, fs_div: str = "CFS") -> list[dict]:
-    metric_keys = CORE_FINANCIAL_METRICS
+def _financial_series(
+    company: str,
+    start_year: int,
+    end_year: int,
+    fs_div: str = "CFS",
+    metric_keys: tuple[str, ...] = CORE_FINANCIAL_METRICS,
+) -> list[dict]:
     stmt = text("""
         SELECT bsns_year, metric_key, amount
         FROM financial_facts_compact
