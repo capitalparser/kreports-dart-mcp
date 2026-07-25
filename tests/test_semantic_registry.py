@@ -209,3 +209,86 @@ def test_compact_rebuild_keeps_non_null_fallback_and_sums_debt_components(temp_e
     assert rows["operating_profit"] == 30
     assert rows["revenue"] == 100
     assert rows["interest_bearing_debt"] == 60
+
+
+def test_compact_debt_prefers_complete_total_over_partial_components(temp_engine):
+    """A partial component group must lose to a complete later total fallback."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, account_nm,
+             ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126381', 2024, '11011', 'CFS', 'BS', 'ifrs-full_CurrentBorrowings', '유동차입금', 1, 10, CURRENT_TIMESTAMP),
+            ('00126381', 2024, '11011', 'CFS', 'BS', 'ifrs-full_Borrowings', '차입금', 2, 100, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        amount = session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126381' AND metric_key='interest_bearing_debt'
+        """)).scalar_one()
+    assert amount == 100
+
+
+def test_compact_debt_uses_partial_components_only_without_complete_group(temp_engine):
+    """A partial component amount remains an explicit last-resort coverage-limited value."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, account_nm,
+             ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126382', 2024, '11011', 'CFS', 'BS', 'ifrs-full_CurrentBorrowings', '유동차입금', 1, 10, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        amount = session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126382' AND metric_key='interest_bearing_debt'
+        """)).scalar_one()
+    assert amount == 10
+
+
+def test_compact_uses_registered_statement_division_preference(temp_engine):
+    """The same account must select the registry-ranked CIS amount, not SQL row order."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, account_nm,
+             ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126383', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 90, CURRENT_TIMESTAMP),
+            ('00126383', 2024, '11011', 'CFS', 'CIS', 'ifrs-full_Revenue', '매출액', 1, 100, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        amount = session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126383' AND metric_key='revenue'
+        """)).scalar_one()
+    assert amount == 100

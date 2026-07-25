@@ -13,7 +13,7 @@ TATA만 Financial.operating_cf(compute_cf_flags 이후 설정)를 활용.
 import logging
 from kreports.db.engine import get_session
 from kreports.db.models import Financial, FinancialFact
-from kreports.semantic.metrics import metric_definition
+from kreports.semantic.metrics import metric_definition, metric_source_account_ids
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ _REPRT_CODE_ANNUAL = "11011"
 
 # XBRL 계정 ID 우선순위 (앞에서부터 첫 매칭 사용)
 _XBRL_IDS: dict[str, list[str]] = {
-    "revenue": list(metric_definition("revenue").source_account_ids),
+    "revenue": list(metric_source_account_ids("revenue", consumer="beneish")),
     "cogs": [
         "ifrs-full_CostOfSales",
         "dart_CostOfSales",

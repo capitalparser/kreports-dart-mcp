@@ -19,6 +19,18 @@ SUMMARY_METRIC_MAP = {
 _COMPACT_METRICS = {definition.key: definition for definition in compact_metric_definitions()}
 
 
+def _statement_preferred_row(definition, rows: list[dict]) -> dict | None:
+    """Select one populated account row using the metric's immutable statement order."""
+    populated = [row for row in rows if row["thstrm_amount"] is not None]
+    if not populated:
+        return None
+    rank = {statement: index for index, statement in enumerate(definition.statement_division_preference)}
+    return min(
+        populated,
+        key=lambda row: (rank.get(row["sj_div"] or "", len(rank)), row["sj_div"] or ""),
+    )
+
+
 def _compact_rows(rows: list[dict]) -> list[dict]:
     """Resolve registered source groups into one deterministic compact row each."""
     candidates: dict[tuple[str, int, str, str], dict[str, list[dict]]] = {}
@@ -31,14 +43,20 @@ def _compact_rows(rows: list[dict]) -> list[dict]:
     for (corp_code, bsns_year, fs_div, metric_key), by_account in candidates.items():
         definition = _COMPACT_METRICS[metric_key]
         selected: list[dict] = []
+        partial: list[dict] = []
         for account_group in definition.source_account_groups:
             selected = [
-                by_account[account_id][0]
+                source
                 for account_id in account_group
-                if by_account.get(account_id) and by_account[account_id][0]["thstrm_amount"] is not None
+                if (source := _statement_preferred_row(definition, by_account.get(account_id, [])))
+                is not None
             ]
-            if selected:
+            if len(selected) == len(account_group):
                 break
+            if selected and not partial:
+                partial = selected
+        else:
+            selected = partial
         if not selected:
             continue
 
@@ -81,7 +99,7 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
         params["year_to"] = int(year_to)
 
     sql = text(f"""
-        SELECT corp_code, bsns_year, fs_div, account_id, account_nm, thstrm_amount
+        SELECT corp_code, bsns_year, fs_div, sj_div, account_id, account_nm, thstrm_amount
         FROM financial_facts
         WHERE {" AND ".join(where)}
     """)

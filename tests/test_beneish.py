@@ -177,3 +177,37 @@ def test_beneish_uses_registered_revenue_alternative(temp_engine):
         ).one()
         actual_sgi = financial.beneish_sgi
     assert actual_sgi == 1.2
+
+
+def test_beneish_preserves_legacy_revenue_precedence(temp_engine):
+    """When concepts coexist, legacy DART total revenue must remain the SGI source."""
+    from kreports.db.engine import get_session
+    from kreports.db.models import Financial, FinancialFact
+    from kreports.judge.beneish import compute_beneish
+
+    with get_session() as session:
+        session.add(Financial(
+            corp_code="00126384", year=2024, quarter=4, fs_div="CFS",
+            revenue=999, total_assets=500,
+        ))
+        session.add_all([
+            FinancialFact(
+                corp_code="00126384", bsns_year=2024, reprt_code="11011", fs_div="CFS",
+                sj_div="IS", account_id="ifrs-full_RevenueFromContractsWithCustomers",
+                account_nm="고객과의계약수익", thstrm_amount=120, frmtrm_amount=100,
+            ),
+            FinancialFact(
+                corp_code="00126384", bsns_year=2024, reprt_code="11011", fs_div="CFS",
+                sj_div="IS", account_id="dart_Revenue", account_nm="매출액",
+                thstrm_amount=200, frmtrm_amount=100,
+            ),
+        ])
+
+    compute_beneish("00126384", 2024, "CFS")
+
+    with get_session() as session:
+        financial = session.query(Financial).filter_by(
+            corp_code="00126384", year=2024, quarter=4, fs_div="CFS",
+        ).one()
+        actual_sgi = financial.beneish_sgi
+    assert actual_sgi == 2.0
