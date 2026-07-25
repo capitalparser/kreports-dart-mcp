@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 
 import pytest
@@ -98,6 +98,64 @@ def test_dataset_manifest_allows_empty_dataset_with_unknown_year_range(temp_engi
     assert result["company_count"] == 0
     assert result["disclosure_count"] == 0
     assert result["evidence_document_count"] == 0
+
+
+def test_dataset_manifest_includes_compact_only_financial_years(temp_engine):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import FinancialFactCompact
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add_all(
+            [
+                FinancialFactCompact(
+                    corp_code="00126380",
+                    bsns_year=2020,
+                    fs_div="CFS",
+                    metric_key="revenue",
+                    metric_name="매출액",
+                    amount=100,
+                    fetched_at=datetime.now(timezone.utc),
+                ),
+                FinancialFactCompact(
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    fs_div="CFS",
+                    metric_key="assets",
+                    metric_name="자산총계",
+                    amount=200,
+                    fetched_at=datetime.now(timezone.utc),
+                ),
+            ]
+        )
+
+    result = write_dataset_manifest("compact-only-v1")
+
+    assert (result["year_from"], result["year_to"]) == (2020, 2025)
+
+
+def test_dataset_manifest_rejects_whitespace_only_version(temp_engine):
+    from kreports.db.engine import write_dataset_manifest
+
+    _apply_contract(temp_engine)
+
+    with pytest.raises(ValueError, match="dataset_version"):
+        write_dataset_manifest(" \t ")
+
+
+def test_dataset_manifest_normalizes_version_before_identity_and_duplicate_check(
+    temp_engine,
+):
+    from kreports.db.engine import write_dataset_manifest
+
+    _apply_contract(temp_engine)
+
+    result = write_dataset_manifest("  compact-v1  ")
+
+    assert result["manifest_id"] == "compact-v1"
+    assert result["dataset_version"] == "compact-v1"
+    with pytest.raises(ValueError, match="already exists"):
+        write_dataset_manifest("compact-v1")
 
 
 def test_dataset_manifest_rejects_duplicate_manifest_id_without_overwrite(temp_engine):

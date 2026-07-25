@@ -17,6 +17,7 @@ from kreports.db.models import (
     Disclosure,
     EvidenceDocument,
     Financial,
+    FinancialFactCompact,
 )
 
 _logger = logging.getLogger(__name__)
@@ -343,19 +344,26 @@ def write_dataset_manifest(
     dataset_version: str,
     notes: str | None = None,
 ) -> dict:
-    """Record an immutable collector-built dataset contract."""
+    """Record an immutable collector-built dataset contract.
+
+    Surrounding version whitespace is removed before both identity fields are
+    written, so equivalent caller input cannot create alias manifests.
+    """
     from kreports.db.migrations import current_schema_version
 
     _require_session_write("write dataset manifest")
-    if not dataset_version or len(dataset_version) > 80:
+    if not isinstance(dataset_version, str):
+        raise ValueError("dataset_version must contain 1 to 80 characters")
+    normalized_version = dataset_version.strip()
+    if not normalized_version or len(normalized_version) > 80:
         raise ValueError("dataset_version must contain 1 to 80 characters")
 
     generated_at = datetime.now(timezone.utc)
     try:
         with get_session() as session:
-            if session.get(DatasetManifest, dataset_version) is not None:
+            if session.get(DatasetManifest, normalized_version) is not None:
                 raise ValueError(
-                    f"dataset manifest already exists: {dataset_version}"
+                    f"dataset manifest already exists: {normalized_version}"
                 )
 
             schema_version = current_schema_version(session.connection())
@@ -380,6 +388,12 @@ def write_dataset_manifest(
                 ).one(),
                 session.execute(
                     select(
+                        func.min(FinancialFactCompact.bsns_year),
+                        func.max(FinancialFactCompact.bsns_year),
+                    )
+                ).one(),
+                session.execute(
+                    select(
                         func.min(Disclosure.disc_date),
                         func.max(Disclosure.disc_date),
                     )
@@ -398,9 +412,9 @@ def write_dataset_manifest(
                 if year is not None
             ]
             manifest = DatasetManifest(
-                manifest_id=dataset_version,
+                manifest_id=normalized_version,
                 schema_version=schema_version,
-                dataset_version=dataset_version,
+                dataset_version=normalized_version,
                 generated_at=generated_at,
                 year_from=min(represented_years) if represented_years else None,
                 year_to=max(represented_years) if represented_years else None,
@@ -427,6 +441,6 @@ def write_dataset_manifest(
             }
     except IntegrityError as exc:
         raise ValueError(
-            f"dataset manifest already exists: {dataset_version}"
+            f"dataset manifest already exists: {normalized_version}"
         ) from exc
     return result

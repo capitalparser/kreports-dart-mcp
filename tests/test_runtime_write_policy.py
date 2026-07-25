@@ -258,6 +258,37 @@ def test_empty_manifest_tables_do_not_make_release_manifest_available(temp_engin
     assert "release_manifest_unavailable" in report["required_failures"]
 
 
+def test_written_manifest_is_visible_to_readonly_release_gate(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.db.engine import write_dataset_manifest
+    from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
+    from kreports.quality import release_gate
+
+    with temp_engine.begin() as conn:
+        apply_schema_migrations(conn)
+    write_dataset_manifest("compact-release-v1")
+
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+    monkeypatch.setattr(
+        release_gate,
+        "investor_dataset_readiness_snapshot",
+        lambda: {"required_gaps": []},
+    )
+    monkeypatch.setattr(
+        release_gate,
+        "auditor_feature_readiness_snapshot",
+        lambda: {"feature_status": {}},
+    )
+
+    report = release_gate.evaluate_release_gate("public_runtime")
+
+    assert "release_manifest_unavailable" not in report["required_failures"]
+    assert report["schema_version"] == MIGRATIONS[-1].revision
+    assert report["dataset_version"] == "compact-release-v1"
+
+
 def test_release_gate_returns_stable_failure_when_db_inspection_raises(monkeypatch):
     from kreports.quality import release_gate
 

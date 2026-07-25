@@ -2,6 +2,7 @@ import hashlib
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import DatabaseError
 
 
 def test_schema_contract_tables_exist(temp_engine):
@@ -87,6 +88,79 @@ def test_schema_migration_checksum_drift_fails_without_rewriting_record(temp_eng
             ).scalar_one()
             == "0" * 64
         )
+
+
+def test_schema_migration_rolls_back_all_statements_after_mid_revision_failure(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.db.migrations as migrations_module
+    from kreports.db.migrations import Migration, apply_schema_migrations
+
+    broken = Migration(
+        revision="20260711_test_atomic",
+        description="Exercise atomic rollback",
+        statements=(
+            "CREATE TABLE migration_atomic_probe (value INTEGER NOT NULL)",
+            "INSERT INTO migration_atomic_probe (value) VALUES (1)",
+            "THIS IS NOT VALID SQL",
+        ),
+    )
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", (broken,))
+
+    with pytest.raises(DatabaseError, match="syntax"):
+        with temp_engine.begin() as conn:
+            apply_schema_migrations(conn)
+
+    assert "migration_atomic_probe" not in inspect(temp_engine).get_table_names()
+    with temp_engine.connect() as conn:
+        recorded = conn.execute(
+            text(
+                "SELECT revision FROM schema_migrations "
+                "WHERE revision = :revision"
+            ),
+            {"revision": broken.revision},
+        ).scalar_one_or_none()
+    assert recorded is None
+
+
+def test_schema_migrations_apply_in_declared_order(temp_engine, monkeypatch):
+    import kreports.db.migrations as migrations_module
+    from kreports.db.migrations import Migration, apply_schema_migrations
+
+    first = Migration(
+        revision="20260711_test_01",
+        description="Create ordered probe",
+        statements=(
+            "CREATE TABLE migration_order_probe "
+            "(position INTEGER PRIMARY KEY)",
+            "INSERT INTO migration_order_probe (position) VALUES (1)",
+        ),
+    )
+    second = Migration(
+        revision="20260711_test_02",
+        description="Append ordered probe",
+        statements=(
+            "INSERT INTO migration_order_probe (position) VALUES (2)",
+        ),
+    )
+    monkeypatch.setattr(
+        migrations_module,
+        "MIGRATIONS",
+        (first, second),
+    )
+
+    with temp_engine.begin() as conn:
+        applied = apply_schema_migrations(conn)
+        positions = conn.execute(
+            text(
+                "SELECT position FROM migration_order_probe "
+                "ORDER BY position"
+            )
+        ).scalars().all()
+
+    assert applied == [first.revision, second.revision]
+    assert positions == [1, 2]
 
 
 def test_init_db_stops_on_schema_drift(tmp_path, monkeypatch):
