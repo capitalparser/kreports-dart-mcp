@@ -225,7 +225,7 @@ class FinancialFactCompact(Base):
 
 
 class AuditFee(Base):
-    """DS002 회계감사용역계약 체결현황 (사업보고서 기준)."""
+    """Source- and period-aware audit fee/hour compatibility record."""
     __tablename__ = "audit_fees"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -234,6 +234,18 @@ class AuditFee(Base):
     auditor_nm = Column(String(100), nullable=True)      # 감사인명
     audit_fee_m = Column(Integer, nullable=True)          # 감사보수 (백만원)
     audit_hours = Column(Integer, nullable=True)          # 감사시간 (시간)
+    contract_fee_m = Column(Integer, nullable=True)
+    contract_hours = Column(Integer, nullable=True)
+    actual_fee_m = Column(Integer, nullable=True)
+    actual_hours = Column(Integer, nullable=True)
+    source_class = Column(String(40), nullable=True)
+    source_rcept_no = Column(String(80), nullable=True)
+    source_period = Column(String(80), nullable=True)
+    availability_status = Column(String(40), nullable=True)
+    quality_status = Column(String(24), nullable=True)
+    compatibility_basis = Column(String(40), nullable=True)
+    conflict_status = Column(String(24), nullable=True)
+    source_observations_json = Column(Text, nullable=True)
     non_audit_fee_m = Column(Integer, nullable=True)      # 비감사보수 (백만원)
     non_audit_hours = Column(Integer, nullable=True)      # 비감사시간 (시간)
     nas_ratio = Column(Float, nullable=True)              # 비감사보수/감사보수
@@ -243,6 +255,11 @@ class AuditFee(Base):
     __table_args__ = (
         UniqueConstraint("corp_code", "bsns_year", name="uq_audit_fee"),
         Index("idx_audit_fee_corp", "corp_code"),
+        Index(
+            "idx_audit_fee_availability_year",
+            "bsns_year",
+            "availability_status",
+        ),
     )
 
 

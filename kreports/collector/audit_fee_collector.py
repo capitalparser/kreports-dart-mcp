@@ -7,8 +7,15 @@ NAS ratio(비감사보수/감사보수) 및 독립성 위험 플래그를 계산
 import logging
 import time
 from datetime import date, datetime, timezone
+import json
 
 from kreports.collector.fetcher import fetch_audit_fee
+from kreports.collector.audit_fee_sources import (
+    AuditFeeObservation,
+    merge_audit_fee_observations,
+    normalize_endpoint_result,
+    observation_from_dict,
+)
 from kreports.config import settings
 from kreports.db.engine import get_session
 from kreports.db.models import AuditFee, Company, FetchLog
@@ -112,16 +119,18 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                 )
                 continue
 
-            auditor_nm = item.get("adtor") or item.get("nm") or item.get("auditor_nm") or None
-            audit_fee_m = _parse_fee(
-                item.get("real_exc_dtls_mendng")
-                or item.get("adt_cntrct_dtls_mendng")
-                or item.get("adt_fee")
+            observation = normalize_endpoint_result(
+                corp_code=corp_code,
+                year=year,
+                status=status,
+                rows=data.get("list") or [],
+                message=data.get("message"),
             )
-            audit_hours = _parse_fee(
-                item.get("real_exc_dtls_time")
-                or item.get("adt_cntrct_dtls_time")
-                or item.get("adt_time")
+            auditor_nm = observation.auditor_nm
+            audit_fee_m = (
+                observation.actual_fee_m
+                if observation.actual_fee_m is not None
+                else observation.contract_fee_m
             )
             non_audit_fee_m = _sum_non_audit_fee(data.get("non_audit_list") or [])
             if non_audit_fee_m is None:
@@ -135,12 +144,9 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                 nas_ratio = round(non_audit_fee_m / audit_fee_m, 4)
                 independence_risk_flag = nas_ratio > _NAS_RISK_THRESHOLD
 
-            _upsert_audit_fee(
-                corp_code=corp_code,
-                bsns_year=year,
+            upsert_audit_fee_observations(
+                [observation],
                 auditor_nm=auditor_nm,
-                audit_fee_m=audit_fee_m,
-                audit_hours=audit_hours,
                 non_audit_fee_m=non_audit_fee_m,
                 non_audit_hours=non_audit_hours,
                 nas_ratio=nas_ratio,
@@ -210,6 +216,135 @@ def _upsert_audit_fee(corp_code: str, bsns_year: int, **kwargs) -> None:
                 fetched_at=datetime.utcnow(),
                 **kwargs,
             ))
+
+
+def _previous_audit_fee_values(row: AuditFee) -> dict:
+    return {
+        name: getattr(row, name, None)
+        for name in (
+            "contract_fee_m",
+            "contract_hours",
+            "actual_fee_m",
+            "actual_hours",
+            "audit_fee_m",
+            "audit_hours",
+            "compatibility_basis",
+            "source_class",
+            "source_rcept_no",
+            "source_period",
+            "availability_status",
+            "quality_status",
+            "source_observations_json",
+        )
+    }
+
+
+def _persisted_observations(row: AuditFee | None) -> list[AuditFeeObservation]:
+    if row is None or not row.source_observations_json:
+        return []
+    try:
+        values = json.loads(row.source_observations_json)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(values, list):
+        return []
+    output: list[AuditFeeObservation] = []
+    for value in values[:20]:
+        parsed = observation_from_dict(value) if isinstance(value, dict) else None
+        if parsed is not None:
+            output.append(parsed)
+    return output
+
+
+def upsert_audit_fee_observations(
+    observations: list[AuditFeeObservation],
+    **compatibility_fields,
+) -> None:
+    """Idempotently persist typed observations for one company-year."""
+    if not observations:
+        return
+    keys = {(item.corp_code, item.bsns_year) for item in observations}
+    if len(keys) != 1:
+        raise ValueError("audit fee observations must share one company-year")
+    corp_code, bsns_year = next(iter(keys))
+    with get_session() as session:
+        existing = (
+            session.query(AuditFee)
+            .filter_by(corp_code=corp_code, bsns_year=bsns_year)
+            .first()
+        )
+        previous = _previous_audit_fee_values(existing) if existing else {}
+        merged = merge_audit_fee_observations(
+            [*_persisted_observations(existing), *observations],
+            previous=previous,
+        )
+        values = merged.to_record()
+        values.update(compatibility_fields)
+        if existing:
+            for key, value in values.items():
+                # A failed/missing source may not erase already verified
+                # non-audit compatibility values either.
+                if value is not None or getattr(existing, key, None) is None:
+                    setattr(existing, key, value)
+            existing.fetched_at = datetime.utcnow()
+        else:
+            session.add(
+                AuditFee(
+                    corp_code=corp_code,
+                    bsns_year=bsns_year,
+                    fetched_at=datetime.utcnow(),
+                    **values,
+                )
+            )
+
+
+def ingest_cached_audit_fee_table(
+    source_text: str | bytes,
+    *,
+    corp_code: str,
+    bsns_year: int,
+    rcept_no: str | None = None,
+) -> dict:
+    """Parse and merge one already-cached business-report fee table.
+
+    The adapter never fetches DART. It is suitable for cached backfill jobs
+    that already own the source body and receipt provenance.
+    """
+    from kreports.processor.audit_fee_table_parser import parse_audit_fee_table
+
+    observations = parse_audit_fee_table(
+        source_text,
+        corp_code=corp_code,
+        bsns_year=bsns_year,
+        rcept_no=rcept_no,
+    )
+    if not observations:
+        return {
+            "saved": 0,
+            "not_found": 1,
+            "parse_error": 0,
+            "source_class": "cached_business_report",
+        }
+    grouped: dict[tuple[str, int], list[AuditFeeObservation]] = {}
+    for observation in observations:
+        grouped.setdefault(
+            (observation.corp_code, observation.bsns_year),
+            [],
+        ).append(observation)
+    parse_errors = 0
+    saved = 0
+    for items in grouped.values():
+        if all(item.availability_status == "parse_error" for item in items):
+            parse_errors += 1
+        else:
+            saved += 1
+        upsert_audit_fee_observations(items)
+    return {
+        "saved": saved,
+        "not_found": 0,
+        "parse_error": parse_errors,
+        "source_class": "cached_business_report",
+    }
 
 
 def collect_audit_fees(corp_code: str, year_from: int | None = None, year_to: int | None = None) -> dict:

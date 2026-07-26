@@ -237,6 +237,28 @@ MIGRATIONS = (
             ),
         ),
     ),
+    Migration(
+        revision="20260711_07_audit_fee_availability",
+        description="Add typed audit fee and hour availability provenance",
+        statements=(
+            "ALTER TABLE audit_fees ADD COLUMN contract_fee_m INTEGER",
+            "ALTER TABLE audit_fees ADD COLUMN contract_hours INTEGER",
+            "ALTER TABLE audit_fees ADD COLUMN actual_fee_m INTEGER",
+            "ALTER TABLE audit_fees ADD COLUMN actual_hours INTEGER",
+            "ALTER TABLE audit_fees ADD COLUMN source_class VARCHAR(40)",
+            "ALTER TABLE audit_fees ADD COLUMN source_rcept_no VARCHAR(80)",
+            "ALTER TABLE audit_fees ADD COLUMN source_period VARCHAR(80)",
+            "ALTER TABLE audit_fees ADD COLUMN availability_status VARCHAR(40)",
+            "ALTER TABLE audit_fees ADD COLUMN quality_status VARCHAR(24)",
+            "ALTER TABLE audit_fees ADD COLUMN compatibility_basis VARCHAR(40)",
+            "ALTER TABLE audit_fees ADD COLUMN conflict_status VARCHAR(24)",
+            "ALTER TABLE audit_fees ADD COLUMN source_observations_json TEXT",
+            (
+                "CREATE INDEX IF NOT EXISTS idx_audit_fee_availability_year "
+                "ON audit_fees (bsns_year, availability_status)"
+            ),
+        ),
+    ),
 )
 
 

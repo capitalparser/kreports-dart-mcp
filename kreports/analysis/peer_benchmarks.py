@@ -944,11 +944,42 @@ def compare_peer_audit_fees(
     fs_div = base["selection_policy"]["fs_div_used"]
     peer_codes = [p["corp_code"] for p in base["peers"]]
     all_codes = [corp_code] + peer_codes
+    has_typed_fee = _has_db_column("audit_fees", "actual_fee_m")
+    actual_fee_expr = "af.actual_fee_m" if has_typed_fee else "NULL"
+    actual_hours_expr = "af.actual_hours" if has_typed_fee else "NULL"
+    contract_fee_expr = "af.contract_fee_m" if has_typed_fee else "NULL"
+    contract_hours_expr = "af.contract_hours" if has_typed_fee else "NULL"
+    basis_expr = (
+        "COALESCE(af.compatibility_basis, 'legacy_inferred')"
+        if has_typed_fee
+        else "'legacy_inferred'"
+    )
+    availability_expr = (
+        "af.availability_status"
+        if has_typed_fee
+        else (
+            "CASE WHEN af.audit_fee_m IS NOT NULL OR af.audit_hours IS NOT NULL "
+            "THEN 'available' ELSE 'missing' END"
+        )
+    )
+    nas_expr = (
+        "CASE WHEN COALESCE(af.compatibility_basis, 'legacy_inferred') "
+        "IN ('actual', 'legacy_inferred') THEN af.nas_ratio END"
+        if has_typed_fee
+        else "af.nas_ratio"
+    )
 
     stmt = text(
-        """
+        f"""
         SELECT c.corp_code, c.corp_name, f.total_assets,
-               af.audit_fee_m, af.audit_hours, af.non_audit_fee_m, af.nas_ratio,
+               af.audit_fee_m, af.audit_hours, af.non_audit_fee_m,
+               {nas_expr} AS nas_ratio,
+               {actual_fee_expr} AS actual_fee_m,
+               {actual_hours_expr} AS actual_hours,
+               {contract_fee_expr} AS contract_fee_m,
+               {contract_hours_expr} AS contract_hours,
+               {basis_expr} AS metric_basis,
+               {availability_expr} AS availability_status,
                CASE WHEN f.total_assets > 0 AND af.audit_fee_m IS NOT NULL
                     THEN 10000.0 * af.audit_fee_m * 1000000.0 / f.total_assets END AS fee_assets_bps,
                CASE WHEN af.audit_hours > 0 AND af.audit_fee_m IS NOT NULL
@@ -965,6 +996,25 @@ def compare_peer_audit_fees(
         rows = conn.execute(stmt, {"ccs": all_codes, "year": year, "fs": fs_div}).mappings().all()
 
     by_cc = {row["corp_code"]: dict(row) for row in rows}
+    typed_evidence = has_typed_fee and any(
+        row.get("actual_fee_m") is not None
+        or row.get("actual_hours") is not None
+        or row.get("contract_fee_m") is not None
+        or row.get("contract_hours") is not None
+        or row.get("availability_status") is not None
+        for row in by_cc.values()
+    )
+    if not typed_evidence:
+        for row in by_cc.values():
+            for key in (
+                "actual_fee_m",
+                "actual_hours",
+                "contract_fee_m",
+                "contract_hours",
+                "metric_basis",
+                "availability_status",
+            ):
+                row.pop(key, None)
     subject_row = by_cc.get(corp_code, {})
     peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
     metrics = {
@@ -984,6 +1034,31 @@ def compare_peer_audit_fees(
         }
         for key, vals in metrics.items()
     }
+    basis_populations = {}
+    if typed_evidence:
+        for basis, fee_key, hours_key in (
+            ("actual", "actual_fee_m", "actual_hours"),
+            ("contract", "contract_fee_m", "contract_hours"),
+        ):
+            fees = [
+                float(row[fee_key])
+                for row in peer_rows
+                if row.get(fee_key) is not None
+            ]
+            hours = [
+                float(row[hours_key])
+                for row in peer_rows
+                if row.get(hours_key) is not None
+            ]
+            basis_populations[basis] = {
+                "basis": basis,
+                "fee": _metric_quantiles(fees),
+                "hours": _metric_quantiles(hours),
+                "valid_fee_n": len(fees),
+                "valid_hours_n": len(hours),
+                "unavailable_fee_count": len(peer_rows) - len(fees),
+                "unavailable_hours_count": len(peer_rows) - len(hours),
+            }
     for key, vals in metrics.items():
         subj_key = {
             "audit_fee_to_assets_bps": "fee_assets_bps",
@@ -995,6 +1070,15 @@ def compare_peer_audit_fees(
             [float(v) for v in vals],
         )
 
+    data_quality = {
+        "metric_coverage": metric_coverage,
+        "limited_metrics": [
+            key for key, info in metric_coverage.items()
+            if info["status"] != "usable"
+        ],
+    }
+    if typed_evidence:
+        data_quality["basis_populations"] = basis_populations
     return _clean_dict({
         "subject": base["subject"],
         "year": year,
@@ -1002,18 +1086,21 @@ def compare_peer_audit_fees(
         "peer_count": len(peer_rows),
         "subject_metrics": subject_row,
         "benchmarks": benchmarks,
-        "data_quality": {
-            "metric_coverage": metric_coverage,
-            "limited_metrics": [
-                key for key, info in metric_coverage.items()
-                if info["status"] != "usable"
-            ],
-        },
+        "data_quality": data_quality,
         "peers": peer_rows[:peer_limit],
         "selection_policy": base["selection_policy"],
         "note": (
-            "DART audit fee contract/status data; audit judgment not performed. "
-            "Metrics with available_n < 5 are screening signals only."
+            (
+                "Actual and contract peer populations are reported separately; "
+                "legacy compatibility metrics retain their explicit metric_basis. "
+                "DART audit fee evidence only; audit judgment not performed. "
+                "Metrics with available_n < 5 are screening signals only."
+            )
+            if typed_evidence
+            else (
+                "DART audit fee contract/status data; audit judgment not performed. "
+                "Metrics with available_n < 5 are screening signals only."
+            )
         ),
     })
 

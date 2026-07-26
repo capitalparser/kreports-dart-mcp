@@ -10,9 +10,11 @@ from sqlalchemy import bindparam, text
 import kreports.db.engine as _engine_module
 from kreports.analysis import queries as _queries
 from kreports.analysis.audit_procedure_evidence import (
+    ProcedureDatabaseUnavailable,
     classify_audit_procedure_linkages,
     procedure_database_preflight,
     procedure_read_connection,
+    procedure_read_engine,
 )
 
 from kreports.analysis._shared import _clean_dict, _dedupe_confirmed_facts, _df_to_records, _display_text, _has_db_column, _has_db_table
@@ -25,6 +27,332 @@ from kreports.analysis.company_profile import (
 from kreports.analysis.search_adapter import (
     group_company_records,
 )
+
+
+_AUDIT_FEE_TYPED_COLUMNS = (
+    "contract_fee_m",
+    "contract_hours",
+    "actual_fee_m",
+    "actual_hours",
+    "source_class",
+    "source_rcept_no",
+    "source_period",
+    "availability_status",
+    "quality_status",
+    "compatibility_basis",
+    "conflict_status",
+    "source_observations_json",
+)
+
+
+def _audit_fee_observation_conflicts(observations: list[dict]) -> list[dict]:
+    conflicts: list[dict] = []
+    for metric in ("actual_fee_m", "actual_hours"):
+        claims = []
+        for item in observations:
+            if (
+                item.get(metric) is None
+                or item.get("quality_status") in {"error", "missing"}
+            ):
+                continue
+            try:
+                claims.append((int(item[metric]), item))
+            except (TypeError, ValueError):
+                continue
+        for index, (left, left_source) in enumerate(claims):
+            for right, right_source in claims[index + 1 :]:
+                absolute = abs(left - right)
+                percentage = absolute / max(abs(left), abs(right), 1)
+                if percentage <= 0.05:
+                    continue
+                conflicts.append(
+                    {
+                        "metric": metric,
+                        "left_value": left,
+                        "right_value": right,
+                        "absolute_variance": absolute,
+                        "percentage_variance": round(percentage, 6),
+                        "denominator": "max(abs(left), abs(right), 1)",
+                        "left_source": left_source.get("source_class"),
+                        "right_source": right_source.get("source_class"),
+                        "left_rcept_no": left_source.get("source_rcept_no"),
+                        "right_rcept_no": right_source.get("source_rcept_no"),
+                    }
+                )
+    return sorted(
+        conflicts,
+        key=lambda item: (
+            item["metric"],
+            str(item["left_source"]),
+            str(item["right_source"]),
+        ),
+    )
+
+
+def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine) -> dict:
+    try:
+        with active_engine.connect() as connection:
+            table_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    text("PRAGMA table_info(audit_fees)")
+                ).mappings()
+            }
+            if not table_columns:
+                return {
+                    "corp_code": corp_code,
+                    "year": year,
+                    "availability_status": "schema_unavailable",
+                    "quality_status": "missing",
+                    "selected": {
+                        "audit_fee_m": None,
+                        "audit_hours": None,
+                        "basis": "unavailable",
+                    },
+                    "limitations": ["audit_fees table is unavailable"],
+                    "source_observations": [],
+                    "conflicts": [],
+                }
+            selected_columns = [
+                name
+                for name in (
+                    "audit_fee_m",
+                    "audit_hours",
+                    "non_audit_fee_m",
+                    "non_audit_hours",
+                    "nas_ratio",
+                    "auditor_nm",
+                    *_AUDIT_FEE_TYPED_COLUMNS,
+                )
+                if name in table_columns
+            ]
+            row = connection.execute(
+                text(
+                    "SELECT "
+                    + ", ".join(selected_columns)
+                    + " FROM audit_fees "
+                    "WHERE corp_code=:corp_code AND bsns_year=:year LIMIT 1"
+                ),
+                {"corp_code": corp_code, "year": year},
+            ).mappings().first()
+            has_fetch_log = connection.execute(
+                text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='fetch_log'"
+                )
+            ).first()
+            fetch_row = (
+                connection.execute(
+                    text(
+                        "SELECT status, error_msg FROM fetch_log "
+                        "WHERE corp_code=:corp_code AND year=:year "
+                        "AND task_type IN ('audit_fee', 'audit_fees') "
+                        "ORDER BY fetched_at DESC, id DESC LIMIT 1"
+                    ),
+                    {"corp_code": corp_code, "year": year},
+                ).mappings().first()
+                if has_fetch_log
+                else None
+            )
+    except Exception as exc:
+        return {
+            "corp_code": corp_code,
+            "year": year,
+            "availability_status": "schema_unavailable",
+            "quality_status": "error",
+            "selected": {
+                "audit_fee_m": None,
+                "audit_hours": None,
+                "basis": "unavailable",
+            },
+            "limitations": [f"read-only availability query failed: {type(exc).__name__}"],
+            "source_observations": [],
+            "conflicts": [],
+        }
+
+    if row is None:
+        fetch_status = str(fetch_row["status"]) if fetch_row else ""
+        availability = (
+            "transport_error"
+            if fetch_status == "error"
+            else "not_available_from_endpoint"
+            if fetch_status == "no_data"
+            else "missing"
+        )
+        return {
+            "corp_code": corp_code,
+            "year": year,
+            "availability_status": availability,
+            "quality_status": "error" if fetch_status == "error" else "missing",
+            "selected": {
+                "audit_fee_m": None,
+                "audit_hours": None,
+                "basis": "unavailable",
+            },
+            "contract": {"fee_m": None, "hours": None},
+            "actual": {"fee_m": None, "hours": None},
+            "source": {},
+            "source_observations": [],
+            "conflicts": [],
+            "limitations": [
+                str(fetch_row["error_msg"])
+                if fetch_row and fetch_row["error_msg"]
+                else "No typed audit fee observation is cached"
+            ],
+        }
+
+    record = dict(row)
+    typed_schema = all(name in table_columns for name in _AUDIT_FEE_TYPED_COLUMNS)
+    try:
+        observations = json.loads(record.get("source_observations_json") or "[]")
+        if not isinstance(observations, list):
+            observations = []
+    except (TypeError, ValueError):
+        observations = []
+    observations = [item for item in observations if isinstance(item, dict)][:20]
+    conflicts = _audit_fee_observation_conflicts(observations)
+    basis = record.get("compatibility_basis") or "legacy_inferred"
+    audit_fee = record.get("audit_fee_m")
+    audit_hours = record.get("audit_hours")
+    availability = record.get("availability_status")
+    if not availability:
+        availability = (
+            "available"
+            if audit_fee is not None and audit_hours is not None
+            else "partial"
+            if audit_fee is not None or audit_hours is not None
+            else "missing"
+        )
+    quality = record.get("quality_status") or (
+        "verified" if availability == "available" else "partial"
+    )
+    limitations: list[str] = []
+    if not typed_schema:
+        limitations.append(
+            "Pre-20260711_07 row: compatibility basis inferred from legacy columns"
+        )
+    if availability == "conflict":
+        limitations.append(
+            "Source observations disagree by more than 5%; verify the filing"
+        )
+    if record.get("nas_ratio") is not None and basis not in {
+        "actual",
+        "legacy_inferred",
+    }:
+        limitations.append(
+            "NAS ratio omitted from interpretation because fee bases may be incompatible"
+        )
+    if fetch_row and str(fetch_row["status"]) == "error":
+        availability = "transport_error"
+        quality = "error"
+        limitations.append(
+            str(fetch_row["error_msg"])
+            if fetch_row["error_msg"]
+            else "Latest audit-fee source attempt failed"
+        )
+    return {
+        "corp_code": corp_code,
+        "year": year,
+        "availability_status": availability,
+        "quality_status": quality,
+        "selected": {
+            "audit_fee_m": audit_fee,
+            "audit_hours": audit_hours,
+            "basis": basis,
+            "nas_ratio": (
+                record.get("nas_ratio")
+                if basis in {"actual", "legacy_inferred"}
+                else None
+            ),
+        },
+        "contract": {
+            "fee_m": record.get("contract_fee_m"),
+            "hours": record.get("contract_hours"),
+        },
+        "actual": {
+            "fee_m": record.get("actual_fee_m"),
+            "hours": record.get("actual_hours"),
+        },
+        "source": {
+            "class": record.get("source_class"),
+            "rcept_no": record.get("source_rcept_no"),
+            "period": record.get("source_period"),
+            "auditor_nm": record.get("auditor_nm"),
+        },
+        "source_observations": observations,
+        "conflict_status": record.get("conflict_status") or (
+            "conflict" if conflicts else "none"
+        ),
+        "conflicts": conflicts,
+        "limitations": limitations,
+    }
+
+
+def audit_fee_availability(corp_code: str, year: int) -> dict:
+    """Return source-aware audit fee/hour coverage without collecting or writing."""
+    try:
+        with procedure_read_engine({"audit_fees"}) as read_engine:
+            return _audit_fee_availability_from_engine(
+                corp_code,
+                year,
+                read_engine,
+            )
+    except ProcedureDatabaseUnavailable as exc:
+        return {
+            "corp_code": corp_code,
+            "year": year,
+            "availability_status": "schema_unavailable",
+            "quality_status": "missing",
+            "selected": {
+                "audit_fee_m": None,
+                "audit_hours": None,
+                "basis": "unavailable",
+            },
+            "contract": {"fee_m": None, "hours": None},
+            "actual": {"fee_m": None, "hours": None},
+            "source": {},
+            "source_observations": [],
+            "conflicts": [],
+            "limitations": [str(exc)],
+        }
+
+
+def audit_fee_availability_trend(
+    corp_code: str,
+    end_year: int,
+    *,
+    periods: int = 5,
+) -> dict:
+    """Return an explicit annual availability window with null gaps."""
+    bounded_periods = min(max(int(periods), 1), 10)
+    rows = [
+        audit_fee_availability(corp_code, year)
+        for year in range(end_year - bounded_periods + 1, end_year + 1)
+    ]
+    return {
+        "corp_code": corp_code,
+        "year_from": end_year - bounded_periods + 1,
+        "year_to": end_year,
+        "periods": [
+            {
+                "year": row["year"],
+                "availability_status": row["availability_status"],
+                "quality_status": row["quality_status"],
+                "selected_fee_m": row.get("selected", {}).get("audit_fee_m"),
+                "selected_hours": row.get("selected", {}).get("audit_hours"),
+                "metric_basis": row.get("selected", {}).get("basis"),
+                "actual_fee_m": row.get("actual", {}).get("fee_m"),
+                "actual_hours": row.get("actual", {}).get("hours"),
+                "contract_fee_m": row.get("contract", {}).get("fee_m"),
+                "contract_hours": row.get("contract", {}).get("hours"),
+            }
+            for row in rows
+        ],
+        "limitation": (
+            "Unavailable periods remain null and are excluded from "
+            "source-available coverage denominators."
+        ),
+    }
 
 
 def _audit_section_source(

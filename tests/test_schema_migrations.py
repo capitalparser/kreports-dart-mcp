@@ -24,6 +24,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_04_backfill_owner_identity",
         "20260711_05_kam_items",
         "20260711_06_audit_procedure_linkage",
+        "20260711_07_audit_fee_availability",
     ]
     assert second == []
 
@@ -249,7 +250,7 @@ def test_audit_procedure_linkage_migration_is_append_only_and_nullable(temp_engi
     assert _checksum(MIGRATIONS[3]) == (
         "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
     )
-    assert MIGRATIONS[-1].revision == "20260711_06_audit_procedure_linkage"
+    assert MIGRATIONS[5].revision == "20260711_06_audit_procedure_linkage"
     columns = {
         column["name"]: column
         for column in inspect(temp_engine).get_columns("audit_procedure_items")
@@ -277,6 +278,44 @@ def test_audit_procedure_linkage_migration_is_append_only_and_nullable(temp_engi
             "quality_status",
         }
     )
+
+
+def test_audit_fee_availability_migration_is_append_only_and_nullable(temp_engine):
+    from kreports.db.migrations import MIGRATIONS, _checksum
+
+    assert _checksum(MIGRATIONS[2]) == (
+        "b5a958e21c751e72e4243b5f4a35b03ff41f313a87e5e058e7a9623bfaf4f324"
+    )
+    assert _checksum(MIGRATIONS[3]) == (
+        "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
+    )
+    assert _checksum(MIGRATIONS[4]) == (
+        "0fa52c82a3c4807885b757734417f5069e04698c954cabb414d67b7e4ac84d06"
+    )
+    assert _checksum(MIGRATIONS[5]) == (
+        "d35015b9c185fcf69b62fcf74224cc21b2607ea61047a0505b588bbc1e8cd637"
+    )
+    assert MIGRATIONS[-1].revision == "20260711_07_audit_fee_availability"
+    columns = {
+        column["name"]: column
+        for column in inspect(temp_engine).get_columns("audit_fees")
+    }
+    expected = {
+        "contract_fee_m",
+        "contract_hours",
+        "actual_fee_m",
+        "actual_hours",
+        "source_class",
+        "source_rcept_no",
+        "source_period",
+        "availability_status",
+        "quality_status",
+        "compatibility_basis",
+        "conflict_status",
+        "source_observations_json",
+    }
+    assert expected.issubset(columns)
+    assert all(columns[name]["nullable"] for name in expected)
 
 
 def test_backfill_owner_migration_repairs_duplicate_running_leases_atomically(

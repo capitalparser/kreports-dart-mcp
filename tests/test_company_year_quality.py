@@ -30,6 +30,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
         "20260711_04_backfill_owner_identity",
         "20260711_05_kam_items",
         "20260711_06_audit_procedure_linkage",
+        "20260711_07_audit_fee_availability",
     ]
     assert CompanyYearQuality.__tablename__ == "company_year_quality"
 
@@ -43,6 +44,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
         "20260711_04_backfill_owner_identity",
         "20260711_05_kam_items",
         "20260711_06_audit_procedure_linkage",
+        "20260711_07_audit_fee_availability",
     ]
     columns = {
         column["name"]

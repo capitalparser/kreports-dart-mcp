@@ -16,7 +16,6 @@ from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingNoteChapter,
     AccountingPolicyItem,
-    AuditFee,
     Auditor,
     AuditProcedureItem,
     BusinessAffiliateAuditor,
@@ -33,6 +32,7 @@ from kreports.db.models import (
 from kreports.runtime import require_runtime_write
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 from kreports.db.quality_snapshot import QUALITY_VERSION
+from kreports.analysis.audit_reporting import audit_fee_availability
 
 
 ANNUAL_CORE_YEARS_FOR_A = 5
@@ -194,19 +194,25 @@ def _investor_grade(
 
 
 def _audit_fee_peer_grade(corp_code: str, year: int) -> str:
-    with get_session() as session:
-        count = int(
-            session.query(func.count(func.distinct(AuditFee.bsns_year)))
-            .filter(
-                AuditFee.corp_code == corp_code,
-                AuditFee.bsns_year.between(year - 4, year),
-                AuditFee.audit_fee_m.is_not(None),
-                AuditFee.audit_hours.is_not(None),
-            )
-            .scalar()
-            or 0
-        )
-    return "A" if count == 5 else "B" if count >= 3 else "C" if count else "D"
+    statuses = [
+        audit_fee_availability(corp_code, candidate)
+        for candidate in range(year - 4, year + 1)
+    ]
+    eligible = [
+        item
+        for item in statuses
+        if item.get("availability_status") != "not_available_from_endpoint"
+    ]
+    if not eligible:
+        return "not_applicable"
+    available = sum(
+        item.get("availability_status") in {"available", "conflict"}
+        and item.get("selected", {}).get("audit_fee_m") is not None
+        and item.get("selected", {}).get("audit_hours") is not None
+        for item in eligible
+    )
+    coverage = available / len(eligible)
+    return "A" if coverage >= 0.8 else "B" if coverage >= 0.6 else "C" if available else "D"
 
 
 def _fetch_outcome(
@@ -282,27 +288,17 @@ def _auditor_status(corp_code: str, year: int) -> str:
 
 
 def _audit_fee_status(corp_code: str, year: int) -> str:
-    fetch_outcome = _latest_fetch_outcome(
-        corp_code,
-        year,
-        ("audit_fee", "audit_fees"),
-    )
-    with get_session() as session:
-        row = (
-            session.query(AuditFee.audit_fee_m, AuditFee.audit_hours)
-            .filter(
-                AuditFee.corp_code == corp_code,
-                AuditFee.bsns_year == year,
-            )
-            .first()
-        )
-    if fetch_outcome == "error":
+    availability = audit_fee_availability(corp_code, year)
+    status = availability.get("availability_status")
+    if status in {"transport_error", "parse_error", "conflict", "schema_unavailable"}:
         return "error"
-    if row and row.audit_fee_m is not None and row.audit_hours is not None:
+    if status == "available":
         return "available"
-    if row:
+    if status == "partial":
         return "partial"
-    return fetch_outcome or "missing"
+    if status == "not_available_from_endpoint":
+        return "not_available"
+    return "missing"
 
 
 def _policy_status(corp_code: str, year: int) -> str:

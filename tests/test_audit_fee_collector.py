@@ -5,9 +5,74 @@ from unittest.mock import patch
 import pytest
 
 from kreports.db.models import AuditFee, FetchLog
+from kreports.collector.audit_fee_sources import normalize_endpoint_result
+from kreports.collector.audit_fee_sources import AuditFeeObservation
 
 
 CORP_CODE = "00126380"
+
+
+def test_ds002_normalizes_contract_and_actual_fields_independently():
+    observation = normalize_endpoint_result(
+        year=2024,
+        status="000",
+        rows=[
+            {
+                "bsns_year": "제56기\n(당기)",
+                "adtor": "삼정회계법인",
+                "adt_cntrct_dtls_mendng": "7,500",
+                "adt_cntrct_dtls_time": "78,000",
+                "real_exc_dtls_mendng": "7,800",
+                "real_exc_dtls_time": "76,830",
+            }
+        ],
+        corp_code=CORP_CODE,
+    )
+
+    assert observation.contract_fee_m == 7500
+    assert observation.contract_hours == 78000
+    assert observation.actual_fee_m == 7800
+    assert observation.actual_hours == 76830
+    assert observation.availability_status == "available"
+    assert observation.quality_status == "verified"
+
+
+def test_unsupported_historical_period_is_not_transport_error():
+    observation = normalize_endpoint_result(
+        year=2021,
+        status="013",
+        rows=[],
+        corp_code=CORP_CODE,
+    )
+
+    assert observation.availability_status == "not_available_from_endpoint"
+    assert observation.quality_status == "missing"
+
+
+def test_supported_period_013_is_missing_not_unsupported_or_transport_error():
+    observation = normalize_endpoint_result(
+        year=2025,
+        status="013",
+        rows=[],
+        corp_code=CORP_CODE,
+        source_supported=True,
+    )
+
+    assert observation.availability_status == "partial"
+    assert observation.quality_status == "missing"
+
+
+def test_unsupported_empty_success_rows_are_endpoint_gap():
+    observation = normalize_endpoint_result(
+        year=2021,
+        status="000",
+        rows=[],
+        corp_code=CORP_CODE,
+        source_supported=False,
+    )
+
+    assert observation.availability_status == "not_available_from_endpoint"
+    assert observation.quality_status == "missing"
 
 
 @pytest.fixture
@@ -155,3 +220,69 @@ def test_collect_audit_fee_counts_transport_failure_as_error(fresh_audit_fee_db)
         )
         assert outcome.status == "error"
         assert outcome.error_msg == "Server disconnected"
+
+
+def test_typed_observation_upsert_is_idempotent_and_missing_does_not_erase(
+    fresh_audit_fee_db,
+):
+    eng, collector = fresh_audit_fee_db
+    verified = AuditFeeObservation(
+        corp_code=CORP_CODE,
+        bsns_year=2024,
+        source_class="cached_business_report",
+        actual_fee_m=1200,
+        actual_hours=10500,
+        source_rcept_no="20250318000001",
+        availability_status="available",
+        quality_status="verified",
+    )
+    missing = AuditFeeObservation(
+        corp_code=CORP_CODE,
+        bsns_year=2024,
+        source_class="opendart_ds002",
+        availability_status="transport_error",
+        quality_status="error",
+    )
+
+    collector.upsert_audit_fee_observations([verified])
+    collector.upsert_audit_fee_observations([verified])
+    collector.upsert_audit_fee_observations([missing])
+
+    with eng.get_session() as session:
+        row = session.query(AuditFee).one()
+        assert row.audit_fee_m == 1200
+        assert row.audit_hours == 10500
+        assert row.availability_status == "available"
+        assert len(__import__("json").loads(row.source_observations_json)) == 2
+
+
+def test_cached_business_report_adapter_merges_historical_actuals(
+    fresh_audit_fee_db,
+):
+    eng, collector = fresh_audit_fee_db
+    body = """
+    <p>단위: 천원, 시간</p>
+    <table>
+      <tr>
+        <th>사업연도</th><th>감사인</th>
+        <th>실제수행보수</th><th>실제수행시간</th>
+      </tr>
+      <tr><td>2021</td><td>삼일회계법인</td><td>1,200,000</td><td>10,500</td></tr>
+    </table>
+    """
+
+    result = collector.ingest_cached_audit_fee_table(
+        body,
+        corp_code=CORP_CODE,
+        bsns_year=2021,
+        rcept_no="20220318000001",
+    )
+
+    assert result["saved"] == 1
+    with eng.get_session() as session:
+        row = session.query(AuditFee).one()
+        assert row.actual_fee_m == 1200
+        assert row.actual_hours == 10500
+        assert row.audit_fee_m == 1200
+        assert row.compatibility_basis == "actual"
+        assert row.source_class == "cached_business_report"
