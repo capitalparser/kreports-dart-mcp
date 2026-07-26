@@ -32,6 +32,13 @@ _PEER_PROFILES = frozenset({
 })
 _MAX_RETURNED_EXCLUSIONS = 50
 _SIZE_OUTLIER_DECADES = 2.0
+_GENERIC_BASIS_METRICS = frozenset({"audit_fee", "audit_hours", "nas_ratio"})
+_FIXED_METRIC_BASES = {
+    "audit_fee_actual": "actual",
+    "audit_hours_actual": "actual",
+    "audit_fee_contract": "contract",
+    "audit_hours_contract": "contract",
+}
 
 
 def _require_tuple(name: str, value: object) -> tuple:
@@ -216,7 +223,60 @@ class PeerCohort:
         )
         _validate_pairs("subject_metric_bases", self.subject_metric_bases)
         _validate_pairs("score_policy", self.score_policy)
+        for name, pairs in (
+            ("subject_metric_bases", self.subject_metric_bases),
+            ("score_policy", self.score_policy),
+        ):
+            if any(
+                not isinstance(value, str) or not value
+                for _key, value in pairs
+            ):
+                raise TypeError(f"{name} values must be non-empty strings")
         _validate_string_tuple("limitations", self.limitations)
+        counts = dict(self.exclusion_counts)
+        subject_count = counts.get("subject", 0)
+        if subject_count != 1:
+            raise ValueError("subject exclusion count must be exactly 1")
+        outside_limit = counts.get("outside_limit", 0)
+        expected_outside_limit = self.eligible_count - len(self.members)
+        if outside_limit != expected_outside_limit:
+            raise ValueError(
+                "outside_limit must equal eligible_count minus selected members"
+            )
+        common_excluded = sum(
+            count
+            for reason, count in counts.items()
+            if reason not in {"subject", "outside_limit"}
+        )
+        if subject_count + common_excluded + self.eligible_count != self.total_candidates:
+            raise ValueError(
+                "common eligibility exclusions and eligible_count must reconcile "
+                "to company universe"
+            )
+        if any(count > self.total_candidates for count in counts.values()):
+            raise ValueError("exclusion counts cannot exceed company universe")
+        member_codes = [member.corp_code for member in self.members]
+        if len(member_codes) != len(set(member_codes)):
+            raise ValueError("members must have unique corp_code values")
+        if self.subject_corp_code in member_codes:
+            raise ValueError("subject cannot be a selected member")
+        exclusion_codes = [exclusion.corp_code for exclusion in self.exclusions]
+        if len(exclusion_codes) != len(set(exclusion_codes)):
+            raise ValueError("returned exclusions must have unique corp_code values")
+        if set(member_codes) & set(exclusion_codes):
+            raise ValueError("selected members cannot also be returned exclusions")
+        returned_counts: dict[str, int] = {}
+        for exclusion in self.exclusions:
+            returned_counts[exclusion.reason_code] = (
+                returned_counts.get(exclusion.reason_code, 0) + 1
+            )
+        if any(
+            reason not in counts or returned_count > counts[reason]
+            for reason, returned_count in returned_counts.items()
+        ):
+            raise ValueError(
+                "returned exclusion reasons must be consistent with exclusion_counts"
+            )
 
     @property
     def denominator_metadata(
@@ -657,22 +717,6 @@ def _validate_peer_schema(read_engine) -> None:
             )
 
 
-def _table_columns(read_engine, table_name: str) -> set[str]:
-    inspector = inspect(read_engine)
-    if table_name not in set(inspector.get_table_names()):
-        return set()
-    return {str(column["name"]) for column in inspector.get_columns(table_name)}
-
-
-def _profile_table_available(
-    read_engine,
-    table_name: str,
-    required_columns: set[str],
-) -> bool:
-    columns = _table_columns(read_engine, table_name)
-    return bool(columns) and required_columns <= columns
-
-
 def _resolve_company_row(conn, company: str):
     exact_rows = conn.execute(
         text(
@@ -893,20 +937,93 @@ def _weighted_score(
     )
 
 
-def _profile_evidence(
+@dataclass(frozen=True)
+class _ProfileSnapshot:
+    available_codes: frozenset[str]
+    metrics_by_code: dict[str, dict[str, float | None]]
+    bases_by_code: dict[str, dict[str, str]]
+    limitations_by_code: dict[str, tuple[str, ...]]
+    overlap_keys_by_code: dict[str, frozenset[str]]
+
+
+def _profile_schema_map(read_engine, profile: str) -> dict[str, set[str]]:
+    tables_by_profile = {
+        "investor": (),
+        "audit_fee": ("audit_fees",),
+        "audit_risk": (
+            "auditors",
+            "report_sections",
+            "audit_matter_items",
+            "kam_items",
+        ),
+        "accounting_policy": ("accounting_policy_items",),
+        "kam_procedure": ("kam_items", "audit_procedure_items"),
+    }
+    inspector = inspect(read_engine)
+    available_tables = set(inspector.get_table_names())
+    return {
+        table_name: (
+            {
+                str(column["name"])
+                for column in inspector.get_columns(table_name)
+            }
+            if table_name in available_tables
+            else set()
+        )
+        for table_name in tables_by_profile[profile]
+    }
+
+
+def _has_profile_columns(
+    schema_map: dict[str, set[str]],
+    table_name: str,
+    required_columns: set[str],
+) -> bool:
+    return required_columns <= schema_map.get(table_name, set())
+
+
+def _empty_profile_snapshot(
+    corp_codes: tuple[str, ...],
+    limitations: tuple[str, ...] = (),
+) -> _ProfileSnapshot:
+    return _ProfileSnapshot(
+        available_codes=frozenset(),
+        metrics_by_code={},
+        bases_by_code={},
+        limitations_by_code={
+            corp_code: limitations
+            for corp_code in corp_codes
+        },
+        overlap_keys_by_code={},
+    )
+
+
+def _prefetch_profile_snapshot(
     conn,
     read_engine,
-    corp_code: str,
+    corp_codes: tuple[str, ...],
     year: int,
-    fs_div: str,
+    fs_div: str | None,
     profile: str,
-) -> tuple[bool, dict[str, float | None], dict[str, str], tuple[str, ...]]:
+) -> _ProfileSnapshot:
     if profile == "investor":
-        return True, {}, {}, ()
+        return _ProfileSnapshot(
+            available_codes=frozenset(corp_codes),
+            metrics_by_code={},
+            bases_by_code={},
+            limitations_by_code={},
+            overlap_keys_by_code={},
+        )
+    schema_map = _profile_schema_map(read_engine, profile)
+    if fs_div is None:
+        return _empty_profile_snapshot(corp_codes)
     if profile == "audit_fee":
-        columns = _table_columns(read_engine, "audit_fees")
+        columns = schema_map.get("audit_fees", set())
         if not {"corp_code", "bsns_year"} <= columns:
-            return False, {}, {}, ("audit_fee_schema_unavailable",)
+            return _empty_profile_snapshot(
+                corp_codes,
+                ("audit_fee_schema_unavailable",),
+            )
         selected = [
             name
             for name in (
@@ -921,207 +1038,215 @@ def _profile_evidence(
             if name in columns
         ]
         if not selected:
-            return False, {}, {}, ("audit_fee_columns_unavailable",)
-        row = conn.execute(
+            return _empty_profile_snapshot(
+                corp_codes,
+                ("audit_fee_columns_unavailable",),
+            )
+        rows = conn.execute(
             text(
-                f"SELECT {', '.join(selected)} FROM audit_fees "
-                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1"
+                f"SELECT corp_code, {', '.join(selected)} FROM audit_fees "
+                "WHERE bsns_year=:year ORDER BY corp_code"
             ),
-            {"cc": corp_code, "year": year},
-        ).mappings().first()
-        metrics, bases = _audit_fee_metrics(row, columns)
-        return bool(metrics), metrics, bases, ()
+            {"year": year},
+        ).mappings().all()
+        metrics_by_code: dict[str, dict[str, float | None]] = {}
+        bases_by_code: dict[str, dict[str, str]] = {}
+        for row in rows:
+            corp_code = str(row["corp_code"])
+            metrics, bases = _audit_fee_metrics(row, columns)
+            if metrics:
+                metrics_by_code[corp_code] = metrics
+                bases_by_code[corp_code] = bases
+        return _ProfileSnapshot(
+            available_codes=frozenset(metrics_by_code),
+            metrics_by_code=metrics_by_code,
+            bases_by_code=bases_by_code,
+            limitations_by_code={},
+            overlap_keys_by_code={},
+        )
     if profile == "audit_risk":
         evidence_specs = (
             (
                 "auditors",
                 {"corp_code", "bsns_year", "fs_div"},
-                "SELECT 1 FROM auditors "
-                "WHERE corp_code=:cc AND bsns_year=:year AND fs_div=:fs LIMIT 1",
+                "SELECT DISTINCT corp_code FROM auditors "
+                "WHERE bsns_year=:year AND fs_div=:fs",
             ),
             (
                 "report_sections",
                 {"corp_code", "bsns_year", "source_type"},
-                "SELECT 1 FROM report_sections "
-                "WHERE corp_code=:cc AND bsns_year=:year "
-                "AND source_type='audit_report' LIMIT 1",
+                "SELECT DISTINCT corp_code FROM report_sections "
+                "WHERE bsns_year=:year AND source_type='audit_report'",
             ),
             (
                 "audit_matter_items",
                 {"corp_code", "bsns_year"},
-                "SELECT 1 FROM audit_matter_items "
-                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1",
+                "SELECT DISTINCT corp_code FROM audit_matter_items "
+                "WHERE bsns_year=:year",
             ),
             (
                 "kam_items",
                 {"id", "corp_code", "bsns_year"},
-                "SELECT 1 FROM kam_items "
-                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1",
+                "SELECT DISTINCT corp_code FROM kam_items "
+                "WHERE bsns_year=:year",
             ),
         )
-        evidence_queries: list[str] = []
-        limitations: list[str] = []
-        valid_tables: set[str] = set()
+        evidence_codes: set[str] = set()
+        kam_codes: set[str] = set()
+        global_limitations: list[str] = []
         for table_name, required_columns, query in evidence_specs:
-            if _profile_table_available(
-                read_engine,
+            if not _has_profile_columns(
+                schema_map,
                 table_name,
                 required_columns,
             ):
-                evidence_queries.append(query)
-                valid_tables.add(table_name)
-            else:
-                limitations.append(f"profile_schema_unavailable:{table_name}")
-        exists = any(
-            conn.execute(
+                global_limitations.append(
+                    f"profile_schema_unavailable:{table_name}"
+                )
+                continue
+            rows = conn.execute(
                 text(query),
-                {"cc": corp_code, "year": year, "fs": fs_div},
-            ).first()
-            is not None
-            for query in evidence_queries
+                {"year": year, "fs": fs_div},
+            )
+            table_codes = {str(row[0]) for row in rows}
+            evidence_codes.update(table_codes)
+            if table_name == "kam_items":
+                kam_codes = table_codes
+        limitations_by_code = {
+            corp_code: tuple(dict.fromkeys((
+                *global_limitations,
+                *(
+                    ()
+                    if corp_code in kam_codes
+                    else ("kam_evidence_unavailable",)
+                ),
+            )))
+            for corp_code in corp_codes
+        }
+        return _ProfileSnapshot(
+            available_codes=frozenset(evidence_codes),
+            metrics_by_code={},
+            bases_by_code={},
+            limitations_by_code=limitations_by_code,
+            overlap_keys_by_code={},
         )
-        if "kam_items" not in valid_tables or conn.execute(
-            text(
-                "SELECT 1 FROM kam_items "
-                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1"
-            ),
-            {"cc": corp_code, "year": year},
-        ).first() is None:
-            limitations.append("kam_evidence_unavailable")
-        return exists, {}, {}, tuple(dict.fromkeys(limitations))
     if profile == "accounting_policy":
-        if not _profile_table_available(
-            read_engine,
+        if not _has_profile_columns(
+            schema_map,
             "accounting_policy_items",
             {"corp_code", "bsns_year", "fs_div", "item_key"},
         ):
-            return False, {}, {}, (
-                "profile_schema_unavailable:accounting_policy_items",
+            return _empty_profile_snapshot(
+                corp_codes,
+                ("profile_schema_unavailable:accounting_policy_items",),
             )
-        count = conn.execute(
+        keys_by_code: dict[str, set[str]] = {}
+        rows = conn.execute(
             text(
-                "SELECT COUNT(DISTINCT item_key) FROM accounting_policy_items "
-                "WHERE corp_code=:cc AND bsns_year=:year AND fs_div=:fs"
+                "SELECT corp_code, item_key FROM accounting_policy_items "
+                "WHERE bsns_year=:year AND fs_div=:fs "
+                "ORDER BY corp_code, item_key"
             ),
-            {"cc": corp_code, "year": year, "fs": fs_div},
-        ).scalar_one()
-        return count > 0, {}, {}, ()
-    missing_profile_tables = [
-        table_name
-        for table_name, required_columns in (
-            (
-                "kam_items",
-                {"id", "corp_code", "bsns_year", "normalized_topic"},
-            ),
-            (
-                "audit_procedure_items",
-                {
-                    "corp_code",
-                    "bsns_year",
-                    "kam_item_id",
-                    "procedure_type",
-                },
-            ),
+            {"year": year, "fs": fs_div},
         )
-        if not _profile_table_available(
-            read_engine,
+        for corp_code, item_key in rows:
+            if item_key:
+                keys_by_code.setdefault(str(corp_code), set()).add(str(item_key))
+        frozen_keys = {
+            corp_code: frozenset(keys)
+            for corp_code, keys in keys_by_code.items()
+        }
+        return _ProfileSnapshot(
+            available_codes=frozenset(frozen_keys),
+            metrics_by_code={},
+            bases_by_code={},
+            limitations_by_code={},
+            overlap_keys_by_code=frozen_keys,
+        )
+    required_tables = (
+        (
+            "kam_items",
+            {"id", "corp_code", "bsns_year", "normalized_topic"},
+        ),
+        (
+            "audit_procedure_items",
+            {
+                "corp_code",
+                "bsns_year",
+                "kam_item_id",
+                "procedure_type",
+            },
+        ),
+    )
+    missing_tables = [
+        table_name
+        for table_name, required_columns in required_tables
+        if not _has_profile_columns(
+            schema_map,
             table_name,
             required_columns,
         )
     ]
-    if missing_profile_tables:
-        return False, {}, {}, tuple(
-            f"profile_schema_unavailable:{table_name}"
-            for table_name in missing_profile_tables
+    if missing_tables:
+        return _empty_profile_snapshot(
+            corp_codes,
+            tuple(
+                f"profile_schema_unavailable:{table_name}"
+                for table_name in missing_tables
+            ),
         )
-    count = conn.execute(
+    keys_by_code: dict[str, set[str]] = {}
+    rows = conn.execute(
         text(
-            "SELECT COUNT(*) FROM audit_procedure_items p "
+            "SELECT p.corp_code, p.procedure_type, k.normalized_topic "
+            "FROM audit_procedure_items p "
             "JOIN kam_items k ON k.id=p.kam_item_id "
             "AND k.corp_code=p.corp_code AND k.bsns_year=p.bsns_year "
-            "WHERE p.corp_code=:cc AND p.bsns_year=:year "
-            "AND p.kam_item_id IS NOT NULL"
+            "WHERE p.bsns_year=:year AND p.kam_item_id IS NOT NULL "
+            "ORDER BY p.corp_code, p.procedure_type, k.normalized_topic"
         ),
-        {"cc": corp_code, "year": year},
-    ).scalar_one()
-    return count > 0, {}, {}, ()
+        {"year": year},
+    )
+    for corp_code, procedure_type, normalized_topic in rows:
+        if procedure_type:
+            keys_by_code.setdefault(str(corp_code), set()).add(
+                f"{procedure_type}:{normalized_topic or 'unknown'}"
+            )
+    frozen_keys = {
+        corp_code: frozenset(keys)
+        for corp_code, keys in keys_by_code.items()
+    }
+    return _ProfileSnapshot(
+        available_codes=frozenset(frozen_keys),
+        metrics_by_code={},
+        bases_by_code={},
+        limitations_by_code={},
+        overlap_keys_by_code=frozen_keys,
+    )
 
 
-def _profile_overlap(
-    conn,
+def _profile_overlap_from_snapshot(
+    snapshot: _ProfileSnapshot,
     profile: str,
     subject_corp_code: str,
     candidate_corp_code: str,
-    year: int,
-    fs_div: str,
 ) -> float:
-    if profile == "accounting_policy":
-        table, field, extra = "accounting_policy_items", "item_key", "AND fs_div=:fs"
-    elif profile == "kam_procedure":
-        params = {
-            "subject": subject_corp_code,
-            "candidate": candidate_corp_code,
-            "year": year,
-        }
-
-        def linked_keys(corp_param: str) -> set[str]:
-            return {
-                f"{row[0]}:{row[1] or 'unknown'}"
-                for row in conn.execute(
-                    text(
-                        "SELECT DISTINCT p.procedure_type, k.normalized_topic "
-                        "FROM audit_procedure_items p "
-                        "JOIN kam_items k ON k.id=p.kam_item_id "
-                        "AND k.corp_code=p.corp_code "
-                        "AND k.bsns_year=p.bsns_year "
-                        f"WHERE p.corp_code=:{corp_param} "
-                        "AND p.bsns_year=:year AND p.kam_item_id IS NOT NULL"
-                    ),
-                    params,
-                )
-                if row[0]
-            }
-
-        subject_keys = linked_keys("subject")
-        candidate_keys = linked_keys("candidate")
-        union = subject_keys | candidate_keys
-        return (
-            round(len(subject_keys & candidate_keys) / len(union), 6)
-            if union
-            else 0.0
-        )
-    else:
+    if profile not in {"accounting_policy", "kam_procedure"}:
         return 1.0
-    params = {
-        "subject": subject_corp_code,
-        "candidate": candidate_corp_code,
-        "year": year,
-        "fs": fs_div,
-    }
-    subject_keys = {
-        row[0]
-        for row in conn.execute(
-            text(
-                f"SELECT DISTINCT {field} FROM {table} "
-                f"WHERE corp_code=:subject AND bsns_year=:year {extra}"
-            ),
-            params,
-        )
-        if row[0]
-    }
-    candidate_keys = {
-        row[0]
-        for row in conn.execute(
-            text(
-                f"SELECT DISTINCT {field} FROM {table} "
-                f"WHERE corp_code=:candidate AND bsns_year=:year {extra}"
-            ),
-            params,
-        )
-        if row[0]
-    }
+    subject_keys = snapshot.overlap_keys_by_code.get(
+        subject_corp_code,
+        frozenset(),
+    )
+    candidate_keys = snapshot.overlap_keys_by_code.get(
+        candidate_corp_code,
+        frozenset(),
+    )
     union = subject_keys | candidate_keys
-    return round(len(subject_keys & candidate_keys) / len(union), 6) if union else 0.0
+    return (
+        round(len(subject_keys & candidate_keys) / len(union), 6)
+        if union
+        else 0.0
+    )
 
 
 def build_peer_cohort(
@@ -1147,16 +1272,39 @@ def build_peer_cohort(
         subject_code = str(subject["corp_code"])
         subject_industry = str(subject["induty_code"] or "")
         subject_sector = classify_sector(subject_industry)
-        subject_financial_rows = conn.execute(
+        companies = conn.execute(
+            text(
+                "SELECT corp_code, corp_name, stock_code, market, induty_code "
+                "FROM companies ORDER BY corp_code"
+            )
+        ).mappings().all()
+        corp_codes = tuple(str(row["corp_code"]) for row in companies)
+        financial_rows = conn.execute(
             text(
                 "SELECT * FROM financials "
-                "WHERE corp_code=:cc AND year=:year AND quarter=4 "
-                "ORDER BY CASE fs_div WHEN 'CFS' THEN 0 WHEN 'OFS' THEN 1 ELSE 2 END"
+                "WHERE year=:year AND quarter=4 "
+                "ORDER BY corp_code, "
+                "CASE fs_div WHEN 'CFS' THEN 0 WHEN 'OFS' THEN 1 ELSE 2 END"
             ),
-            {"cc": subject_code, "year": year},
+            {"year": year},
         ).mappings().all()
+        financial_rows_by_code: dict[str, list] = {}
+        for row in financial_rows:
+            financial_rows_by_code.setdefault(
+                str(row["corp_code"]),
+                [],
+            ).append(row)
+        subject_financial_rows = financial_rows_by_code.get(subject_code, [])
         subject_financial = subject_financial_rows[0] if subject_financial_rows else None
         fs_div = str(subject_financial["fs_div"]) if subject_financial else None
+        profile_snapshot = _prefetch_profile_snapshot(
+            conn,
+            read_engine,
+            corp_codes,
+            year,
+            fs_div,
+            profile,
+        )
         subject_metrics = _financial_metrics(subject_financial)
         subject_bases: dict[str, str] = {
             key: fs_div
@@ -1168,13 +1316,19 @@ def build_peer_cohort(
             limitations.append("subject_year_unavailable")
         subject_profile_available = False
         if fs_div is not None:
-            (
-                subject_profile_available,
-                subject_profile_metrics,
-                subject_profile_bases,
-                subject_profile_limitations,
-            ) = _profile_evidence(
-                conn, read_engine, subject_code, year, fs_div, profile
+            subject_profile_available = (
+                subject_code in profile_snapshot.available_codes
+            )
+            subject_profile_metrics = profile_snapshot.metrics_by_code.get(
+                subject_code,
+                {},
+            )
+            subject_profile_bases = profile_snapshot.bases_by_code.get(
+                subject_code,
+                {},
+            )
+            subject_profile_limitations = (
+                profile_snapshot.limitations_by_code.get(subject_code, ())
             )
             subject_metrics.update(subject_profile_metrics)
             subject_bases.update(subject_profile_bases)
@@ -1193,12 +1347,6 @@ def build_peer_cohort(
             if profile != "investor" and not subject_profile_available:
                 limitations.append("subject_profile_evidence_unavailable")
 
-        companies = conn.execute(
-            text(
-                "SELECT corp_code, corp_name, stock_code, market, induty_code "
-                "FROM companies ORDER BY corp_code"
-            )
-        ).mappings().all()
         candidates: list[PeerMember] = []
         all_exclusions: list[PeerExclusion] = []
         exclusion_counts: dict[str, int] = {}
@@ -1233,13 +1381,7 @@ def build_peer_cohort(
             ):
                 exclude(candidate, "sector_mismatch")
                 continue
-            exact_rows = conn.execute(
-                text(
-                    "SELECT * FROM financials "
-                    "WHERE corp_code=:cc AND year=:year AND quarter=4"
-                ),
-                {"cc": candidate_code, "year": year},
-            ).mappings().all()
+            exact_rows = financial_rows_by_code.get(candidate_code, [])
             if not exact_rows:
                 exclude(candidate, "year_unavailable")
                 continue
@@ -1282,18 +1424,19 @@ def build_peer_cohort(
             ):
                 exclude(candidate, "size_outlier")
                 continue
-            (
-                profile_available,
-                profile_metrics,
-                profile_bases,
-                member_limitations,
-            ) = _profile_evidence(
-                conn,
-                read_engine,
+            profile_available = (
+                candidate_code in profile_snapshot.available_codes
+            )
+            profile_metrics = profile_snapshot.metrics_by_code.get(
                 candidate_code,
-                year,
-                str(fs_div),
-                profile,
+                {},
+            )
+            profile_bases = profile_snapshot.bases_by_code.get(
+                candidate_code,
+                {},
+            )
+            member_limitations = (
+                profile_snapshot.limitations_by_code.get(candidate_code, ())
             )
             if profile != "investor" and not profile_available:
                 exclude(candidate, "missing_profile_evidence")
@@ -1317,13 +1460,11 @@ def build_peer_cohort(
                     subject_metrics.get("revenue"),
                     candidate_metrics.get("revenue"),
                 ),
-                "profile_evidence": _profile_overlap(
-                    conn,
+                "profile_evidence": _profile_overlap_from_snapshot(
+                    profile_snapshot,
                     profile,
                     subject_code,
                     candidate_code,
-                    year,
-                    str(fs_div),
                 ),
             }
             score = _weighted_score(components, _score_weights(profile))
@@ -1409,19 +1550,29 @@ def compare_metric(
     subject_metrics = dict(cohort.subject_metrics)
     subject_bases = dict(cohort.subject_metric_bases)
     subject_value = subject_metrics.get(metric_key)
-    basis = subject_bases.get(metric_key)
+    basis = _FIXED_METRIC_BASES.get(
+        metric_key,
+        subject_bases.get(metric_key),
+    )
     values: list[float] = []
     unavailable = 0
-    for member in cohort.members:
-        member_value = dict(member.metric_values).get(metric_key)
-        member_basis = dict(member.metric_bases).get(metric_key)
-        if (
-            member_value is None
-            or (basis is not None and member_basis != basis)
-        ):
-            unavailable += 1
-            continue
-        values.append(float(member_value))
+    subject_basis_unavailable = (
+        metric_key in _GENERIC_BASIS_METRICS
+        and (subject_value is None or basis is None)
+    )
+    if subject_basis_unavailable:
+        unavailable = len(cohort.members)
+    else:
+        for member in cohort.members:
+            member_value = dict(member.metric_values).get(metric_key)
+            member_basis = dict(member.metric_bases).get(metric_key)
+            if (
+                member_value is None
+                or (basis is not None and member_basis != basis)
+            ):
+                unavailable += 1
+                continue
+            values.append(float(member_value))
     values.sort()
     n = len(values)
     limitations: list[str] = list(cohort.limitations)
@@ -1431,14 +1582,16 @@ def compare_metric(
         )
     if subject_value is None:
         limitations.append("subject_metric_unavailable")
+    if subject_basis_unavailable:
+        limitations.append("subject_basis_unavailable")
     if unavailable:
         limitations.append(f"peer_metric_unavailable:{unavailable}")
-    if n < 5:
-        percentile = None
-        confidence = "insufficient_n"
-    elif subject_value is None:
+    if subject_value is None:
         percentile = None
         confidence = "subject_unavailable"
+    elif n < 5:
+        percentile = None
+        confidence = "insufficient_n"
     else:
         below = sum(1 for value in values if value < float(subject_value))
         equal = sum(1 for value in values if value == float(subject_value))

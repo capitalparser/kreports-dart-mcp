@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import sqlite3
 
 import pytest
@@ -361,6 +361,113 @@ def test_audit_fee_profile_never_mixes_actual_and_contract_populations(temp_engi
     assert contract.unavailable_count == 1
 
 
+def test_basis_dependent_generic_metric_fails_closed_without_subject_basis(
+    temp_engine,
+):
+    from kreports.analysis.peer import build_peer_cohort, compare_metric
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditFee
+
+    _seed_financial_cohort(temp_engine, peer_count=3)
+    with get_session() as session:
+        session.add_all(
+            [
+                AuditFee(
+                    corp_code="00000001",
+                    bsns_year=2024,
+                    actual_hours=1_000,
+                ),
+                AuditFee(
+                    corp_code="00000002",
+                    bsns_year=2024,
+                    actual_fee_m=110,
+                    nas_ratio=0.2,
+                ),
+                AuditFee(
+                    corp_code="00000003",
+                    bsns_year=2024,
+                    contract_fee_m=90,
+                    nas_ratio=0.3,
+                ),
+                AuditFee(
+                    corp_code="00000004",
+                    bsns_year=2024,
+                    audit_fee_m=80,
+                    nas_ratio=0.4,
+                ),
+            ]
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 10)
+    generic = compare_metric(cohort, "audit_fee")
+    nas = compare_metric(cohort, "nas_ratio")
+    actual = compare_metric(cohort, "audit_fee_actual")
+    contract = compare_metric(cohort, "audit_fee_contract")
+
+    for comparison in (generic, nas):
+        assert comparison.peer_values == ()
+        assert comparison.n == 0
+        assert comparison.unavailable_count == 3
+        assert comparison.percentile is None
+        assert comparison.decile is None
+        assert comparison.confidence == "subject_unavailable"
+        assert "subject_basis_unavailable" in comparison.limitations
+    assert actual.basis == "actual"
+    assert actual.peer_values == (110_000_000.0,)
+    assert actual.confidence == "subject_unavailable"
+    assert contract.basis == "contract"
+    assert contract.peer_values == (90_000_000.0,)
+    assert contract.confidence == "subject_unavailable"
+
+
+def test_cohort_constructor_enforces_deep_and_denominator_invariants(temp_engine):
+    from kreports.analysis.peer import PeerExclusion, build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=3)
+    cohort = build_peer_cohort("00000001", 2024, "investor", 2)
+
+    assert dict(cohort.denominator_metadata)["outside_limit"] == 1
+    with pytest.raises(TypeError, match="subject_metric_bases values"):
+        replace(
+            cohort,
+            subject_metric_bases=(("assets", ["CFS"]),),  # type: ignore[list-item]
+        )
+    with pytest.raises(TypeError, match="score_policy values"):
+        replace(
+            cohort,
+            score_policy=(("weight", {"assets": 1}),),  # type: ignore[dict-item]
+        )
+    with pytest.raises(ValueError, match="subject exclusion count"):
+        replace(
+            cohort,
+            exclusion_counts=tuple(
+                pair for pair in cohort.exclusion_counts if pair[0] != "subject"
+            ),
+        )
+    with pytest.raises(ValueError, match="outside_limit"):
+        replace(
+            cohort,
+            exclusion_counts=tuple(
+                (reason, 2 if reason == "outside_limit" else count)
+                for reason, count in cohort.exclusion_counts
+            ),
+        )
+    with pytest.raises(ValueError, match="company universe"):
+        replace(cohort, total_candidates=cohort.total_candidates + 1)
+    with pytest.raises(ValueError, match="returned exclusion"):
+        replace(
+            cohort,
+            exclusions=(
+                *cohort.exclusions,
+                PeerExclusion(
+                    corp_code="99999999",
+                    corp_name="Impossible",
+                    reason_code="unlisted",
+                ),
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     "profile",
     ["audit_risk", "accounting_policy", "kam_procedure"],
@@ -701,3 +808,156 @@ def test_real_peer_facade_propagates_typed_cohort_metadata_to_answer_pack(
         if table["id"] == "peer_cohort_metadata"
     )
     assert table["rows"][0]["profile"] == "investor"
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["audit_fee", "audit_risk", "accounting_policy", "kam_procedure"],
+)
+def test_auditor_profile_statement_count_is_bounded_independent_of_candidates(
+    temp_engine,
+    profile,
+):
+    from sqlalchemy import event
+
+    from kreports.analysis.peer import build_peer_cohort
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        AccountingPolicyItem,
+        Auditor,
+        AuditFee,
+        AuditProcedureItem,
+        Company,
+        Financial,
+        KamItem,
+    )
+
+    def add_profile_evidence(session, corp_codes):
+        for corp_code in corp_codes:
+            if profile == "audit_fee":
+                session.add(
+                    AuditFee(
+                        corp_code=corp_code,
+                        bsns_year=2024,
+                        actual_fee_m=100,
+                    )
+                )
+            elif profile == "audit_risk":
+                session.add(
+                    Auditor(
+                        corp_code=corp_code,
+                        bsns_year=2024,
+                        fs_div="CFS",
+                        auditor_nm="Auditor",
+                    )
+                )
+            elif profile == "accounting_policy":
+                session.add(
+                    AccountingPolicyItem(
+                        corp_code=corp_code,
+                        bsns_year=2024,
+                        fs_div="CFS",
+                        rcept_no=f"R{corp_code}",
+                        item_key="revenue_recognition",
+                        body="policy",
+                    )
+                )
+            else:
+                kam = KamItem(
+                    corp_code=corp_code,
+                    bsns_year=2024,
+                    rcept_no=f"R{corp_code}",
+                    source_type="audit_report",
+                    ordinal=1,
+                    normalized_topic="revenue",
+                    full_body_hash=f"H{corp_code}",
+                    full_body_length=100,
+                    source_basis="full_body",
+                    quality_status="verified",
+                )
+                session.add(kam)
+                session.flush()
+                session.add(
+                    AuditProcedureItem(
+                        corp_code=corp_code,
+                        bsns_year=2024,
+                        rcept_no=f"R{corp_code}",
+                        source_type="audit_report",
+                        kam_item_id=kam.id,
+                        kam_topic="revenue",
+                        procedure_type="inspection",
+                        procedure_text="inspected invoices",
+                        section_ordinal=1,
+                        procedure_ordinal=1,
+                    )
+                )
+
+    _seed_financial_cohort(temp_engine, peer_count=10)
+    initial_codes = [f"{index:08d}" for index in range(1, 12)]
+    with get_session() as session:
+        add_profile_evidence(session, initial_codes)
+
+    statements: list[str] = []
+
+    def before_cursor_execute(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        if statement.lstrip().upper().startswith(("SELECT", "PRAGMA")):
+            statements.append(statement)
+
+    event.listen(temp_engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        build_peer_cohort("00000001", 2024, profile, 5)
+        small_count = len(statements)
+
+        added_codes = [f"{index:08d}" for index in range(12, 102)]
+        with get_session() as session:
+            for index, corp_code in enumerate(added_codes, start=12):
+                session.add(
+                    Company(
+                        corp_code=corp_code,
+                        stock_code=f"{index:06d}",
+                        corp_name=f"Peer {index}",
+                        market="KOSPI",
+                        induty_code="26410",
+                    )
+                )
+                session.add(
+                    Financial(
+                        corp_code=corp_code,
+                        year=2024,
+                        quarter=4,
+                        fs_div="CFS",
+                        revenue=1_000,
+                        operating_profit=100,
+                        net_income=80,
+                        total_assets=2_000,
+                        total_debt=800,
+                        total_equity=1_200,
+                    )
+                )
+            add_profile_evidence(session, added_codes)
+
+        statements.clear()
+        cohort = build_peer_cohort("00000001", 2024, profile, 5)
+        large_count = len(statements)
+    finally:
+        event.remove(temp_engine, "before_cursor_execute", before_cursor_execute)
+
+    assert cohort.eligible_count == 100
+    expected_query_counts = {
+        "audit_fee": 9,
+        "audit_risk": 15,
+        "accounting_policy": 9,
+        "kam_procedure": 10,
+    }
+    assert small_count == expected_query_counts[profile]
+    assert large_count == expected_query_counts[profile]
+    assert small_count <= 30
+    assert large_count <= 30
+    assert abs(large_count - small_count) <= 2
