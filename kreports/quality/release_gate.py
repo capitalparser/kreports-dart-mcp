@@ -16,6 +16,7 @@ from kreports.db.migrations import MIGRATIONS, _checksum
 from kreports.db.quality_snapshot import (
     QUALITY_CONTENT_FIELDS,
     QUALITY_VERSION,
+    QualitySnapshotError,
     quality_content_digest,
 )
 from kreports.runtime import is_readonly_mode
@@ -241,8 +242,15 @@ def _runtime_schema_state() -> tuple[
                     if not quality_versions
                     else None
                 )
+                quality_content_valid = True
+                try:
+                    content_digest = quality_content_digest(quality_rows)
+                except QualitySnapshotError:
+                    content_digest = None
+                    quality_content_valid = False
+                    failures.append("quality_snapshot_invalid")
                 live_quality_snapshot = {
-                    "content_digest": quality_content_digest(quality_rows),
+                    "content_digest": content_digest,
                     "coverage_year": live_coverage_year,
                     "coverage_year_row_count": coverage_year_row_count,
                     "quality_version": live_quality_version,
@@ -270,7 +278,8 @@ def _runtime_schema_state() -> tuple[
                 if manifest_row and not quality_version_supported:
                     failures.append("quality_version_unsupported")
                 quality_snapshot_valid = (
-                    quality_version_supported
+                    quality_content_valid
+                    and quality_version_supported
                     and manifest_quality_snapshot == live_quality_snapshot
                 )
                 if manifest_row and not quality_snapshot_valid:

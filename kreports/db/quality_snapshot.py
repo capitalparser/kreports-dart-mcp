@@ -27,6 +27,27 @@ QUALITY_CONTENT_FIELDS = (
 )
 
 
+class QualitySnapshotError(ValueError):
+    """Raised when persisted quality content cannot be canonicalized."""
+
+
+def _normalized_blockers(value: Any) -> list[str]:
+    try:
+        blockers = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise QualitySnapshotError(
+            "blockers_json must be a JSON array of strings"
+        ) from exc
+    if (
+        not isinstance(blockers, list)
+        or any(not isinstance(blocker, str) for blocker in blockers)
+    ):
+        raise QualitySnapshotError(
+            "blockers_json must be a JSON array of strings"
+        )
+    return sorted(blockers)
+
+
 def quality_content_digest(
     rows: Iterable[Mapping[str, Any]],
 ) -> str:
@@ -34,7 +55,11 @@ def quality_content_digest(
     canonical_rows = sorted(
         (
             {
-                field: row[field]
+                field: (
+                    _normalized_blockers(row[field])
+                    if field == "blockers_json"
+                    else row[field]
+                )
                 for field in QUALITY_CONTENT_FIELDS
             }
             for row in rows

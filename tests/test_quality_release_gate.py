@@ -32,7 +32,11 @@ def _expected_quality_digest(rows: list[CompanyYearQuality]) -> str:
     ordered = sorted(
         (
             {
-                field: getattr(row, field)
+                field: (
+                    sorted(json.loads(getattr(row, field)))
+                    if field == "blockers_json"
+                    else getattr(row, field)
+                )
                 for field in _QUALITY_CONTENT_FIELDS
             }
             for row in rows
@@ -603,6 +607,30 @@ def test_release_gate_accepts_matching_quality_content_digest(
         "required_failures"
     ]
     assert report["ok"] is True
+
+
+def test_release_gate_fails_closed_on_malformed_blocker_json(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.blockers_json = "{not-json"
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "quality_snapshot_invalid" in report["required_failures"]
+    assert "release_manifest_unavailable" in report["required_failures"]
 
 
 def test_release_gate_rejects_quality_snapshot_row_count_mismatch(

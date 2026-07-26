@@ -34,7 +34,11 @@ def _expected_quality_digest(rows: list[dict]) -> str:
     ordered = sorted(
         (
             {
-                field: row[field]
+                field: (
+                    sorted(json.loads(row[field]))
+                    if field == "blockers_json"
+                    else row[field]
+                )
                 for field in _QUALITY_CONTENT_FIELDS
             }
             for row in rows
@@ -56,6 +60,7 @@ def _quality_values(
     *,
     investor_grade: str = "A",
     quality_version: str = "v1",
+    blockers_json: str = "[]",
 ) -> dict:
     return {
         "corp_code": corp_code,
@@ -71,7 +76,7 @@ def _quality_values(
         "investor_grade": investor_grade,
         "auditor_grade": "A",
         "group_audit_grade": "D",
-        "blockers_json": "[]",
+        "blockers_json": blockers_json,
         "quality_version": quality_version,
     }
 
@@ -384,3 +389,85 @@ def test_dataset_manifest_rejects_unsupported_quality_version(temp_engine):
         match="supported quality version",
     ):
         write_dataset_manifest("unsupported-quality-v2")
+
+
+def test_manifest_digest_normalizes_blocker_order_but_detects_content_change(
+    temp_engine,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values(
+                    "00126380",
+                    2025,
+                    blockers_json='["kam_error", "policy_error"]',
+                ),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    first = json.loads(
+        write_dataset_manifest("blockers-first")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.blockers_json = '["policy_error", "kam_error"]'
+    reordered = json.loads(
+        write_dataset_manifest("blockers-reordered")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.blockers_json = '["policy_error", "audit_fee_error"]'
+    changed = json.loads(
+        write_dataset_manifest("blockers-changed")[
+            "quality_snapshot_json"
+        ]
+    )
+
+    assert reordered["content_digest"] == first["content_digest"]
+    assert changed["content_digest"] != first["content_digest"]
+
+
+@pytest.mark.parametrize(
+    "blockers_json",
+    [
+        "{not-json",
+        '{"kam_error": true}',
+        '[1, "kam_error"]',
+    ],
+)
+def test_dataset_manifest_rejects_invalid_blocker_array(
+    temp_engine,
+    blockers_json,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values(
+                    "00126380",
+                    2025,
+                    blockers_json=blockers_json,
+                ),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="blockers_json must be a JSON array of strings",
+    ):
+        write_dataset_manifest("invalid-blockers")
