@@ -519,43 +519,76 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
     if fetch_outcome == "error":
         return "error", "D"
     with get_session() as session:
-        canonical_entity_count = int(
-            session.query(func.count(GroupEntityRecord.id))
+        selected_receipt = (
+            session.query(func.max(GroupEntityRecord.source_rcept_no))
             .filter(
                 GroupEntityRecord.parent_corp_code == corp_code,
                 GroupEntityRecord.effective_year == year,
             )
             .scalar()
-            or 0
         )
-        canonical_relationships = (
-            session.query(
-                GroupRelationshipRecord.child_entity_key,
-                GroupRelationshipRecord.ownership_pct,
+        canonical_entities = []
+        canonical_relationships = []
+        canonical_metrics = []
+        if selected_receipt:
+            canonical_entities = (
+                session.query(
+                    GroupEntityRecord.entity_key,
+                    GroupEntityRecord.resolution_reason,
+                )
+                .filter(
+                    GroupEntityRecord.parent_corp_code == corp_code,
+                    GroupEntityRecord.effective_year == year,
+                    GroupEntityRecord.source_rcept_no == selected_receipt,
+                )
+                .all()
             )
-            .filter(
-                GroupRelationshipRecord.parent_corp_code == corp_code,
-                GroupRelationshipRecord.effective_year == year,
+            canonical_relationships = (
+                session.query(
+                    GroupRelationshipRecord.relationship_key,
+                    GroupRelationshipRecord.parent_entity_key,
+                    GroupRelationshipRecord.child_entity_key,
+                    GroupRelationshipRecord.relation_type,
+                    GroupRelationshipRecord.ownership_pct,
+                    GroupRelationshipRecord.source_rcept_no,
+                )
+                .filter(
+                    GroupRelationshipRecord.parent_corp_code == corp_code,
+                    GroupRelationshipRecord.effective_year == year,
+                    GroupRelationshipRecord.source_rcept_no == selected_receipt,
+                )
+                .all()
             )
-            .all()
-        )
-        canonical_metrics = (
-            session.query(
-                GroupComponentMetricRecord.entity_key,
-                GroupComponentMetricRecord.metric_key,
-                GroupComponentMetricRecord.share_pct,
-                GroupComponentMetricRecord.denominator_amount,
-                GroupComponentMetricRecord.denominator_unit,
-                GroupComponentMetricRecord.denominator_source_rcept_no,
-                GroupComponentMetricRecord.numerator_source_rcept_no,
-                GroupComponentMetricRecord.qsc_status,
+            canonical_metrics = (
+                session.query(
+                    GroupComponentMetricRecord.source_rcept_no,
+                    GroupComponentMetricRecord.entity_key,
+                    GroupComponentMetricRecord.metric_key,
+                    GroupComponentMetricRecord.unit,
+                    GroupComponentMetricRecord.share_pct,
+                    GroupComponentMetricRecord.denominator_amount,
+                    GroupComponentMetricRecord.denominator_unit,
+                    GroupComponentMetricRecord.denominator_source_rcept_no,
+                    GroupComponentMetricRecord.denominator_source_table,
+                    GroupComponentMetricRecord.numerator_source_rcept_no,
+                    GroupComponentMetricRecord.numerator_source_table,
+                    GroupComponentMetricRecord.fs_div,
+                    GroupComponentMetricRecord.period,
+                    GroupComponentMetricRecord.elimination_basis,
+                    GroupComponentMetricRecord.qsc_status,
+                    GroupComponentMetricRecord.qsc_basis,
+                    GroupComponentMetricRecord.qsc_evidence_refs_json,
+                    GroupComponentMetricRecord.qsc_threshold_pct,
+                    GroupComponentMetricRecord.quality_status,
+                )
+                .filter(
+                    GroupComponentMetricRecord.parent_corp_code == corp_code,
+                    GroupComponentMetricRecord.effective_year == year,
+                    GroupComponentMetricRecord.source_rcept_no
+                    == selected_receipt,
+                )
+                .all()
             )
-            .filter(
-                GroupComponentMetricRecord.parent_corp_code == corp_code,
-                GroupComponentMetricRecord.effective_year == year,
-            )
-            .all()
-        )
         component_count = int(
             session.query(func.count(BusinessAffiliateAuditor.id))
             .filter(
@@ -565,36 +598,155 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             .scalar()
             or 0
         )
-    if canonical_entity_count and canonical_relationships:
+    if canonical_entities and canonical_relationships:
+        entity_keys = {entity.entity_key for entity in canonical_entities}
         child_keys = {
             relationship.child_entity_key
             for relationship in canonical_relationships
         }
-        metrics_by_child: dict[str, dict[str, tuple]] = (
-            defaultdict(dict)
+        metrics_by_child: dict[str, dict[str, list[tuple]]] = defaultdict(
+            lambda: defaultdict(list)
         )
         for metric in canonical_metrics:
-            metrics_by_child[metric.entity_key][metric.metric_key] = metric
+            metrics_by_child[metric.entity_key][metric.metric_key].append(metric)
+        graph_conflict = any(
+            relationship.parent_entity_key not in entity_keys
+            or relationship.child_entity_key not in entity_keys
+            for relationship in canonical_relationships
+        )
+        edge_claims: dict[tuple[str, str], set[tuple[str, float | None]]] = (
+            defaultdict(set)
+        )
+        parents_by_child: dict[str, set[str]] = defaultdict(set)
+        adjacency: dict[str, set[str]] = defaultdict(set)
+        for relationship in canonical_relationships:
+            edge = (
+                relationship.parent_entity_key,
+                relationship.child_entity_key,
+            )
+            edge_claims[edge].add(
+                (relationship.relation_type, relationship.ownership_pct)
+            )
+            parents_by_child[relationship.child_entity_key].add(
+                relationship.parent_entity_key
+            )
+            adjacency[relationship.parent_entity_key].add(
+                relationship.child_entity_key
+            )
+        graph_conflict = graph_conflict or any(
+            len(claims) > 1 for claims in edge_claims.values()
+        ) or any(
+            len(parents) > 1 for parents in parents_by_child.values()
+        ) or any(
+            entity.resolution_reason in {
+                "orphan_parent", "ambiguous_parent_name",
+            }
+            for entity in canonical_entities
+        )
+        graph_nodes = set(adjacency) | set(parents_by_child)
+        if len(graph_nodes - set(parents_by_child)) != 1:
+            graph_conflict = True
+
+        def has_cycle(node: str, active: set[str], done: set[str]) -> bool:
+            if node in active:
+                return True
+            if node in done:
+                return False
+            active.add(node)
+            found = any(
+                has_cycle(child, active, done)
+                for child in adjacency.get(node, ())
+            )
+            active.remove(node)
+            done.add(node)
+            return found
+
+        visited: set[str] = set()
+        graph_conflict = graph_conflict or any(
+            has_cycle(node, set(), visited)
+            for node in sorted(graph_nodes)
+        )
         ownership_complete = all(
             relationship.ownership_pct is not None
             for relationship in canonical_relationships
         )
-        evidence_complete = bool(child_keys) and all(
-            {
-                "assets", "revenue",
-            }.issubset(metrics_by_child.get(child_key, {}))
-            and all(
-                metric.share_pct is not None
+        def metric_is_complete(metric) -> bool:
+            try:
+                evidence_refs = set(json.loads(
+                    metric.qsc_evidence_refs_json or "[]"
+                ))
+            except (TypeError, ValueError):
+                return False
+            return bool(
+                metric.source_rcept_no == selected_receipt
+                and metric.share_pct is not None
+                and metric.unit
                 and metric.denominator_amount is not None
-                and metric.denominator_unit
+                and metric.denominator_unit == metric.unit
                 and metric.denominator_source_rcept_no
-                and metric.numerator_source_rcept_no
-                and metric.qsc_status in {"qsc", "not_qsc"}
-                for metric in metrics_by_child[child_key].values()
+                and metric.denominator_source_table
+                and metric.numerator_source_rcept_no == selected_receipt
+                and metric.numerator_source_table
+                and metric.fs_div in {"CFS", "OFS"}
+                and metric.period == str(year)
+                and metric.elimination_basis in {
+                    "before_elimination", "after_elimination",
+                }
+                and metric.qsc_threshold_pct == 10.0
+                and metric.quality_status == "usable"
+                and {
+                    metric.numerator_source_rcept_no,
+                    metric.denominator_source_rcept_no,
+                }.issubset(evidence_refs)
             )
+
+        def child_has_complete_qsc(child_key: str) -> bool:
+            by_kind = metrics_by_child.get(child_key, {})
+            if not by_kind or not set(by_kind).issubset(
+                {"assets", "revenue"}
+            ):
+                return False
+            if any(len(values) != 1 for values in by_kind.values()):
+                return False
+            metrics = {
+                key: values[0] for key, values in by_kind.items()
+            }
+            statuses = {metric.qsc_status for metric in metrics.values()}
+            if len(statuses) != 1:
+                return False
+            status = next(iter(statuses))
+            if status == "qsc":
+                for metric_key, metric in metrics.items():
+                    expected_basis = (
+                        f"{'asset' if metric_key == 'assets' else 'revenue'}"
+                        "_share_pct>=10.0"
+                    )
+                    if (
+                        metric_is_complete(metric)
+                        and metric.share_pct >= 10.0
+                        and expected_basis in {
+                            item for item in (metric.qsc_basis or "").split("|")
+                            if item
+                        }
+                    ):
+                        return True
+                return False
+            if status == "not_qsc":
+                if set(metrics) != {"assets", "revenue"}:
+                    return False
+                return all(
+                    metric_is_complete(metric)
+                    and metric.share_pct < 10.0
+                    and not metric.qsc_basis
+                    for metric in metrics.values()
+                )
+            return False
+
+        evidence_complete = bool(child_keys) and all(
+            child_has_complete_qsc(child_key)
             for child_key in child_keys
         )
-        if ownership_complete and evidence_complete:
+        if ownership_complete and evidence_complete and not graph_conflict:
             return "available", "A"
         return "partial", "D"
     if not component_count:

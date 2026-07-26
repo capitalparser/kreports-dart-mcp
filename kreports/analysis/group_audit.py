@@ -16,6 +16,7 @@ from kreports.analysis.group_graph import (
     GroupGraphUnavailable,
     build_group_graph,
     classify_qsc,
+    latest_group_graph_year,
 )
 
 
@@ -62,6 +63,14 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
     if not graph.entities:
         return None
     entities = {entity.entity_key: entity for entity in graph.entities}
+    graph_root_keys = {
+        entity.entity_key
+        for entity in graph.entities
+        if (
+            entity.entity_key == f"parent:{corp_code}"
+            or entity.resolved_corp_code == corp_code
+        )
+    }
     metrics: dict[str, dict[str, Any]] = {}
     for metric in graph.metrics:
         metrics.setdefault(metric.entity_key, {})[metric.metric_key] = metric
@@ -79,6 +88,7 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
         rows.append({
             "entity_key": entity.entity_key,
             "parent_entity_key": edge.parent_entity_key,
+            "parent_is_root": edge.parent_entity_key in graph_root_keys,
             "name": entity.original_name,
             "relation": edge.relation_type,
             "ownership_pct": edge.ownership_pct,
@@ -89,10 +99,14 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
             "qsc_status": qsc_status,
             "qsc_basis": list(asset.qsc_basis if asset else revenue.qsc_basis if revenue else ()),
             "corp_code": entity.resolved_corp_code,
+            "stock_code": entity.stock_code,
+            "market": entity.market,
+            "listed_yn": entity.listed_state,
             "auditor": {
                 "auditor_nm": entity.component_auditor_name,
                 "bsns_year": entity.component_auditor_year,
                 "rcept_no": entity.component_auditor_rcept_no,
+                "fs_div": entity.component_auditor_fs_div,
             } if entity.component_auditor_name else None,
             "auditor_gap_reason": entity.auditor_gap_reason,
             "source_rcept_no": edge.source_rcept_no,
@@ -458,6 +472,49 @@ def get_subsidiary_auditors(
             result["group_graph"] = canonical_graph
             result["data_quality"]["canonical_graph"] = "available"
         return result
+    try:
+        canonical_year = latest_group_graph_year(corp_code)
+    except GroupGraphUnavailable:
+        canonical_year = None
+    canonical_graph = _canonical_graph_payload(corp_code, canonical_year)
+    if canonical_graph is not None:
+        all_items = list(canonical_graph["entities"])
+        items = list(all_items)
+        if only_with_auditor:
+            items = [item for item in items if item.get("auditor")]
+        truncated = False
+        if limit is not None and len(items) > limit:
+            items = items[:limit]
+            truncated = True
+        if slim:
+            items = [
+                {key: item.get(key) for key in _SUBSIDIARY_SLIM_FIELDS}
+                for item in items
+            ]
+        first_receipt = next(
+            (
+                item.get("source_rcept_no")
+                for item in all_items
+                if item.get("source_rcept_no")
+            ),
+            None,
+        )
+        return _clean_dict({
+            "corp_code": corp_code,
+            "parent_rcept_no": first_receipt,
+            "bsns_year": canonical_year,
+            "qsc_criterion": _QSC_CRITERION,
+            "subsidiaries": items,
+            "count": len(items),
+            "total": len(all_items),
+            "truncated": truncated,
+            "group_graph": canonical_graph,
+            "data_quality": {
+                "status": "usable",
+                "source": "canonical_group_audit_graph",
+                "canonical_graph": "available",
+            },
+        })
     if row is None:
         return {
             "corp_code": corp_code,

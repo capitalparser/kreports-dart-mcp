@@ -361,8 +361,11 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
         ),
     })
     warnings = []
-    if len(subsidiaries) > 8:
-        warnings.append(f"graph_nodes_omitted:{len(subsidiaries) - 8}")
+    visible_count = len(_hierarchy_closed_rows(subsidiaries, limit=8))
+    if len(subsidiaries) > visible_count:
+        warnings.append(
+            f"graph_nodes_omitted:{len(subsidiaries) - visible_count}"
+        )
     if result.get("truncated") or graph.get("truncated"):
         warnings.append("upstream_result_truncated")
     if warnings:
@@ -378,7 +381,7 @@ def _subsidiary_mermaid(
     canonical: bool = False,
 ) -> str:
     lines = ["flowchart TD", f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]']
-    visible = subsidiaries[:8]
+    visible = _hierarchy_closed_rows(subsidiaries, limit=8)
     node_ids = {
         str(item.get("entity_key") or f"row:{idx}"): f"N{idx}"
         for idx, item in enumerate(visible, start=1)
@@ -401,6 +404,49 @@ def _subsidiary_mermaid(
     if not subsidiaries:
         lines.append('  P -->|"캐시 없음"| N0["연결/투자 실체 미확보"]')
     return "\n".join(lines)
+
+
+def _hierarchy_closed_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Choose a bounded subgraph without inventing a root for descendants."""
+    child_keys = {
+        str(row.get("entity_key") or "")
+        for row in rows
+        if row.get("entity_key")
+    }
+    visible: list[dict[str, Any]] = []
+    visible_keys: set[str] = set()
+    pending = list(rows)
+    while pending and len(visible) < limit:
+        progressed = False
+        for row in list(pending):
+            parent_key = str(row.get("parent_entity_key") or "")
+            parent_is_root = (
+                row.get("parent_is_root") is True
+                or (
+                    "parent_is_root" not in row
+                    and parent_key not in child_keys
+                )
+            )
+            if (
+                parent_key
+                and not parent_is_root
+                and parent_key not in visible_keys
+            ):
+                continue
+            pending.remove(row)
+            visible.append(row)
+            if row.get("entity_key"):
+                visible_keys.add(str(row["entity_key"]))
+            progressed = True
+            if len(visible) == limit:
+                break
+        if not progressed:
+            break
+    return visible
 
 
 def _mermaid_label(value: Any) -> str:

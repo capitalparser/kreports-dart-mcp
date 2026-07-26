@@ -185,7 +185,7 @@ def _render_subsidiary_auditors(result: dict) -> str:
         "flowchart TD",
         f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]',
     ]
-    visible = subsidiaries[:8]
+    visible = _hierarchy_closed_group_rows(subsidiaries, limit=8)
     node_ids = {
         str(item.get("entity_key") or f"row:{idx}"): f"N{idx}"
         for idx, item in enumerate(visible, start=1)
@@ -255,9 +255,9 @@ def _render_subsidiary_auditors(result: dict) -> str:
         lines.append("- 결과가 잘렸습니다. 전체 구조 확인이 필요하면 limit을 늘려 재조회해야 합니다.")
     if graph.get("truncated"):
         lines.append("- 상위 그래프 결과가 잘렸습니다. 현재 표는 반환된 행 전체만 포함합니다.")
-    if len(subsidiaries) > 8:
+    if len(subsidiaries) > len(visible):
         lines.append(
-            f"- 구조도는 가독성을 위해 {len(subsidiaries) - 8}개 노드를 생략했지만 표에는 반환 행 전체를 표시했습니다."
+            f"- 구조도는 가독성을 위해 {len(subsidiaries) - len(visible)}개 노드를 생략했지만 표에는 반환 행 전체를 표시했습니다."
         )
 
     coverage_note = data_quality.get("coverage_note")
@@ -275,6 +275,48 @@ def _markdown_cell(value: Any) -> str:
         .replace("|", "\\|")
         .replace("\n", "<br/>")
     )
+
+
+def _hierarchy_closed_group_rows(
+    rows: list[dict],
+    *,
+    limit: int,
+) -> list[dict]:
+    child_keys = {
+        str(row.get("entity_key") or "")
+        for row in rows
+        if row.get("entity_key")
+    }
+    visible: list[dict] = []
+    visible_keys: set[str] = set()
+    pending = list(rows)
+    while pending and len(visible) < limit:
+        progressed = False
+        for row in list(pending):
+            parent_key = str(row.get("parent_entity_key") or "")
+            parent_is_root = (
+                row.get("parent_is_root") is True
+                or (
+                    "parent_is_root" not in row
+                    and parent_key not in child_keys
+                )
+            )
+            if (
+                parent_key
+                and not parent_is_root
+                and parent_key not in visible_keys
+            ):
+                continue
+            pending.remove(row)
+            visible.append(row)
+            if row.get("entity_key"):
+                visible_keys.add(str(row["entity_key"]))
+            progressed = True
+            if len(visible) == limit:
+                break
+        if not progressed:
+            break
+    return visible
 
 
 def _render_kam_topics(result: dict) -> str:

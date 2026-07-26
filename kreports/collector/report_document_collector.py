@@ -921,10 +921,11 @@ def _persist_business_affiliate_auditors(meta: dict, *, content: str) -> dict:
     if meta.get("source_type") != "business_report":
         return {"count": 0}
 
-    affiliates = extract_affiliates_from_report(content)
-    if not affiliates:
+    source_affiliates = extract_affiliates_from_report(content)
+    if not source_affiliates:
         # A parser gap is not authorization to erase last-known-good evidence.
         return {"count": 0}
+    affiliates = _legacy_affiliate_rows(source_affiliates)
 
     names = [item["name"] for item in affiliates if item.get("name")]
     name_to_company = _match_companies_by_names_local(names)
@@ -1030,8 +1031,29 @@ def _persist_business_affiliate_auditors(meta: dict, *, content: str) -> dict:
             )
             session.execute(stmt)
 
-    graph_count = _persist_group_audit_graph(meta, affiliates=affiliates)
+    graph_count = _persist_group_audit_graph(
+        meta,
+        affiliates=source_affiliates,
+    )
     return {"count": len(rows), "graph_count": graph_count}
+
+
+def _legacy_affiliate_rows(source_rows: list[dict]) -> list[dict]:
+    """Keep the historical name-unique matrix while graph storage keeps claims."""
+    merged: dict[str, dict] = {}
+    for item in source_rows:
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        if name not in merged:
+            merged[name] = dict(item)
+            continue
+        existing = merged[name]
+        if existing.get("ownership_pct") is None:
+            existing["ownership_pct"] = item.get("ownership_pct")
+        if not existing.get("listed_yn"):
+            existing["listed_yn"] = item.get("listed_yn")
+    return list(merged.values())
 
 
 def _normalize_company_name(value: str) -> str:
@@ -1071,19 +1093,34 @@ def _match_companies_by_names_local(names: list[str]) -> dict[str, dict]:
     return result
 
 
-def _parse_graph_amount(value: object) -> float | None:
-    """Parse disclosed subsidiary-table values presented in KRW millions."""
+def _parse_graph_amount(
+    value: object,
+    unit: object,
+) -> tuple[float | None, str | None]:
+    """Parse an amount only when its disclosed scale is explicit."""
     raw = str(value or "").strip()
     if not raw or raw in {"-", "—"}:
-        return None
+        return None, None
+    unit_text = str(unit or "").strip()
+    unit_key = re.sub(r"[\s,_-]+", "", unit_text).lower()
+    multipliers = {
+        "krw": (1.0, "KRW"),
+        "원": (1.0, "KRW"),
+        "krwmillion": (1_000_000.0, "KRW"),
+        "백만원": (1_000_000.0, "KRW"),
+    }
+    unit_contract = multipliers.get(unit_key)
+    if unit_contract is None:
+        return None, None
     negative = raw.startswith("(") and raw.endswith(")")
     match = re.search(r"-?\d+(?:\.\d+)?", raw.replace(",", ""))
     if not match:
-        return None
+        return None, None
     amount = float(match.group(0))
     if negative:
         amount *= -1
-    return amount * 1_000_000
+    multiplier, canonical_unit = unit_contract
+    return amount * multiplier, canonical_unit
 
 
 def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
@@ -1130,6 +1167,8 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
                 "rcept_no": row.rcept_no,
                 "bsns_year": row.bsns_year,
                 "fs_div": row.fs_div,
+                "id": row.id,
+                "fetched_at": row.fetched_at,
             }
             for row in (
                 session.query(Auditor)
@@ -1139,11 +1178,12 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
             )
         ]
         denominator_rows = session.execute(text("""
-            SELECT fs_div, metric_key, amount
+            SELECT id, fs_div, metric_key, amount, fetched_at
             FROM financial_facts_compact
             WHERE corp_code=:corp_code AND bsns_year=:year
               AND metric_key IN ('assets','revenue')
-            ORDER BY CASE fs_div WHEN 'CFS' THEN 0 ELSE 1 END, metric_key
+            ORDER BY CASE fs_div WHEN 'CFS' THEN 0 ELSE 1 END,
+                     metric_key, fetched_at DESC, id DESC
         """), {"corp_code": parent_code, "year": year}).mappings().all()
 
     by_code = {item["corp_code"]: item for item in companies}
@@ -1152,12 +1192,16 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
         by_name.setdefault(
             normalize_entity_name(company["corp_name"]), [],
         ).append(company)
-    auditor_by_code: dict[str, dict] = {}
+    auditor_claims_by_code: dict[str, list[dict]] = {}
     for auditor in exact_auditors:
-        auditor_by_code.setdefault(auditor["corp_code"], auditor)
+        auditor_claims_by_code.setdefault(
+            auditor["corp_code"], [],
+        ).append(auditor)
     denominators: dict[str, dict] = {}
     for item in denominator_rows:
-        denominators.setdefault(str(item["metric_key"]), dict(item))
+        row = dict(item)
+        row["unit"] = None
+        denominators.setdefault(str(item["metric_key"]), row)
 
     parent_key = f"parent:{parent_code}"
     parent_name = (
@@ -1182,6 +1226,7 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
     }]
     relationship_rows: list[dict] = []
     metric_rows: list[dict] = []
+    relationship_claims: list[tuple[int, dict, str, str]] = []
     name_to_keys: dict[str, list[str]] = {
         normalize_entity_name(parent_name): [parent_key],
     }
@@ -1190,12 +1235,21 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
         if not original:
             continue
         normalized = normalize_entity_name(original)
+        source_ordinal = int(item.get("source_ordinal", ordinal))
         explicit_code = str(item.get("corp_code") or "").strip()
         listed = str(item.get("listed_yn") or "").strip() or None
         company = by_code.get(explicit_code) if explicit_code else None
         reason = "explicit_corp_code" if company else ""
         status = "resolved" if company else "unresolved"
-        if company is None:
+        if explicit_code and company is None:
+            reason = "invalid_explicit_corp_code"
+        elif company is not None and (
+            normalize_entity_name(company["corp_name"]) != normalized
+        ):
+            company = None
+            status = "ambiguous"
+            reason = "explicit_corp_code_name_conflict"
+        elif company is None:
             candidates = by_name.get(normalized, [])
             if listed and listed.upper() in {"N", "비상장"}:
                 reason = "unlisted"
@@ -1209,10 +1263,38 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
             else:
                 reason = "unmatched_exact_normalized_name"
         resolved_code = company["corp_code"] if company else None
-        auditor = auditor_by_code.get(resolved_code or "")
+        auditor = None
         auditor_gap = None
+        claims = auditor_claims_by_code.get(resolved_code or "", [])
+        claim_names = {
+            str(claim.get("auditor_nm") or "").strip()
+            for claim in claims
+            if claim.get("auditor_nm")
+        }
+        if len(claim_names) > 1:
+            auditor_gap = "component_auditor_conflict"
+        elif claims:
+            eligible_claims = [
+                claim for claim in claims
+                if claim.get("rcept_no")
+                and claim.get("fs_div") in {"CFS", "OFS"}
+            ]
+            if eligible_claims:
+                basis_claims = [
+                    claim for claim in eligible_claims
+                    if claim["fs_div"] == "CFS"
+                ] or eligible_claims
+                auditor = max(
+                    basis_claims,
+                    key=lambda claim: (
+                        str(claim.get("fetched_at") or ""),
+                        int(claim.get("id") or 0),
+                    ),
+                )
+            else:
+                auditor_gap = "component_auditor_receipt_missing"
         if not auditor:
-            auditor_gap = (
+            auditor_gap = auditor_gap or (
                 "entity_resolution_not_exact"
                 if status != "resolved"
                 else "exact_year_component_auditor_missing"
@@ -1220,7 +1302,10 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
         entity_key = (
             f"corp:{resolved_code}"
             if resolved_code
-            else f"unresolved:{receipt}:{item.get('source') or 'affiliate'}:{ordinal}"
+            else (
+                f"unresolved:{receipt}:"
+                f"{item.get('source') or 'affiliate'}:{source_ordinal}"
+            )
         )
         source_table = str(item.get("source") or "affiliate")
         entity_rows.append({
@@ -1238,27 +1323,144 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
             "component_auditor_name": auditor.get("auditor_nm") if auditor else None,
             "component_auditor_year": auditor.get("bsns_year") if auditor else None,
             "component_auditor_rcept_no": auditor.get("rcept_no") if auditor else None,
+            "component_auditor_fs_div": auditor.get("fs_div") if auditor else None,
             "auditor_gap_reason": auditor_gap,
             "source_rcept_no": receipt,
             "source_table": source_table,
-            "source_ordinal": ordinal,
+            "source_ordinal": source_ordinal,
             "fetched_at": now,
         })
         name_to_keys.setdefault(normalized, []).append(entity_key)
+        relationship_claims.append(
+            (source_ordinal, item, entity_key, source_table)
+        )
+
+        asset_amount, asset_unit = _parse_graph_amount(
+            item.get("assets"), item.get("asset_unit"),
+        )
+        revenue_amount, revenue_unit = _parse_graph_amount(
+            item.get("revenue"), item.get("revenue_unit"),
+        )
+        component_values = {
+            "assets": (asset_amount, asset_unit),
+            "revenue": (revenue_amount, revenue_unit),
+        }
+        component_elimination_basis = item.get("elimination_basis")
+        denominator_elimination_basis = item.get(
+            "denominator_elimination_basis"
+        )
+        component_period = item.get("period")
+        component_fs_div = item.get("fs_div")
+        provisional: dict[str, tuple[float | None, str | None]] = {}
+        for metric_key, (amount, unit) in component_values.items():
+            denominator = denominators.get(metric_key) or {}
+            share, gap = compute_component_share(
+                amount, unit, component_period, component_fs_div,
+                component_elimination_basis,
+                receipt if amount is not None else None,
+                denominator.get("amount"), denominator.get("unit"), str(year),
+                str(denominator.get("fs_div") or ""),
+                denominator_elimination_basis, None,
+            )
+            if denominator.get("amount") is not None and gap == (
+                "incomplete_evidence_identity"
+            ):
+                gap = "denominator_receipt_unavailable"
+            provisional[metric_key] = (share, gap)
+        qsc_evidence_refs: tuple[str, ...] = ()
+        qsc = classify_qsc(
+            provisional["assets"][0], provisional["revenue"][0],
+            evidence_refs=qsc_evidence_refs,
+        )
+        for metric_key, (amount, unit) in component_values.items():
+            share, gap = provisional[metric_key]
+            denominator = denominators.get(metric_key) or {}
+            metric_rows.append({
+                "parent_corp_code": parent_code,
+                "effective_year": year,
+                "metric_identity": (
+                    f"{receipt}:{source_table}:{source_ordinal}:{metric_key}"
+                ),
+                "source_rcept_no": receipt,
+                "entity_key": entity_key,
+                "metric_key": metric_key,
+                "amount": amount,
+                "unit": unit if amount is not None else None,
+                "numerator_source_rcept_no": receipt if amount is not None else None,
+                "numerator_source_table": source_table if amount is not None else None,
+                "denominator_amount": denominator.get("amount"),
+                "denominator_unit": denominator.get("unit"),
+                "denominator_source_rcept_no": None,
+                "denominator_source_table": "financial_facts_compact" if denominator else None,
+                "fs_div": component_fs_div,
+                "period": component_period,
+                "elimination_basis": component_elimination_basis,
+                "share_pct": share,
+                "qsc_status": qsc.status,
+                "qsc_basis": "|".join(qsc.basis),
+                "qsc_evidence_refs_json": json.dumps(
+                    qsc.evidence_refs,
+                    ensure_ascii=False,
+                ),
+                "qsc_threshold_pct": QSC_THRESHOLD_PCT,
+                "quality_status": "usable" if share is not None else "partial",
+                "gap_reason": gap,
+                "fetched_at": now,
+            })
+
+    # Resolve direct parents only after every source entity is indexed. This
+    # makes child-first and parent-first disclosures identical.
+    for ordinal, item, entity_key, source_table in relationship_claims:
         disclosed_parent = str(item.get("parent_name") or "").strip()
-        if disclosed_parent:
-            parent_candidates = name_to_keys.get(
-                normalize_entity_name(disclosed_parent), [],
-            )
-            direct_parent_key = (
-                parent_candidates[0] if len(parent_candidates) == 1 else parent_key
-            )
-        else:
+        if not disclosed_parent or (
+            normalize_entity_name(disclosed_parent)
+            == normalize_entity_name(parent_name)
+        ):
             direct_parent_key = parent_key
+        else:
+            parent_candidates = sorted(set(name_to_keys.get(
+                normalize_entity_name(disclosed_parent), [],
+            )))
+            if len(parent_candidates) == 1:
+                direct_parent_key = parent_candidates[0]
+            else:
+                reason = (
+                    "ambiguous_parent_name"
+                    if parent_candidates else "orphan_parent"
+                )
+                direct_parent_key = (
+                    f"parent-gap:{receipt}:{source_table}:{ordinal}"
+                )
+                entity_rows.append({
+                    "parent_corp_code": parent_code,
+                    "effective_year": year,
+                    "entity_key": direct_parent_key,
+                    "original_name": disclosed_parent,
+                    "normalized_name": normalize_entity_name(disclosed_parent),
+                    "resolved_corp_code": None,
+                    "stock_code": None,
+                    "market": None,
+                    "resolution_status": (
+                        "ambiguous" if parent_candidates else "unresolved"
+                    ),
+                    "resolution_reason": reason,
+                    "listed_state": None,
+                    "component_auditor_name": None,
+                    "component_auditor_year": None,
+                    "component_auditor_rcept_no": None,
+                    "auditor_gap_reason": "entity_resolution_not_exact",
+                    "source_rcept_no": receipt,
+                    "source_table": source_table,
+                    "source_ordinal": ordinal,
+                    "fetched_at": now,
+                })
         relationship_rows.append({
             "parent_corp_code": parent_code,
             "effective_year": year,
-            "relationship_key": f"{receipt}:{source_table}:{ordinal}:{direct_parent_key}:{entity_key}",
+            "relationship_key": (
+                f"{receipt}:{source_table}:{ordinal}:"
+                f"{direct_parent_key}:{entity_key}"
+            ),
             "parent_entity_key": direct_parent_key,
             "child_entity_key": entity_key,
             "relation_type": str(item.get("relation") or "other"),
@@ -1268,61 +1470,6 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
             "source_ordinal": ordinal,
             "fetched_at": now,
         })
-
-        asset_amount = _parse_graph_amount(item.get("assets"))
-        component_values = {
-            "assets": asset_amount,
-            "revenue": _parse_graph_amount(item.get("revenue")),
-        }
-        component_elimination_basis = str(
-            item.get("elimination_basis") or "not_disclosed"
-        )
-        denominator_elimination_basis = str(
-            item.get("denominator_elimination_basis") or "not_disclosed"
-        )
-        provisional: dict[str, tuple[float | None, str | None]] = {}
-        for metric_key, amount in component_values.items():
-            denominator = denominators.get(metric_key) or {}
-            provisional[metric_key] = compute_component_share(
-                amount, "KRW", str(year), str(denominator.get("fs_div") or ""),
-                component_elimination_basis,
-                receipt if amount is not None else None,
-                denominator.get("amount"), "KRW", str(year),
-                str(denominator.get("fs_div") or ""),
-                denominator_elimination_basis, receipt,
-            )
-        qsc = classify_qsc(
-            provisional["assets"][0], provisional["revenue"][0],
-            evidence_refs=(receipt,),
-        )
-        for metric_key, amount in component_values.items():
-            share, gap = provisional[metric_key]
-            denominator = denominators.get(metric_key) or {}
-            metric_rows.append({
-                "parent_corp_code": parent_code,
-                "effective_year": year,
-                "metric_identity": f"{receipt}:{source_table}:{ordinal}:{metric_key}",
-                "entity_key": entity_key,
-                "metric_key": metric_key,
-                "amount": amount,
-                "unit": "KRW" if amount is not None else None,
-                "numerator_source_rcept_no": receipt if amount is not None else None,
-                "numerator_source_table": source_table if amount is not None else None,
-                "denominator_amount": denominator.get("amount"),
-                "denominator_unit": "KRW" if denominator.get("amount") is not None else None,
-                "denominator_source_rcept_no": receipt if denominator.get("amount") is not None else None,
-                "denominator_source_table": "financial_facts_compact" if denominator else None,
-                "fs_div": denominator.get("fs_div"),
-                "period": str(year),
-                "elimination_basis": component_elimination_basis,
-                "share_pct": share,
-                "qsc_status": qsc.status,
-                "qsc_basis": "|".join(qsc.basis),
-                "qsc_threshold_pct": QSC_THRESHOLD_PCT,
-                "quality_status": "usable" if share is not None else "partial",
-                "gap_reason": gap,
-                "fetched_at": now,
-            })
 
     with get_session() as session:
         # Replacement is scoped to this exact source receipt; other years and

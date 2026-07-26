@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 from pathlib import Path
 import re
@@ -23,8 +24,14 @@ _RESOLUTION_REASONS = frozenset({
     "unmatched_exact_normalized_name", "parent_corp_code",
     "parent_not_registered", "synthetic_parent", "orphan_parent",
     "ambiguous_parent_name", "unresolved",
+    "invalid_explicit_corp_code", "explicit_corp_code_name_conflict",
 })
 _METRIC_KEYS = frozenset({"assets", "revenue"})
+_QSC_BASES = frozenset({
+    "asset_share_pct>=10.0",
+    "revenue_share_pct>=10.0",
+})
+_MAX_EVIDENCE_REFS = 8
 _ELIMINATION_BASES = frozenset({
     "before_elimination", "after_elimination", "not_disclosed",
 })
@@ -77,8 +84,18 @@ class QscResult:
         _finite("threshold_pct", self.threshold_pct, optional=False)
         if float(self.threshold_pct) != QSC_THRESHOLD_PCT:
             raise ValueError("QSC threshold must be 10.0")
-        if self.status == "not_qsc" and self.basis:
-            raise ValueError("not_qsc cannot have a threshold-crossing basis")
+        if self.status == "qsc" and not self.basis:
+            raise ValueError("qsc requires a threshold-crossing basis")
+        if self.status != "qsc" and self.basis:
+            raise ValueError(
+                "only qsc may carry a threshold-crossing basis"
+            )
+        if not set(self.basis).issubset(_QSC_BASES):
+            raise ValueError("invalid QSC basis")
+        if tuple(sorted(set(self.evidence_refs))) != self.evidence_refs:
+            raise ValueError("evidence_refs must be sorted and unique")
+        if len(self.evidence_refs) > _MAX_EVIDENCE_REFS:
+            raise ValueError("evidence_refs exceeds the bounded maximum")
 
 
 def _validated_share(name: str, value: Any) -> float | None:
@@ -133,6 +150,7 @@ class GroupEntity:
     component_auditor_name: str | None = None
     component_auditor_year: int | None = None
     component_auditor_rcept_no: str | None = None
+    component_auditor_fs_div: str | None = None
     auditor_gap_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -158,6 +176,8 @@ class GroupEntity:
             or isinstance(self.component_auditor_year, bool)
         ):
             raise TypeError("component_auditor_year must be an integer or None")
+        if self.component_auditor_fs_div not in {None, "CFS", "OFS"}:
+            raise ValueError("component_auditor_fs_div must be CFS, OFS, or None")
         if self.resolution_status != "resolved" and self.resolved_corp_code:
             raise ValueError("unresolved entities cannot carry a corp code")
 
@@ -194,6 +214,7 @@ class GroupRelationship:
 @dataclass(frozen=True)
 class ComponentMetric:
     metric_identity: str
+    source_rcept_no: str
     entity_key: str
     metric_key: str
     amount: float | None
@@ -210,12 +231,16 @@ class ComponentMetric:
     share_pct: float | None
     qsc_status: str
     qsc_basis: tuple[str, ...]
+    qsc_evidence_refs: tuple[str, ...]
     qsc_threshold_pct: float
     quality_status: str
     gap_reason: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("metric_identity", "entity_key", "quality_status"):
+        for name in (
+            "metric_identity", "source_rcept_no", "entity_key",
+            "quality_status",
+        ):
             _required_text(name, getattr(self, name))
         if self.metric_key not in _METRIC_KEYS:
             raise ValueError("metric_key must be assets or revenue")
@@ -226,6 +251,18 @@ class ComponentMetric:
         if self.qsc_status not in _QSC_STATUSES:
             raise ValueError("invalid qsc_status")
         _tuple_of_text("qsc_basis", self.qsc_basis)
+        _tuple_of_text("qsc_evidence_refs", self.qsc_evidence_refs)
+        if not set(self.qsc_basis).issubset(_QSC_BASES):
+            raise ValueError("invalid QSC basis")
+        if (
+            tuple(sorted(set(self.qsc_evidence_refs)))
+            != self.qsc_evidence_refs
+        ):
+            raise ValueError("qsc_evidence_refs must be sorted and unique")
+        if len(self.qsc_evidence_refs) > _MAX_EVIDENCE_REFS:
+            raise ValueError(
+                "qsc_evidence_refs exceeds the bounded maximum"
+            )
         if self.qsc_status == "qsc" and not self.qsc_basis:
             raise ValueError("qsc requires a threshold-crossing basis")
         if self.qsc_status != "qsc" and self.qsc_basis:
@@ -406,8 +443,14 @@ class GroupGraph:
             ordinal = int(row.get("source_ordinal", position))
             parent_norm = normalize_entity_name(parent)
             child_norm = normalize_entity_name(child)
+            if parent_norm == child_norm:
+                limitations.add("normalized_self_edge")
+                continue
             candidates = name_keys.get(parent_norm, [])
-            if parent_norm == normalize_entity_name(parent_name):
+            explicit_parent_key = str(row.get("parent_entity_key") or "")
+            if explicit_parent_key and explicit_parent_key in entities:
+                parent_key = explicit_parent_key
+            elif parent_norm == normalize_entity_name(parent_name):
                 parent_key = root_key
             elif len(candidates) == 1:
                 parent_key = candidates[0]
@@ -442,8 +485,12 @@ class GroupGraph:
                 name_keys.setdefault(child_norm, []).append(child_key)
             signature_key = (parent_key, child_key)
             signature = (row.get("ownership_pct"), row.get("relation_type") or "subsidiary")
-            if signature_key in signatures and signatures[signature_key] != signature:
-                limitations.add("contradictory_duplicate_edge")
+            if signature_key in signatures:
+                limitations.add(
+                    "contradictory_duplicate_edge"
+                    if signatures[signature_key] != signature
+                    else "duplicate_relationship_claim"
+                )
                 continue
             signatures[signature_key] = signature
             effective_year = int(row.get("effective_year") or year or 0)
@@ -520,17 +567,28 @@ _REQUIRED_COLUMNS = {
     "group_entities": {
         "parent_corp_code", "effective_year", "entity_key", "original_name",
         "normalized_name", "resolution_status", "resolution_reason",
-        "source_rcept_no", "source_table", "source_ordinal",
+        "listed_state", "resolved_corp_code", "stock_code", "market",
+        "component_auditor_name", "component_auditor_year",
+        "component_auditor_rcept_no", "component_auditor_fs_div",
+        "auditor_gap_reason",
+        "source_rcept_no", "source_table", "source_ordinal", "fetched_at",
     },
     "group_relationships": {
         "parent_corp_code", "effective_year", "relationship_key",
         "parent_entity_key", "child_entity_key", "relation_type",
-        "source_rcept_no", "source_table", "source_ordinal",
+        "ownership_pct", "source_rcept_no", "source_table",
+        "source_ordinal", "fetched_at",
     },
     "group_component_metrics": {
         "parent_corp_code", "effective_year", "metric_identity", "entity_key",
-        "metric_key", "qsc_status", "qsc_basis", "qsc_threshold_pct",
-        "quality_status",
+        "source_rcept_no", "metric_key", "amount", "unit",
+        "numerator_source_rcept_no",
+        "numerator_source_table", "denominator_amount", "denominator_unit",
+        "denominator_source_rcept_no", "denominator_source_table", "fs_div",
+        "period", "elimination_basis", "share_pct", "qsc_status",
+        "qsc_basis", "qsc_evidence_refs_json", "qsc_threshold_pct",
+        "quality_status", "gap_reason",
+        "fetched_at",
     },
 }
 
@@ -587,11 +645,13 @@ def _entity_from_row(row: dict[str, Any], *, requested_year: int) -> GroupEntity
     auditor_year = row.get("component_auditor_year")
     auditor_name = row.get("component_auditor_name")
     auditor_receipt = row.get("component_auditor_rcept_no")
+    auditor_fs_div = row.get("component_auditor_fs_div")
     auditor_gap = row.get("auditor_gap_reason")
     if auditor_name and auditor_year != requested_year:
         auditor_name = None
         auditor_receipt = None
         auditor_year = None
+        auditor_fs_div = None
         auditor_gap = "component_auditor_year_mismatch"
     return GroupEntity(
         entity_key=str(row["entity_key"]),
@@ -609,15 +669,51 @@ def _entity_from_row(row: dict[str, Any], *, requested_year: int) -> GroupEntity
         component_auditor_name=auditor_name,
         component_auditor_year=auditor_year,
         component_auditor_rcept_no=auditor_receipt,
+        component_auditor_fs_div=auditor_fs_div,
         auditor_gap_reason=auditor_gap,
     )
 
 
 def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
-    """Read one exact-year canonical graph using three bounded bulk queries."""
+    """Read one exact-year canonical graph and normalize corrupt rows closed."""
     _required_text("parent_corp_code", parent_corp_code)
     if not isinstance(year, int) or isinstance(year, bool):
         raise TypeError("year must be an integer")
+    try:
+        return _build_group_graph_unchecked(parent_corp_code, year)
+    except GroupGraphUnavailable:
+        raise
+    except Exception as exc:
+        raise GroupGraphUnavailable(
+            f"invalid_canonical_graph:{type(exc).__name__}"
+        ) from exc
+
+
+def latest_group_graph_year(parent_corp_code: str) -> int | None:
+    """Return the newest canonical graph year without creating DB sidecars."""
+    _required_text("parent_corp_code", parent_corp_code)
+    try:
+        with _group_read_engine() as read_engine:
+            with read_engine.connect() as conn:
+                value = conn.execute(text("""
+                    SELECT MAX(effective_year)
+                    FROM group_entities
+                    WHERE parent_corp_code=:corp_code
+                """), {"corp_code": parent_corp_code}).scalar_one_or_none()
+        return int(value) if value is not None else None
+    except GroupGraphUnavailable:
+        raise
+    except Exception as exc:
+        raise GroupGraphUnavailable(
+            f"invalid_canonical_graph:{type(exc).__name__}"
+        ) from exc
+
+
+def _build_group_graph_unchecked(
+    parent_corp_code: str,
+    year: int,
+) -> GroupGraph:
+    """Internal three-query materializer after public input validation."""
     with _group_read_engine() as read_engine:
         with read_engine.connect() as conn:
             entity_rows = conn.execute(text("""
@@ -652,10 +748,7 @@ def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
     ]
     metric_rows = [
         row for row in metric_rows
-        if (
-            str(row["metric_identity"]).startswith(f"{selected_receipt}:")
-            or str(row["numerator_source_rcept_no"] or "") == selected_receipt
-        )
+        if str(row["source_rcept_no"]) == selected_receipt
     ]
     limitations: set[str] = set()
     if len(receipts) > 1:
@@ -669,6 +762,11 @@ def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
             continue
         entity_by_key[entity.entity_key] = entity
     entities = tuple(entity_by_key.values())
+    for entity in entities:
+        if entity.resolution_reason in {
+            "orphan_parent", "ambiguous_parent_name",
+        }:
+            limitations.add(entity.resolution_reason)
     relationship_candidates = tuple(
         GroupRelationship(
             str(row["relationship_key"]), str(row["parent_entity_key"]),
@@ -679,9 +777,10 @@ def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
         )
         for row in relationship_rows
     )
-    metrics = tuple(
+    metric_candidates = tuple(
         ComponentMetric(
-            str(row["metric_identity"]), str(row["entity_key"]),
+            str(row["metric_identity"]), str(row["source_rcept_no"]),
+            str(row["entity_key"]),
             str(row["metric_key"]), row["amount"], row["unit"],
             row["numerator_source_rcept_no"], row["numerator_source_table"],
             row["denominator_amount"], row["denominator_unit"],
@@ -689,12 +788,39 @@ def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
             row["fs_div"], row["period"], row["elimination_basis"],
             row["share_pct"], str(row["qsc_status"]),
             tuple(filter(None, str(row["qsc_basis"] or "").split("|"))),
+            tuple(json.loads(
+                str(row["qsc_evidence_refs_json"] or "[]")
+            )),
             float(row["qsc_threshold_pct"]), str(row["quality_status"]),
             row["gap_reason"],
         )
         for row in metric_rows
     )
     known_entity_keys = {entity.entity_key for entity in entities}
+    metric_by_key: dict[tuple[str, str], ComponentMetric] = {}
+    blocked_metric_keys: set[tuple[str, str]] = set()
+    for metric in metric_candidates:
+        key = (metric.entity_key, metric.metric_key)
+        if metric.entity_key not in known_entity_keys:
+            limitations.add("metric_unknown_entity")
+            continue
+        if key in blocked_metric_keys:
+            continue
+        existing = metric_by_key.get(key)
+        if existing is None:
+            metric_by_key[key] = metric
+            continue
+        existing_signature = existing.__dict__.copy()
+        existing_signature.pop("metric_identity")
+        candidate_signature = metric.__dict__.copy()
+        candidate_signature.pop("metric_identity")
+        if existing_signature == candidate_signature:
+            limitations.add("duplicate_metric_claim")
+            continue
+        limitations.add("contradictory_metric_claim")
+        metric_by_key.pop(key, None)
+        blocked_metric_keys.add(key)
+    metrics = tuple(metric_by_key.values())
     relationships_list: list[GroupRelationship] = []
     edge_claims: dict[tuple[str, str], tuple[str, float | None]] = {}
     for relationship in relationship_candidates:

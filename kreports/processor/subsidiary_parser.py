@@ -100,15 +100,14 @@ def _relation(pct: float | None) -> str:
 def extract_subsidiaries(content: str) -> list[dict]:
     """종속회사 현황 파싱."""
     items: list[dict] = []
-    seen: set[str] = set()
     for m in _RE_SUB_GROUP.finditer(content):
         for row in _tbody_rows(m.group(2)):
+            source_ordinal = len(items)
             f = _row_fields(row)
             original_name = f.get('CRP_NM') or f.get('CORP_NM') or ''
             name = _clean_name(original_name)
-            if _skip(name) or name in seen:
+            if _skip(name):
                 continue
-            seen.add(name)
             items.append({
                 'name': name,
                 'original_name': original_name.strip(),
@@ -119,8 +118,17 @@ def extract_subsidiaries(content: str) -> list[dict]:
                 'business': f.get('M_IND', ''),
                 'assets': f.get('KEY_IND', ''),
                 'revenue': f.get('REV_AMT', '') or f.get('REVENUE', ''),
+                'asset_unit': f.get('KEY_UNIT') or None,
+                'revenue_unit': f.get('REV_UNIT') or None,
+                'period': f.get('PERIOD') or None,
+                'fs_div': f.get('FS_DIV') or None,
+                'elimination_basis': f.get('ELIM_BASIS') or None,
+                'denominator_elimination_basis': (
+                    f.get('DENOM_ELIM_BASIS') or None
+                ),
                 'relation': '종속',
                 'source': m.group(1),
+                'source_ordinal': source_ordinal,
             })
     return items
 
@@ -128,15 +136,14 @@ def extract_subsidiaries(content: str) -> list[dict]:
 def extract_equity_investments(content: str) -> list[dict]:
     """타법인출자 현황 파싱. 지분율 기준 종속/지분법/기타 분류."""
     items: list[dict] = []
-    seen: set[str] = set()
     for m in _RE_INV_GROUP.finditer(content):
         for row in _tbody_rows(m.group(1)):
+            source_ordinal = len(items)
             f = _row_fields(row)
             original_name = f.get('INV_PRM') or f.get('CRP_NM') or ''
             name = _clean_name(original_name)
-            if _skip(name) or name in seen:
+            if _skip(name):
                 continue
-            seen.add(name)
             p = _pct(f.get('INV_LPR', ''))
             items.append({
                 'name': name,
@@ -148,25 +155,24 @@ def extract_equity_investments(content: str) -> list[dict]:
                 'business': f.get('INV_OBJ', ''),
                 'assets': f.get('INV_NTM', ''),
                 'revenue': f.get('REV_AMT', '') or f.get('REVENUE', ''),
+                'asset_unit': f.get('INV_UNIT') or None,
+                'revenue_unit': f.get('REV_UNIT') or None,
+                'period': f.get('PERIOD') or None,
+                'fs_div': f.get('FS_DIV') or None,
+                'elimination_basis': f.get('ELIM_BASIS') or None,
+                'denominator_elimination_basis': (
+                    f.get('DENOM_ELIM_BASIS') or None
+                ),
                 'relation': _relation(p),
                 'source': 'INV_PRT',
+                'source_ordinal': source_ordinal,
             })
     return items
 
 
 def extract_affiliates_from_report(content: str) -> list[dict]:
-    """종속회사 + 타법인출자 통합. 종속 우선."""
-    merged: dict[str, dict] = {}
-    for it in extract_subsidiaries(content):
-        merged[it['name']] = it
-    for it in extract_equity_investments(content):
-        name = it['name']
-        if name not in merged:
-            merged[name] = it
-        else:
-            ex = merged[name]
-            if ex.get('ownership_pct') is None:
-                ex['ownership_pct'] = it.get('ownership_pct')
-            if not ex.get('listed_yn'):
-                ex['listed_yn'] = it.get('listed_yn', '')
-    return list(merged.values())
+    """Return every disclosed source claim; identity resolution happens later."""
+    return [
+        *extract_subsidiaries(content),
+        *extract_equity_investments(content),
+    ]
