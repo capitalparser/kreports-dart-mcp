@@ -160,6 +160,8 @@ def test_dcf_answer_pack_preserves_all_review_layers_and_escapes_subject():
     pack = build_answer_pack("build_dcf_model_pack", _model_result())
 
     assert pack["summary"]["title"].startswith("&lt;script&gt;")
+    assert pack["summary"]["subject"] == "&lt;script&gt;주식회사&lt;/script&gt;"
+    assert "<script>" not in json.dumps(pack, ensure_ascii=False)
     table_ids = {table["id"] for table in pack["tables"]}
     assert {
         "dcf_actuals",
@@ -183,6 +185,10 @@ def test_dcf_narrative_is_bounded_reviewable_and_not_a_conclusion():
     assert "승인된 예측" in text
     assert "감사 결론" in text
     assert "EBIT * (1-tax) + D&A - capex - change_in_NWC" in text
+    assert "final_UFCF * (1+g) / (wacc-g)" in text
+    assert "터미널가치:" in text
+    assert "최종연도 할인계수:" in text
+    assert "기업가치 = 예측기간 현재가치 + 터미널가치 현재가치" in text
     assert len(text) < 20_000
 
 
@@ -199,3 +205,148 @@ def test_dcf_model_result_has_no_binary_float_drift():
     encoded = json.dumps(payload, ensure_ascii=False)
     assert "0.30000000000000004" not in encoded
     assert payload["assumptions"][0]["value"] == "0.10"
+
+
+def test_dcf_bridge_exposes_raw_terminal_formula_discount_and_ev_reconciliation():
+    payload = _model_result()
+    bridge = payload["valuation_bridge"]
+
+    assert bridge["terminal_value"] == payload["terminal_value"]
+    assert bridge["gordon_growth_formula"] == "final_UFCF * (1+g) / (wacc-g)"
+    assert bridge["final_year_discount_factor"] == payload["projections"][-1][
+        "discount_factor"
+    ]
+    assert bridge["enterprise_value_formula"] == (
+        "enterprise_value = forecast_period_present_value + "
+        "terminal_value_present_value"
+    )
+
+
+def test_dcf_facade_marks_enterprise_only_or_source_partial_as_limited(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.analysis import dcf_source, financial_analysis
+    from kreports.analysis.dcf_source import DcfSourceResult
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00126380",
+            corp_name="정확회사",
+            stock_code="005930",
+            market="KOSPI",
+        ))
+    facts = tuple(
+        fact
+        for fact in _facts_for_facade()
+        if fact.metric_key != "cash_and_equivalents"
+    )
+    monkeypatch.setattr(
+        dcf_source,
+        "load_dcf_actuals",
+        lambda *_args, **_kwargs: DcfSourceResult(
+            status="partial",
+            facts=facts,
+            missing_metrics=("cash_and_equivalents",),
+            limitations=("source_partial",),
+        ),
+    )
+
+    result = financial_analysis.build_dcf_model_pack(
+        "005930",
+        2024,
+        revenue_growth=0.1,
+        operating_margin=0.1,
+        tax_rate=0.2,
+        da_to_revenue=0.05,
+        capex_to_revenue=0.04,
+        nwc_to_revenue=0.2,
+        wacc=0.1,
+        terminal_growth=0.03,
+    )
+
+    assert result["status"] == "complete_model"
+    assert result["confidence"] == "enterprise_complete_equity_partial"
+    assert result["data_quality"]["status"] == "limited"
+    assert result["data_quality"]["enterprise_completion"] == "complete"
+    assert result["data_quality"]["equity_completion"] == "partial"
+
+
+def _facts_for_facade():
+    from kreports.analysis.dcf_model import DcfActualFact
+
+    values = {
+        "revenue": "1000",
+        "operating_profit": "100",
+        "depreciation_amortization": "40",
+        "purchase_ppe": "-30",
+        "purchase_intangible_assets": "-10",
+        "trade_receivables": "200",
+        "inventories": "100",
+        "trade_payables": "150",
+        "cash_and_equivalents": "80",
+        "interest_bearing_debt": "200",
+    }
+    return tuple(
+        DcfActualFact(
+            metric_key=key,
+            amount=Decimal(value),
+            unit="KRW",
+            year=2024,
+            fs_div="CFS",
+            source_account_id=f"ifrs-full_{key}",
+            source_account_name=key,
+            source_table="financial_facts_compact",
+            fetched_at=None,
+        )
+        for key, value in values.items()
+    )
+
+
+def test_dcf_direct_api_rejects_fuzzy_or_ambiguous_names_and_numeric_coercion(
+    temp_engine,
+):
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00000001",
+                corp_name="알파 전자",
+                stock_code="000001",
+                market="KOSPI",
+            ),
+            Company(
+                corp_code="00000002",
+                corp_name="알파 화학",
+                stock_code="000002",
+                market="KOSPI",
+            ),
+            Company(
+                corp_code="00000003",
+                corp_name="중복 회사",
+                stock_code="000003",
+                market="KOSPI",
+            ),
+            Company(
+                corp_code="00000004",
+                corp_name="  중복   회사  ",
+                stock_code="000004",
+                market="KOSPI",
+            ),
+        ])
+
+    fuzzy = build_dcf_model_pack("알파", 2024)
+    assert "error" in fuzzy
+    assert "정확" in fuzzy["error"]
+
+    ambiguous = build_dcf_model_pack("중복 회사", 2024)
+    assert "error" in ambiguous
+    assert "둘 이상" in ambiguous["error"]
+
+    with pytest.raises((TypeError, ValueError), match="base_year"):
+        build_dcf_model_pack("000001", True)

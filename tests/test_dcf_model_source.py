@@ -192,6 +192,41 @@ def test_dcf_source_fails_closed_for_missing_partial_corrupt_and_nonempty_wal(
     assert "uncheckpointed_wal" in " ".join(wal.limitations)
 
 
+def test_dcf_source_withholds_null_provenance_but_allows_named_summary_source(
+    tmp_path,
+):
+    from kreports.analysis.dcf_source import load_dcf_actuals
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'provenance.db'}")
+    _schema(engine)
+    _seed(engine)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE financial_facts_compact
+            SET source_account_id=NULL, source_account_nm=NULL
+            WHERE metric_key='revenue'
+        """))
+    missing = load_dcf_actuals("00126380", 2024, "CFS", read_engine=engine)
+    assert missing.status == "partial"
+    assert "revenue" in missing.missing_metrics
+    assert "provenance_gap:revenue" in missing.limitations
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE financial_facts_compact
+            SET source_account_id='financials.revenue',
+                source_account_nm='매출액'
+            WHERE metric_key='revenue'
+        """))
+    synthetic = load_dcf_actuals("00126380", 2024, "CFS", read_engine=engine)
+    assert synthetic.status == "usable"
+    assert next(
+        fact.source_account_id
+        for fact in synthetic.facts
+        if fact.metric_key == "revenue"
+    ) == "financials.revenue"
+
+
 def test_compact_registry_exposes_all_dcf_source_metrics_without_debt_double_counting():
     from kreports.semantic.metrics import DCF_MODEL_METRICS, METRICS
 
@@ -306,3 +341,105 @@ def test_compact_rebuild_dedupes_identical_same_statement_rows():
         "source_account_id": "ifrs-full_Revenue",
         "source_account_nm": "매출",
     }]
+
+
+def test_compact_rebuild_reconciles_stale_conflict_without_summary_fallback(
+    temp_engine,
+):
+    from kreports.db.engine import get_session
+    from kreports.db.models import Financial
+    from kreports.maintenance.financial_compact import (
+        rebuild_financial_facts_compact,
+    )
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id,
+             account_nm, ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126380', 2024, '11011', 'CFS', 'IS',
+             'ifrs-full_Revenue', '매출', 1, 1000, CURRENT_TIMESTAMP)
+        """))
+        session.add(Financial(
+            corp_code="00126380",
+            year=2024,
+            quarter=4,
+            fs_div="CFS",
+            revenue=777,
+        ))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_account_id, source_account_nm, fetched_at)
+            VALUES
+            ('outside', 2023, 'CFS', 'revenue', '매출', 55,
+             'manual.outside', '외부', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'custom_metric', '사용자 지표', 9,
+             'manual.custom', '사용자 지표', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+    with get_session() as session:
+        assert session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126380' AND bsns_year=2024
+              AND fs_div='CFS' AND metric_key='revenue'
+        """)).scalar_one() == 1000
+        session.execute(text("""
+            UPDATE financial_facts
+            SET thstrm_amount=NULL
+            WHERE corp_code='00126380' AND bsns_year=2024
+              AND account_id='ifrs-full_Revenue'
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+    with get_session() as session:
+        assert session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126380' AND bsns_year=2024
+              AND fs_div='CFS' AND metric_key='revenue'
+        """)).scalar_one_or_none() is None
+        assert session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='outside' AND bsns_year=2023
+              AND metric_key='revenue'
+        """)).scalar_one() == 55
+        assert session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126380' AND bsns_year=2024
+              AND metric_key='custom_metric'
+        """)).scalar_one() == 9
+
+
+def test_compact_rebuild_removes_stale_rows_when_source_is_deleted(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import (
+        rebuild_financial_facts_compact,
+    )
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id,
+             account_nm, ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126380', 2024, '11011', 'CFS', 'IS',
+             'ifrs-full_Revenue', '매출', 1, 1000, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+    with get_session() as session:
+        session.execute(text("DELETE FROM financial_facts"))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        assert session.execute(text("""
+            SELECT amount FROM financial_facts_compact
+            WHERE corp_code='00126380' AND bsns_year=2024
+              AND metric_key='revenue'
+        """)).scalar_one_or_none() is None

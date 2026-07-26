@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
 import json
 
@@ -96,7 +96,6 @@ def test_dcf_accepts_forecast_period_boundary(forecast_years):
         ("tax_rate", Decimal("1.01")),
         ("da_to_revenue", Decimal("-0.01")),
         ("capex_to_revenue", Decimal("-0.01")),
-        ("nwc_to_revenue", Decimal("-0.01")),
         ("wacc", Decimal("0")),
     ],
 )
@@ -309,6 +308,135 @@ def test_nonpositive_normalized_base_revenue_returns_invalid_model():
     assert result.status == "invalid_model"
     assert result.enterprise_value is None
     assert "base_revenue_nonpositive" in result.missing_inputs
+
+
+def test_negative_operating_margin_and_nwc_ratio_are_valid_economic_inputs():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    result = build_dcf_valuation(
+        _scenario(
+            operating_margin=Decimal("-1.50"),
+            nwc_to_revenue=Decimal("-0.10"),
+        ),
+        _facts(),
+    )
+
+    assert result.status == "complete_model"
+    assert result.projections[0].nwc_balance == Decimal("-110.00")
+    assert result.projections[0].nwc_change == Decimal("-260.00")
+    assert result.projections[0].ufcf == Decimal("-1049.00")
+
+
+def test_sensitivity_preserves_unrounded_center_and_tiny_positive_wacc():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    precise = build_dcf_valuation(
+        _scenario(
+            wacc=Decimal("0.103712345678"),
+            terminal_growth=Decimal("0.021112345678"),
+        ),
+        _facts(),
+    )
+    center = precise.sensitivity[12]
+    assert center.wacc == Decimal("0.103712345678")
+    assert center.terminal_growth == Decimal("0.021112345678")
+    assert center.enterprise_value == precise.enterprise_value
+
+    tiny = build_dcf_valuation(
+        _scenario(
+            wacc=Decimal("0.000000000001"),
+            terminal_growth=Decimal("-0.01"),
+        ),
+        _facts(),
+    )
+    tiny_center = tiny.sensitivity[12]
+    assert tiny_center.status == "valid"
+    assert tiny_center.wacc == Decimal("0.000000000001")
+    assert tiny_center.enterprise_value == tiny.enterprise_value
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("base_year", True),
+        ("base_year", 2024.0),
+        ("forecast_years", True),
+        ("forecast_years", 2.5),
+    ],
+)
+def test_scenario_rejects_bool_and_noninteger_year_fields(field, value):
+    with pytest.raises((TypeError, ValueError), match=field):
+        _scenario(**{field: value})
+
+
+def test_public_dcf_dataclasses_validate_nested_contracts_and_defensively_copy():
+    from kreports.analysis.dcf_model import (
+        DcfProjection,
+        DcfSensitivityCell,
+        build_dcf_valuation,
+    )
+
+    result = build_dcf_valuation(_scenario(), _facts())
+    copied = replace(
+        result,
+        actuals=list(result.actuals),
+        assumptions=list(result.assumptions),
+        projections=list(result.projections),
+        sensitivity=list(result.sensitivity),
+        missing_inputs=[],
+        limitations=list(result.limitations),
+    )
+    assert isinstance(copied.actuals, tuple)
+    assert isinstance(copied.projections, tuple)
+    assert isinstance(copied.limitations, tuple)
+
+    with pytest.raises(ValueError, match="formula"):
+        replace(result.projections[0], formula="EBIT + D&A")
+    with pytest.raises(ValueError, match="reconcile"):
+        replace(result, enterprise_value=result.enterprise_value + Decimal("1"))
+    with pytest.raises(ValueError, match="status"):
+        DcfSensitivityCell(
+            wacc=Decimal("0.10"),
+            terminal_growth=Decimal("0.20"),
+            status="valid",
+            enterprise_value=Decimal("1"),
+        )
+    with pytest.raises((TypeError, ValueError), match="year"):
+        DcfProjection(
+            year=True,
+            revenue=Decimal("1"),
+            ebit=Decimal("1"),
+            tax_rate=Decimal("0.2"),
+            after_tax_ebit=Decimal("0.8"),
+            depreciation_amortization=Decimal("0"),
+            capex=Decimal("0"),
+            nwc_balance=Decimal("0"),
+            nwc_change=Decimal("0"),
+            ufcf=Decimal("0.8"),
+            discount_factor=Decimal("0.9"),
+            present_value=Decimal("0.72"),
+        )
+
+
+def test_decimal_bounds_reject_pathological_values_and_arithmetic_fails_typed():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    with pytest.raises(ValueError, match="wacc"):
+        _scenario(wacc=Decimal("1E+999999"))
+
+    facts = tuple(
+        replace(fact, amount=Decimal("900000000000000000000"))
+        if fact.metric_key == "revenue"
+        else fact
+        for fact in _facts()
+    )
+    result = build_dcf_valuation(
+        _scenario(revenue_growth=Decimal("999999999999999999")),
+        facts,
+    )
+    assert result.status == "invalid_model"
+    assert result.enterprise_value is None
+    assert "arithmetic_invalid" in result.missing_inputs
 
 
 def test_dcf_discloses_nwc_definition_capex_sign_and_bridge_exclusions():

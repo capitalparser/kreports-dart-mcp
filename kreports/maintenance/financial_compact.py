@@ -119,23 +119,16 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
     summary_inserted_or_updated = 0
     with get_session() as session:
         rows = session.execute(sql, params).mappings().all()
-        for row in _compact_rows(rows):
-            session.execute(text("""
-                INSERT INTO financial_facts_compact
-                (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
-                 source_account_id, source_account_nm, fetched_at)
-                VALUES
-                (:corp_code, :bsns_year, :fs_div, :metric_key, :metric_name, :amount,
-                 :source_account_id, :source_account_nm, CURRENT_TIMESTAMP)
-                ON CONFLICT(corp_code, bsns_year, fs_div, metric_key) DO UPDATE SET
-                  amount=excluded.amount,
-                  source_account_id=excluded.source_account_id,
-                  source_account_nm=excluded.source_account_nm,
-                  fetched_at=excluded.fetched_at
-            """), {
-                **row,
-            })
-            inserted_or_updated += 1
+        compact_rows = _compact_rows(rows)
+        authoritative_scopes = {
+            (
+                row["corp_code"],
+                int(row["bsns_year"]),
+                row["fs_div"],
+                METRIC_MAP[row["account_id"]][0],
+            )
+            for row in rows
+        }
 
         summary_where = ["quarter=4"]
         summary_params: dict[str, object] = {}
@@ -153,10 +146,58 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
             FROM financials
             WHERE {" AND ".join(summary_where)}
         """), summary_params).mappings().all()
+
+        metric_params = {
+            f"metric_key_{index}": metric_key
+            for index, metric_key in enumerate(_COMPACT_METRICS)
+        }
+        delete_where = [
+            "metric_key IN ("
+            + ", ".join(f":{key}" for key in metric_params)
+            + ")"
+        ]
+        delete_params: dict[str, object] = dict(metric_params)
+        if year_from is not None:
+            delete_where.append("bsns_year >= :delete_year_from")
+            delete_params["delete_year_from"] = int(year_from)
+        if year_to is not None:
+            delete_where.append("bsns_year <= :delete_year_to")
+            delete_params["delete_year_to"] = int(year_to)
+        deleted_stale = int(session.execute(text(f"""
+            DELETE FROM financial_facts_compact
+            WHERE {" AND ".join(delete_where)}
+        """), delete_params).rowcount or 0)
+
+        for row in compact_rows:
+            session.execute(text("""
+                INSERT INTO financial_facts_compact
+                (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+                 source_account_id, source_account_nm, fetched_at)
+                VALUES
+                (:corp_code, :bsns_year, :fs_div, :metric_key, :metric_name, :amount,
+                 :source_account_id, :source_account_nm, CURRENT_TIMESTAMP)
+                ON CONFLICT(corp_code, bsns_year, fs_div, metric_key) DO UPDATE SET
+                  amount=excluded.amount,
+                  source_account_id=excluded.source_account_id,
+                  source_account_nm=excluded.source_account_nm,
+                  fetched_at=excluded.fetched_at
+            """), {
+                **row,
+            })
+            inserted_or_updated += 1
+
         for row in summary_rows:
             for source_field, (metric_key, metric_name) in SUMMARY_METRIC_MAP.items():
                 amount = row[source_field]
                 if amount is None:
+                    continue
+                scope = (
+                    row["corp_code"],
+                    int(row["bsns_year"]),
+                    row["fs_div"],
+                    metric_key,
+                )
+                if scope in authoritative_scopes:
                     continue
                 result = session.execute(text("""
                     INSERT INTO financial_facts_compact
@@ -190,4 +231,5 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
         "summary_source_rows": len(summary_rows),
         "summary_inserted_or_updated": summary_inserted_or_updated,
         "total_inserted_or_updated": inserted_or_updated + summary_inserted_or_updated,
+        "deleted_stale": deleted_stale,
     }

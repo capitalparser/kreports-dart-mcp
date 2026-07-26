@@ -38,6 +38,52 @@ class DcfSourceResult:
     missing_metrics: tuple[str, ...]
     limitations: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if self.status not in {"usable", "partial", "missing"}:
+            raise ValueError("source status is invalid")
+        facts = tuple(self.facts)
+        if not all(isinstance(fact, DcfActualFact) for fact in facts):
+            raise TypeError("source facts contain invalid values")
+        missing = tuple(self.missing_metrics)
+        limitations = tuple(self.limitations)
+        if (
+            any(
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.strip()) > 1_000
+                for value in missing
+            )
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.strip()) > 1_000
+                for value in limitations
+            )
+            or len(missing) > len(DCF_MODEL_METRICS)
+            or len(limitations) > 32
+        ):
+            raise ValueError("source result bounds are invalid")
+        missing = tuple(value.strip() for value in missing)
+        limitations = tuple(value.strip() for value in limitations)
+        if (
+            len(set(missing)) != len(missing)
+            or not set(missing) <= set(DCF_MODEL_METRICS)
+        ):
+            raise ValueError("source missing metrics are invalid")
+        if self.status == "usable" and (missing or limitations):
+            raise ValueError("usable source cannot contain gaps")
+        if self.status == "usable" and {
+            fact.metric_key for fact in facts
+        } != set(DCF_MODEL_METRICS):
+            raise ValueError("usable source must contain every DCF metric")
+        if self.status == "missing" and facts:
+            raise ValueError("missing source cannot contain facts")
+        if self.status == "partial" and not (missing or limitations):
+            raise ValueError("partial source must disclose a gap")
+        object.__setattr__(self, "facts", facts)
+        object.__setattr__(self, "missing_metrics", missing)
+        object.__setattr__(self, "limitations", limitations)
+
 
 def _validate_schema(read_engine) -> set[str]:
     try:
@@ -109,6 +155,21 @@ def _safe_amount(value: object) -> Decimal | None:
 
 
 def _select_row(metric_key: str, rows: list[dict]) -> tuple[dict | None, str | None]:
+    def row_id(row: dict) -> int | None:
+        value = row.get("_id")
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def recency_key(row: dict) -> tuple[str, int]:
+        return (
+            str(row.get("fetched_at") or ""),
+            row_id(row) if row_id(row) is not None else -1,
+        )
+
     if len(rows) == 1:
         return rows[0], None
     signatures = {
@@ -122,29 +183,23 @@ def _select_row(metric_key: str, rows: list[dict]) -> tuple[dict | None, str | N
     if len(signatures) == 1:
         return sorted(
             rows,
-            key=lambda row: (
-                str(row.get("fetched_at") or ""),
-                int(row.get("_id") or -1),
-            ),
+            key=recency_key,
             reverse=True,
         )[0], None
     has_timestamp = any(row.get("fetched_at") for row in rows)
-    has_id = any(row.get("_id") is not None for row in rows)
+    has_id = any(row_id(row) is not None for row in rows)
     if not has_timestamp and not has_id:
         return None, f"duplicate_ambiguous:{metric_key}"
     ordered = sorted(
         rows,
-        key=lambda row: (
-            str(row.get("fetched_at") or ""),
-            int(row.get("_id") or -1),
-        ),
+        key=recency_key,
         reverse=True,
     )
     top = ordered[0]
     runner_up = ordered[1]
     if (
         str(top.get("fetched_at") or "") == str(runner_up.get("fetched_at") or "")
-        and top.get("_id") == runner_up.get("_id")
+        and row_id(top) == row_id(runner_up)
     ):
         return None, f"duplicate_ambiguous:{metric_key}"
     return top, f"duplicate_resolved_latest:{metric_key}"
@@ -163,7 +218,7 @@ def _load_with_engine(
     )
     params = {
         "company": company,
-        "base_year": int(base_year),
+        "base_year": base_year,
         "fs_div": fs_div,
         **{
             f"metric_{index}": metric_key
@@ -211,22 +266,41 @@ def _load_with_engine(
             missing.append(metric_key)
             limitations.append(f"corrupt_amount:{metric_key}")
             continue
-        facts.append(DcfActualFact(
-            metric_key=metric_key,
-            amount=amount,
-            unit=metric_definition(metric_key).unit,
-            year=int(base_year),
-            fs_div=fs_div,
-            source_account_id=selected.get("source_account_id"),
-            source_account_name=selected.get("source_account_nm"),
-            source_table="financial_facts_compact",
-            fetched_at=(
-                str(selected["fetched_at"])
-                if selected.get("fetched_at") is not None
-                else None
-            ),
-        ))
-    status = "usable" if not missing else "partial" if facts or rows else "missing"
+        source_account_id = str(
+            selected.get("source_account_id") or ""
+        ).strip()
+        source_account_name = str(
+            selected.get("source_account_nm") or ""
+        ).strip()
+        if not source_account_id or not source_account_name:
+            missing.append(metric_key)
+            limitations.append(f"provenance_gap:{metric_key}")
+            continue
+        try:
+            facts.append(DcfActualFact(
+                metric_key=metric_key,
+                amount=amount,
+                unit=metric_definition(metric_key).unit,
+                year=base_year,
+                fs_div=fs_div,
+                source_account_id=source_account_id,
+                source_account_name=source_account_name,
+                source_table="financial_facts_compact",
+                fetched_at=(
+                    str(selected["fetched_at"])
+                    if selected.get("fetched_at") is not None
+                    else None
+                ),
+            ))
+        except (TypeError, ValueError):
+            missing.append(metric_key)
+            limitations.append(f"invalid_fact_contract:{metric_key}")
+    status = (
+        "usable"
+        if not missing and not limitations
+        else "partial" if facts or rows
+        else "missing"
+    )
     return DcfSourceResult(
         status=status,
         facts=tuple(facts),
@@ -243,6 +317,13 @@ def load_dcf_actuals(
     read_engine=None,
 ) -> DcfSourceResult:
     """Read only the exact requested company/year/FS basis, with no fallback."""
+    if isinstance(base_year, bool) or not isinstance(base_year, int):
+        return DcfSourceResult(
+            status="missing",
+            facts=(),
+            missing_metrics=DCF_MODEL_METRICS,
+            limitations=("invalid_base_year",),
+        )
     if fs_div not in {"CFS", "OFS"}:
         return DcfSourceResult(
             status="missing",
@@ -255,14 +336,14 @@ def load_dcf_actuals(
             return _load_with_engine(
                 read_engine,
                 str(company),
-                int(base_year),
+                base_year,
                 fs_div,
             )
         with dcf_read_engine() as safe_engine:
             return _load_with_engine(
                 safe_engine,
                 str(company),
-                int(base_year),
+                base_year,
                 fs_div,
             )
     except DcfSourceUnavailable as exc:

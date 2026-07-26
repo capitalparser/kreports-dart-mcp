@@ -767,6 +767,58 @@ def get_dcf_input_candidates(
     return _clean_dict(result)
 
 
+def _normalized_exact_company_name(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _resolve_dcf_company_exact(
+    company: str,
+) -> tuple[str | None, dict | None, str | None]:
+    """Resolve only an exact corp/stock code or one normalized exact name."""
+    if not isinstance(company, str) or not company.strip():
+        return None, None, "회사 식별자는 비어 있지 않은 문자열이어야 합니다."
+    identifier = company.strip()
+    with _engine_module.engine.connect() as connection:
+        if identifier.isdigit() and len(identifier) in {6, 8}:
+            column = "corp_code" if len(identifier) == 8 else "stock_code"
+            rows = connection.execute(text(f"""
+                SELECT corp_code, stock_code, corp_name, market, induty_code
+                FROM companies
+                WHERE {column}=:identifier
+                ORDER BY corp_code
+                LIMIT 2
+            """), {"identifier": identifier}).mappings().all()
+        elif identifier.isdigit():
+            rows = []
+        else:
+            normalized = _normalized_exact_company_name(identifier)
+            rows = [
+                row
+                for row in connection.execute(text("""
+                    SELECT corp_code, stock_code, corp_name, market, induty_code
+                    FROM companies
+                    ORDER BY corp_code
+                """)).mappings().all()
+                if _normalized_exact_company_name(str(row["corp_name"]))
+                == normalized
+            ][:2]
+    if len(rows) == 1:
+        subject = dict(rows[0])
+        return str(subject["corp_code"]), subject, None
+    if len(rows) > 1:
+        return (
+            None,
+            None,
+            "정규화된 정확한 회사명이 둘 이상입니다. "
+            "8자리 corp_code 또는 6자리 종목코드를 사용하세요.",
+        )
+    return (
+        None,
+        None,
+        "정확한 corp_code, 종목코드 또는 회사명과 일치하는 기업이 없습니다.",
+    )
+
+
 def build_dcf_model_pack(
     company: str,
     base_year: int,
@@ -792,13 +844,16 @@ def build_dcf_model_pack(
     )
     from kreports.analysis.dcf_source import load_dcf_actuals
 
-    corp_code = resolve_corp_code(company) or company
-    subject = get_company_summary(corp_code)
-    if not subject:
-        return {"error": "company not found", "company": company}
+    corp_code, subject, resolution_error = _resolve_dcf_company_exact(company)
+    if resolution_error or corp_code is None or subject is None:
+        return {
+            "error": resolution_error or "정확한 기업 식별에 실패했습니다.",
+            "company": company,
+            "match_policy": "exact_identifier_or_unique_normalized_exact_name",
+        }
     scenario = DcfScenarioInput(
         company=corp_code,
-        base_year=int(base_year),
+        base_year=base_year,
         fs_div=fs_div,
         forecast_years=forecast_years,
         revenue_growth=revenue_growth,
@@ -813,7 +868,7 @@ def build_dcf_model_pack(
         normalized_operating_profit=normalized_operating_profit,
         normalization_reason=normalization_reason,
     )
-    source = load_dcf_actuals(corp_code, int(base_year), fs_div)
+    source = load_dcf_actuals(corp_code, scenario.base_year, fs_div)
     result = build_dcf_valuation(
         scenario,
         source.facts,
@@ -825,11 +880,27 @@ def build_dcf_model_pack(
     payload["data_quality"] = {
         "status": (
             "usable"
-            if result.status == "complete_model"
-            else "limited" if source.facts else "missing"
+            if (
+                result.status == "complete_model"
+                and result.confidence == "complete_equity"
+                and source.status == "usable"
+            )
+            else "missing"
+            if source.status == "missing" and not source.facts
+            else "limited"
         ),
         "source": "financial_facts_compact",
-        "covered_years": [int(base_year)] if source.facts else [],
+        "source_status": source.status,
+        "covered_years": [scenario.base_year] if source.facts else [],
+        "enterprise_completion": (
+            "complete" if result.enterprise_value is not None else "unavailable"
+        ),
+        "equity_completion": (
+            "complete"
+            if result.equity_value is not None
+            else "partial" if result.enterprise_value is not None
+            else "unavailable"
+        ),
         "missing_fields": list(result.missing_inputs),
         "limitations": list(result.limitations),
     }
@@ -839,7 +910,7 @@ def build_dcf_model_pack(
             "실제값, 정규화, 분석가 가정, 예측 공식과 가치 브리지를 "
             "분리한 검토용 모델입니다."
         ),
-        "basis": f"{int(base_year)} {fs_div} local compact facts",
+        "basis": f"{scenario.base_year} {fs_div} local compact facts",
     }]
     payload["next_checks"] = [
         "가정의 승인 주체와 근거 문서를 별도로 확인하세요.",

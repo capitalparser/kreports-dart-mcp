@@ -670,6 +670,9 @@ def _render_dcf_inputs(result: dict) -> str:
 
 
 def _render_dcf_model_pack(result: dict) -> str:
+    def safe(value: object) -> str:
+        return html.escape(str(value)[:1000], quote=True)
+
     subject = html.escape(_subject_label(result), quote=True)
     status = str(result.get("status") or _status(result))
     bridge = result.get("valuation_bridge") or {}
@@ -696,18 +699,22 @@ def _render_dcf_model_pack(result: dict) -> str:
         lines.extend(["", "연도별 예측:"])
         for row in projections[:10]:
             lines.append(
-                f"- {row.get('year')}: 매출 {row.get('revenue')}, "
-                f"EBIT {row.get('ebit')}, UFCF {row.get('ufcf')}, "
-                f"현재가치 {row.get('present_value')}"
+                f"- {safe(row.get('year'))}: 매출 {safe(row.get('revenue'))}, "
+                f"EBIT {safe(row.get('ebit'))}, UFCF {safe(row.get('ufcf'))}, "
+                f"현재가치 {safe(row.get('present_value'))}"
             )
     lines.extend([
         "",
         "가치 브리지:",
-        f"- 예측기간 현재가치: {bridge.get('forecast_period_present_value')}",
-        f"- 터미널가치 현재가치: {bridge.get('terminal_value_present_value')}",
-        f"- 기업가치: {bridge.get('enterprise_value')}",
-        f"- 순부채: {bridge.get('net_debt')}",
-        f"- 자기자본가치: {bridge.get('equity_value')}",
+        f"- 예측기간 현재가치: {safe(bridge.get('forecast_period_present_value'))}",
+        f"- 터미널가치: {safe(bridge.get('terminal_value'))}",
+        "- Gordon 공식: final_UFCF * (1+g) / (wacc-g)",
+        f"- 최종연도 할인계수: {safe(bridge.get('final_year_discount_factor'))}",
+        f"- 터미널가치 현재가치: {safe(bridge.get('terminal_value_present_value'))}",
+        "- 기업가치 = 예측기간 현재가치 + 터미널가치 현재가치",
+        f"- 기업가치: {safe(bridge.get('enterprise_value'))}",
+        f"- 순부채: {safe(bridge.get('net_debt'))}",
+        f"- 자기자본가치: {safe(bridge.get('equity_value'))}",
     ])
     missing = result.get("missing_inputs") or []
     if missing:

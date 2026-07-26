@@ -306,11 +306,11 @@ class BuildDcfModelPackInput(ToolInput):
     fs_div: FsDiv = "CFS"
     forecast_years: int = Field(5, ge=1, le=10)
     revenue_growth: float | None = Field(None, gt=-1)
-    operating_margin: float | None = Field(None, gt=-1)
+    operating_margin: float | None = None
     tax_rate: float | None = Field(None, ge=0, le=1)
     da_to_revenue: float | None = Field(None, ge=0)
     capex_to_revenue: float | None = Field(None, ge=0)
-    nwc_to_revenue: float | None = Field(None, ge=0)
+    nwc_to_revenue: float | None = None
     wacc: float | None = Field(None, gt=0)
     terminal_growth: float | None = Field(None, gt=-1)
     normalized_revenue: float | None = Field(None, gt=0)

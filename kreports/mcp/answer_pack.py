@@ -239,15 +239,31 @@ def _safe_dcf_rows(value: Any, *, limit: int) -> list[dict[str, Any]]:
     for raw in (value if isinstance(value, list) else [])[:limit]:
         if not isinstance(raw, dict):
             continue
-        rows.append({
-            str(key)[:80]: (
-                html.escape(str(item), quote=True)[:1000]
-                if isinstance(item, str)
-                else item
-            )
-            for key, item in raw.items()
-        })
+        rows.append(_safe_dcf_value(raw, depth=0))
     return rows
+
+
+def _safe_dcf_value(value: Any, *, depth: int) -> Any:
+    if depth > 4:
+        return None
+    if isinstance(value, str):
+        return html.escape(value[:1000], quote=True)
+    if isinstance(value, dict):
+        return {
+            html.escape(str(key)[:80], quote=True): _safe_dcf_value(
+                item,
+                depth=depth + 1,
+            )
+            for key, item in list(value.items())[:64]
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _safe_dcf_value(item, depth=depth + 1)
+            for item in value[:64]
+        ]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return html.escape(str(value)[:1000], quote=True)
 
 
 def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
@@ -257,6 +273,13 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         result,
         status=str(result.get("status") or _status(result)),
     )
+    pack["summary"]["subject"] = subject
+    pack["summary"]["status"] = _safe_dcf_value(
+        str(pack["summary"]["status"]),
+        depth=0,
+    )
+    pack["sources"] = _safe_dcf_value(pack["sources"], depth=0)
+    pack["data_quality"] = _safe_dcf_value(pack["data_quality"], depth=0)
     actuals = _safe_dcf_rows(result.get("actuals"), limit=20)
     normalization = _safe_dcf_rows(result.get("normalization"), limit=2)
     assumptions = _safe_dcf_rows(result.get("assumptions"), limit=8)
@@ -327,8 +350,12 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "기업가치·순부채·자기자본 브리지",
             [
                 ("forecast_period_present_value", "예측기간 PV"),
+                ("terminal_value", "할인 전 터미널가치"),
                 ("terminal_value_present_value", "터미널가치 PV"),
+                ("gordon_growth_formula", "Gordon 성장 공식"),
+                ("final_year_discount_factor", "최종연도 할인계수"),
                 ("enterprise_value", "기업가치"),
+                ("enterprise_value_formula", "기업가치 조정 공식"),
                 ("debt", "이자부부채"),
                 ("cash", "현금"),
                 ("net_debt", "순부채"),

@@ -63,7 +63,7 @@ def handle_get_dcf_input_candidates(args: GetDcfInputCandidatesInput) -> dict:
 
 def handle_build_dcf_model_pack(args: BuildDcfModelPackInput) -> dict:
     return build_dcf_model_pack(
-        company=resolve_company(args.company),
+        company=args.company,
         base_year=args.base_year,
         fs_div=args.fs_div,
         forecast_years=args.forecast_years,
