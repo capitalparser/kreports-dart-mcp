@@ -9,6 +9,12 @@ from typing import Any, Iterable
 
 
 _MISSING_TOKENS = {"", "-", "n/a", "na", "해당없음", "없음"}
+_DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
+
+
+def ds002_source_supported(year: int) -> bool:
+    """Return the documented OpenDART DS002 year eligibility policy."""
+    return year >= _DS002_OFFICIAL_AVAILABLE_FROM_YEAR
 
 
 @dataclass(frozen=True)
@@ -286,28 +292,25 @@ def observations_json(observations: Iterable[AuditFeeObservation], limit: int = 
             separators=(",", ":"),
         )
         deduped_by_fingerprint[fingerprint] = item
-    deduped = sorted(
-        deduped_by_fingerprint.values(),
+    deduped = list(deduped_by_fingerprint.values())
+    prioritized = sorted(
+        deduped,
         key=_provenance_priority,
     )
     anchors = sorted(
-        (
-            min(
-                (
-                    item
-                    for item in deduped
-                    if item.source_class == source_class
-                ),
-                key=_provenance_priority,
-            )
-            for source_class in {item.source_class for item in deduped}
-        ),
+        latest_audit_fee_observations_by_source(deduped).values(),
         key=_provenance_priority,
     )
     anchor_ids = {id(item) for item in anchors}
-    bounded = [*anchors, *(item for item in deduped if id(item) not in anchor_ids)]
+    selected = [
+        *anchors,
+        *(item for item in prioritized if id(item) not in anchor_ids),
+    ][: max(1, limit)]
+    selected_ids = {id(item) for item in selected}
+    # Retain input order so equal-period sequential corrections remain ordered.
+    bounded = [item for item in deduped if id(item) in selected_ids]
     return json.dumps(
-        [item.to_dict() for item in bounded[: max(1, limit)]],
+        [item.to_dict() for item in bounded],
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -356,9 +359,21 @@ def _source_recency(observation: AuditFeeObservation) -> tuple[object, ...]:
         _temporal_number(observation.source_rcept_no, 20),
         observation.source_period or "",
         observation.source_rcept_no or "",
-        observation.availability_status,
-        json.dumps(observation.raw_values, ensure_ascii=False, sort_keys=True),
     )
+
+
+def latest_audit_fee_observations_by_source(
+    observations: Iterable[AuditFeeObservation],
+) -> dict[str, AuditFeeObservation]:
+    """Resolve the current observation for each source using merge recency."""
+    latest: dict[str, AuditFeeObservation] = {}
+    for observation in observations:
+        current = latest.get(observation.source_class)
+        if current is None or _source_recency(observation) >= _source_recency(
+            current
+        ):
+            latest[observation.source_class] = observation
+    return latest
 
 
 def _provenance_priority(
@@ -480,17 +495,7 @@ def merge_audit_fee_observations(
     )
     conflicts = _actual_conflicts(materialized)
     statuses = {item.availability_status for item in materialized}
-    latest_by_source = {
-        source_class: max(
-            (
-                item
-                for item in materialized
-                if item.source_class == source_class
-            ),
-            key=_source_recency,
-        )
-        for source_class in {item.source_class for item in materialized}
-    }
+    latest_by_source = latest_audit_fee_observations_by_source(materialized)
     blockers = sorted(
         (
             item

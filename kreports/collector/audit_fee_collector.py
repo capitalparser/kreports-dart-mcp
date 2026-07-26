@@ -12,6 +12,7 @@ import json
 from kreports.collector.fetcher import fetch_audit_fee
 from kreports.collector.audit_fee_sources import (
     AuditFeeObservation,
+    ds002_source_supported,
     merge_audit_fee_observations,
     normalize_endpoint_result,
     observation_from_dict,
@@ -25,13 +26,6 @@ logger = logging.getLogger(__name__)
 # NAS ratio 임계값: 비감사보수가 감사보수를 초과하면 독립성 위험
 _NAS_RISK_THRESHOLD = 1.0
 _DART_NO_DATA_STATUS = "013"
-# OpenDART ``adtServcCnclsSttus`` guide documents endpoint coverage from 2015.
-_DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
-
-
-def ds002_source_supported(year: int) -> bool:
-    """Return the documented DS002 year eligibility policy."""
-    return year >= _DS002_OFFICIAL_AVAILABLE_FROM_YEAR
 
 
 def _parse_fee(value: str | None) -> int | None:

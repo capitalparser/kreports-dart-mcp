@@ -27,6 +27,11 @@ from kreports.analysis.company_profile import (
 from kreports.analysis.search_adapter import (
     group_company_records,
 )
+from kreports.collector.audit_fee_sources import (
+    ds002_source_supported,
+    latest_audit_fee_observations_by_source,
+    observation_from_dict,
+)
 
 
 _AUDIT_FEE_TYPED_COLUMNS = (
@@ -45,12 +50,21 @@ _AUDIT_FEE_TYPED_COLUMNS = (
 )
 
 
-def _valid_audit_fee_observation(value: object) -> bool:
+def _valid_audit_fee_observation(
+    value: object,
+    *,
+    corp_code: str,
+    year: int,
+) -> bool:
     if not isinstance(value, dict):
         return False
-    if not isinstance(value.get("corp_code"), str):
+    if value.get("corp_code") != corp_code:
         return False
-    if not isinstance(value.get("bsns_year"), int):
+    if (
+        value.get("bsns_year") != year
+        or not isinstance(value.get("bsns_year"), int)
+        or isinstance(value.get("bsns_year"), bool)
+    ):
         return False
     if not isinstance(value.get("source_class"), str) or not value["source_class"]:
         return False
@@ -218,18 +232,27 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
 
     if row is None:
         fetch_status = str(fetch_row["status"]) if fetch_row else ""
-        availability = (
-            "transport_error"
-            if fetch_status == "error"
-            else "missing"
-            if fetch_status == "no_data"
-            else "missing"
-        )
+        if fetch_status == "error":
+            availability = "transport_error"
+            source_eligibility = "unknown"
+        elif fetch_status == "no_data":
+            source_supported = ds002_source_supported(year)
+            availability = (
+                "partial"
+                if source_supported
+                else "not_available_from_endpoint"
+            )
+            source_eligibility = (
+                "eligible" if source_supported else "not_eligible"
+            )
+        else:
+            availability = "missing"
+            source_eligibility = "unknown"
         return {
             "corp_code": corp_code,
             "year": year,
             "availability_status": availability,
-            "source_eligibility": "unknown",
+            "source_eligibility": source_eligibility,
             "quality_status": "error" if fetch_status == "error" else "missing",
             "selected": {
                 "audit_fee_m": None,
@@ -244,7 +267,12 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
             "limitations": [
                 str(fetch_row["error_msg"])
                 if fetch_row and fetch_row["error_msg"]
-                else "No typed audit fee observation is cached"
+                else (
+                    "Legacy FetchLog no_data classified using documented "
+                    "DS002 coverage policy"
+                    if fetch_status == "no_data"
+                    else "No typed audit fee observation is cached"
+                )
             ],
         }
 
@@ -264,7 +292,11 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
     observations = [
         item
         for item in raw_observations
-        if _valid_audit_fee_observation(item)
+        if _valid_audit_fee_observation(
+            item,
+            corp_code=corp_code,
+            year=year,
+        )
     ][:20]
     if len(observations) != len(raw_observations):
         provenance_error = True
@@ -272,16 +304,31 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
     basis = record.get("compatibility_basis") or "legacy_inferred"
     audit_fee = record.get("audit_fee_m")
     audit_hours = record.get("audit_hours")
-    eligibility_values = {
-        str(item.get("source_eligibility"))
+    rehydrated_observations = [
+        parsed
         for item in observations
-        if item.get("source_eligibility")
-        in {"eligible", "not_eligible", "unknown"}
+        if (parsed := observation_from_dict(item)) is not None
+    ]
+    latest_by_source = latest_audit_fee_observations_by_source(
+        rehydrated_observations
+    )
+    eligibility_values = {
+        item.source_eligibility for item in latest_by_source.values()
     }
+    has_typed_provenance = provenance_error or bool(raw_observations)
+    legacy_no_data = (
+        not has_typed_provenance
+        and fetch_row is not None
+        and str(fetch_row["status"]) == "no_data"
+    )
     if "eligible" in eligibility_values:
         source_eligibility = "eligible"
     elif eligibility_values == {"not_eligible"}:
         source_eligibility = "not_eligible"
+    elif legacy_no_data:
+        source_eligibility = (
+            "eligible" if ds002_source_supported(year) else "not_eligible"
+        )
     elif audit_fee is not None or audit_hours is not None:
         source_eligibility = "eligible"
     else:
@@ -298,6 +345,13 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
     quality = record.get("quality_status") or (
         "verified" if availability == "available" else "partial"
     )
+    if legacy_no_data:
+        availability = (
+            "partial"
+            if ds002_source_supported(year)
+            else "not_available_from_endpoint"
+        )
+        quality = "missing"
     limitations: list[str] = []
     for observation in observations:
         for limitation in observation.get("limitations") or []:
@@ -311,6 +365,10 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
     if not typed_schema:
         limitations.append(
             "Pre-20260711_07 row: compatibility basis inferred from legacy columns"
+        )
+    if legacy_no_data:
+        limitations.append(
+            "Legacy FetchLog no_data classified using documented DS002 coverage policy"
         )
     if availability == "conflict":
         limitations.append(

@@ -13,6 +13,9 @@ from kreports.collector.audit_fee_sources import (
     merge_audit_fee_observations,
     observations_json,
 )
+from kreports.collector.audit_fee_collector import (
+    upsert_audit_fee_observations,
+)
 from kreports.db.models import AuditFee
 
 
@@ -134,6 +137,41 @@ def test_read_only_availability_exposes_typed_values_and_conflict(temp_engine):
     assert len(out["source_observations"]) == 2
 
 
+def test_latest_same_source_observation_controls_eligibility(temp_engine):
+    upsert_audit_fee_observations(
+        [
+            AuditFeeObservation(
+                corp_code="corrected",
+                bsns_year=2024,
+                source_class="opendart_ds002",
+                source_period="2024",
+                source_eligibility="eligible",
+                availability_status="partial",
+                quality_status="missing",
+            )
+        ]
+    )
+    upsert_audit_fee_observations(
+        [
+            AuditFeeObservation(
+                corp_code="corrected",
+                bsns_year=2024,
+                source_class="opendart_ds002",
+                source_period="2024",
+                source_eligibility="not_eligible",
+                availability_status="not_available_from_endpoint",
+                quality_status="missing",
+            )
+        ]
+    )
+
+    out = audit_fee_availability("corrected", 2024)
+
+    assert out["availability_status"] == "not_available_from_endpoint"
+    assert out["source_eligibility"] == "not_eligible"
+    assert len(out["source_observations"]) == 2
+
+
 def test_legacy_row_is_inferred_without_rewrite(monkeypatch):
     legacy = create_engine("sqlite:///:memory:")
     with legacy.begin() as conn:
@@ -170,6 +208,137 @@ def test_legacy_row_is_inferred_without_rewrite(monkeypatch):
     assert out["availability_status"] == "available"
 
 
+def test_row_missing_legacy_fetch_log_uses_official_boundary_without_write(
+    temp_engine,
+):
+    with temp_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO fetch_log "
+                "(task_type, corp_code, year, status, fetched_at) VALUES "
+                "('audit_fee', 'legacy-gap', 2014, 'no_data', CURRENT_TIMESTAMP), "
+                "('audit_fee', 'legacy-gap', 2019, 'no_data', CURRENT_TIMESTAMP)"
+            )
+        )
+        before_audit_fees = conn.execute(
+            text("SELECT COUNT(*) FROM audit_fees")
+        ).scalar_one()
+        before_fetch_logs = conn.execute(
+            text(
+                "SELECT task_type, corp_code, year, status "
+                "FROM fetch_log ORDER BY year"
+            )
+        ).all()
+
+    unsupported = audit_fee_availability("legacy-gap", 2014)
+    supported = audit_fee_availability("legacy-gap", 2019)
+
+    with temp_engine.connect() as conn:
+        after_audit_fees = conn.execute(
+            text("SELECT COUNT(*) FROM audit_fees")
+        ).scalar_one()
+        after_fetch_logs = conn.execute(
+            text(
+                "SELECT task_type, corp_code, year, status "
+                "FROM fetch_log ORDER BY year"
+            )
+        ).all()
+
+    assert unsupported["availability_status"] == "not_available_from_endpoint"
+    assert unsupported["source_eligibility"] == "not_eligible"
+    assert supported["availability_status"] == "partial"
+    assert supported["source_eligibility"] == "eligible"
+    assert after_audit_fees == before_audit_fees
+    assert after_fetch_logs == before_fetch_logs
+
+
+def test_pre_typed_rows_use_official_boundary_without_rewrite(monkeypatch):
+    legacy = create_engine("sqlite:///:memory:")
+    with legacy.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE audit_fees (
+                    id INTEGER PRIMARY KEY,
+                    corp_code VARCHAR(8) NOT NULL,
+                    bsns_year SMALLINT NOT NULL,
+                    audit_fee_m INTEGER,
+                    audit_hours INTEGER
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE fetch_log (
+                    id INTEGER PRIMARY KEY,
+                    task_type VARCHAR(50) NOT NULL,
+                    corp_code VARCHAR(8),
+                    year SMALLINT,
+                    status VARCHAR(20) NOT NULL,
+                    error_msg TEXT,
+                    fetched_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO audit_fees (corp_code, bsns_year) VALUES "
+                "('pretyped', 2014), ('pretyped', 2019)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO fetch_log "
+                "(task_type, corp_code, year, status, fetched_at) VALUES "
+                "('audit_fee', 'pretyped', 2014, 'no_data', CURRENT_TIMESTAMP), "
+                "('audit_fee', 'pretyped', 2019, 'no_data', CURRENT_TIMESTAMP)"
+            )
+        )
+        before = {
+            "fees": conn.execute(
+                text(
+                    "SELECT corp_code, bsns_year, audit_fee_m, audit_hours "
+                    "FROM audit_fees ORDER BY bsns_year"
+                )
+            ).all(),
+            "logs": conn.execute(
+                text(
+                    "SELECT task_type, corp_code, year, status "
+                    "FROM fetch_log ORDER BY year"
+                )
+            ).all(),
+        }
+    monkeypatch.setattr(engine_module, "engine", legacy)
+
+    unsupported = audit_fee_availability("pretyped", 2014)
+    supported = audit_fee_availability("pretyped", 2019)
+
+    with legacy.connect() as conn:
+        after = {
+            "fees": conn.execute(
+                text(
+                    "SELECT corp_code, bsns_year, audit_fee_m, audit_hours "
+                    "FROM audit_fees ORDER BY bsns_year"
+                )
+            ).all(),
+            "logs": conn.execute(
+                text(
+                    "SELECT task_type, corp_code, year, status "
+                    "FROM fetch_log ORDER BY year"
+                )
+            ).all(),
+        }
+
+    assert unsupported["availability_status"] == "not_available_from_endpoint"
+    assert unsupported["source_eligibility"] == "not_eligible"
+    assert supported["availability_status"] == "partial"
+    assert supported["source_eligibility"] == "eligible"
+    assert after == before
+
+
 def test_five_year_trend_keeps_unavailable_periods_as_null_gaps(temp_engine):
     with temp_engine.begin() as conn:
         conn.execute(
@@ -198,8 +367,8 @@ def test_five_year_trend_keeps_unavailable_periods_as_null_gaps(temp_engine):
     by_year = {row["year"]: row for row in out["periods"]}
 
     assert len(out["periods"]) == 5
-    assert by_year[2022]["availability_status"] == "missing"
-    assert by_year[2022]["source_eligibility"] == "unknown"
+    assert by_year[2022]["availability_status"] == "partial"
+    assert by_year[2022]["source_eligibility"] == "eligible"
     assert by_year[2022]["selected_fee_m"] is None
     assert by_year[2024]["selected_fee_m"] == 900
     assert all(row["selected_fee_m"] != 0 for row in out["periods"])
@@ -423,6 +592,56 @@ def test_structurally_invalid_provenance_fails_closed(
         )
 
     out = audit_fee_availability(f"invalid-{len(provenance)}", 2024)
+
+    assert out["availability_status"] == "parse_error"
+    assert out["quality_status"] == "error"
+    assert out["selected"]["audit_fee_m"] == 900
+    assert out["source_observations"] == []
+    assert any("provenance" in item.lower() for item in out["limitations"])
+
+
+@pytest.mark.parametrize(
+    ("observation_corp_code", "observation_year"),
+    [
+        ("different", 2024),
+        ("identity", 2020),
+    ],
+)
+def test_provenance_identity_mismatch_fails_closed(
+    temp_engine,
+    observation_corp_code,
+    observation_year,
+):
+    observation = AuditFeeObservation(
+        corp_code=observation_corp_code,
+        bsns_year=observation_year,
+        source_class="cached_business_report",
+        actual_fee_m=900,
+        actual_hours=9000,
+        source_eligibility="eligible",
+        availability_status="available",
+        quality_status="verified",
+    )
+    with temp_engine.begin() as conn:
+        conn.execute(
+            AuditFee.__table__.insert(),
+            {
+                "corp_code": "identity",
+                "bsns_year": 2024,
+                "audit_fee_m": 900,
+                "audit_hours": 9000,
+                "actual_fee_m": 900,
+                "actual_hours": 9000,
+                "availability_status": "available",
+                "quality_status": "verified",
+                "compatibility_basis": "actual",
+                "source_observations_json": json.dumps(
+                    [observation.to_dict()]
+                ),
+            },
+        )
+
+    out = audit_fee_availability("identity", 2024)
 
     assert out["availability_status"] == "parse_error"
     assert out["quality_status"] == "error"
