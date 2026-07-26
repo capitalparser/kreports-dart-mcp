@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from kreports.db.models import (
+    Base,
     Company,
     CompanyYearQuality,
     EvidenceDocument,
@@ -72,13 +76,136 @@ def test_resource_uri_parser_rejects_malformed_or_unknown_uris(uri):
     assert "/tmp/private" not in str(caught.value)
 
 
-def test_dataset_readiness_does_not_claim_release_without_manifest(monkeypatch):
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "kreports://dataset//readiness",
+        "kreports://dataset/readiness/",
+        "kreports://company//00126380/2025",
+        "kreports://company/00126380//2025",
+        "kreports://company/00126380/2025/",
+        "kreports://company/%2e%2e/2025",
+        "kreports://evidence//20250101000000",
+        "kreports://evidence/20250101000000/",
+        "kreports://evidence/%2e%2e",
+    ],
+)
+def test_resource_uri_parser_requires_exact_canonical_path(uri):
+    with pytest.raises(ResourceRequestError, match="invalid|unknown"):
+        read_resource(uri)
+
+
+def test_missing_sqlite_resource_reads_do_not_create_database_or_sidecars(
+    tmp_path, monkeypatch
+):
+    import kreports.db.engine as engine_module
+
+    missing_path = tmp_path / "missing-resource.db"
+    missing_engine = create_engine(f"sqlite:///{missing_path}")
+    monkeypatch.setattr(engine_module, "engine", missing_engine)
+
+    readiness = read_resource("kreports://dataset/readiness")
+    company = read_resource("kreports://company/00126380/2025")
+    evidence = read_resource("kreports://evidence/20250312000001")
+
+    assert readiness["release_ready"] is False
+    assert readiness["required_failures"] == ["runtime_db_unavailable"]
+    assert company["cache_status"] == "error"
+    assert evidence["cache_status"] == "error"
+    assert not missing_path.exists()
+    assert not Path(f"{missing_path}-wal").exists()
+    assert not Path(f"{missing_path}-shm").exists()
+
+
+def test_existing_sqlite_resource_reads_leave_file_and_sidecars_unchanged(
+    tmp_path, monkeypatch
+):
+    import kreports.db.engine as engine_module
+
+    db_path = tmp_path / "prepared-resource.db"
+    seed_engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(seed_engine)
+    with Session(seed_engine) as session:
+        session.add(Company(corp_code="00126380", corp_name="표본회사"))
+        session.commit()
+    seed_engine.dispose()
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{db_path}{suffix}")
+        if sidecar.exists():
+            sidecar.unlink()
+    wal_path = Path(f"{db_path}-wal")
+    wal_path.touch()
+
+    before_mtime = db_path.stat().st_mtime_ns
+    resource_engine = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(engine_module, "engine", resource_engine)
+
+    read_resource("kreports://dataset/readiness")
+    company = read_resource("kreports://company/00126380/2025")
+    read_resource("kreports://evidence/20250312000001")
+
+    assert company["company"]["corp_name"] == "표본회사"
+    assert db_path.stat().st_mtime_ns == before_mtime
+    assert wal_path.exists() and wal_path.stat().st_size == 0
+    assert not Path(f"{db_path}-shm").exists()
+
+
+def test_sqlite_resource_reads_fail_closed_on_nonempty_wal_without_touching_sidecars(
+    tmp_path, monkeypatch
+):
+    import kreports.db.engine as engine_module
+
+    db_path = tmp_path / "wal-resource.db"
+    wal_engine = create_engine(f"sqlite:///{db_path}")
+    with wal_engine.connect() as connection:
+        connection.execute(text("PRAGMA journal_mode=WAL"))
+        connection.execute(text("PRAGMA wal_autocheckpoint=0"))
+        connection.commit()
+    Base.metadata.create_all(wal_engine)
+    with Session(wal_engine) as session:
+        session.add(Company(corp_code="00126380", corp_name="WAL 표본회사"))
+        session.commit()
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+    assert wal_path.exists() and wal_path.stat().st_size > 0
+    assert shm_path.exists()
+    before = {
+        path: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in (db_path, wal_path, shm_path)
+    }
+    monkeypatch.setattr(engine_module, "engine", wal_engine)
+
+    readiness = read_resource("kreports://dataset/readiness")
+    company = read_resource("kreports://company/00126380/2025")
+    evidence = read_resource("kreports://evidence/20250312000001")
+
+    assert readiness["release_ready"] is False
+    assert readiness["required_failures"] == [
+        "resource_db_unavailable:uncheckpointed_wal"
+    ]
+    assert company["cache_status"] == "error"
+    assert company["errors"] == [
+        "resource_db_unavailable:uncheckpointed_wal"
+    ]
+    assert evidence["cache_status"] == "error"
+    assert evidence["errors"] == [
+        "resource_db_unavailable:uncheckpointed_wal"
+    ]
+    assert {
+        path: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in (db_path, wal_path, shm_path)
+    } == before
+
+
+def test_dataset_readiness_does_not_claim_release_without_manifest(
+    monkeypatch, temp_engine
+):
     from kreports.mcp import resources
 
     monkeypatch.setattr(
         resources,
         "evaluate_release_gate",
-        lambda _profile: {
+        lambda _profile, **_options: {
             "ok": False,
             "profile": "public_runtime",
             "schema_version": "unknown",
@@ -303,3 +430,78 @@ def test_evidence_storage_failure_is_error_not_missing(temp_engine, monkeypatch)
     assert payload["data_quality"]["status"] == "error"
     assert payload["source_basis"] is None
     assert "sensitive" not in json.dumps(payload)
+
+
+def test_blank_external_raw_falls_through_to_normalized_evidence(
+    temp_engine, monkeypatch
+):
+    from kreports.mcp import resources
+
+    class BlankRawStore:
+        def read(self, _uri, *, expected_hash=None):
+            return " \n\t "
+
+    monkeypatch.setattr(resources, "RawDocumentStore", BlankRawStore)
+    with Session(temp_engine) as session:
+        session.add(
+            SourceDocument(
+                rcept_no="20250312000004",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                report_nm="감사보고서",
+                content_type="xml",
+                raw_content="",
+                doc_hash="hash",
+                storage_uri="file:///private/raw.xml.gz",
+                storage_status="externalized",
+            )
+        )
+        session.add(
+            EvidenceDocument(
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                rcept_no="20250312000004",
+                normalized_text="normalized actual text",
+            )
+        )
+        session.commit()
+
+    payload = read_resource("kreports://evidence/20250312000004")
+
+    assert payload["source_basis"] == "normalized_evidence"
+    assert payload["text"] == "normalized actual text"
+    assert "raw_external_blank" in payload["data_quality"]["limitations"]
+
+
+def test_blank_normalized_evidence_falls_through_to_derived_section(
+    temp_engine,
+):
+    with Session(temp_engine) as session:
+        session.add(
+            EvidenceDocument(
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                rcept_no="20250312000005",
+                normalized_text=" \n ",
+            )
+        )
+        session.add(
+            ReportSection(
+                rcept_no="20250312000005",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                section_key="kam",
+                body_text="derived actual text",
+            )
+        )
+        session.commit()
+
+    payload = read_resource("kreports://evidence/20250312000005")
+
+    assert payload["source_basis"] == "derived_summary"
+    assert payload["text"] == "derived actual text"
+    assert "normalized_evidence_blank" in payload["data_quality"]["limitations"]

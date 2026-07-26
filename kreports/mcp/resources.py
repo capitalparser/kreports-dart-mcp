@@ -1,16 +1,19 @@
 """Strict, bounded, read-only MCP resources over prepared KReports data."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlsplit
 
 from mcp.types import Resource, ResourceTemplate
-from sqlalchemy import inspect
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.orm import Session
 
-from kreports.db.engine import get_session
+import kreports.db.engine as _engine_module
 from kreports.db.models import (
     Company,
     CompanyYearQuality,
@@ -40,6 +43,48 @@ _DART_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
 class ResourceRequestError(ValueError):
     """A stable public resource error that never embeds private state."""
+
+
+class _ResourceDatabaseUnavailable(RuntimeError):
+    pass
+
+
+@contextmanager
+def _resource_session():
+    """Open one non-committing session, using immutable SQLite file access."""
+    source_engine = _engine_module.engine
+    if source_engine.dialect.name != "sqlite":
+        with Session(bind=source_engine) as session:
+            yield session
+        return
+
+    database = source_engine.url.database
+    if database in {None, "", ":memory:"}:
+        with Session(bind=source_engine) as session:
+            yield session
+        return
+
+    database_path = Path(str(database)).expanduser().resolve()
+    if not database_path.is_file():
+        raise _ResourceDatabaseUnavailable("runtime_db_unavailable")
+    wal_path = Path(f"{database_path}-wal")
+    if wal_path.exists() and wal_path.stat().st_size > 0:
+        raise _ResourceDatabaseUnavailable(
+            "resource_db_unavailable:uncheckpointed_wal"
+        )
+    readonly_url = (
+        f"sqlite:///file:{database_path.as_posix()}"
+        "?mode=ro&immutable=1&uri=true"
+    )
+    readonly_engine = create_engine(
+        readonly_url,
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        with Session(bind=readonly_engine) as session:
+            yield session
+    finally:
+        readonly_engine.dispose()
 
 
 @dataclass(frozen=True)
@@ -130,35 +175,50 @@ def _parse_uri(uri: object) -> tuple[str, dict[str, Any]]:
         or parsed.password is not None
     ):
         raise ResourceRequestError("invalid_resource_uri")
-    path_parts = [part for part in parsed.path.split("/") if part]
-    if any(part in {".", ".."} for part in path_parts):
-        raise ResourceRequestError("invalid_resource_uri")
-
-    if parsed.netloc == "dataset" and path_parts == ["readiness"]:
+    if parsed.netloc == "dataset" and parsed.path == "/readiness":
         return "dataset_readiness", {}
-    if parsed.netloc == "company" and len(path_parts) == 2:
-        corp_code, raw_year = path_parts
+    company_match = re.fullmatch(r"/(\d{8})/(\d{4})", parsed.path)
+    if parsed.netloc == "company" and company_match:
+        corp_code, raw_year = company_match.groups()
         if not _CORP_CODE.fullmatch(corp_code):
             raise ResourceRequestError("invalid_corp_code")
-        if not raw_year.isdigit():
-            raise ResourceRequestError("invalid_year")
         year = int(raw_year)
         if not 2000 <= year <= 2100:
             raise ResourceRequestError("invalid_year")
         return "company_year", {"corp_code": corp_code, "year": year}
-    if parsed.netloc == "evidence" and len(path_parts) == 1:
-        rcept_no = path_parts[0]
-        if not _RCEPT_NO.fullmatch(rcept_no):
-            raise ResourceRequestError("invalid_rcept_no")
+    evidence_match = re.fullmatch(r"/(\d{14})", parsed.path)
+    if parsed.netloc == "evidence" and evidence_match:
+        rcept_no = evidence_match.group(1)
         return "filing_evidence", {"rcept_no": rcept_no}
+    if parsed.netloc == "company":
+        raise ResourceRequestError("invalid_company_resource")
+    if parsed.netloc == "evidence":
+        raise ResourceRequestError("invalid_evidence_resource")
+    if parsed.netloc == "dataset":
+        raise ResourceRequestError("invalid_dataset_resource")
     raise ResourceRequestError("unknown_resource")
 
 
 def _dataset_readiness() -> dict[str, Any]:
     try:
-        gate = evaluate_release_gate("public_runtime")
+        with _resource_session() as session:
+            session.connection()
+    except _ResourceDatabaseUnavailable as exc:
+        gate = runtime_db_unavailable_report("public_runtime")
+        failure = str(exc)
+        if failure.startswith("resource_db_unavailable:"):
+            gate["required_failures"] = [failure]
     except Exception:
         gate = runtime_db_unavailable_report("public_runtime")
+    else:
+        try:
+            gate = evaluate_release_gate(
+                "public_runtime",
+                session_scope=_resource_session,
+                include_legacy_diagnostics=False,
+            )
+        except Exception:
+            gate = runtime_db_unavailable_report("public_runtime")
     required_failures = list(gate.get("required_failures") or [])
     schema_version = str(gate.get("schema_version") or "unknown")
     dataset_version = str(gate.get("dataset_version") or "unknown")
@@ -248,7 +308,7 @@ def _quality_payload(row: CompanyYearQuality | None) -> dict[str, Any] | None:
 
 def _company_year(corp_code: str, year: int) -> dict[str, Any]:
     try:
-        with get_session() as session:
+        with _resource_session() as session:
             company = session.get(Company, corp_code)
             if company is None:
                 raise ResourceRequestError("company_not_found")
@@ -314,6 +374,28 @@ def _company_year(corp_code: str, year: int) -> dict[str, Any]:
             quality_payload = _quality_payload(quality)
     except ResourceRequestError:
         raise
+    except _ResourceDatabaseUnavailable as exc:
+        failure = str(exc)
+        return {
+            "resource_version": "1.0",
+            "company": {"corp_code": corp_code},
+            "year": year,
+            "cache_status": "error",
+            "filing_status": "not_determined",
+            "manifest": {
+                "available": False,
+                "schema_version": "unknown",
+                "dataset_version": "unknown",
+            },
+            "quality": None,
+            "structured_facts": [],
+            "evidence": [],
+            "data_quality": {
+                "status": "error",
+                "limitations": [failure],
+            },
+            "errors": [failure],
+        }
     except Exception:
         return {
             "resource_version": "1.0",
@@ -370,7 +452,7 @@ def _bounded_text(text: str) -> tuple[str, bool]:
 def _evidence(rcept_no: str) -> dict[str, Any]:
     recovery_errors: list[str] = []
     try:
-        with get_session() as session:
+        with _resource_session() as session:
             raw = (
                 session.query(SourceDocument)
                 .filter(
@@ -403,29 +485,44 @@ def _evidence(rcept_no: str) -> dict[str, Any]:
             source_basis: str | None = None
             if raw is not None:
                 try:
-                    text_value = RawDocumentStore().read(
+                    raw_text = RawDocumentStore().read(
                         raw.storage_uri,
                         expected_hash=raw.doc_hash,
                     )
-                    source_basis = "raw_external"
+                    if raw_text.strip():
+                        text_value = raw_text
+                        source_basis = "raw_external"
+                    else:
+                        recovery_errors.append("raw_external_blank")
                 except Exception:
                     recovery_errors.append("raw_external_read_failed")
 
             if text_value is None and normalized is not None:
                 if normalized.full_text_uri:
                     try:
-                        text_value = EvidenceBlobStore().read(
+                        normalized_text = EvidenceBlobStore().read(
                             normalized.full_text_uri,
                             expected_hash=normalized.full_text_hash,
                         )
-                        source_basis = "normalized_evidence"
+                        if normalized_text.strip():
+                            text_value = normalized_text
+                            source_basis = "normalized_evidence"
+                        else:
+                            recovery_errors.append(
+                                "normalized_evidence_blank"
+                            )
                     except Exception:
                         recovery_errors.append(
                             "normalized_external_read_failed"
                         )
                 if text_value is None and normalized.normalized_text:
-                    text_value = normalized.normalized_text
-                    source_basis = "normalized_evidence"
+                    if normalized.normalized_text.strip():
+                        text_value = normalized.normalized_text
+                        source_basis = "normalized_evidence"
+                    elif "normalized_evidence_blank" not in recovery_errors:
+                        recovery_errors.append(
+                            "normalized_evidence_blank"
+                        )
 
             if text_value is None:
                 section_parts: list[str] = []
@@ -437,17 +534,39 @@ def _evidence(rcept_no: str) -> dict[str, Any]:
                                 section.full_text_uri,
                                 expected_hash=section.full_text_hash,
                             )
+                            if not section_text.strip():
+                                recovery_errors.append(
+                                    "derived_evidence_blank"
+                                )
+                                section_text = None
                         except Exception:
                             recovery_errors.append(
                                 "derived_external_read_failed"
                             )
                     if section_text is None and section.body_text:
                         section_text = section.body_text
-                    if section_text:
+                    if section_text and section_text.strip():
                         section_parts.append(section_text)
                 if section_parts:
                     text_value = "\n\n".join(section_parts)
                     source_basis = "derived_summary"
+    except _ResourceDatabaseUnavailable as exc:
+        failure = str(exc)
+        return {
+            "resource_version": "1.0",
+            "rcept_no": rcept_no,
+            "source_url": _DART_URL.format(rcept_no=rcept_no),
+            "source_basis": None,
+            "text": "",
+            "truncated": False,
+            "cache_status": "error",
+            "filing_status": "not_determined",
+            "data_quality": {
+                "status": "error",
+                "limitations": [failure],
+            },
+            "errors": [failure],
+        }
     except Exception:
         return {
             "resource_version": "1.0",

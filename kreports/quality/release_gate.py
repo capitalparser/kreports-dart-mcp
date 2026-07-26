@@ -85,7 +85,9 @@ def _as_utc(value: Any) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _runtime_schema_state() -> tuple[
+def _runtime_schema_state(
+    session_scope=get_session,
+) -> tuple[
     list[str],
     str,
     str,
@@ -95,7 +97,7 @@ def _runtime_schema_state() -> tuple[
 ]:
     """Read schema, immutable manifest, and stale-run state without mutation."""
     failures: list[str] = []
-    with get_session() as session:
+    with session_scope() as session:
         bind = session.get_bind()
         table_names = set(inspect(bind).get_table_names())
         for table_name in REQUIRED_TABLES:
@@ -360,6 +362,7 @@ def _coverage_result(numerator: int, denominator: int) -> CoverageResult:
 
 def _quality_coverage(
     manifest_year: int | None,
+    session_scope=get_session,
 ) -> tuple[
     int | None,
     dict[str, CoverageResult],
@@ -367,7 +370,7 @@ def _quality_coverage(
     dict[str, dict[str, int]],
 ]:
     """Calculate exact current-population coverage and exclusions."""
-    with get_session() as session:
+    with session_scope() as session:
         table_names = set(inspect(session.get_bind()).get_table_names())
         if "company_year_quality" not in table_names:
             return _empty_quality_contract()
@@ -553,6 +556,9 @@ def _below_threshold(result: CoverageResult | None) -> bool:
 
 def evaluate_release_gate(
     profile: str = PROFILE_PUBLIC_RUNTIME,
+    *,
+    session_scope=get_session,
+    include_legacy_diagnostics: bool = True,
 ) -> ReleaseGateReport:
     """Evaluate a no-write release profile without repairing live state."""
     if profile not in SUPPORTED_PROFILES:
@@ -566,13 +572,13 @@ def evaluate_release_gate(
             running_started_at,
             manifest_available,
             manifest_year,
-        ) = _runtime_schema_state()
+        ) = _runtime_schema_state(session_scope)
         (
             coverage_year,
             coverage,
             denominators,
             excluded_populations,
-        ) = _quality_coverage(manifest_year)
+        ) = _quality_coverage(manifest_year, session_scope)
     except Exception:
         return runtime_db_unavailable_report(profile)
 
@@ -604,7 +610,7 @@ def evaluate_release_gate(
     # Older prepared databases may not have the ledger revision. Keep the
     # previous read-only diagnostics visible while failing closed on the
     # missing ledger table.
-    if not coverage:
+    if not coverage and include_legacy_diagnostics:
         try:
             snapshot = investor_dataset_readiness_snapshot()
             if snapshot.get("required_gaps"):

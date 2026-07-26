@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 from typing import Any
 
 from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
@@ -18,7 +19,8 @@ WORKFLOW_SPECS: dict[str, tuple[str, ...]] = {
         "get_financial_snapshot",
         "get_quality_of_earnings_pack",
         "search_disclosure_events",
-        "get_investor_signals",
+        "score_going_concern",
+        "get_audit_history",
     ),
     "audit_acceptance_review": (
         "get_audit_history",
@@ -35,6 +37,27 @@ WORKFLOW_SPECS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+WORKFLOW_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "investor_first_pass": (
+        "financial_snapshot",
+        "quality_of_earnings",
+        "disclosure_events",
+        "accounting_audit_risk",
+    ),
+    "audit_acceptance_review": (
+        "audit_history_and_opinion",
+        "acceptance_evidence_and_gaps",
+    ),
+    "group_audit_scope": ("group_scope_and_component_evidence",),
+    "accounting_policy_peer_review": (
+        "policy_text",
+        "policy_change_history",
+        "peer_differences",
+        "kam_linkage",
+    ),
+}
+
+MAX_WORKFLOW_OUTPUT_CHARACTERS = 100_000
 _MAX_ANSWER_CHARACTERS = 8_000
 _MAX_ITEMS = 20
 _MAX_NESTED_TEXT = 1_000
@@ -60,7 +83,8 @@ def _bound_value(value: Any, *, depth: int = 0) -> Any:
 
 def _bounded_child(
     envelope: AnswerEnvelopeV1 | dict[str, Any],
-) -> dict[str, Any]:
+    tool: str,
+) -> tuple[dict[str, Any], bool]:
     raw = (
         envelope.model_dump(mode="json")
         if isinstance(envelope, AnswerEnvelopeV1)
@@ -77,9 +101,30 @@ def _bounded_child(
             "missing_fields": [],
             "limitations": ["invalid_child_answer_contract"],
         }
-    return {
+    else:
+        quality = dict(quality)
+    error_key = (
+        "error"
+        if "error" in raw
+        else "exception"
+        if "exception" in raw
+        else None
+    )
+    if error_key is not None:
+        raw_error = raw.get(error_key)
+        bounded_error = str(raw_error).replace("\n", " ")[:300]
+        quality["status"] = "error"
+        quality["grade"] = None
+        limitations = quality.get("limitations")
+        if not isinstance(limitations, list):
+            limitations = []
+        quality["limitations"] = [
+            bounded_error or "specialist_error",
+            *limitations,
+        ][:_MAX_ITEMS]
+    child = {
         "schema_version": str(raw.get("schema_version") or "1.0")[:20],
-        "tool_name": str(raw.get("tool_name") or "unknown")[:120],
+        "tool_name": str(raw.get("tool_name") or tool)[:120],
         "verdict": str(raw.get("verdict") or "")[:1_000],
         "answer": str(raw.get("answer") or "")[:_MAX_ANSWER_CHARACTERS],
         "confirmed_facts": _bound_value(raw.get("confirmed_facts") or []),
@@ -88,6 +133,84 @@ def _bounded_child(
         "data_quality": _bound_value(quality),
         "warnings": _bound_value(raw.get("warnings") or []),
         "next_checks": _bound_value(raw.get("next_checks") or []),
+    }
+    was_bounded = (
+        len(str(raw.get("answer") or "")) > _MAX_ANSWER_CHARACTERS
+        or len(str(raw.get("verdict") or "")) > 1_000
+        or raw.get("confirmed_facts", []) != child["confirmed_facts"]
+        or raw.get("analysis", []) != child["analysis"]
+        or raw.get("evidence", []) != child["evidence"]
+        or raw.get("warnings", []) != child["warnings"]
+        or raw.get("next_checks", []) != child["next_checks"]
+    )
+    return child, was_bounded
+
+
+def _compact_child(child: dict[str, Any]) -> dict[str, Any]:
+    quality = child.get("data_quality") or {}
+    compact_quality = {
+        "status": str(quality.get("status") or "error")[:20],
+        "grade": quality.get("grade"),
+        "dataset_version": str(
+            quality.get("dataset_version") or "unknown"
+        )[:120],
+        "schema_version": str(
+            quality.get("schema_version") or "unknown"
+        )[:120],
+        "covered_years": list(quality.get("covered_years") or [])[:10],
+        "missing_fields": [
+            str(item)[:200]
+            for item in list(quality.get("missing_fields") or [])[:10]
+        ],
+        "limitations": [
+            str(item)[:300]
+            for item in list(quality.get("limitations") or [])[:10]
+        ],
+    }
+    compact_evidence = []
+    for item in list(child.get("evidence") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        compact_evidence.append(
+            {
+                "source_label": str(item.get("source_label") or "")[:200],
+                "source_url": str(item.get("source_url") or "")[:1_000],
+                "rcept_no": (
+                    str(item["rcept_no"])[:80]
+                    if item.get("rcept_no") is not None
+                    else None
+                ),
+                "section_title": (
+                    str(item["section_title"])[:300]
+                    if item.get("section_title") is not None
+                    else None
+                ),
+                "excerpt": (
+                    str(item["excerpt"])[:500]
+                    if item.get("excerpt") is not None
+                    else None
+                ),
+            }
+        )
+    return {
+        "schema_version": str(child.get("schema_version") or "1.0")[:20],
+        "tool_name": str(child.get("tool_name") or "unknown")[:120],
+        "verdict": str(child.get("verdict") or "")[:500],
+        "answer": str(child.get("answer") or "")[:1_000],
+        "confirmed_facts": _bound_value(
+            list(child.get("confirmed_facts") or [])[:2]
+        ),
+        "analysis": _bound_value(list(child.get("analysis") or [])[:2]),
+        "evidence": compact_evidence,
+        "data_quality": compact_quality,
+        "warnings": [
+            str(item)[:300]
+            for item in list(child.get("warnings") or [])[:5]
+        ],
+        "next_checks": [
+            str(item)[:300]
+            for item in list(child.get("next_checks") or [])[:5]
+        ],
     }
 
 
@@ -108,12 +231,7 @@ def _arguments(workflow: str, tool: str, company: str, year: int) -> dict[str, A
             "end_date": f"{year}-12-31",
             "limit": 50,
         },
-        "get_investor_signals": {
-            **common,
-            "years": 5,
-            "window_days": 365,
-            "event_limit": 20,
-        },
+        "score_going_concern": common,
         "get_audit_history": common,
         "build_audit_acceptance_pack": {
             **common,
@@ -182,6 +300,7 @@ def run_workflow(
 
     children: list[dict[str, Any]] = []
     limitations: list[str] = []
+    output_was_bounded = False
     seen: set[str] = set()
     for tool in specialists:
         if tool in seen:
@@ -194,7 +313,8 @@ def run_workflow(
             )
         except Exception:
             envelope = _failed_child(tool)
-        child = _bounded_child(envelope)
+        child, child_was_bounded = _bounded_child(envelope, tool)
+        output_was_bounded = output_was_bounded or child_was_bounded
         status = str(
             (child.get("data_quality") or {}).get("status") or "error"
         )
@@ -215,15 +335,36 @@ def run_workflow(
         if statuses & {"missing", "limited"}
         else "usable"
     )
-    return {
+    result = {
         "workflow_version": "1.0",
         "workflow_name": workflow,
+        "categories": list(WORKFLOW_CATEGORIES[workflow]),
         "company": normalized_company,
         "year": int(year),
         "status": status,
         "children": children,
         "limitations": limitations,
     }
+    if (
+        output_was_bounded
+        or len(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        > MAX_WORKFLOW_OUTPUT_CHARACTERS
+    ):
+        result["children"] = [
+            _compact_child(child) for child in children
+        ]
+        result["limitations"] = [
+            *limitations,
+            "workflow_output_truncated",
+        ]
+        if status != "error":
+            result["status"] = "limited"
+    if (
+        len(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        > MAX_WORKFLOW_OUTPUT_CHARACTERS
+    ):
+        raise RuntimeError("workflow_output_budget_exceeded")
+    return result
 
 
 def investor_first_pass(
