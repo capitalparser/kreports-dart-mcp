@@ -1,5 +1,6 @@
 from decimal import Decimal
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -350,3 +351,56 @@ def test_dcf_direct_api_rejects_fuzzy_or_ambiguous_names_and_numeric_coercion(
 
     with pytest.raises((TypeError, ValueError), match="base_year"):
         build_dcf_model_pack("000001", True)
+
+
+def test_dcf_exact_identity_resolution_uses_immutable_sqlite_reads(
+    tmp_path,
+    monkeypatch,
+):
+    from sqlalchemy import create_engine, text
+
+    import kreports.db.engine as engine_module
+    from kreports.analysis.financial_analysis import _resolve_dcf_company_exact
+    from kreports.db.models import Base
+
+    database_path = tmp_path / "immutable-identity.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    Base.metadata.create_all(engine)
+    with engine.connect() as connection:
+        connection.execute(text("PRAGMA journal_mode=WAL"))
+        connection.commit()
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO companies
+            (corp_code, stock_code, corp_name, market, updated_at)
+            VALUES
+            ('00126380', '005930', '삼성전자', 'KOSPI', CURRENT_TIMESTAMP)
+        """))
+    with engine.connect() as connection:
+        connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        connection.commit()
+    engine.dispose()
+    monkeypatch.setattr(engine_module, "engine", engine)
+
+    tracked_paths = (
+        database_path,
+        Path(f"{database_path}-wal"),
+        Path(f"{database_path}-shm"),
+    )
+    before = {
+        path: (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in tracked_paths
+        if path.exists()
+    }
+
+    corp_code, subject, error = _resolve_dcf_company_exact("00126380")
+
+    after = {
+        path: (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in tracked_paths
+        if path.exists()
+    }
+    assert error is None
+    assert corp_code == "00126380"
+    assert subject["corp_name"] == "삼성전자"
+    assert after == before

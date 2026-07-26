@@ -775,33 +775,37 @@ def _resolve_dcf_company_exact(
     company: str,
 ) -> tuple[str | None, dict | None, str | None]:
     """Resolve only an exact corp/stock code or one normalized exact name."""
+    from kreports.analysis.dcf_source import dcf_read_engine
+
     if not isinstance(company, str) or not company.strip():
         return None, None, "회사 식별자는 비어 있지 않은 문자열이어야 합니다."
     identifier = company.strip()
-    with _engine_module.engine.connect() as connection:
-        if identifier.isdigit() and len(identifier) in {6, 8}:
-            column = "corp_code" if len(identifier) == 8 else "stock_code"
-            rows = connection.execute(text(f"""
-                SELECT corp_code, stock_code, corp_name, market, induty_code
-                FROM companies
-                WHERE {column}=:identifier
-                ORDER BY corp_code
-                LIMIT 2
-            """), {"identifier": identifier}).mappings().all()
-        elif identifier.isdigit():
-            rows = []
-        else:
-            normalized = _normalized_exact_company_name(identifier)
-            rows = [
-                row
-                for row in connection.execute(text("""
+    with dcf_read_engine() as read_engine:
+        with read_engine.connect() as connection:
+            if identifier.isdigit() and len(identifier) in {6, 8}:
+                column = "corp_code" if len(identifier) == 8 else "stock_code"
+                rows = connection.execute(text(f"""
                     SELECT corp_code, stock_code, corp_name, market, induty_code
                     FROM companies
+                    WHERE {column}=:identifier
                     ORDER BY corp_code
-                """)).mappings().all()
-                if _normalized_exact_company_name(str(row["corp_name"]))
-                == normalized
-            ][:2]
+                    LIMIT 2
+                """), {"identifier": identifier}).mappings().all()
+            elif identifier.isdigit():
+                rows = []
+            else:
+                normalized = _normalized_exact_company_name(identifier)
+                rows = [
+                    row
+                    for row in connection.execute(text("""
+                        SELECT corp_code, stock_code, corp_name, market,
+                               induty_code
+                        FROM companies
+                        ORDER BY corp_code
+                    """)).mappings().all()
+                    if _normalized_exact_company_name(str(row["corp_name"]))
+                    == normalized
+                ][:2]
     if len(rows) == 1:
         subject = dict(rows[0])
         return str(subject["corp_code"]), subject, None
