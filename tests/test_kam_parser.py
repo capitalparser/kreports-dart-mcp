@@ -169,6 +169,38 @@ def test_parser_keeps_unpunctuated_procedure_before_unnumbered_matter(procedure)
     assert "표본 재고" in items[1].audit_response_text
 
 
+@pytest.mark.parametrize(
+    "procedure",
+    [
+        pytest.param("1. 계약 관련", id="arabic"),
+        pytest.param("I. 계약 관련", id="roman"),
+        pytest.param("가. 계약 관련", id="korean"),
+    ],
+)
+def test_parser_keeps_connector_procedure_before_unnumbered_matter(procedure):
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = f"""
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단에 유의적인 위험이 있습니다.
+    감사인이 수행한 주요 절차
+    {procedure}
+    재고자산 평가
+    핵심감사사항으로 결정한 이유
+    순실현가능가치 추정에 유의적인 판단이 포함됩니다.
+    감사에서 다루어진 방법
+    표본 재고의 예상판매가격을 검사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
+    assert items[0].audit_response_text == procedure
+    assert "표본 재고" in items[1].audit_response_text
+
+
 def test_parser_joins_wrapped_numbered_next_matter_inside_response_state():
     from kreports.processor.kam_parser import extract_kam_items
 
@@ -474,6 +506,29 @@ def test_parser_supports_standard_english_reason_headings(reason_heading):
     assert items[0].title == "Revenue recognition"
     assert "significant judgment" in items[0].reason_text
     assert "sample of contracts" in items[0].audit_response_text
+
+
+def test_parser_collapses_duplicate_reason_heading_before_response():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    핵심감사사항으로 선정한 이유
+    복합계약 판단 위험
+    감사에서 다루어진 방법
+    계약 표본을 검사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+    assert items[0].reason_text == "기간귀속 판단 위험\n복합계약 판단 위험"
+    assert "핵심감사사항으로 선정한 이유" not in items[0].reason_text
+    assert items[0].audit_response_text == "계약 표본을 검사했습니다."
 
 
 def test_rebuild_prefers_exact_receipt_source_document_and_dry_run_writes_nothing(

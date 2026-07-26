@@ -99,6 +99,7 @@ class ParsedKamItem:
 class _TitleBoundary:
     start: int
     title: str
+    marker: tuple[str, str] | None
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,15 @@ class _MatterFrame:
     title_start: int
     title: str
     reason_heading: int
+    reason_separators: tuple[int, ...]
+    response_heading: int
+    marker: tuple[str, str] | None
+
+
+@dataclass(frozen=True)
+class _HeadingFrame:
+    reason_heading: int
+    reason_separators: tuple[int, ...]
     response_heading: int
 
 
@@ -224,6 +234,7 @@ def _discover_title_boundary(
     lower: int,
     reason_index: int,
     response_owned: bool,
+    current_marker: tuple[str, str] | None,
 ) -> _TitleBoundary | None:
     """Discover one reason-anchored title without segmenting any fields."""
     if reason_index <= lower:
@@ -253,16 +264,26 @@ def _discover_title_boundary(
 
     start: int
     title_values: list[str]
+    selected_marker: tuple[str, str] | None = None
     if marker_index is None or marker is None:
         start = _unnumbered_suffix_start(lines, scan_start, reason_index)
         title_values = lines[start:reason_index]
     else:
-        _, _, marked_title = marker
+        family, identity, marked_title = marker
         suffix_start = marker_index + 1
         has_suffix = suffix_start < reason_index
-        marked_wrap = has_suffix and _is_title_continuation(
-            marked_title,
-            lines[suffix_start],
+        is_distinct_matter_marker = (
+            not response_owned
+            or (
+                current_marker is not None
+                and family == current_marker[0]
+                and identity != current_marker[1]
+            )
+        )
+        marked_wrap = (
+            has_suffix
+            and is_distinct_matter_marker
+            and _is_title_continuation(marked_title, lines[suffix_start])
         )
         if response_owned and has_suffix and not marked_wrap:
             # This marker already belongs to the accepted matter's response.
@@ -273,6 +294,7 @@ def _discover_title_boundary(
         else:
             start = marker_index
             title_values = [marked_title, *lines[suffix_start:reason_index]]
+            selected_marker = (family, identity)
 
     if sum(len(line) for line in lines[start:reason_index]) > MAX_TITLE_BLOCK_CHARS:
         return None
@@ -282,40 +304,53 @@ def _discover_title_boundary(
     return _TitleBoundary(
         start=start,
         title=title,
+        marker=selected_marker,
     )
+
+
+def _discover_heading_frames(lines: list[str]) -> list[_HeadingFrame]:
+    frames: list[_HeadingFrame] = []
+    reason_heading: int | None = None
+    reason_separators: list[int] = []
+    state = "seeking_reason"
+    for index, line in enumerate(lines):
+        if _matches_heading(line, _REASON_HEADINGS):
+            if state == "reading_reason":
+                reason_separators.append(index)
+            else:
+                reason_heading = index
+                reason_separators = []
+                state = "reading_reason"
+            continue
+        if (
+            state == "reading_reason"
+            and reason_heading is not None
+            and _matches_heading(line, _RESPONSE_HEADINGS)
+        ):
+            frames.append(
+                _HeadingFrame(
+                    reason_heading=reason_heading,
+                    reason_separators=tuple(reason_separators),
+                    response_heading=index,
+                )
+            )
+            state = "reading_response"
+    return frames
 
 
 def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
     """Phase 1: discover matter boundaries with a bounded heading state machine."""
-    reason_indices = [
-        index
-        for index, line in enumerate(lines)
-        if _matches_heading(line, _REASON_HEADINGS)
-    ]
+    heading_frames = _discover_heading_frames(lines)
     frames: list[_MatterFrame] = []
     previous_response: int | None = None
-    for anchor_position, reason_index in enumerate(reason_indices):
-        next_reason = (
-            reason_indices[anchor_position + 1]
-            if anchor_position + 1 < len(reason_indices)
-            else len(lines)
-        )
-        response_index = next(
-            (
-                index
-                for index in range(reason_index + 1, next_reason)
-                if _matches_heading(lines[index], _RESPONSE_HEADINGS)
-            ),
-            None,
-        )
-        if response_index is None:
-            continue
+    for heading_frame in heading_frames:
         lower = previous_response + 1 if previous_response is not None else 0
         title = _discover_title_boundary(
             lines,
             lower=lower,
-            reason_index=reason_index,
+            reason_index=heading_frame.reason_heading,
             response_owned=previous_response is not None,
+            current_marker=frames[-1].marker if frames else None,
         )
         if title is None:
             continue
@@ -323,11 +358,13 @@ def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
             _MatterFrame(
                 title_start=title.start,
                 title=title.title,
-                reason_heading=reason_index,
-                response_heading=response_index,
+                reason_heading=heading_frame.reason_heading,
+                reason_separators=heading_frame.reason_separators,
+                response_heading=heading_frame.response_heading,
+                marker=title.marker,
             )
         )
-        previous_response = response_index
+        previous_response = heading_frame.response_heading
     return frames
 
 
@@ -388,7 +425,12 @@ def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
         )
         matter_lines = lines[frame.title_start:end]
         reason = "\n".join(
-            lines[frame.reason_heading + 1:frame.response_heading]
+            line
+            for index, line in enumerate(
+                lines[frame.reason_heading + 1:frame.response_heading],
+                start=frame.reason_heading + 1,
+            )
+            if index not in frame.reason_separators
         ).strip()
         response = "\n".join(lines[frame.response_heading + 1:end]).strip()
         if not reason or not response:
