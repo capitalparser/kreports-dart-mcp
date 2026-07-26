@@ -1,7 +1,7 @@
 """Deterministic parser for full-body key audit matters."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha1
 from html import unescape
 import re
@@ -169,6 +169,11 @@ class StructuredLine:
     origin: str
     block_id: int
     blank_before: bool = False
+    tag_path: tuple[str, ...] = ()
+    is_title_container: bool = False
+    is_table_header: bool = False
+    is_table_cell: bool = False
+    is_explicit_heading: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,11 +214,20 @@ def _compact(value: str) -> str:
 def _structured_lines(full_text: str) -> list[StructuredLine]:
     bounded = (full_text or "")[:MAX_INPUT_CHARS]
     lines: list[StructuredLine] = []
-    origin_stack: list[str] = []
-    origin = "plain"
+    tag_stack: list[tuple[str, bool]] = []
     buffer: list[str] = []
     block_id = 0
     blank_before = False
+
+    def current_origin() -> str:
+        for tag, _ in reversed(tag_stack):
+            if tag == "title":
+                return "title"
+            if tag in {"td", "th"}:
+                return "table_cell"
+            if tag == "p":
+                return "paragraph"
+        return "plain"
 
     def flush() -> None:
         nonlocal block_id, blank_before
@@ -222,24 +236,54 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         if not value:
             blank_before = True
             return
+        tag_path = tuple(tag for tag, _ in tag_stack)
         lines.append(
             StructuredLine(
                 text=value,
-                origin=origin,
+                origin=current_origin(),
                 block_id=block_id,
                 blank_before=blank_before,
+                tag_path=tag_path,
+                is_title_container="title" in tag_path,
+                is_table_header="th" in tag_path,
+                is_table_cell=any(
+                    tag in {"td", "th"}
+                    for tag in tag_path
+                ),
+                is_explicit_heading=any(
+                    explicit_heading
+                    for _, explicit_heading in tag_stack
+                ),
             )
         )
         block_id += 1
         blank_before = False
 
-    origin_tags = {
-        "title": "title",
-        "td": "table_cell",
-        "th": "table_cell",
-        "p": "paragraph",
-    }
-    block_tags = {*origin_tags, "tr", "table", "br"}
+    def explicit_heading(tag: str, token: str) -> bool:
+        if tag in {"title", "th"}:
+            return True
+        if tag != "td":
+            return False
+        attributes: dict[str, str] = {}
+        for match in re.finditer(
+            r"""([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""",
+            token,
+        ):
+            attributes[match.group(1).lower()] = next(
+                value
+                for value in match.groups()[1:]
+                if value is not None
+            )
+        if attributes.get("role", "").lower() == "heading":
+            return True
+        class_tokens = {
+            value.lower()
+            for value in re.split(r"[\s_-]+", attributes.get("class", ""))
+            if value
+        }
+        return bool(class_tokens & {"heading", "title"})
+
+    block_tags = {"title", "p", "td", "th", "tr", "table", "br"}
     for token in _HTML_TOKEN_RE.findall(bounded):
         if token.startswith("<"):
             match = re.match(r"<\s*(/?)\s*([A-Za-z0-9]+)", token)
@@ -250,12 +294,19 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             if tag not in block_tags:
                 continue
             flush()
-            if tag in origin_tags:
-                if closing:
-                    origin = origin_stack.pop() if origin_stack else "plain"
-                else:
-                    origin_stack.append(origin)
-                    origin = origin_tags[tag]
+            if closing:
+                matching_index = next(
+                    (
+                        index
+                        for index in range(len(tag_stack) - 1, -1, -1)
+                        if tag_stack[index][0] == tag
+                    ),
+                    None,
+                )
+                if matching_index is not None:
+                    del tag_stack[matching_index:]
+            elif tag != "br" and not token.rstrip().endswith("/>"):
+                tag_stack.append((tag, explicit_heading(tag, token)))
             continue
         text = unescape(token)
         text = re.sub(r"&cr;|&#13;", "\n", text, flags=re.IGNORECASE)
@@ -580,7 +631,7 @@ def _has_explicit_title_structure(
     if structured_lines is None:
         return False
     return any(
-        line.origin in {"title", "table_cell"}
+        line.is_explicit_heading
         for line in structured_lines[title.start:reason_heading]
     )
 
@@ -646,10 +697,13 @@ def _has_ambiguous_plain_boundary(
             continue
         candidate_lines = structured_lines[lower:current.reason_heading]
         if any(
-            line.origin in {"title", "table_cell"}
+            line.is_explicit_heading
             for line in candidate_lines
         ):
             continue
+        candidate_line = structured_lines[current.reason_heading - 1]
+        if candidate_line.is_table_cell:
+            return True
         marker_positions = [
             index
             for index in range(lower, current.reason_heading)
@@ -657,7 +711,7 @@ def _has_ambiguous_plain_boundary(
         ]
         if marker_positions and current.reason_heading - marker_positions[-1] > 1:
             continue
-        candidate = lines[current.reason_heading - 1]
+        candidate = candidate_line.text
         title_score = _title_evidence_score(candidate)
         procedure_score = _procedure_evidence_score(candidate)
         same_literal_pair = (
@@ -768,7 +822,23 @@ def _items_from_frames(
                 full_body_length=len(body),
             )
         )
-    return items
+    deduplicated: list[ParsedKamItem] = []
+    previous_signature: tuple[object, ...] | None = None
+    for item in items:
+        signature = (
+            _compact(item.title),
+            item.reason_text,
+            item.audit_response_text,
+            tuple(item.related_note_references),
+            item.full_body_hash,
+        )
+        if signature == previous_signature:
+            continue
+        deduplicated.append(
+            replace(item, ordinal=len(deduplicated) + 1)
+        )
+        previous_signature = signature
+    return deduplicated
 
 
 def parse_kam_items(full_text: str) -> KamParseOutcome:

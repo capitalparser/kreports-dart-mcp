@@ -166,6 +166,228 @@ def test_parse_outcome_rejects_three_page_mixed_nominal_procedures():
     assert outcome.items == []
 
 
+@pytest.mark.parametrize(
+    "container",
+    [
+        pytest.param("TITLE", id="title"),
+        pytest.param("TH", id="table-header"),
+        pytest.param('TD role="heading"', id="explicit-heading-cell"),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested-p"])
+def test_parse_outcome_preserves_strong_heading_ancestry(container, nested):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    def heading(value):
+        content = f"<P>{value}</P>" if nested else value
+        tag = container.split()[0]
+        return f"<{container}>{content}</{tag}>"
+
+    body = f"""
+    <TITLE>Key Audit Matters</TITLE>
+    {heading("Revenue recognition")}
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    {heading("Classification of leases")}
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Lease classification requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We reviewed management's classification.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "Revenue recognition",
+        "Classification of leases",
+    ]
+
+
+@pytest.mark.parametrize(
+    "procedure",
+    [
+        "2. 재고자산 평가",
+        "2. 매출채권 표본 추출",
+        "II. Goodwill impairment assessment",
+    ],
+)
+def test_parse_outcome_does_not_promote_generic_td_procedure(procedure):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TABLE>
+    <TR><TH>1. 수익인식</TH></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>기간귀속 판단 위험</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>{procedure}</TD></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>페이지 반복 위험 본문</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>추가 감사절차</TD></TR>
+    </TABLE>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
+def test_parse_outcome_rejects_three_page_generic_td_procedures():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>핵심감사사항</TITLE>
+    <TABLE>
+    <TR><TH>1. 수익인식</TH></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>위험 본문 1</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>1. 계약 검사</TD></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>위험 본문 2</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>2. 재고자산 평가</TD></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>위험 본문 3</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>II. Goodwill impairment assessment</TD></TR>
+    </TABLE>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
+def test_parse_outcome_requires_explicit_role_for_generic_td_title():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>핵심감사사항</TITLE>
+    <TABLE>
+    <TR><TH>1. 수익인식</TH></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>기간귀속 판단 위험</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>계약 표본 검사</TD></TR>
+    <TR><TD>2. 연결범위의 적정성</TD></TR>
+    <TR><TD>핵심감사사항으로 결정한 이유</TD></TR>
+    <TR><TD>연결대상 판단 위험</TD></TR>
+    <TR><TD>감사인의 대응</TD></TR>
+    <TR><TD>지배력 판단 검토</TD></TR>
+    </TABLE>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
+def test_parse_outcome_recovers_malformed_nested_title_deterministically():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE><P>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.<BR/></P>
+    """
+
+    first = parse_kam_items(body)
+    second = parse_kam_items(body)
+
+    assert first == second
+    assert first.status == "complete"
+    assert [item.title for item in first.items] == ["Revenue recognition"]
+
+
+def test_parser_collapses_only_adjacent_exact_full_matter_duplicates():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    matter = """
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    """
+    body = f"<TITLE>Key Audit Matters</TITLE>{matter}{matter}"
+    single = extract_kam_items(f"<TITLE>Key Audit Matters</TITLE>{matter}")
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].ordinal == 1
+    assert items[0].full_body_hash == single[0].full_body_hash
+
+
+def test_parser_keeps_same_title_when_matter_body_differs():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Variable consideration requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We recalculated variable consideration.</P>
+    """
+
+    items = extract_kam_items(body)
+
+    assert [item.ordinal for item in items] == [1, 2]
+    assert [item.title for item in items] == [
+        "Revenue recognition",
+        "Revenue recognition",
+    ]
+    assert items[0].full_body_hash != items[1].full_body_hash
+
+
+def test_parser_keeps_nonadjacent_exact_matters():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    repeated = """
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    """
+    middle = """
+    <TITLE>Goodwill impairment</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Forecast assumptions require significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We tested forecast assumptions.</P>
+    """
+    body = f"<TITLE>Key Audit Matters</TITLE>{repeated}{middle}{repeated}"
+
+    items = extract_kam_items(body)
+
+    assert [item.ordinal for item in items] == [1, 2, 3]
+    assert [item.title for item in items] == [
+        "Revenue recognition",
+        "Goodwill impairment",
+        "Revenue recognition",
+    ]
+    assert items[0].full_body_hash == items[2].full_body_hash
+
+
 def test_multi_kam_parser_separates_reason_response_and_notes():
     from kreports.processor.kam_parser import extract_kam_items
 
