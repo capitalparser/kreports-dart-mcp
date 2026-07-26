@@ -1,11 +1,11 @@
 """Company identity, profile, and financial snapshot handlers."""
 from __future__ import annotations
 
-from kreports.analysis.api import (
+from kreports.analysis.company_profile import (
     get_business_overview,
-    get_financial_snapshot,
     search_company,
 )
+from kreports.analysis.financial_analysis import get_financial_snapshot
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     GetBusinessOverviewInput,

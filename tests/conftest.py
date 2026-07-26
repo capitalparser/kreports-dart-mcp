@@ -24,11 +24,10 @@ def temp_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(engine_module, "engine", test_engine)
     monkeypatch.setattr(engine_module, "SessionLocal", new_session_maker)
 
-    import kreports.analysis.api as api_module
+    import kreports.analysis.company_profile as company_profile_module
     import kreports.analysis.peer as peer_module
     import kreports.analysis.readiness as readiness_module
 
-    monkeypatch.setattr(api_module, "_engine", test_engine)
     monkeypatch.setattr(peer_module, "engine", test_engine)
     monkeypatch.setattr(readiness_module, "engine", test_engine)
 
@@ -45,7 +44,7 @@ def temp_engine(monkeypatch, tmp_path):
     def isolated_raw_store(**kwargs):
         return RawDocumentStore(base_dir=raw_root, **kwargs)
 
-    monkeypatch.setattr(api_module, "RawDocumentStore", isolated_raw_store)
+    monkeypatch.setattr(company_profile_module, "RawDocumentStore", isolated_raw_store)
     monkeypatch.setattr(on_demand_module, "RawDocumentStore", isolated_raw_store)
     monkeypatch.setattr(report_collector_module, "RawDocumentStore", isolated_raw_store)
     monkeypatch.setattr(raw_migration_module, "RawDocumentStore", isolated_raw_store)

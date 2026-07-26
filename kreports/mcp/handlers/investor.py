@@ -1,7 +1,7 @@
 """Investor-quality and disclosure-event handlers."""
 from __future__ import annotations
 
-from kreports.analysis.api import (
+from kreports.analysis.financial_analysis import (
     detect_restatement,
     get_dcf_input_candidates,
     get_investor_signals,

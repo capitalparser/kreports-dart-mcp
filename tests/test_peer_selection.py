@@ -48,7 +48,7 @@ def test_select_peer_group_mcp_dispatch():
 
 
 def test_select_peer_group_propagates_requested_year_to_cohort_resolution(temp_engine, monkeypatch):
-    from kreports.analysis import api
+    from kreports.analysis import api, peer_benchmarks
     from kreports.analysis.peer import PeerResolution, SectorGroup
     from kreports.db.engine import get_session
     from kreports.db.models import Company
@@ -66,8 +66,8 @@ def test_select_peer_group_propagates_requested_year_to_cohort_resolution(temp_e
         seen["peer_year"] = kwargs["year"]
         return PeerResolution([], 3, SectorGroup.GENERAL, 0, resolved_year=kwargs["year"])
 
-    monkeypatch.setattr(api, "resolve_fs_div_for_company", fake_fs_div)
-    monkeypatch.setattr(api, "resolve_peers", fake_resolve_peers)
+    monkeypatch.setattr(peer_benchmarks, "resolve_fs_div_for_company", fake_fs_div)
+    monkeypatch.setattr(peer_benchmarks, "resolve_peers", fake_resolve_peers)
     out = api.select_peer_group("00000001", year=2022)
 
     assert seen == {"fs_year": 2022, "peer_year": 2022}

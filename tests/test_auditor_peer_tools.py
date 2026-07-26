@@ -420,12 +420,12 @@ def test_search_dataset_source_documents_marks_derived_evidence(temp_engine):
 
 
 def test_search_dataset_source_documents_reads_externalized_excerpt(temp_engine, tmp_path, monkeypatch):
-    import kreports.analysis.api as api_module
+    import kreports.analysis.company_profile as company_profile_module
     from kreports.db.engine import get_session
     from kreports.storage.raw_documents import RawDocumentStore, sha1_text
 
     store = RawDocumentStore(base_dir=tmp_path)
-    monkeypatch.setattr(api_module, "RawDocumentStore", lambda: store)
+    monkeypatch.setattr(company_profile_module, "RawDocumentStore", lambda: store)
     raw_content = "<DOCUMENT><P>외부 gzip 원문에서 수익인식 문단을 읽습니다.</P></DOCUMENT>"
     saved = store.write(
         corp_code="00000001",
@@ -603,7 +603,7 @@ def test_build_audit_acceptance_pack_mcp_dispatch():
 
 
 def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeypatch):
-    from kreports.analysis import api
+    from kreports.analysis import peer_benchmarks
 
     cohort = {
         "subject": {"corp_code": "001", "corp_name": "A"},
@@ -614,7 +614,7 @@ def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeyp
     }
     selected_years = []
     reused = []
-    monkeypatch.setattr(api, "select_peer_group", lambda **kwargs: (selected_years.append(kwargs["year"]) or cohort))
+    monkeypatch.setattr(peer_benchmarks, "select_peer_group", lambda **kwargs: (selected_years.append(kwargs["year"]) or cohort))
 
     def child_result(name, result):
         def child(*args, **kwargs):
@@ -622,14 +622,14 @@ def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeyp
             return result
         return child
 
-    monkeypatch.setattr(api, "compare_peer_audit_fees", child_result("fee", {"subject_metrics": {}, "benchmarks": {}}))
-    monkeypatch.setattr(api, "compare_peer_risk_profile", child_result("risk", {"subject_metrics": {}, "benchmarks": {}}))
-    monkeypatch.setattr(api, "estimate_audit_hours_proxy", child_result("hours", {"complexity_band": "low", "drivers": []}))
-    monkeypatch.setattr(api, "compare_peer_accounting_policies", child_result("policy", {"peer_count": 1, "peers_with_policy": 1, "data_quality": {"status": "usable"}}))
-    monkeypatch.setattr(api, "compare_peer_kam_topics", child_result("kam", {"audit_report_events": {}, "audit_report_sections": {}, "data_quality": {}}))
-    monkeypatch.setattr(api, "compare_peer_audit_report_matters", child_result("matter", {"matter_counts": {}, "data_quality": {}}))
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_audit_fees", child_result("fee", {"subject_metrics": {}, "benchmarks": {}}))
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_risk_profile", child_result("risk", {"subject_metrics": {}, "benchmarks": {}}))
+    monkeypatch.setattr(peer_benchmarks, "estimate_audit_hours_proxy", child_result("hours", {"complexity_band": "low", "drivers": []}))
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_accounting_policies", child_result("policy", {"peer_count": 1, "peers_with_policy": 1, "data_quality": {"status": "usable"}}))
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_kam_topics", child_result("kam", {"audit_report_events": {}, "audit_report_sections": {}, "data_quality": {}}))
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_audit_report_matters", child_result("matter", {"matter_counts": {}, "data_quality": {}}))
 
-    out = api.build_audit_acceptance_pack("001", year=2022)
+    out = peer_benchmarks.build_audit_acceptance_pack("001", year=2022)
 
     assert selected_years == [2022]
     assert {name for name, _ in reused} == {"fee", "risk", "hours", "policy", "kam", "matter"}
@@ -639,7 +639,7 @@ def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeyp
 
 
 def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):
-    from kreports.analysis import api
+    from kreports.analysis import peer_benchmarks
 
     cohort = {
         "subject": {"corp_code": "001", "corp_name": "A"},
@@ -649,7 +649,7 @@ def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):
     }
     selected = []
     passed = []
-    monkeypatch.setattr(api, "select_peer_group", lambda **kwargs: (selected.append(kwargs["year"]) or cohort))
+    monkeypatch.setattr(peer_benchmarks, "select_peer_group", lambda **kwargs: (selected.append(kwargs["year"]) or cohort))
 
     def fees(*args, **kwargs):
         passed.append(kwargs["_peer_group"])
@@ -659,9 +659,9 @@ def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):
         passed.append(kwargs["_peer_group"])
         return {"subject_metrics": {}, "data_quality": {}}
 
-    monkeypatch.setattr(api, "compare_peer_audit_fees", fees)
-    monkeypatch.setattr(api, "compare_peer_risk_profile", risk)
-    api.estimate_audit_hours_proxy("001", year=2022)
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_audit_fees", fees)
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_risk_profile", risk)
+    peer_benchmarks.estimate_audit_hours_proxy("001", year=2022)
 
     assert selected == [2022]
     assert passed == [cohort, cohort]
@@ -677,7 +677,7 @@ def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):
 ])
 def test_peer_comparators_select_the_requested_year_when_no_cohort_is_supplied(monkeypatch, comparator_name):
     """All peer comparisons must resolve their own cohort at the data year, never latest."""
-    from kreports.analysis import api
+    from kreports.analysis import peer_benchmarks
 
     selected_years = []
 
@@ -685,8 +685,8 @@ def test_peer_comparators_select_the_requested_year_when_no_cohort_is_supplied(m
         selected_years.append(kwargs["year"])
         return {"error": "stop after selection"}
 
-    monkeypatch.setattr(api, "select_peer_group", no_cohort)
-    result = getattr(api, comparator_name)("001", year=2022)
+    monkeypatch.setattr(peer_benchmarks, "select_peer_group", no_cohort)
+    result = getattr(peer_benchmarks, comparator_name)("001", year=2022)
 
     assert result == {"error": "stop after selection"}
     assert selected_years == [2022]

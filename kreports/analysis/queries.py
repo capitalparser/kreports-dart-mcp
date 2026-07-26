@@ -1793,7 +1793,6 @@ def _extract_topic_chapter_items(note_section: str) -> dict[str, dict]:
             continue
 
         # label 매칭
-        label_lower = label.lower()
         for keywords, item_key in _TOPIC_CHAPTER_MAP:
             if item_key in items:
                 continue  # 이미 매칭됨
@@ -1895,7 +1894,6 @@ def get_subsidiaries_with_auditors(corp_code: str) -> dict:
         "parse_errors": [str],
     }
     """
-    import re as _re
     from kreports.collector.fetcher import fetch_document_xml
     from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 
@@ -1996,3 +1994,36 @@ def get_subsidiaries_with_auditors(corp_code: str) -> dict:
 
     result["items"] = merged
     return result
+
+
+def get_cached_report_section_years(
+    corp_code: str,
+    source_type: str,
+    section_key: str | None = None,
+) -> list[int]:
+    """Return cached report-section years through a narrow query adapter."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import engine
+
+    where = "corp_code=:corp_code AND source_type=:source_type"
+    params: dict[str, object] = {
+        "corp_code": corp_code,
+        "source_type": source_type,
+    }
+    if section_key:
+        where += " AND section_key=:section_key"
+        params["section_key"] = section_key
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT DISTINCT bsns_year
+                FROM report_sections
+                WHERE {where}
+                ORDER BY bsns_year DESC
+                """
+            ),
+            params,
+        ).scalars().all()
+    return [int(year) for year in rows]

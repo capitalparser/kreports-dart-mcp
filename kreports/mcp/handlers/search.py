@@ -1,11 +1,11 @@
 """Dataset, peer-selection, industry, and on-demand retrieval handlers."""
 from __future__ import annotations
 
-from kreports.analysis.api import (
+from kreports.analysis.company_profile import search_dataset
+from kreports.analysis.peer_benchmarks import (
     compare_to_industry,
     compare_to_industry_multi,
     get_industry_audit_landscape,
-    search_dataset,
     select_peer_group,
 )
 from kreports.collector.on_demand import fetch_disclosure_on_demand

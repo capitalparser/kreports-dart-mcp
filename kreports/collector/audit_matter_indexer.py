@@ -7,7 +7,7 @@ from datetime import datetime
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from kreports.analysis.api import _classify_audit_matter
+from kreports.analysis.audit_reporting import _classify_audit_matter
 from kreports.db.engine import get_session, init_db
 from kreports.db.models import AuditMatterItem, ReportSection
 

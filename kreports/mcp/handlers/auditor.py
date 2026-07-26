@@ -1,7 +1,17 @@
 """Auditor evidence, peer-comparison, and engagement-planning handlers."""
 from __future__ import annotations
 
-from kreports.analysis.api import (
+from kreports.analysis.audit_reporting import (
+    get_accounting_policy,
+    get_accounting_policy_changes,
+    get_audit_history,
+    get_audit_report_sections,
+    get_kam_lifecycle,
+    search_audit_procedures,
+    search_audit_report_matters,
+)
+from kreports.analysis.group_audit import get_subsidiary_auditors
+from kreports.analysis.peer_benchmarks import (
     build_audit_acceptance_pack,
     compare_peer_accounting_policies,
     compare_peer_audit_fees,
@@ -10,14 +20,6 @@ from kreports.analysis.api import (
     compare_peer_kam_topics,
     compare_peer_risk_profile,
     estimate_audit_hours_proxy,
-    get_accounting_policy,
-    get_accounting_policy_changes,
-    get_audit_history,
-    get_audit_report_sections,
-    get_kam_lifecycle,
-    get_subsidiary_auditors,
-    search_audit_procedures,
-    search_audit_report_matters,
 )
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (

@@ -163,11 +163,11 @@ def test_disclosure_event_api_adds_confirmed_facts(temp_engine):
 
 
 def test_investor_signals_api_adds_confirmed_facts(temp_engine, monkeypatch):
-    from kreports.analysis import api
+    from kreports.analysis import financial_analysis
     from kreports.analysis.api import get_investor_signals
     from kreports.db.engine import get_session
 
-    monkeypatch.setattr(api, "get_financial_snapshot", lambda *args, **kwargs: {
+    monkeypatch.setattr(financial_analysis, "get_financial_snapshot", lambda *args, **kwargs: {
         "rows": [{
             "연도": 2024,
             "ROE": 12.5,
@@ -178,8 +178,8 @@ def test_investor_signals_api_adds_confirmed_facts(temp_engine, monkeypatch):
             "CFO_NI": 1.1,
         }],
     })
-    monkeypatch.setattr(api._queries, "get_risk_summary", lambda corp_code: {"has_data": True, "non_clean_opinion_count": 0})
-    monkeypatch.setattr(api, "_recent_investor_events", lambda *args: ([
+    monkeypatch.setattr(financial_analysis._queries, "get_risk_summary", lambda corp_code: {"has_data": True, "non_clean_opinion_count": 0})
+    monkeypatch.setattr(financial_analysis, "_recent_investor_events", lambda *args: ([
         {
             "disc_date": "2025-01-01",
             "rcept_no": "20250101000001",
