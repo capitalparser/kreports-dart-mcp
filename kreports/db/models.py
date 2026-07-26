@@ -583,6 +583,13 @@ class BackfillRun(Base):
     market = Column(String(10), nullable=True)
     status = Column(String(20), nullable=False)  # running / success / error
     pid = Column(Integer, nullable=True)
+    owner_token = Column(String(64), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    checkpoint_json = Column(Text, nullable=False, default="{}")
+    attempted_count = Column(Integer, nullable=False, default=0)
+    saved_count = Column(Integer, nullable=False, default=0)
+    no_data_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
     params_json = Column(Text, nullable=True)
     summary_json = Column(Text, nullable=True)
     error_msg = Column(Text, nullable=True)

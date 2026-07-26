@@ -20,6 +20,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
     assert first == [
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
+        "20260711_03_backfill_run_lifecycle",
     ]
     assert second == []
 

@@ -84,6 +84,19 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_03_backfill_run_lifecycle",
+        description="Add resumable backfill lease and checkpoint columns",
+        statements=(
+            "ALTER TABLE backfill_runs ADD COLUMN owner_token VARCHAR(64)",
+            "ALTER TABLE backfill_runs ADD COLUMN heartbeat_at DATETIME",
+            "ALTER TABLE backfill_runs ADD COLUMN checkpoint_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE backfill_runs ADD COLUMN attempted_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE backfill_runs ADD COLUMN saved_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE backfill_runs ADD COLUMN no_data_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE backfill_runs ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0",
+        ),
+    ),
 )
 
 
@@ -135,7 +148,7 @@ def apply_schema_migrations(connection: Connection) -> list[str]:
                 continue
 
             for statement in migration.statements:
-                connection.execute(text(statement))
+                _execute_statement(connection, statement)
             connection.execute(
                 text(
                     "INSERT INTO schema_migrations "
@@ -156,6 +169,32 @@ def apply_schema_migrations(connection: Connection) -> list[str]:
                 migration.description,
             )
     return applied
+
+
+def _execute_statement(connection: Connection, statement: str) -> None:
+    """Execute one statement, tolerating columns already created by metadata.
+
+    Test and fresh-database bootstraps create the current ORM schema before
+    replaying the append-only migration ledger. SQLite has no portable
+    ``ADD COLUMN IF NOT EXISTS``, so detect that narrow case without changing
+    the checksummed migration text.
+    """
+    normalized = " ".join(statement.split())
+    tokens = normalized.split()
+    if (
+        len(tokens) >= 6
+        and tokens[:2] == ["ALTER", "TABLE"]
+        and tokens[3:5] == ["ADD", "COLUMN"]
+    ):
+        table_name = tokens[2]
+        column_name = tokens[5]
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        if column_name in existing:
+            return
+    connection.execute(text(statement))
 
 
 def current_schema_version(connection: Connection) -> str:

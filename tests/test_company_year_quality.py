@@ -26,6 +26,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
     assert [migration.revision for migration in MIGRATIONS] == [
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
+        "20260711_03_backfill_run_lifecycle",
     ]
     assert CompanyYearQuality.__tablename__ == "company_year_quality"
 
@@ -35,6 +36,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
     assert applied == [
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
+        "20260711_03_backfill_run_lifecycle",
     ]
     columns = {
         column["name"]

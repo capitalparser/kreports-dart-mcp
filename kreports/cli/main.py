@@ -4,7 +4,7 @@ import json
 import platform
 import shutil
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +19,7 @@ from kreports.config import settings
 from kreports.db.engine import init_db, get_session
 from kreports.db.models import (
     Company, Financial, Disclosure, Auditor, AuditFee, FetchLog,
-    AccountingPolicyItem, BackfillRun,
+    AccountingPolicyItem,
 )
 
 app = typer.Typer(
@@ -50,6 +50,8 @@ GOLDEN_STOCK_CODES = [
     "207940",  # 삼성바이오로직스
 ]
 
+_ACTIVE_BACKFILL_LEASES = {}
+
 
 @contextmanager
 def _backfill_run_guard(
@@ -61,66 +63,170 @@ def _backfill_run_guard(
     force: bool = False,
 ):
     """Record a batch run and block concurrent duplicate backfills."""
+    from kreports.maintenance.backfill_runs import (
+        BackfillAlreadyRunning,
+        BackfillLease,
+        classify_backfill_error,
+    )
+
     init_db()
-    normalized_market = market or "ALL"
-    with get_session() as session:
-        active = (
-            session.query(BackfillRun)
-            .filter(
-                BackfillRun.task_type == task_type,
-                BackfillRun.year == year,
-                BackfillRun.market == normalized_market,
-                BackfillRun.status == "running",
-            )
-            .order_by(BackfillRun.started_at.desc())
-            .first()
-        )
-        if active and not force:
-            typer.echo(
-                f"오류: 동일 백필이 이미 실행 중입니다 "
-                f"(run_id={active.id}, task={task_type}, year={year}, market={normalized_market}, pid={active.pid})",
-                err=True,
-            )
-            raise typer.Exit(2)
-        run = BackfillRun(
+    try:
+        lease = BackfillLease.start(
             task_type=task_type,
             year=year,
-            market=normalized_market,
-            status="running",
-            pid=os.getpid(),
-            params_json=json.dumps(params, ensure_ascii=False, sort_keys=True),
-            started_at=datetime.utcnow(),
+            market=market,
+            params=params,
+            force=force,
         )
-        session.add(run)
-        session.flush()
-        run_id = run.id
+    except BackfillAlreadyRunning as exc:
+        typer.echo(f"오류: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    _ACTIVE_BACKFILL_LEASES[lease.id] = lease
 
     try:
-        yield run_id
+        yield lease.id
     except BaseException as exc:
-        with get_session() as session:
-            run = session.get(BackfillRun, run_id)
-            if run:
-                run.status = "error"
-                run.error_msg = str(exc)[:4000]
-                run.finished_at = datetime.utcnow()
+        active_lease = _ACTIVE_BACKFILL_LEASES.pop(lease.id, None)
+        if active_lease is not None:
+            active_lease.fail(classify_backfill_error(exc), str(exc))
         raise
     else:
-        with get_session() as session:
-            run = session.get(BackfillRun, run_id)
-            if run and run.status == "running":
-                run.status = "success"
-                run.summary_json = run.summary_json or "{}"
-                run.finished_at = datetime.utcnow()
+        active_lease = _ACTIVE_BACKFILL_LEASES.get(lease.id)
+        if active_lease is not None:
+            active_lease.succeed({})
+            _ACTIVE_BACKFILL_LEASES.pop(lease.id, None)
 
 
 def _finish_backfill_run(run_id: int, result: dict[str, object]) -> None:
-    with get_session() as session:
-        run = session.get(BackfillRun, run_id)
-        if run:
-            run.status = "success"
-            run.summary_json = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
-            run.finished_at = datetime.utcnow()
+    lease = _ACTIVE_BACKFILL_LEASES.get(run_id)
+    if lease is None:
+        raise RuntimeError(f"backfill run {run_id} is not owned by this process")
+    lease.succeed(result)
+    _ACTIVE_BACKFILL_LEASES.pop(run_id, None)
+
+
+@app.command("repair-stale-backfills")
+def repair_stale_backfills_cmd(
+    timeout_seconds: int = typer.Option(3600, min=1),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Mark timed-out runs stale only when their owner process is dead."""
+    from kreports.maintenance import backfill_runs
+
+    init_db()
+    result = backfill_runs.repair_stale_backfills(
+        datetime.now(timezone.utc),
+        timeout_seconds,
+    )
+    if json_output:
+        typer.echo(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return
+    typer.echo(
+        f"stale backfills repaired: {result['repaired_count']} "
+        f"(ids={result['repaired_ids']})"
+    )
+
+
+@app.command("backfill-status")
+def backfill_status_cmd(
+    json_output: bool = typer.Option(False, "--json"),
+    limit: int = typer.Option(50, min=1, max=500),
+):
+    """Show bounded, newest-first durable backfill state."""
+    from kreports.maintenance.backfill_runs import list_backfill_status
+
+    init_db()
+    result = list_backfill_status(limit)
+    if json_output:
+        typer.echo(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return
+    rows = [
+        [
+            row["id"],
+            row["task_type"],
+            row["year"],
+            row["market"],
+            row["status"],
+            row["attempted"],
+            row["saved"],
+            row["no_data"],
+            row["errors"],
+            row["heartbeat_at"],
+        ]
+        for row in result["runs"]
+    ]
+    typer.echo(
+        tabulate(
+            rows,
+            headers=[
+                "id",
+                "task_type",
+                "year",
+                "market",
+                "status",
+                "attempted",
+                "saved",
+                "no_data",
+                "errors",
+                "heartbeat_at",
+            ],
+            tablefmt="github",
+        )
+    )
+
+
+@app.command("orchestrate-complete-backfill")
+def orchestrate_complete_backfill_cmd(
+    year_from: int = typer.Option(2021),
+    year_to: int = typer.Option(2025),
+    disclosure_end_year: int = typer.Option(2026),
+    force: bool = typer.Option(False, "--force"),
+):
+    """Run the complete workflow with durable Python-owned progress."""
+    from kreports.collector.scheduler import orchestrate_complete_backfill
+
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+    with _backfill_run_guard(
+        task_type="complete_dataset",
+        year=year_from,
+        market="LISTED",
+        params={
+            "year_from": year_from,
+            "year_to": year_to,
+            "disclosure_end_year": disclosure_end_year,
+            "raw_backfill": os.getenv("KREPORTS_ENABLE_RAW_BACKFILL", "0"),
+        },
+        force=force,
+    ) as run_id:
+        result = orchestrate_complete_backfill(
+            _ACTIVE_BACKFILL_LEASES[run_id],
+            year_from=year_from,
+            year_to=year_to,
+            disclosure_end_year=disclosure_end_year,
+        )
+        _finish_backfill_run(run_id, result)
+    typer.echo(
+        "complete backfill finished - "
+        f"attempted: {result['attempted']}, "
+        f"saved: {result['saved']}, errors: {result['errors']}"
+    )
 
 
 def _parse_stock_codes(raw: Optional[str]) -> list[str]:
@@ -1387,7 +1493,7 @@ def collect_all(
         typer.echo("오류: DART_API_KEY 미설정", err=True)
         raise typer.Exit(1)
 
-    from kreports.collector.fin_collector import collect_all_companies
+    from kreports.collector.scheduler import run_resumable_financial_backfill
 
     def _progress(done, total, corp_name):
         typer.echo(f"\r[{done}/{total}] {corp_name}", nl=False)
@@ -1400,13 +1506,21 @@ def collect_all(
         params={"year_from": year_from, "year_to": year_to, "market": market},
         force=force,
     ) as run_id:
-        result = collect_all_companies(
-            year_from,
-            year_to,
+        progress = run_resumable_financial_backfill(
+            _ACTIVE_BACKFILL_LEASES[run_id],
+            year_from=year_from,
+            year_to=year_to,
             market=market,
             progress_callback=_progress,
             force=force,
         )
+        result = {
+            "success": progress["saved"],
+            "no_data": progress["no_data"],
+            "error": progress["errors"],
+            "skipped": progress["skipped"],
+            "attempted": progress["attempted"],
+        }
         _finish_backfill_run(run_id, result)
     typer.echo(
         "\n완료 - "

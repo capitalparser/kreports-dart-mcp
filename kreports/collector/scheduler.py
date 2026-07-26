@@ -9,12 +9,454 @@
 """
 import logging
 from datetime import date, timedelta
+import os
+import subprocess
+import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kreports.maintenance.backfill_runs import BackfillLease
 
 logger = logging.getLogger(__name__)
 
 # 설정 상수
 _DAILY_BATCH_LIMIT = 9_000      # DART 일일 API 한도(10,000) 여유분
 _RETRY_LIMIT = 3                # fetch_log 실패 재시도 최대 횟수
+
+
+def run_resumable_financial_backfill(
+    lease: "BackfillLease",
+    *,
+    year_from: int | None,
+    year_to: int | None,
+    market: str | None,
+    force: bool = False,
+    progress_callback=None,
+) -> dict[str, int]:
+    """Collect companies in stable order and checkpoint after every company."""
+    from kreports.collector.fin_collector import (
+        _LISTED_MARKETS,
+        collect_financial_range,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun, Company
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    state = BackfillLease.resume_point(lease.id)
+    last_corp_code = state.get("last_corp_code")
+    with get_session() as session:
+        run = session.get(BackfillRun, lease.id)
+        if run is None:
+            raise KeyError(f"backfill run not found: {lease.id}")
+        attempted = run.attempted_count or 0
+        saved = run.saved_count or 0
+        no_data = run.no_data_count or 0
+        errors = run.error_count or 0
+        query = session.query(
+            Company.corp_code,
+            Company.stock_code,
+            Company.corp_name,
+        ).filter(Company.stock_code.isnot(None))
+        if market:
+            query = query.filter(Company.market == market.upper())
+        else:
+            query = query.filter(Company.market.in_(_LISTED_MARKETS))
+        if last_corp_code:
+            query = query.filter(Company.corp_code > str(last_corp_code))
+        companies = query.order_by(Company.corp_code.asc()).all()
+
+    skipped = _non_negative_int(state.get("skipped"), default=0)
+    total = attempted + len(companies)
+
+    for corp_code, stock_code, corp_name in companies:
+        result = collect_financial_range(
+            stock_code,
+            year_from,
+            year_to,
+            force=force,
+        )
+        attempted += 1
+        saved += _non_negative_int(result.get("success"), default=0)
+        no_data += _non_negative_int(result.get("no_data"), default=0)
+        errors += _non_negative_int(result.get("error"), default=0)
+        skipped += _non_negative_int(result.get("skipped"), default=0)
+        lease.checkpoint(
+            {
+                "attempted": attempted,
+                "errors": errors,
+                "last_corp_code": corp_code,
+                "no_data": no_data,
+                "saved": saved,
+                "skipped": skipped,
+            },
+            attempted=attempted,
+            saved=saved,
+            no_data=no_data,
+            errors=errors,
+        )
+        if progress_callback:
+            progress_callback(attempted, total, corp_name)
+
+    return {
+        "attempted": attempted,
+        "saved": saved,
+        "no_data": no_data,
+        "errors": errors,
+        "skipped": skipped,
+    }
+
+
+def _non_negative_int(value, *, default: int) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def orchestrate_complete_backfill(
+    lease: "BackfillLease",
+    *,
+    year_from: int = 2021,
+    year_to: int = 2025,
+    disclosure_end_year: int = 2026,
+) -> dict[str, int]:
+    """Run the complete dataset workflow under one durable Python owner.
+
+    Individual collector commands retain their own feature-specific leases.
+    This outer lease checkpoints the last completed pipeline step and keeps a
+    heartbeat alive while a child command is running.
+    """
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun, Disclosure
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    state = BackfillLease.resume_point(lease.id)
+    completed_steps = {
+        str(item)
+        for item in state.get("completed_steps", [])
+        if isinstance(item, str)
+    }
+    with get_session() as session:
+        run = session.get(BackfillRun, lease.id)
+        if run is None:
+            raise KeyError(f"backfill run not found: {lease.id}")
+        disclosure_rows = session.query(Disclosure).count()
+        attempted = run.attempted_count or 0
+        saved = run.saved_count or 0
+        errors = run.error_count or 0
+
+    steps: list[tuple[str, list[str], bool]] = []
+    if disclosure_rows < 100_000:
+        for market in ("KOSPI", "KOSDAQ"):
+            steps.append(
+                (
+                    f"initial disclosure list {market}",
+                    [
+                        "collect-disclosures",
+                        "--market",
+                        market,
+                        "--start-date",
+                        f"{year_from}0101",
+                        "--end-date",
+                        f"{disclosure_end_year}1231",
+                    ],
+                    True,
+                )
+            )
+
+    if os.getenv("KREPORTS_ENABLE_RAW_BACKFILL", "0") == "1":
+        from kreports.runtime import require_raw_backfill_mode
+
+        require_raw_backfill_mode("complete dataset raw report backfill")
+        for year, market in _raw_gap_targets(year_from, year_to):
+            steps.extend(
+                [
+                    (
+                        f"business report sections {year} {market}",
+                        [
+                            "collect-business-report-sections",
+                            "--year",
+                            str(year),
+                            "--market",
+                            market,
+                        ],
+                        True,
+                    ),
+                    (
+                        f"audit report sections {year} {market}",
+                        [
+                            "collect-audit-report-sections",
+                            "--year",
+                            str(year),
+                            "--market",
+                            market,
+                        ],
+                        True,
+                    ),
+                    (
+                        f"business-report attached audit reports {year} {market}",
+                        [
+                            "__python_script__",
+                            "scripts/backfill_business_report_audit_attachments.py",
+                            "--start-year",
+                            str(year),
+                            "--end-year",
+                            str(year),
+                            "--market",
+                            market,
+                        ],
+                        True,
+                    ),
+                    (
+                        f"audit-submission sections {year} {market}",
+                        [
+                            "__python_script__",
+                            "scripts/backfill_audit_submission_sections.py",
+                            "--start-year",
+                            str(year),
+                            "--end-year",
+                            str(year),
+                            "--market",
+                            market,
+                        ],
+                        True,
+                    ),
+                ]
+            )
+
+    steps.append(
+        (
+            "financial facts",
+            [
+                "collect-all",
+                "--year-from",
+                str(year_from),
+                "--year-to",
+                str(year_to),
+            ],
+            True,
+        )
+    )
+    steps.append(
+        (
+            "rebuild compact financial facts",
+            [
+                "rebuild-financial-facts-compact",
+                "--year-from",
+                str(year_from),
+                "--year-to",
+                str(year_to),
+            ],
+            False,
+        )
+    )
+    for market in ("KOSPI", "KOSDAQ"):
+        steps.append(
+            (
+                f"disclosure list {market}",
+                [
+                    "collect-disclosures",
+                    "--market",
+                    market,
+                    "--start-date",
+                    f"{year_from}0101",
+                    "--end-date",
+                    f"{disclosure_end_year}1231",
+                ],
+                True,
+            )
+        )
+    for year in range(year_from, disclosure_end_year + 1):
+        for market in ("KOSPI", "KOSDAQ"):
+            steps.append(
+                (
+                    f"disclosure event index {year} {market}",
+                    [
+                        "rebuild-disclosure-events",
+                        "--year",
+                        str(year),
+                        "--market",
+                        market,
+                    ],
+                    False,
+                )
+            )
+    for year in range(year_from, year_to + 1):
+        for source_type in ("business_report", "audit_report"):
+            steps.append(
+                (
+                    f"document extractors {year} {source_type}",
+                    [
+                        "run-document-extractors",
+                        "--year",
+                        str(year),
+                        "--source-type",
+                        source_type,
+                    ],
+                    False,
+                )
+            )
+    steps.extend(
+        [
+            ("rebuild audit matters", ["rebuild-audit-matter-items"], False),
+            ("rebuild audit procedures", ["index-audit-procedures"], False),
+            (
+                "rebuild evidence documents",
+                [
+                    "rebuild-evidence-documents",
+                    "--year-from",
+                    str(year_from),
+                    "--year-to",
+                    str(year_to),
+                    "--max-text-chars",
+                    "12000",
+                ],
+                False,
+            ),
+            ("auditors all", ["collect-auditors"], True),
+        ]
+    )
+    for market in ("KOSPI", "KOSDAQ"):
+        steps.append(
+            (
+                f"audit fees {market}",
+                [
+                    "collect-audit-fees",
+                    "--year-from",
+                    str(year_from),
+                    "--year-to",
+                    str(year_to),
+                    "--market",
+                    market,
+                ],
+                True,
+            )
+        )
+    steps.extend(
+        [
+            (
+                "raw annual report coverage",
+                [
+                    "raw-annual-report-coverage",
+                    "--start-filing-year",
+                    str(year_from + 1),
+                    "--end-filing-year",
+                    str(disclosure_end_year),
+                ],
+                False,
+            ),
+            (
+                "evidence document readiness",
+                ["evidence-document-readiness"],
+                False,
+            ),
+            (
+                "investor dataset readiness",
+                [
+                    "investor-dataset-readiness",
+                    "--year",
+                    str(year_to),
+                    "--years-back",
+                    str(year_to - year_from + 1),
+                ],
+                False,
+            ),
+            (
+                "auditor feature readiness",
+                ["auditor-feature-readiness", "--year", str(year_to)],
+                False,
+            ),
+            (
+                "auditor dataset readiness",
+                [
+                    "dataset-auditor-readiness",
+                    "--year",
+                    str(year_to),
+                    "--years-back",
+                    str(year_to - year_from + 1),
+                ],
+                False,
+            ),
+            ("dataset audit", ["dataset-audit", "--top", "20"], False),
+        ]
+    )
+
+    api_failure: subprocess.CalledProcessError | None = None
+    for step_index, (name, args, uses_api) in enumerate(steps):
+        if name in completed_steps:
+            continue
+        attempted += 1
+        if uses_api and api_failure is not None:
+            outcome = "skipped_after_api_failure"
+        else:
+            try:
+                _run_cli_with_heartbeat(lease, args)
+            except subprocess.CalledProcessError as exc:
+                errors += 1
+                outcome = f"failed:{exc.returncode}"
+                if uses_api and api_failure is None:
+                    api_failure = exc
+                elif not uses_api:
+                    raise
+            else:
+                saved += 1
+                outcome = "success"
+                completed_steps.add(name)
+        lease.checkpoint(
+            {
+                "completed_steps": sorted(completed_steps),
+                "last_step": step_index,
+                "last_step_name": name,
+                "last_step_outcome": outcome,
+            },
+            attempted=attempted,
+            saved=saved,
+            no_data=0,
+            errors=errors,
+        )
+
+    if api_failure is not None:
+        raise api_failure
+    return {
+        "attempted": attempted,
+        "saved": saved,
+        "no_data": 0,
+        "errors": errors,
+    }
+
+
+def _run_cli_with_heartbeat(
+    lease: "BackfillLease",
+    args: list[str],
+) -> None:
+    if args and args[0] == "__python_script__":
+        command = [sys.executable, *args[1:]]
+    else:
+        command = [sys.executable, "-m", "kreports.cli.main", *args]
+    process = subprocess.Popen(command)
+    while True:
+        try:
+            return_code = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            lease.heartbeat()
+            continue
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, args)
+        return
+
+
+def _raw_gap_targets(
+    year_from: int,
+    year_to: int,
+) -> list[tuple[int, str]]:
+    years = list(range(year_from, year_to + 1))
+    priority = [2023, 2022, 2021, 2024, 2025]
+    ordered = [year for year in priority if year in years]
+    ordered.extend(year for year in years if year not in ordered)
+    return [
+        (year, market)
+        for year in ordered
+        for market in ("KOSDAQ", "KOSPI")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +466,7 @@ _RETRY_LIMIT = 3                # fetch_log 실패 재시도 최대 횟수
 def _job_sync_new_disclosures() -> None:
     """어제 공시된 신규 공시를 전체 상장사 대상으로 수집한다."""
     from kreports.db.engine import get_session
-    from kreports.db.models import Company, Disclosure
+    from kreports.db.models import Company
     from kreports.collector.disc_collector import collect_disclosures
 
     yesterday = date.today() - timedelta(days=1)
