@@ -246,6 +246,57 @@ def test_parser_accepts_distinct_wrapped_title_without_current_marker_family(
     assert items[1].title == expected_title
 
 
+@pytest.mark.parametrize(
+    ("first_title", "next_title_lines", "expected_title"),
+    [
+        pytest.param(
+            "1. Revenue recognition",
+            "I. Goodwill\nimpairment assessment",
+            "Goodwill impairment assessment",
+            id="arabic-to-initial-roman",
+        ),
+        pytest.param(
+            "I. Revenue recognition",
+            "가. 영업권\n손상 평가",
+            "영업권 손상 평가",
+            id="roman-to-initial-korean",
+        ),
+        pytest.param(
+            "가. 수익인식",
+            "1. 재고자산\n평가",
+            "재고자산 평가",
+            id="korean-to-restarted-arabic",
+        ),
+    ],
+)
+def test_parser_accepts_title_evidence_across_initial_marker_family_switch(
+    first_title,
+    next_title_lines,
+    expected_title,
+):
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = f"""
+    Key Audit Matters
+    {first_title}
+    Why the matter was determined to be a key audit matter
+    Contract cut-off requires significant judgment.
+    How the matter was addressed in the audit
+    We inspected contract samples.
+    {next_title_lines}
+    Why the matter was determined to be a key audit matter
+    The estimate depends on significant assumptions.
+    How the matter was addressed in the audit
+    We tested the assumptions.
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 2
+    assert items[0].audit_response_text == "We inspected contract samples."
+    assert items[1].title == expected_title
+
+
 def test_parser_keeps_initial_numbered_procedure_after_unnumbered_current_matter():
     from kreports.processor.kam_parser import extract_kam_items
 
@@ -630,6 +681,119 @@ def test_parser_merges_repeated_reason_response_pair_across_page(first_response)
     assert items[0].audit_response_text == f"{first_response}\n기간귀속 재수행"
     assert "핵심감사사항으로 선정한 이유" not in items[0].reason_text
     assert "감사에서 다루어진 방법" not in items[0].audit_response_text
+
+
+def test_parser_splits_unnumbered_next_matter_with_same_headings():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    계약 표본 검사
+    재고자산 평가
+    핵심감사사항으로 선정한 이유
+    순실현가능가치 추정 위험
+    감사에서 다루어진 방법
+    예상판매가격 검사
+    """
+
+    items = extract_kam_items(body)
+
+    assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
+    assert items[0].audit_response_text == "계약 표본 검사"
+    assert items[1].reason_text == "순실현가능가치 추정 위험"
+    assert items[1].audit_response_text == "예상판매가격 검사"
+
+
+@pytest.mark.parametrize(
+    ("first_title", "procedure"),
+    [
+        pytest.param("1. 수익인식", "2. 계약 검사", id="arabic"),
+        pytest.param("I. Revenue recognition", "II. Inspect contracts", id="roman"),
+        pytest.param("가. 수익인식", "나. 계약 검사", id="korean"),
+    ],
+)
+def test_parser_keeps_noninitial_procedure_before_repeated_page_pair(
+    first_title,
+    procedure,
+):
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = f"""
+    핵심감사사항
+    {first_title}
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    {procedure}
+    핵심감사사항으로 선정한 이유
+    복합계약 판단 위험
+    감사에서 다루어진 방법
+    기간귀속 재수행
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].reason_text == "기간귀속 판단 위험\n복합계약 판단 위험"
+    assert items[0].audit_response_text == f"{procedure}\n기간귀속 재수행"
+
+
+def test_parser_merges_three_pages_with_numbered_procedures():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    위험 본문 1
+    감사에서 다루어진 방법
+    1. 계약 검사
+    핵심감사사항으로 선정한 이유
+    위험 본문 2
+    감사에서 다루어진 방법
+    2. 기간귀속 재수행
+    핵심감사사항으로 선정한 이유
+    위험 본문 3
+    감사에서 다루어진 방법
+    3. 전표 검사
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+    assert items[0].reason_text == "위험 본문 1\n위험 본문 2\n위험 본문 3"
+    assert items[0].audit_response_text == (
+        "1. 계약 검사\n2. 기간귀속 재수행\n3. 전표 검사"
+    )
+
+
+def test_parser_merges_semantically_equivalent_heading_variants_across_page():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    계약 표본 검사
+    핵심감사사항으로 결정한 이유
+    복합계약 판단 위험
+    감사인이 수행한 주요 절차
+    기간귀속 재수행
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+    assert items[0].reason_text == "기간귀속 판단 위험\n복합계약 판단 위험"
+    assert items[0].audit_response_text == "계약 표본 검사\n기간귀속 재수행"
 
 
 def test_parser_removes_repeated_response_heading_separator():

@@ -83,6 +83,65 @@ _INITIAL_MARKER_IDENTITIES = {
     "roman": "I",
     "korean": "가",
 }
+_TITLE_TOPIC_TERMS = (
+    "매출",
+    "수익",
+    "재고",
+    "영업권",
+    "자산",
+    "부채",
+    "충당",
+    "공정가치",
+    "금융상품",
+    "파생상품",
+    "법인세",
+    "계속기업",
+    "revenue",
+    "inventory",
+    "goodwill",
+    "asset",
+    "liability",
+    "provision",
+    "fairvalue",
+    "financialinstrument",
+    "derivative",
+    "incometax",
+    "goingconcern",
+)
+_TITLE_RISK_TERMS = (
+    "손상",
+    "인식",
+    "측정",
+    "추정",
+    "평가",
+    "회계처리",
+    "impairment",
+    "recognition",
+    "measurement",
+    "estimate",
+    "valuation",
+    "accounting",
+)
+_AUDIT_PROCEDURE_TERMS = (
+    "검사",
+    "검토",
+    "확인",
+    "테스트",
+    "재계산",
+    "재수행",
+    "조회",
+    "수행",
+    "대사",
+    "inspect",
+    "test",
+    "review",
+    "confirm",
+    "recalculate",
+    "reperform",
+    "inquire",
+    "perform",
+    "reconcile",
+)
 
 
 @dataclass(frozen=True)
@@ -107,11 +166,11 @@ class _TitleBoundary:
     marker: tuple[str, str] | None
 
 
-@dataclass(frozen=True)
+@dataclass
 class _MatterFrame:
     title_start: int
     title: str
-    heading_frames: tuple[_HeadingFrame, ...]
+    heading_frames: list[_HeadingFrame]
     marker: tuple[str, str] | None
 
 
@@ -210,6 +269,25 @@ def _is_title_continuation(previous: str, current: str) -> bool:
     )
 
 
+def _title_evidence_score(value: str) -> int:
+    compact = _compact(value)
+    topic = any(term in compact for term in _TITLE_TOPIC_TERMS)
+    risk = any(term in compact for term in _TITLE_RISK_TERMS)
+    return (2 if topic else 0) + (1 if risk else 0)
+
+
+def _procedure_evidence_score(value: str) -> int:
+    compact = _compact(value)
+    return sum(term in compact for term in _AUDIT_PROCEDURE_TERMS)
+
+
+def _has_clear_title_evidence(value: str) -> bool:
+    return (
+        _title_evidence_score(value) >= 2
+        and _procedure_evidence_score(value) == 0
+    )
+
+
 def _title_parts(values: list[str]) -> str:
     parts: list[str] = []
     for value in values:
@@ -289,11 +367,21 @@ def _discover_title_boundary(
         family, identity, marked_title = marker
         suffix_start = marker_index + 1
         has_suffix = suffix_start < reason_index
-        is_distinct_matter_marker = not response_owned or (
-            _is_distinct_marker_transition(
-                (family, identity),
-                current_marker,
-            )
+        candidate_marker = (family, identity)
+        same_marker = current_marker == candidate_marker
+        initial_without_current = (
+            current_marker is None
+            and identity == _INITIAL_MARKER_IDENTITIES[family]
+        )
+        title_supported_transition = (
+            _has_clear_title_evidence(marked_title)
+            and not same_marker
+            and not initial_without_current
+        )
+        is_distinct_matter_marker = (
+            not response_owned
+            or _is_distinct_marker_transition(candidate_marker, current_marker)
+            or title_supported_transition
         )
         marked_wrap = (
             has_suffix
@@ -374,16 +462,26 @@ def _last_response_heading(frame: _HeadingFrame) -> int:
     return frame.response_heading
 
 
-def _is_repeated_heading_pair(
+def _heading_semantic_class(line: str) -> str | None:
+    if _matches_heading(line, _REASON_HEADINGS):
+        return "reason"
+    if _matches_heading(line, _RESPONSE_HEADINGS):
+        return "response"
+    return None
+
+
+def _is_semantically_equivalent_heading_pair(
     lines: list[str],
     previous: _HeadingFrame,
     current: _HeadingFrame,
 ) -> bool:
     return (
-        _compact(lines[previous.reason_heading])
-        == _compact(lines[current.reason_heading])
-        and _compact(lines[previous.response_heading])
-        == _compact(lines[current.response_heading])
+        _heading_semantic_class(lines[previous.reason_heading])
+        == _heading_semantic_class(lines[current.reason_heading])
+        == "reason"
+        and _heading_semantic_class(lines[previous.response_heading])
+        == _heading_semantic_class(lines[current.response_heading])
+        == "response"
     )
 
 
@@ -405,30 +503,21 @@ def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
             continue
         if (
             frames
-            and _is_repeated_heading_pair(
+            and _is_semantically_equivalent_heading_pair(
                 lines,
                 frames[-1].heading_frames[-1],
                 heading_frame,
             )
-            and not _is_distinct_marker_transition(
-                title.marker,
-                frames[-1].marker,
-            )
+            and not _has_clear_title_evidence(title.title)
         ):
-            current = frames[-1]
-            frames[-1] = _MatterFrame(
-                title_start=current.title_start,
-                title=current.title,
-                heading_frames=(*current.heading_frames, heading_frame),
-                marker=current.marker,
-            )
+            frames[-1].heading_frames.append(heading_frame)
             previous_response = _last_response_heading(heading_frame)
             continue
         frames.append(
             _MatterFrame(
                 title_start=title.start,
                 title=title.title,
-                heading_frames=(heading_frame,),
+                heading_frames=[heading_frame],
                 marker=title.marker,
             )
         )
