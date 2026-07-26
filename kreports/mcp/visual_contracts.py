@@ -20,6 +20,17 @@ MAX_PAYLOAD_BYTES = 128_000
 _ID = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _CONTROLS = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]")
 _URL_SCHEME = re.compile(r"(?i)\b(https?|javascript|data):")
+_PUBLIC_SOURCE_LABELS = {
+    "accounting_note_chapters": "회계정책 주석 캐시",
+    "audit_matter_items": "감사보고서 항목 캐시",
+    "audit_procedure_items": "감사절차 항목 캐시",
+    "evidence_documents": "공시 근거 캐시",
+    "financial_facts_compact": "재무 공시 캐시",
+    "local_subsidiary_auditor_matrix": "연결실체 감사인 캐시",
+    "report_sections": "보고서 섹션 캐시",
+    "report_sections.audit_report": "감사보고서 캐시",
+    "source_documents": "원문 문서 캐시",
+}
 
 
 def _strict_model_config() -> ConfigDict:
@@ -184,7 +195,7 @@ class DiagramSpecV1(BaseModel):
     title: str
     table_ref: str
     definition: str = Field(max_length=20_000)
-    row_refs: list[str] = Field(default_factory=list, max_length=MAX_ROWS)
+    row_refs: list[str] = Field(min_length=1, max_length=MAX_ROWS)
     note: str | None = None
 
     _id = field_validator("id", "table_ref")(_validate_identifier)
@@ -193,7 +204,16 @@ class DiagramSpecV1(BaseModel):
     @field_validator("definition")
     @classmethod
     def _definition(cls, value: str) -> str:
-        if not value.startswith("flowchart ") or "\x00" in value:
+        if (
+            not value.startswith("flowchart ")
+            or "\x00" in value
+            or re.search(
+                r"(?i)(?:%%\{|https?://|javascript:|data:|"
+                r"\bclick\b|\bclassdef\b|\blinkstyle\b|\bstyle\b|"
+                r"<(?:script|style|svg|iframe)|\bon\w+\s*=)",
+                value,
+            )
+        ):
             raise ValueError("diagram definition must be bounded Mermaid")
         return value
 
@@ -237,9 +257,15 @@ class SummarySpecV1(BaseModel):
     title: str
     status: str
     subject: str
+    domain_status: str | None = None
 
     _title = field_validator("title")(_bounded_title)
     _text = field_validator("status", "subject")(_bounded_text)
+
+    @field_validator("domain_status")
+    @classmethod
+    def _domain_status(cls, value: str | None) -> str | None:
+        return _bounded_text(value) if value is not None else None
 
 
 class SourceSpecV1(BaseModel):
@@ -324,6 +350,20 @@ class VisualizationPackV1(BaseModel):
     warnings: list[str] = Field(default_factory=list, max_length=64)
     resource_uri: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_coherent_summary(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "summary" not in value:
+            normalized = dict(value)
+            status = str(normalized.get("status") or "usable")
+            normalized["summary"] = {
+                "title": "시각화",
+                "status": status,
+                "subject": "대상 조건",
+            }
+            return normalized
+        return value
+
     @field_validator("limitations", "warnings")
     @classmethod
     def _bounded_list(cls, values: list[str]) -> list[str]:
@@ -373,9 +413,35 @@ class VisualizationPackV1(BaseModel):
             }
             if not set(diagram.row_refs).issubset(allowed_refs):
                 raise ValueError("diagram references a row outside its canonical table")
+            if set(diagram.row_refs) != allowed_refs:
+                raise ValueError("diagram must bind every canonical table row")
+            if diagram.definition != _canonical_diagram_definition(table):
+                raise ValueError("diagram must be generated from its canonical table")
         for timeline in self.timelines:
-            if timeline.table_ref not in tables:
+            table = tables.get(timeline.table_ref)
+            if table is None:
                 raise ValueError("timeline references unknown table")
+            if table.status in {"missing", "error"} or not table.rows:
+                raise ValueError("timeline cannot reference unavailable data")
+        if self.summary.status != self.status:
+            raise ValueError("summary status must equal pack status")
+        if (
+            self.data_quality is not None
+            and self.data_quality.status != self.status
+        ):
+            raise ValueError("data-quality status must equal pack status")
+        if self.status == "usable" and any(
+            table.status != "usable" for table in self.tables
+        ):
+            raise ValueError("table status contradicts usable pack status")
+        for chart in self.charts:
+            table = tables[chart.data_ref]
+            if table.status in {"missing", "error"} or not table.rows:
+                raise ValueError("chart cannot reference unavailable data")
+        for diagram in self.diagrams:
+            table = tables[diagram.table_ref]
+            if table.status in {"missing", "error"} or not table.rows:
+                raise ValueError("diagram cannot reference unavailable data")
         if self.status != "usable" and not self.limitations:
             raise ValueError("non-usable pack requires an explicit limitation")
         if self.status == "usable" and not any(table.rows for table in self.tables):
@@ -404,6 +470,50 @@ class VisualizationPackV1(BaseModel):
             raise ValueError("resource URI does not match the content digest")
         self.resource_uri = canonical_resource_uri
         return self
+
+
+def _canonical_diagram_definition(table: TableSpecV1) -> str:
+    lines = ["flowchart TD"]
+    for index, row in enumerate(table.rows):
+        label = next(
+            (
+                row.get(key)
+                for key in ("name", "corp_name", "entity_name", "label")
+                if row.get(key) is not None and row.get(key) != ""
+            ),
+            next(
+                (
+                    value for key, value in row.items()
+                    if key != "row_id" and value is not None and value != ""
+                ),
+                "미확보",
+            ),
+        )
+        node_id = "P" if index == 0 else f"N{index}"
+        rendered_label = _mermaid_text(label)
+        if index == 0 and row.get("year") not in {None, ""}:
+            rendered_label += (
+                f"<br/>{_mermaid_text(row['year'])}년 연결실체"
+            )
+        elif index and row.get("qsc_status") not in {None, ""}:
+            rendered_label += (
+                "<br/>"
+                + _mermaid_text(
+                    {
+                        "qsc": "QSC",
+                        "not_qsc": "비QSC",
+                        "undetermined": "미판정",
+                    }.get(
+                        str(row["qsc_status"]),
+                        str(row["qsc_status"]),
+                    )
+                )
+            )
+        lines.append(f'  {node_id}["{rendered_label}"]')
+        if index:
+            relation = _mermaid_text(row.get("relation") or "-")
+            lines.append(f'  P -->|"{relation}"| N{index}')
+    return "\n".join(lines)
 
 
 def _safe_text(value: Any, *, fallback: str = "-") -> str:
@@ -441,7 +551,9 @@ def _infer_unit(label: str, key: str) -> str | None:
     match = re.search(r"\(([^()]{1,30})\)", label)
     if match:
         return match.group(1)
-    if key.endswith("_pct") or key in {"wacc", "terminal_growth", "percentile"}:
+    if key in {"wacc", "terminal_growth"}:
+        return "ratio"
+    if key.endswith("_pct") or key == "percentile":
         return "%"
     return None
 
@@ -471,11 +583,13 @@ def _canonical_table(raw: dict[str, Any], *, pack_status: str) -> dict[str, Any]
     for raw_row in (raw.get("rows") or [])[:MAX_ROWS]:
         if not isinstance(raw_row, dict):
             continue
-        rows.append({
+        row = {
             key: _safe_value(raw_row.get(key))
             for key in seen
             if key in raw_row
-        })
+        }
+        if row and any(value is not None and value != "" for value in row.values()):
+            rows.append(row)
     status = pack_status if rows else "missing"
     note = raw.get("note")
     if not rows and not note:
@@ -493,13 +607,27 @@ def _canonical_table(raw: dict[str, Any], *, pack_status: str) -> dict[str, Any]
 def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
     raw_quality = raw.get("data_quality")
     quality = raw_quality if isinstance(raw_quality, dict) else {}
-    raw_status = str(
-        raw.get("status")
-        or (raw.get("summary") or {}).get("status")
-        or quality.get("status")
-        or "usable"
+    summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
+    quality_status = str(quality.get("status") or "")
+    top_status = str(raw.get("status") or "")
+    summary_status = str(summary.get("status") or "")
+    valid_statuses = {"usable", "limited", "missing", "error"}
+    status = next(
+        (
+            candidate
+            for candidate in (quality_status, top_status, summary_status)
+            if candidate in valid_statuses
+        ),
+        "limited",
     )
-    status = raw_status if raw_status in {"usable", "limited", "missing", "error"} else "limited"
+    domain_status = next(
+        (
+            candidate
+            for candidate in (summary_status, top_status)
+            if candidate and candidate not in valid_statuses
+        ),
+        None,
+    )
     limitations = [
         _safe_text(item)
         for item in [
@@ -576,30 +704,75 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
         table_ref = str(raw_diagram.get("table_ref") or first_table)
         if table_ref not in table_ids:
             continue
-        definition = str(raw_diagram.get("definition") or "")
-        if not definition.startswith("flowchart "):
+        source_table = next(item for item in tables if item["id"] == table_ref)
+        if not source_table["rows"] or source_table["status"] in {"missing", "error"}:
             continue
+        if not raw_diagram.get("table_ref"):
+            fact_id = f"{str(raw_diagram.get('id') or 'group')}_facts"
+            fact_id = fact_id[:64]
+            fact_rows = [{
+                "row_id": "0",
+                "name": _safe_text(summary.get("subject") or "대상 회사"),
+                "relation": "root",
+            }]
+            for index, row in enumerate(source_table["rows"], start=1):
+                fact_rows.append({
+                    "row_id": str(index),
+                    "name": _safe_value(
+                        row.get("name")
+                        or row.get("corp_name")
+                        or f"실체 {index}"
+                    ),
+                    "relation": _safe_value(row.get("relation") or "-"),
+                })
+            source_table = {
+                "id": fact_id,
+                "title": _safe_text(raw_diagram.get("title") or "그룹 구조 근거"),
+                "columns": [
+                    {"key": "row_id", "label": "행 ID", "unit": None},
+                    {"key": "name", "label": "회사", "unit": None},
+                    {"key": "relation", "label": "관계", "unit": None},
+                ],
+                "rows": fact_rows,
+                "status": status,
+            }
+            tables.append(source_table)
+            table_ids.add(fact_id)
+            table_ref = fact_id
+        table_model = TableSpecV1.model_validate(source_table)
+        row_refs = [
+            str(row.get("row_id", index))
+            for index, row in enumerate(table_model.rows)
+        ]
         diagrams.append({
             "id": raw_diagram.get("id"),
             "type": "mermaid",
             "title": _safe_text(raw_diagram.get("title") or raw_diagram.get("id")),
             "table_ref": table_ref,
-            "definition": definition[:20_000],
-            "row_refs": [],
+            "definition": _canonical_diagram_definition(table_model),
+            "row_refs": row_refs,
         })
     timelines = []
     for raw_timeline in (raw.get("timelines") or [])[:8]:
         if not isinstance(raw_timeline, dict):
             continue
         table_ref = str(raw_timeline.get("table_ref") or "disclosure_events")
-        if table_ref in table_ids:
+        table = next(
+            (item for item in tables if item["id"] == table_ref),
+            None,
+        )
+        if (
+            table is not None
+            and table["rows"]
+            and table["status"] not in {"missing", "error"}
+        ):
             timelines.append({
                 "id": raw_timeline.get("id"),
                 "title": _safe_text(raw_timeline.get("title") or raw_timeline.get("id")),
                 "table_ref": table_ref,
                 "events": _safe_value(raw_timeline.get("events") or []),
             })
-    if not tables:
+    if not tables or not any(table["rows"] for table in tables):
         tables = [{
             "id": "availability",
             "title": "데이터 가용성",
@@ -610,9 +783,30 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
         }]
         status = "missing"
         limitations.append("로컬 캐시에 확인 가능한 데이터가 없습니다.")
+        charts = []
+        diagrams = []
+        timelines = []
+    elif status == "usable" and any(
+        table["status"] != "usable" for table in tables
+    ):
+        status = "limited"
+        for table in tables:
+            if table["status"] == "usable":
+                table["status"] = "limited"
+        limitations.append("일부 시각화 표의 데이터가 완전하지 않습니다.")
+    charts = [
+        chart for chart in charts
+        if (
+            (table := next(
+                (item for item in tables if item["id"] == chart["data_ref"]),
+                None,
+            )) is not None
+            and table["rows"]
+            and table["status"] not in {"missing", "error"}
+        )
+    ]
     if status != "usable" and not limitations:
         limitations.append("데이터가 제한되어 시각적 결론을 제공하지 않습니다.")
-    summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
     sources = []
     for source in (raw.get("sources") or [])[:32]:
         if not isinstance(source, dict):
@@ -648,6 +842,11 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
             "title": _safe_text(summary.get("title") or "시각화"),
             "status": _safe_text(status),
             "subject": _safe_text(summary.get("subject") or "대상 조건"),
+            **(
+                {"domain_status": _safe_text(domain_status)}
+                if domain_status
+                else {}
+            ),
         },
         "tables": tables,
         "charts": charts,
@@ -824,28 +1023,42 @@ def build_visualization_pack(result: dict[str, Any]) -> VisualizationPackV1:
     if not isinstance(result, dict):
         raise TypeError("result must be a dict")
     if result.get("kind") == "answer_pack" or "tables" in result:
-        return _from_legacy_pack(result)
-    return _from_legacy_pack(_raw_family_pack(result))
+        pack = _from_legacy_pack(result)
+    else:
+        pack = _from_legacy_pack(_raw_family_pack(result))
+    from kreports.mcp.resources import publish_visualization_resource
+
+    publish_visualization_resource(pack)
+    return pack
 
 
 def _mermaid_text(value: Any) -> str:
     text = _safe_text(value)
     escaped = (
-        text.replace("\\", "&#92;")
+        text.replace("&", "&amp;")
+        .replace("\\", "&#92;")
         .replace("|", "/")
         .replace('"', '\\"')
-        .replace("[", "(")
-        .replace("]", ")")
-        .replace("{", "(")
-        .replace("}", ")")
+        .replace("[", "&#91;")
+        .replace("]", "&#93;")
+        .replace("{", "&#123;")
+        .replace("}", "&#125;")
         .replace("`", "'")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("\n", "<br/>")
     )
-    return re.sub(
+    escaped = re.sub(
         r"(?i)\b(click|style|classdef|linkstyle)\b",
         lambda match: f"{match.group(1)[0]}&#8203;{match.group(1)[1:]}",
+        escaped,
+    )
+    return re.sub(
+        r"(?i)\b(on\w+)(\s*=)",
+        lambda match: (
+            f"{match.group(1)[0]}&#8203;{match.group(1)[1:]}"
+            f"{match.group(2)}"
+        ),
         escaped,
     )
 
@@ -863,11 +1076,26 @@ def _group_definition(entity_name: str, rows: list[dict[str, Any]]) -> str:
 
 def build_group_diagram(entity_name: str) -> DiagramSpecV1:
     """Build a safe group root diagram tied to the canonical group table."""
+    table = TableSpecV1(
+        id="group_entities",
+        title="그룹 실체",
+        columns=[
+            {"field": "row_id", "label": "행 ID"},
+            {"field": "name", "label": "회사"},
+            {"field": "relation", "label": "관계"},
+        ],
+        rows=[{
+            "row_id": "0",
+            "name": _safe_text(entity_name),
+            "relation": "root",
+        }],
+    )
     return DiagramSpecV1(
         id="group_structure",
         title="그룹 구조",
         table_ref="group_entities",
-        definition=_group_definition(entity_name, []),
+        definition=_canonical_diagram_definition(table),
+        row_refs=["0"],
     )
 
 
@@ -884,6 +1112,10 @@ def _markdown_cell(value: Any) -> str:
     )
 
 
+def _public_source_label(value: str) -> str:
+    return _PUBLIC_SOURCE_LABELS.get(value, "로컬 공시 캐시")
+
+
 def render_visualization_markdown(
     pack: VisualizationPackV1,
     *,
@@ -891,7 +1123,15 @@ def render_visualization_markdown(
 ) -> str:
     """Render canonical tables, optionally followed by safe Mermaid diagrams."""
     validated = VisualizationPackV1.model_validate(pack)
-    lines: list[str] = []
+    lines: list[str] = [
+        f"시각화 데이터 상태: {_markdown_cell(validated.status)}",
+    ]
+    if validated.data_quality and validated.data_quality.source:
+        lines.append(
+            "데이터 출처: "
+            f"{_markdown_cell(_public_source_label(validated.data_quality.source))}"
+        )
+    lines.append("")
     for table in validated.tables:
         lines.extend([f"### {_markdown_cell(table.title)}", ""])
         headers = [
@@ -926,6 +1166,21 @@ def render_visualization_markdown(
         lines.extend(["데이터 한계:", *[
             f"- {_markdown_cell(item)}" for item in validated.limitations
         ]])
+    if validated.warnings:
+        lines.extend(["경고:", *[
+            f"- {_markdown_cell(item)}" for item in validated.warnings
+        ]])
+    if validated.sources:
+        lines.extend(["출처:", *[
+            "- "
+            + _markdown_cell(source.label)
+            + (
+                f" / {_markdown_cell(source.rcept_no)}"
+                if source.rcept_no
+                else ""
+            )
+            for source in validated.sources
+        ]])
     return "\n".join(lines).strip()
 
 
@@ -943,7 +1198,13 @@ def render_visualization_html(pack: VisualizationPackV1) -> str:
         "th,td{border:1px solid #ccd1d1;padding:.4rem;text-align:left}"
         "th{background:#f4f6f7}.note{color:#566573}</style></head><body>",
         f"<h1>{html.escape(validated.summary.title)}</h1>",
+        f"<p>시각화 데이터 상태: {html.escape(validated.status)}</p>",
     ]
+    if validated.data_quality and validated.data_quality.source:
+        pieces.append(
+            "<p>데이터 출처: "
+            f"{html.escape(_public_source_label(validated.data_quality.source))}</p>"
+        )
     for table in validated.tables:
         pieces.append(f"<section><h2>{html.escape(table.title)}</h2><table><thead><tr>")
         for column in table.columns:
@@ -970,6 +1231,11 @@ def render_visualization_html(pack: VisualizationPackV1) -> str:
         pieces.append("<section class=\"note\"><h2>데이터 한계</h2><ul>")
         for limitation in validated.limitations:
             pieces.append(f"<li>{html.escape(limitation)}</li>")
+        pieces.append("</ul></section>")
+    if validated.warnings:
+        pieces.append("<section class=\"note\"><h2>경고</h2><ul>")
+        for warning in validated.warnings:
+            pieces.append(f"<li>{html.escape(warning)}</li>")
         pieces.append("</ul></section>")
     pieces.append("</body></html>")
     rendered = "".join(pieces)

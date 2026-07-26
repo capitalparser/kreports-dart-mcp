@@ -1171,7 +1171,15 @@ def _append_visual_table(
 
     raw_pack = result.get("answer_pack")
     if isinstance(raw_pack, dict):
-        pack = VisualizationPackV1.model_validate(raw_pack)
+        try:
+            pack = VisualizationPackV1.model_validate(raw_pack)
+        except (TypeError, ValueError):
+            trusted_result = dict(result)
+            trusted_result.pop("answer_pack", None)
+            built = build_answer_pack(tool_name, trusted_result)
+            if built is None:
+                return narrative
+            pack = VisualizationPackV1.model_validate(built)
     else:
         built = build_answer_pack(tool_name, result)
         if built is None:

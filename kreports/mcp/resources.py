@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections import OrderedDict
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -38,7 +39,10 @@ from kreports.mcp.visual_contracts import (
 DATASET_READINESS_URI = "kreports://dataset/readiness"
 COMPANY_URI_TEMPLATE = "kreports://company/{corp_code}/{year}"
 EVIDENCE_URI_TEMPLATE = "kreports://evidence/{rcept_no}"
+VISUALIZATION_URI_TEMPLATE = "kreports://visualization/{digest}"
 MAX_EVIDENCE_CHARACTERS = 20_000
+MAX_VISUALIZATION_RESOURCES = 32
+MAX_VISUALIZATION_CACHE_BYTES = 4_000_000
 
 _CORP_CODE = re.compile(r"[0-9]{8}", re.ASCII)
 _RCEPT_NO = re.compile(r"[0-9]{14}", re.ASCII)
@@ -47,7 +51,10 @@ _COMPANY_RESOURCE_PATH = re.compile(
     re.ASCII,
 )
 _EVIDENCE_RESOURCE_PATH = re.compile(r"/([0-9]{14})", re.ASCII)
+_VISUALIZATION_RESOURCE_PATH = re.compile(r"/([0-9a-f]{64})", re.ASCII)
 _DART_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+_VISUALIZATION_RESOURCES: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_VISUALIZATION_CACHE_BYTES = 0
 
 
 class ResourceRequestError(ValueError):
@@ -159,6 +166,15 @@ def list_resource_templates() -> list[ResourceTemplateDescriptor]:
                 "normalized evidence, or derived sections."
             ),
         ),
+        ResourceTemplateDescriptor(
+            uri_template=VISUALIZATION_URI_TEMPLATE,
+            name="visualization_html",
+            description=(
+                "One bounded, process-local, content-addressed HTML rendering "
+                "published by a tool response from a validated visualization pack."
+            ),
+            mime_type="text/html; charset=utf-8",
+        ),
     ]
 
 
@@ -222,10 +238,19 @@ def _parse_uri(uri: object) -> tuple[str, dict[str, Any]]:
         if raw != canonical:
             raise ResourceRequestError("invalid_resource_uri")
         return "filing_evidence", {"rcept_no": rcept_no}
+    visualization_match = _VISUALIZATION_RESOURCE_PATH.fullmatch(parsed.path)
+    if parsed.netloc == "visualization" and visualization_match:
+        digest = visualization_match.group(1)
+        canonical = VISUALIZATION_URI_TEMPLATE.format(digest=digest)
+        if raw != canonical:
+            raise ResourceRequestError("invalid_resource_uri")
+        return "visualization", {"digest": digest}
     if parsed.netloc == "company":
         raise ResourceRequestError("invalid_company_resource")
     if parsed.netloc == "evidence":
         raise ResourceRequestError("invalid_evidence_resource")
+    if parsed.netloc == "visualization":
+        raise ResourceRequestError("invalid_visualization_resource")
     if parsed.netloc == "dataset":
         raise ResourceRequestError("invalid_dataset_resource")
     raise ResourceRequestError("unknown_resource")
@@ -669,10 +694,15 @@ def read_resource(uri: object) -> dict[str, Any]:
         return _dataset_readiness()
     if resource_type == "company_year":
         return _company_year(**arguments)
+    if resource_type == "visualization":
+        return _visualization_resource(**arguments)
     return _evidence(**arguments)
 
 
 def render_resource(uri: object) -> str:
+    resource_type, _ = _parse_uri(uri)
+    if resource_type == "visualization":
+        return str(read_resource(uri)["text"])
     return json.dumps(
         read_resource(uri),
         ensure_ascii=False,
@@ -686,10 +716,83 @@ def render_visualization_resource(
 ) -> dict[str, str]:
     """Return a self-contained rich resource without reading or writing the DB."""
     validated = VisualizationPackV1.model_validate(pack)
-    if validated.resource_uri is None:  # pragma: no cover - model always derives it
+    publish_visualization_resource(validated)
+    if validated.resource_uri is None:  # pragma: no cover - validator derives it
         raise ResourceRequestError("invalid_visualization_resource")
-    return {
+    return read_resource(validated.resource_uri)
+
+
+def publish_visualization_resource(
+    pack: VisualizationPackV1 | dict[str, Any],
+) -> str:
+    """Publish one bounded HTML resource in the current MCP server process."""
+    global _VISUALIZATION_CACHE_BYTES
+
+    validated = VisualizationPackV1.model_validate(pack)
+    if validated.resource_uri is None:  # pragma: no cover - validator derives it
+        raise ResourceRequestError("invalid_visualization_resource")
+    html_text = render_visualization_html(validated)
+    size = len(html_text.encode())
+    if size > 200_000:
+        raise ResourceRequestError("visualization_resource_too_large")
+    digest = validated.resource_uri.rsplit("/", 1)[-1]
+    entry = {
         "uri": validated.resource_uri,
         "mimeType": "text/html; charset=utf-8",
-        "text": render_visualization_html(validated),
+        "text": html_text,
+        "pack": validated.model_dump(mode="json"),
+        "size": size,
     }
+    previous = _VISUALIZATION_RESOURCES.pop(digest, None)
+    if previous is not None:
+        _VISUALIZATION_CACHE_BYTES -= int(previous["size"])
+    _VISUALIZATION_RESOURCES[digest] = entry
+    _VISUALIZATION_CACHE_BYTES += size
+    while (
+        len(_VISUALIZATION_RESOURCES) > MAX_VISUALIZATION_RESOURCES
+        or _VISUALIZATION_CACHE_BYTES > MAX_VISUALIZATION_CACHE_BYTES
+    ):
+        _, evicted = _VISUALIZATION_RESOURCES.popitem(last=False)
+        _VISUALIZATION_CACHE_BYTES -= int(evicted["size"])
+    return validated.resource_uri
+
+
+def _visualization_resource(digest: str) -> dict[str, Any]:
+    entry = _VISUALIZATION_RESOURCES.pop(digest, None)
+    if entry is None:
+        raise ResourceRequestError("visualization_resource_unavailable")
+    try:
+        validated = VisualizationPackV1.model_validate(entry["pack"])
+        expected_uri = VISUALIZATION_URI_TEMPLATE.format(digest=digest)
+        if validated.resource_uri != expected_uri:
+            raise ValueError("digest mismatch")
+        regenerated = render_visualization_html(validated)
+        if regenerated != entry["text"]:
+            raise ValueError("content mismatch")
+    except Exception:
+        raise ResourceRequestError(
+            "visualization_resource_unavailable"
+        ) from None
+    _VISUALIZATION_RESOURCES[digest] = entry
+    return {
+        "resource_version": "visualization.v1",
+        "uri": entry["uri"],
+        "mimeType": entry["mimeType"],
+        "text": entry["text"],
+    }
+
+
+def resource_mime_type(uri: object) -> str:
+    resource_type, _ = _parse_uri(uri)
+    return (
+        "text/html; charset=utf-8"
+        if resource_type == "visualization"
+        else "application/json"
+    )
+
+
+def _clear_visualization_resources_for_test() -> None:
+    """Clear only the bounded ephemeral visualization cache."""
+    global _VISUALIZATION_CACHE_BYTES
+    _VISUALIZATION_RESOURCES.clear()
+    _VISUALIZATION_CACHE_BYTES = 0

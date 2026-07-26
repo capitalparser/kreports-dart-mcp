@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -299,3 +300,277 @@ def test_rich_resource_uri_is_content_bound_and_html_only_uses_validated_pack():
     assert resource["uri"] == pack.resource_uri
     assert resource["mimeType"] == "text/html; charset=utf-8"
     assert "<table>" in resource["text"]
+
+
+def test_published_visual_resource_is_fetchable_through_actual_mcp_read_path():
+    import asyncio
+
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.resources import (
+        ResourceRequestError,
+        list_resource_templates,
+        read_resource,
+    )
+    from kreports.mcp.server import handle_read_resource
+
+    raw = build_answer_pack("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "events": [{"year": 2024, "topic": "수익인식", "status": "new"}],
+        "data_quality": {"status": "usable"},
+    })
+    pack = VisualizationPackV1.model_validate(raw)
+    assert any(
+        item.uri_template == "kreports://visualization/{digest}"
+        for item in list_resource_templates()
+    )
+
+    payload = read_resource(pack.resource_uri)
+    assert payload["uri"] == pack.resource_uri
+    assert payload["mimeType"] == "text/html; charset=utf-8"
+    assert "<table>" in payload["text"]
+    stdio = asyncio.run(handle_read_resource(pack.resource_uri))
+    assert stdio[0].mime_type == "text/html; charset=utf-8"
+    assert stdio[0].content == payload["text"]
+
+    unknown = f"kreports://visualization/{'f' * 64}"
+    with pytest.raises(
+        ResourceRequestError,
+        match="visualization_resource_unavailable",
+    ):
+        read_resource(unknown)
+
+
+def test_visual_resource_lru_eviction_and_restart_are_stable_fail_closed():
+    from kreports.mcp import resources
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    resources._clear_visualization_resources_for_test()
+    uris = []
+    for index in range(resources.MAX_VISUALIZATION_RESOURCES + 1):
+        raw = build_answer_pack("get_kam_lifecycle", {
+            "subject": {"corp_name": f"A{index}"},
+            "events": [{"year": 2024, "topic": f"topic-{index}", "status": "new"}],
+            "data_quality": {"status": "usable"},
+        })
+        uris.append(raw["resource_uri"])
+
+    with pytest.raises(
+        resources.ResourceRequestError,
+        match="visualization_resource_unavailable",
+    ):
+        resources.read_resource(uris[0])
+    assert resources.read_resource(uris[-1])["uri"] == uris[-1]
+
+    resources._clear_visualization_resources_for_test()
+    with pytest.raises(
+        resources.ResourceRequestError,
+        match="visualization_resource_unavailable",
+    ):
+        resources.read_resource(uris[-1])
+
+
+def test_legacy_mermaid_is_regenerated_from_fully_bound_canonical_rows():
+    attack = (
+        "%%{init: {'themeCSS':'url(https://evil)'}}%%\n"
+        "flowchart TD\nclick X \"javascript:alert(1)\"\n"
+        "classDef bad fill:url(https://evil)\n"
+        "X[\"<script>alert(1)</script>\"]"
+    )
+    pack = build_visualization_pack({
+        "kind": "answer_pack",
+        "summary": {
+            "title": "A 연결실체 구조",
+            "status": "usable",
+            "subject": "A",
+        },
+        "tables": [{
+            "id": "subsidiary_contribution",
+            "title": "연결실체",
+            "columns": [
+                {"field": "name", "label": "회사"},
+                {"field": "relation", "label": "관계"},
+            ],
+            "rows": [{"name": "B", "relation": "종속"}],
+        }],
+        "charts": [],
+        "diagrams": [{
+            "id": "subsidiary_structure",
+            "type": "mermaid",
+            "title": "구조",
+            "definition": attack,
+        }],
+        "timelines": [],
+        "data_quality": {"status": "usable"},
+    })
+
+    diagram = pack.diagrams[0]
+    table = next(item for item in pack.tables if item.id == diagram.table_ref)
+    assert diagram.row_refs
+    assert set(diagram.row_refs) == {
+        str(row["row_id"]) for row in table.rows
+    }
+    assert "A" in diagram.definition and "B" in diagram.definition
+    assert not re.search(
+        r"(?i)click|https?://|javascript:|%%\{|classdef|linkstyle|"
+        r"<script|<style|<svg|on\\w+=",
+        diagram.definition,
+    )
+    assert attack not in diagram.definition
+
+
+def test_diagram_cannot_use_complete_refs_with_an_invented_definition():
+    with pytest.raises(ValidationError, match="canonical table"):
+        VisualizationPackV1.model_validate(_pack(diagrams=[{
+            "id": "group",
+            "type": "mermaid",
+            "title": "구조",
+            "table_ref": "facts",
+            "definition": 'flowchart TD\n X["invented"]',
+            "row_refs": ["0"],
+        }]))
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        "financial_trend",
+        "dcf",
+        "peer_distribution",
+        "group_graph",
+        "audit_fee",
+        "kam_lifecycle",
+        "disclosure_timeline",
+    ],
+)
+def test_all_families_fail_closed_when_rows_are_empty_or_placeholder(family):
+    pack = build_visualization_pack({
+        "_visual_family": family,
+        "_visual_status": "usable",
+        "historical_actuals": [{}],
+        "projections": [{}],
+        "sensitivity": [{}],
+        "results": {},
+        "entities": [{}],
+        "history": [{}],
+        "events": [{}],
+    })
+
+    assert pack.status in {"limited", "missing"}
+    assert pack.limitations
+    assert all(table.status in {"limited", "missing"} for table in pack.tables)
+    assert all(row for table in pack.tables for row in table.rows)
+    assert not pack.charts
+    assert not pack.diagrams
+    assert not pack.timelines
+
+
+def test_domain_status_is_separate_from_visual_data_quality_status():
+    pack = build_visualization_pack({
+        "kind": "answer_pack",
+        "summary": {
+            "title": "DCF",
+            "status": "complete_model",
+            "subject": "A",
+        },
+        "tables": [_table()],
+        "charts": [],
+        "diagrams": [],
+        "timelines": [],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert pack.status == "usable"
+    assert pack.summary.status == "usable"
+    assert pack.summary.domain_status == "complete_model"
+    assert pack.data_quality.status == "usable"
+    assert pack.tables[0].status == "usable"
+
+
+def test_pack_rejects_incoherent_summary_quality_and_table_statuses():
+    with pytest.raises(ValidationError, match="status"):
+        VisualizationPackV1.model_validate({
+            **_pack(),
+            "summary": {
+                "title": "시각화",
+                "status": "limited",
+                "subject": "A",
+            },
+            "data_quality": {"status": "usable"},
+        })
+    with pytest.raises(ValidationError, match="table status"):
+        VisualizationPackV1.model_validate({
+            **_pack(),
+            "tables": [_table(status="limited")],
+            "data_quality": {"status": "usable"},
+        })
+
+
+def test_ratio_units_and_quality_metadata_have_markdown_html_fact_parity():
+    pack = build_visualization_pack({
+        "kind": "answer_pack",
+        "summary": {"title": "Peer", "status": "limited", "subject": "A"},
+        "tables": [{
+            "id": "peer_metric_matrix",
+            "title": "Peer",
+            "columns": [
+                {"field": "metric", "label": "지표"},
+                {"field": "subject_value", "label": "대상회사", "unit": "ratio"},
+                {"field": "unit", "label": "단위"},
+            ],
+            "rows": [{
+                "metric": "ROE",
+                "subject_value": 0.10,
+                "unit": "ratio",
+            }],
+        }],
+        "charts": [],
+        "diagrams": [],
+        "timelines": [],
+        "sources": [{
+            "label": "DART 공시",
+            "rcept_no": "20250101000001",
+            "url": (
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                "rcpNo=20250101000001"
+            ),
+        }],
+        "data_quality": {
+            "status": "limited",
+            "source": "financial_facts_compact",
+        },
+        "limitations": ["표본 제한"],
+        "warnings": ["검토 필요"],
+    })
+    markdown = render_visualization_markdown(pack, mermaid=False)
+    rich = render_visualization_html(pack)
+
+    for rendered in (markdown, rich):
+        assert "0.1" in rendered
+        assert "ratio" in rendered
+        assert "10%" not in rendered
+        assert "limited" in rendered
+        assert "재무 공시 캐시" in rendered
+        assert "financial_facts_compact" not in rendered
+        assert "DART 공시" in rendered
+        assert "20250101000001" in rendered
+        assert "표본 제한" in rendered
+        assert "검토 필요" in rendered
+
+
+def test_render_answer_contains_invalid_external_answer_pack():
+    from kreports.mcp.renderers import render_answer
+
+    text = render_answer("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "events": [{"year": 2024, "topic": "수익인식", "status": "new"}],
+        "data_quality": {"status": "usable"},
+        "answer_pack": {
+            "kind": "answer_pack",
+            "version": "attacker.v9",
+            "tables": "not-a-list",
+        },
+    })
+
+    assert text is not None
+    assert "수익인식" in text
+    assert "ValidationError" not in text

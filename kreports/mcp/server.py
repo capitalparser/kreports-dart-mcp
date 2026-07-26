@@ -20,6 +20,7 @@ from kreports.mcp.resources import (
     mcp_resource_templates,
     mcp_resources,
     render_resource,
+    resource_mime_type,
 )
 from kreports.runtime import runtime_mode
 
@@ -53,7 +54,7 @@ async def handle_read_resource(uri):
     return [
         ReadResourceContents(
             content=render_resource(uri),
-            mime_type="application/json",
+            mime_type=resource_mime_type(uri),
         )
     ]
 

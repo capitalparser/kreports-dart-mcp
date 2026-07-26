@@ -32,6 +32,7 @@ def test_required_resources_and_templates_are_enumerated():
     assert {resource.uri_template for resource in list_resource_templates()} == {
         "kreports://company/{corp_code}/{year}",
         "kreports://evidence/{rcept_no}",
+        "kreports://visualization/{digest}",
     }
 
 

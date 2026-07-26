@@ -206,12 +206,12 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
             "5개년 실적치",
             [
                 ("year", "연도"),
-                ("revenue", "매출"),
-                ("operating_profit", "영업이익"),
-                ("profit_loss", "순이익"),
-                ("net_income", "순이익"),
-                ("operating_cf", "영업현금흐름"),
-                ("purchase_ppe", "유형자산 취득"),
+                ("revenue", "매출(원)"),
+                ("operating_profit", "영업이익(원)"),
+                ("profit_loss", "순이익(원)"),
+                ("net_income", "순이익(원)"),
+                ("operating_cf", "영업현금흐름(원)"),
+                ("purchase_ppe", "유형자산 취득(원)"),
             ],
             actuals,
         ))
@@ -328,7 +328,7 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "요청 기준연도 공시 실제값",
             [
                 ("metric_key", "지표"),
-                ("amount", "금액"),
+                ("amount", "금액(KRW)"),
                 ("unit", "단위"),
                 ("year", "연도"),
                 ("fs_div", "재무제표"),
@@ -344,8 +344,8 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "정규화 레이어",
             [
                 ("metric_key", "지표"),
-                ("original_actual", "원 실제값"),
-                ("normalized_amount", "정규화값"),
+                ("original_actual", "원 실제값(KRW)"),
+                ("normalized_amount", "정규화값(KRW)"),
                 ("basis", "구분"),
                 ("reason", "분석가 근거"),
             ],
@@ -362,16 +362,16 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "연도별 UFCF 예측",
             [
                 ("year", "연도"),
-                ("revenue", "매출"),
-                ("ebit", "EBIT"),
-                ("after_tax_ebit", "세후 EBIT"),
-                ("depreciation_amortization", "D&A"),
-                ("capex", "CAPEX"),
-                ("nwc_balance", "NWC"),
-                ("nwc_change", "NWC 증감"),
-                ("ufcf", "UFCF"),
+                ("revenue", "매출(KRW)"),
+                ("ebit", "EBIT(KRW)"),
+                ("after_tax_ebit", "세후 EBIT(KRW)"),
+                ("depreciation_amortization", "D&A(KRW)"),
+                ("capex", "CAPEX(KRW)"),
+                ("nwc_balance", "NWC(KRW)"),
+                ("nwc_change", "NWC 증감(KRW)"),
+                ("ufcf", "UFCF(KRW)"),
                 ("discount_factor", "할인계수"),
-                ("present_value", "현재가치"),
+                ("present_value", "현재가치(KRW)"),
                 ("formula", "공식"),
             ],
             projections,
@@ -603,6 +603,11 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(row, dict)
     ]
     pack = _base_pack(f"{subject} 연결실체 구조", result)
+    visible_diagram_rows = _hierarchy_closed_rows(
+        subsidiaries,
+        limit=8,
+    )
+    omitted_count = len(subsidiaries) - len(visible_diagram_rows)
     rows = []
     for item in subsidiaries:
         auditor = item.get("auditor") if isinstance(item.get("auditor"), dict) else {}
@@ -668,10 +673,56 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
             data_ref="subsidiary_contribution",
             encodings={"x": {"field": "name"}, "y": {"field": "revenue_share_pct"}},
         ))
+        pack["tables"].append(_table(
+            "subsidiary_structure_facts",
+            "연결실체 구조도 근거",
+            [
+                ("row_id", "행 ID"),
+                ("name", "회사"),
+                ("relation", "관계"),
+                ("year", "연도"),
+                ("qsc_status", "QSC"),
+            ],
+            [
+                {
+                    "row_id": "0",
+                    "name": subject,
+                    "relation": "root",
+                    "year": year,
+                    "qsc_status": None,
+                },
+                *[
+                    {
+                        "row_id": str(index),
+                        "name": row.get("name"),
+                        "relation": row.get("relation"),
+                        "year": year,
+                        "qsc_status": row.get("qsc_status"),
+                    }
+                    for index, row in enumerate(
+                        visible_diagram_rows,
+                        start=1,
+                    )
+                ],
+                *(
+                    [{
+                        "row_id": str(len(visible_diagram_rows) + 1),
+                        "name": f"{omitted_count}개 노드는 가독성을 위해 생략",
+                        "relation": "omitted",
+                        "year": year,
+                        "qsc_status": None,
+                    }]
+                    if omitted_count > 0
+                    else []
+                ),
+            ],
+            note="구조도 노드와 간선은 이 표의 행만 사용합니다.",
+        ))
     pack["diagrams"].append({
         "id": "subsidiary_structure",
         "type": "mermaid",
         "title": "연결실체 구조도",
+        "table_ref": "subsidiary_structure_facts",
         "definition": _subsidiary_mermaid(
             subject, year, subsidiaries,
             canonical=bool(graph_rows),
@@ -909,6 +960,7 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("p50", "P50"),
                 ("p75", "P75"),
                 ("n", "Peer 수"),
+                ("unit", "단위"),
             ],
             rows,
         ))
