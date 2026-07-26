@@ -112,6 +112,73 @@ def test_parser_merges_duplicate_wrapped_title_and_keeps_numbered_procedures():
     assert "표본 재고" in items[1].audit_response_text
 
 
+def test_parser_keeps_numbered_response_step_before_unnumbered_next_matter():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    수익인식
+    핵심감사사항으로 선정한 이유
+    복합 계약의 기간귀속 판단에 유의적인 위험이 있습니다.
+    감사인이 수행한 주요 절차
+    1. 계약 표본 검사
+    재고자산 평가
+    핵심감사사항으로 결정한 이유
+    순실현가능가치 추정에 유의적인 판단이 포함됩니다.
+    감사에서 다루어진 방법
+    표본 재고의 예상판매가격을 검사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
+    assert "1. 계약 표본 검사" in items[0].audit_response_text
+    assert "표본 재고" in items[1].audit_response_text
+
+
+def test_parser_deduplicates_numbered_title_followed_by_same_unnumbered_title():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    1. 수익인식
+    수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단에 중요한 왜곡표시위험이 있습니다.
+    감사에서 다루어진 방법
+    표본 계약서와 세금계산서를 대사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+
+
+def test_parser_separates_consecutive_unnumbered_matters():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단에 중요한 왜곡표시위험이 있습니다.
+    감사에서 다루어진 방법
+    표본 계약서를 검사했습니다.
+    재고자산 평가
+    핵심감사사항으로 결정한 이유
+    순실현가능가치 추정에 유의적인 판단이 포함됩니다.
+    감사인이 수행한 주요 절차
+    예상판매가격을 검사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
+    assert "표본 계약서" in items[0].audit_response_text
+    assert "예상판매가격" in items[1].audit_response_text
+
+
 @pytest.mark.parametrize(
     "reason_heading",
     [
@@ -255,6 +322,182 @@ def test_rebuild_continues_from_failed_raw_read_to_normalized_evidence(
     assert receipt["item_count"] == 2
     assert any(
         limitation.startswith("source_documents.raw_body:read_error:")
+        for limitation in receipt["limitations"]
+    )
+
+
+def test_rebuild_falls_back_after_structured_raw_body_parse_error(temp_engine):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    malformed = (
+        "핵심감사사항\n1. 수익인식\n핵심감사사항으로 선정한 이유\n"
+        "중요한 위험 설명만 있고 감사 대응 제목과 본문은 없습니다."
+    )
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000081",
+                    stock_code="000081",
+                    corp_name="원문파싱오류회사",
+                    market="KOSPI",
+                ),
+                SourceDocument(
+                    rcept_no="20250318000081",
+                    corp_code="00000081",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    report_nm="감사보고서",
+                    content_type="xml",
+                    raw_content=malformed,
+                    doc_hash="1" * 40,
+                    storage_status="inline",
+                ),
+                EvidenceDocument(
+                    corp_code="00000081",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    rcept_no="20250318000081",
+                    evidence_scope="auditor_view",
+                    title="정상 정규화 증거",
+                    normalized_text=FIXTURE.read_text(encoding="utf-8"),
+                    source_count=1,
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "evidence_documents.normalized_text"
+    assert "source_documents.raw_body:parse_error" in receipt["limitations"]
+
+
+def test_rebuild_falls_back_after_structured_evidence_uri_parse_error(temp_engine):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    malformed = (
+        "핵심감사사항\n1. 수익인식\n핵심감사사항으로 선정한 이유\n"
+        "중요한 위험 설명만 있고 감사 대응 제목과 본문은 없습니다."
+    )
+    stored = collector_module.RawDocumentStore().write(
+        corp_code="00000082",
+        bsns_year=2024,
+        source_type="audit_report",
+        rcept_no="20250318000082",
+        content_type="xml",
+        content=malformed,
+    )
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000082",
+                    stock_code="000082",
+                    corp_name="URI파싱오류회사",
+                    market="KOSPI",
+                ),
+                EvidenceDocument(
+                    corp_code="00000082",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    rcept_no="20250318000082",
+                    evidence_scope="auditor_view",
+                    title="URI 파싱 오류 후 정상 정규화",
+                    normalized_text=FIXTURE.read_text(encoding="utf-8"),
+                    full_text_uri=stored.storage_uri,
+                    full_text_hash=stored.doc_hash,
+                    full_text_length=stored.content_length,
+                    source_count=1,
+                ),
+            ]
+        )
+
+    result = collector_module.rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "evidence_documents.normalized_text"
+    assert "evidence_documents.full_text_uri:parse_error" in receipt["limitations"]
+
+
+def test_rebuild_reports_structured_normalized_evidence_parse_error(temp_engine):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    malformed = (
+        "핵심감사사항\n1. 수익인식\n핵심감사사항으로 선정한 이유\n"
+        "중요한 위험 설명만 있고 감사 대응 제목과 본문은 없습니다."
+    )
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000083",
+                    stock_code="000083",
+                    corp_name="정규화파싱오류회사",
+                    market="KOSPI",
+                ),
+                EvidenceDocument(
+                    corp_code="00000083",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    rcept_no="20250318000083",
+                    evidence_scope="auditor_view",
+                    title="불완전 정규화 증거",
+                    normalized_text=malformed,
+                    source_count=1,
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "error"
+    assert receipt["source_basis"] == "none"
+    assert (
+        "evidence_documents.normalized_text:parse_error"
+        in receipt["limitations"]
+    )
+
+
+def test_rebuild_treats_plain_empty_raw_body_as_missing(temp_engine):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000084",
+                    stock_code="000084",
+                    corp_name="본문누락회사",
+                    market="KOSPI",
+                ),
+                SourceDocument(
+                    rcept_no="20250318000084",
+                    corp_code="00000084",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    report_nm="감사보고서",
+                    content_type="xml",
+                    raw_content="",
+                    doc_hash="4" * 40,
+                    storage_status="inline",
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "missing"
+    assert not any(
+        limitation.endswith(":parse_error")
         for limitation in receipt["limitations"]
     )
 

@@ -1610,6 +1610,16 @@ def _kam_rebuild_targets(
     return [targets[key] for key in sorted(targets)]
 
 
+def _kam_no_item_limitation(source_basis: str, body: str) -> str:
+    has_reason_heading, has_response_heading = kam_detail_heading_status(body)
+    outcome = (
+        "parse_error"
+        if has_reason_heading or has_response_heading
+        else "no_kam_items"
+    )
+    return f"{source_basis}:{outcome}"
+
+
 def _recover_kam_items(
     target: dict,
 ) -> tuple[list[ParsedKamItem], str, list[str], datetime | None]:
@@ -1644,7 +1654,9 @@ def _recover_kam_items(
                 limitations,
                 source.fetched_at,
             )
-        limitations.append("source_documents.raw_body:no_kam_items")
+        limitations.append(
+            _kam_no_item_limitation("source_documents.raw_body", body)
+        )
     for evidence in target["evidence_documents"]:
         if evidence.full_text_uri:
             try:
@@ -1665,7 +1677,12 @@ def _recover_kam_items(
                         limitations,
                         evidence.generated_at,
                     )
-                limitations.append("evidence_documents.full_text_uri:no_kam_items")
+                limitations.append(
+                    _kam_no_item_limitation(
+                        "evidence_documents.full_text_uri",
+                        body,
+                    )
+                )
         normalized = (evidence.normalized_text or "").strip()
         if normalized:
             items = extract_kam_items(normalized)
@@ -1676,7 +1693,12 @@ def _recover_kam_items(
                     limitations,
                     evidence.generated_at,
                 )
-            limitations.append("evidence_documents.normalized_text:no_kam_items")
+            limitations.append(
+                _kam_no_item_limitation(
+                    "evidence_documents.normalized_text",
+                    normalized,
+                )
+            )
     derived_summaries: list[tuple[object, str]] = []
     structured_failure_at: datetime | None = None
     for section in target["report_sections"]:

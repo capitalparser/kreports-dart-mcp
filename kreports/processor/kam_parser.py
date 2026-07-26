@@ -120,6 +120,8 @@ def _normalize_title(title: str) -> str:
 def _numbered_title(
     lines: list[str],
     index: int,
+    *,
+    in_response: bool,
 ) -> tuple[str, int] | None:
     match = _NUMBERED_TITLE_RE.match(lines[index])
     if not match:
@@ -128,9 +130,12 @@ def _numbered_title(
     if not first or first.endswith((".", "。")):
         return None
     parts = [first]
-    for candidate in lines[index + 1:index + 5]:
+    for candidate_index, candidate in enumerate(
+        lines[index + 1:index + 5],
+        start=index + 1,
+    ):
         if _matches_heading(candidate, _REASON_HEADINGS):
-            return _normalize_title(" ".join(parts)), index + len(parts)
+            return _normalize_title(" ".join(parts)), candidate_index
         if (
             _NUMBERED_TITLE_RE.match(candidate)
             or _matches_heading(
@@ -141,17 +146,27 @@ def _numbered_title(
             )
         ):
             return None
+        normalized_candidate = _normalize_title(candidate)
+        if _compact(normalized_candidate) == _compact(parts[-1]):
+            continue
+        if in_response:
+            return None
         if len(parts) > 1 or len(candidate) > 200:
             return None
-        parts.append(_normalize_title(candidate))
+        parts.append(normalized_candidate)
     return None
 
 
 def _title_starts(lines: list[str]) -> list[tuple[int, str]]:
     starts: list[tuple[int, str]] = []
     covered_until = -1
+    in_response = False
     for index, line in enumerate(lines):
-        numbered = _numbered_title(lines, index)
+        if _matches_heading(line, _REASON_HEADINGS):
+            in_response = False
+        elif _matches_heading(line, _RESPONSE_HEADINGS):
+            in_response = True
+        numbered = _numbered_title(lines, index, in_response=in_response)
         title = numbered[0] if numbered is not None else None
         if numbered is not None:
             covered_until = max(covered_until, numbered[1] - 1)
