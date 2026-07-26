@@ -543,6 +543,117 @@ def test_duplicate_audit_fee_conflict_without_recency_fails_closed_per_metric(
 
 
 @pytest.mark.parametrize("reverse_order", [False, True])
+def test_audit_fee_conflict_exclusion_preserves_bounded_reason(
+    temp_engine,
+    reverse_order,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE audit_fees"))
+        connection.execute(text(
+            "CREATE TABLE audit_fees ("
+            "corp_code TEXT, bsns_year INTEGER, actual_fee_m INTEGER)"
+        ))
+        claims = [
+            {"cc": "00000001", "actual": 100},
+            {"cc": "00000002", "actual": 110},
+            {"cc": "00000002", "actual": 130},
+        ]
+        if reverse_order:
+            claims.reverse()
+        connection.execute(
+            text(
+                "INSERT INTO audit_fees VALUES "
+                "(:cc, 2024, :actual)"
+            ),
+            claims,
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 5)
+    exclusion = next(
+        item for item in cohort.exclusions
+        if item.corp_code == "00000002"
+    )
+
+    assert exclusion.reason_code == "missing_profile_evidence"
+    assert exclusion.secondary_reason_codes == (
+        "duplicate_audit_fee_conflict:actual_fee_m",
+    )
+
+
+def test_audit_fee_conflict_exclusion_reasons_are_deduped_and_bounded(
+    temp_engine,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE audit_fees"))
+        connection.execute(text(
+            "CREATE TABLE audit_fees ("
+            "corp_code TEXT, bsns_year INTEGER, "
+            "audit_fee_m INTEGER, audit_hours INTEGER, "
+            "actual_fee_m INTEGER, actual_hours INTEGER, "
+            "contract_fee_m INTEGER, contract_hours INTEGER, "
+            "nas_ratio REAL)"
+        ))
+        connection.execute(text(
+            "INSERT INTO audit_fees VALUES "
+            "('00000001', 2024, 1, 1, 1, 1, 1, 1, 0.1), "
+            "('00000002', 2024, 10, 10, 10, 10, 10, 10, 0.1), "
+            "('00000002', 2024, 20, 20, 20, 20, 20, 20, 0.2)"
+        ))
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 5)
+    exclusion = next(
+        item for item in cohort.exclusions
+        if item.corp_code == "00000002"
+    )
+
+    assert exclusion.secondary_reason_codes == (
+        "duplicate_audit_fee_conflict:actual_fee_m",
+        "duplicate_audit_fee_conflict:actual_hours",
+        "duplicate_audit_fee_conflict:audit_fee_m",
+        "duplicate_audit_fee_conflict:audit_hours",
+        "duplicate_audit_fee_conflict:contract_fee_m",
+    )
+    assert len(set(exclusion.secondary_reason_codes)) == 5
+
+
+def test_genuinely_missing_audit_fee_has_no_conflict_secondary_reason(
+    temp_engine,
+):
+    from kreports.analysis.peer import build_peer_cohort
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditFee
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with get_session() as session:
+        session.add(
+            AuditFee(
+                corp_code="00000001",
+                bsns_year=2024,
+                actual_fee_m=100,
+            )
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 5)
+    exclusion = next(
+        item for item in cohort.exclusions
+        if item.corp_code == "00000002"
+    )
+
+    assert exclusion.reason_code == "missing_profile_evidence"
+    assert exclusion.secondary_reason_codes == ()
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
 def test_duplicate_audit_fee_uses_newest_claim_and_preserves_older_complements(
     temp_engine,
     reverse_order,
@@ -899,6 +1010,11 @@ def test_auditor_profiles_require_requested_year_evidence(temp_engine, profile):
 
     assert [member.corp_code for member in cohort.members] == ["00000002"]
     assert dict(cohort.exclusion_counts)["missing_profile_evidence"] == 1
+    missing = next(
+        item for item in cohort.exclusions
+        if item.corp_code == "00000003"
+    )
+    assert missing.secondary_reason_codes == ()
 
 
 def test_kam_procedure_profile_requires_linked_kam_row(temp_engine):

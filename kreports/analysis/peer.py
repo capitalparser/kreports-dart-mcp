@@ -1599,7 +1599,17 @@ def build_peer_cohort(
                 profile_snapshot.limitations_by_code.get(candidate_code, ())
             )
             if profile != "investor" and not profile_available:
-                exclude(candidate, "missing_profile_evidence")
+                conflict_reasons = tuple(
+                    limitation
+                    for limitation in member_limitations
+                    if limitation.startswith("duplicate_")
+                    and "_conflict:" in limitation
+                )
+                exclude(
+                    candidate,
+                    "missing_profile_evidence",
+                    *conflict_reasons,
+                )
                 continue
             candidate_metrics.update(profile_metrics)
             candidate_bases: dict[str, str] = {
