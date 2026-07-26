@@ -150,7 +150,16 @@ def _numbered_title(
         if _compact(normalized_candidate) == _compact(parts[-1]):
             continue
         if in_response:
-            return None
+            following_index = candidate_index + 1
+            if (
+                following_index >= len(lines)
+                or not _matches_heading(
+                    lines[following_index],
+                    _REASON_HEADINGS,
+                )
+                or len(normalized_candidate.split()) != 1
+            ):
+                return None
         if len(parts) > 1 or len(candidate) > 200:
             return None
         parts.append(normalized_candidate)
