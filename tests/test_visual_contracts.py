@@ -120,6 +120,35 @@ def test_table_rows_reject_unbounded_or_non_json_values(bad_value):
         ]))
 
 
+@pytest.mark.parametrize(
+    "empty_row",
+    [
+        {},
+        {"year": None, "value": None},
+        {"year": " \t", "value": ""},
+        {"year": [], "value": {}},
+        {"year": [None, " "], "value": {"nested": []}},
+    ],
+)
+def test_typed_tables_reject_rows_without_any_declared_fact(empty_row):
+    with pytest.raises(ValidationError, match="fact"):
+        TableSpecV1.model_validate(_table(rows=[empty_row]))
+
+
+def test_typed_tables_preserve_zero_and_false_but_missing_tables_carry_no_rows():
+    zero = TableSpecV1.model_validate(_table(rows=[{
+        "year": 0,
+        "value": False,
+    }]))
+    assert zero.rows == [{"year": 0, "value": False}]
+
+    with pytest.raises(ValidationError, match="missing table"):
+        TableSpecV1.model_validate(_table(
+            status="missing",
+            rows=[{"year": 2024, "value": 0}],
+        ))
+
+
 def test_ids_text_rows_and_total_serialized_payload_are_bounded():
     with pytest.raises(ValidationError):
         TableSpecV1.model_validate(_table(id="../facts"))
@@ -273,6 +302,124 @@ def test_renderer_boundaries_escape_markdown_mermaid_and_html_injection():
     json.dumps(pack.model_dump(mode="json"), allow_nan=False)
 
 
+def test_direct_group_family_keeps_root_parent_and_ownership_as_canonical_facts():
+    pack = build_visualization_pack({
+        "_visual_family": "group_graph",
+        "_visual_status": "usable",
+        "entity_name": "A",
+        "entities": [
+            {
+                "entity_key": "b",
+                "parent_is_root": True,
+                "name": "B",
+                "relation": "종속기업",
+                "ownership_pct": 80,
+            },
+            {
+                "entity_key": "c",
+                "parent_entity_key": "b",
+                "name": "C",
+                "relation": "손자회사",
+                "ownership_pct": 60,
+            },
+        ],
+    })
+
+    table = next(item for item in pack.tables if item.id == "group_entities")
+    assert table.rows == [
+        {
+            "row_id": "root",
+            "parent_row_id": None,
+            "name": "A",
+            "relation": "root",
+            "ownership_pct": None,
+        },
+        {
+            "row_id": "b",
+            "parent_row_id": "root",
+            "name": "B",
+            "relation": "종속기업",
+            "ownership_pct": 80,
+        },
+        {
+            "row_id": "c",
+            "parent_row_id": "b",
+            "name": "C",
+            "relation": "손자회사",
+            "ownership_pct": 60,
+        },
+    ]
+    definition = pack.diagrams[0].definition
+    assert 'P["A"]' in definition
+    assert 'N1["B"]' in definition
+    assert 'N2["C"]' in definition
+    assert 'P -->|"종속기업 / 지분율 80%"| N1' in definition
+    assert 'N1 -->|"손자회사 / 지분율 60%"| N2' in definition
+    markdown = render_visualization_markdown(pack, mermaid=False)
+    for fact in ("A", "B", "C", "종속기업", "손자회사", "80", "60", "%"):
+        assert fact in markdown
+
+
+def test_direct_group_family_keeps_omission_as_a_bound_canonical_sentinel():
+    pack = build_visualization_pack({
+        "_visual_family": "group_graph",
+        "_visual_status": "usable",
+        "entity_name": "A",
+        "entities": [
+            {
+                "entity_key": f"child-{index}",
+                "parent_is_root": True,
+                "name": f"B{index}",
+                "relation": "종속기업",
+                "ownership_pct": 80,
+            }
+            for index in range(10)
+        ],
+    })
+    table = next(item for item in pack.tables if item.id == "group_entities")
+    assert len(table.rows) == 10
+    assert table.rows[-1] == {
+        "row_id": "omitted",
+        "parent_row_id": "root",
+        "name": "2개 노드는 가독성을 위해 생략",
+        "relation": "omitted",
+        "ownership_pct": None,
+    }
+    diagram = pack.diagrams[0]
+    assert "2개 노드는 가독성을 위해 생략" in diagram.definition
+    assert set(diagram.row_refs) == {
+        str(row["row_id"]) for row in table.rows
+    }
+
+
+def test_raw_dcf_family_uses_ratio_inputs_and_krw_valuation_units():
+    pack = build_visualization_pack({
+        "_visual_family": "dcf",
+        "_visual_status": "usable",
+        "projections": [{"year": 2025, "revenue": 100, "ufcf": 10}],
+        "sensitivity": [{
+            "wacc": 0.10,
+            "terminal_growth": 0.03,
+            "enterprise_value": 1_000,
+            "status": "valid",
+        }],
+    })
+    table = next(item for item in pack.tables if item.id == "dcf_sensitivity")
+    units = {column.key: column.unit for column in table.columns}
+    assert units == {
+        "wacc": "ratio",
+        "terminal_growth": "ratio",
+        "enterprise_value": "KRW",
+        "status": None,
+    }
+    markdown = render_visualization_markdown(pack, mermaid=False)
+    assert "WACC (ratio)" in markdown
+    assert "영구성장률 (ratio)" in markdown
+    assert "기업가치 (KRW)" in markdown
+    assert "0.1" in markdown and "0.03" in markdown
+    assert "10%" not in markdown and "3%" not in markdown
+
+
 def test_diagram_may_only_summarize_rows_in_referenced_table():
     with pytest.raises(ValidationError, match="diagram"):
         VisualizationPackV1.model_validate(_pack(diagrams=[{
@@ -283,6 +430,25 @@ def test_diagram_may_only_summarize_rows_in_referenced_table():
             "definition": 'flowchart TD\n X["invented"]',
             "row_refs": ["missing-row"],
         }]))
+
+
+def test_timeline_has_one_canonical_fact_source_and_rejects_a_second_event_copy():
+    typed = _pack(timelines=[{
+        "id": "timeline",
+        "title": "이벤트",
+        "table_ref": "facts",
+        "events": [{"year": 2025, "value": 999}],
+    }])
+    with pytest.raises(ValidationError, match="events"):
+        VisualizationPackV1.model_validate(typed)
+
+    legacy = build_visualization_pack({
+        **typed,
+        "kind": "answer_pack",
+    })
+    assert legacy.timelines[0].table_ref == "facts"
+    assert not hasattr(legacy.timelines[0], "events")
+    assert legacy.tables[0].rows == [{"year": 2024, "value": 100}]
 
 
 def test_rich_resource_uri_is_content_bound_and_html_only_uses_validated_pack():
@@ -300,6 +466,84 @@ def test_rich_resource_uri_is_content_bound_and_html_only_uses_validated_pack():
     assert resource["uri"] == pack.resource_uri
     assert resource["mimeType"] == "text/html; charset=utf-8"
     assert "<table>" in resource["text"]
+
+
+def test_mutated_model_instances_are_revalidated_at_every_render_and_publish_boundary():
+    from kreports.mcp.resources import publish_visualization_resource
+
+    def valid_pack():
+        return VisualizationPackV1.model_validate(_pack(sources=[{
+            "label": "DART 공시",
+            "rcept_no": "20250101000001",
+            "url": (
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                "rcpNo=20250101000001"
+            ),
+        }]))
+
+    poisoned = []
+    pack = valid_pack()
+    pack.resource_uri = None
+    pack.tables[0].rows[0]["undeclared"] = 1
+    poisoned.append(pack)
+    pack = valid_pack()
+    pack.resource_uri = None
+    pack.tables[0].rows[0]["value"] = "poison\x00"
+    poisoned.append(pack)
+    pack = valid_pack()
+    pack.resource_uri = None
+    pack.sources[0].url = "javascript:alert(1)"
+    poisoned.append(pack)
+    pack = valid_pack()
+    pack.resource_uri = None
+    pack.sources[0].label = "poison\x00"
+    poisoned.append(pack)
+
+    for pack in poisoned:
+        for boundary in (
+            lambda: render_visualization_markdown(pack, mermaid=False),
+            lambda: render_visualization_html(pack),
+            lambda: publish_visualization_resource(pack),
+        ):
+            with pytest.raises(ValidationError):
+                boundary()
+
+
+def test_poisoned_visual_resource_is_removed_without_cache_accounting_drift():
+    from kreports.mcp import resources
+
+    resources._clear_visualization_resources_for_test()
+    pack = VisualizationPackV1.model_validate(_pack())
+    uri = resources.publish_visualization_resource(pack)
+    digest = uri.rsplit("/", 1)[-1]
+    assert resources._VISUALIZATION_CACHE_BYTES == sum(
+        int(entry["size"])
+        for entry in resources._VISUALIZATION_RESOURCES.values()
+    )
+
+    resources._VISUALIZATION_RESOURCES[digest]["pack"]["tables"][0]["rows"][0][
+        "value"
+    ] = "poison\x00"
+    with pytest.raises(
+        resources.ResourceRequestError,
+        match="visualization_resource_unavailable",
+    ):
+        resources.read_resource(uri)
+    assert not resources._VISUALIZATION_RESOURCES
+    assert resources._VISUALIZATION_CACHE_BYTES == 0
+
+    for _ in range(3):
+        with pytest.raises(
+            resources.ResourceRequestError,
+            match="visualization_resource_unavailable",
+        ):
+            resources.read_resource(uri)
+        assert resources._VISUALIZATION_CACHE_BYTES == sum(
+            int(entry["size"])
+            for entry in resources._VISUALIZATION_RESOURCES.values()
+        )
+    resources._clear_visualization_resources_for_test()
+    assert resources._VISUALIZATION_CACHE_BYTES == 0
 
 
 def test_published_visual_resource_is_fetchable_through_actual_mcp_read_path():
@@ -555,6 +799,69 @@ def test_ratio_units_and_quality_metadata_have_markdown_html_fact_parity():
         assert "20250101000001" in rendered
         assert "표본 제한" in rendered
         assert "검토 필요" in rendered
+
+
+def test_internal_source_table_provenance_stays_structured_but_renders_public_labels():
+    internal_sources = {
+        "accounting_note_chapters": "회계정책 주석 캐시",
+        "audit_matter_items": "감사보고서 항목 캐시",
+        "audit_procedure_items": "감사절차 항목 캐시",
+        "evidence_documents": "공시 근거 캐시",
+        "financial_facts_compact": "재무 공시 캐시",
+        "local_subsidiary_auditor_matrix": "연결실체 감사인 캐시",
+        "report_sections": "보고서 섹션 캐시",
+        "report_sections.audit_report": "감사보고서 캐시",
+        "source_documents": "원문 문서 캐시",
+    }
+    rows = [
+        {
+            "source_table": internal,
+            "rcept_no": f"20250101{index:06d}",
+        }
+        for index, internal in enumerate(internal_sources, start=1)
+    ]
+    pack = VisualizationPackV1.model_validate({
+        "tables": [{
+            "id": "provenance",
+            "title": "원천 근거",
+            "columns": [
+                {"field": "source_table", "label": "원천 테이블"},
+                {"field": "rcept_no", "label": "접수번호"},
+            ],
+            "rows": rows,
+        }],
+        "charts": [],
+        "diagrams": [],
+        "sources": [{
+            "label": "DART 공시",
+            "rcept_no": "20250101000001",
+            "url": (
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                "rcpNo=20250101000001"
+            ),
+        }],
+        "data_quality": {
+            "status": "usable",
+            "source": "financial_facts_compact",
+        },
+        "status": "usable",
+    })
+    structured = pack.model_dump(mode="json")
+    assert [
+        row["source_table"]
+        for row in structured["tables"][0]["rows"]
+    ] == list(internal_sources)
+
+    for rendered in (
+        render_visualization_markdown(pack, mermaid=False),
+        render_visualization_html(pack),
+    ):
+        for internal, public in internal_sources.items():
+            assert internal not in rendered
+            assert public in rendered
+        for row in rows:
+            assert row["rcept_no"] in rendered
+        assert "20250101000001" in rendered
 
 
 def test_render_answer_contains_invalid_external_answer_pack():

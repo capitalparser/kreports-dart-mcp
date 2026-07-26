@@ -33,6 +33,7 @@ from kreports.storage.raw_documents import RawDocumentStore
 from kreports.mcp.visual_contracts import (
     VisualizationPackV1,
     render_visualization_html,
+    validate_visualization_pack,
 )
 
 
@@ -715,7 +716,7 @@ def render_visualization_resource(
     pack: VisualizationPackV1 | dict[str, Any],
 ) -> dict[str, str]:
     """Return a self-contained rich resource without reading or writing the DB."""
-    validated = VisualizationPackV1.model_validate(pack)
+    validated = validate_visualization_pack(pack)
     publish_visualization_resource(validated)
     if validated.resource_uri is None:  # pragma: no cover - validator derives it
         raise ResourceRequestError("invalid_visualization_resource")
@@ -728,7 +729,7 @@ def publish_visualization_resource(
     """Publish one bounded HTML resource in the current MCP server process."""
     global _VISUALIZATION_CACHE_BYTES
 
-    validated = VisualizationPackV1.model_validate(pack)
+    validated = validate_visualization_pack(pack)
     if validated.resource_uri is None:  # pragma: no cover - validator derives it
         raise ResourceRequestError("invalid_visualization_resource")
     html_text = render_visualization_html(validated)
@@ -743,26 +744,40 @@ def publish_visualization_resource(
         "pack": validated.model_dump(mode="json"),
         "size": size,
     }
-    previous = _VISUALIZATION_RESOURCES.pop(digest, None)
-    if previous is not None:
-        _VISUALIZATION_CACHE_BYTES -= int(previous["size"])
+    _remove_visualization_resource(digest)
     _VISUALIZATION_RESOURCES[digest] = entry
     _VISUALIZATION_CACHE_BYTES += size
     while (
-        len(_VISUALIZATION_RESOURCES) > MAX_VISUALIZATION_RESOURCES
-        or _VISUALIZATION_CACHE_BYTES > MAX_VISUALIZATION_CACHE_BYTES
+        _VISUALIZATION_RESOURCES
+        and (
+            len(_VISUALIZATION_RESOURCES) > MAX_VISUALIZATION_RESOURCES
+            or _VISUALIZATION_CACHE_BYTES > MAX_VISUALIZATION_CACHE_BYTES
+        )
     ):
-        _, evicted = _VISUALIZATION_RESOURCES.popitem(last=False)
-        _VISUALIZATION_CACHE_BYTES -= int(evicted["size"])
+        evicted_digest = next(iter(_VISUALIZATION_RESOURCES))
+        _remove_visualization_resource(evicted_digest)
     return validated.resource_uri
 
 
-def _visualization_resource(digest: str) -> dict[str, Any]:
+def _remove_visualization_resource(digest: str) -> dict[str, Any] | None:
+    """Remove one cache entry and restore the exact byte invariant."""
+    global _VISUALIZATION_CACHE_BYTES
+
     entry = _VISUALIZATION_RESOURCES.pop(digest, None)
+    if entry is not None:
+        _VISUALIZATION_CACHE_BYTES = sum(
+            int(item["size"])
+            for item in _VISUALIZATION_RESOURCES.values()
+        )
+    return entry
+
+
+def _visualization_resource(digest: str) -> dict[str, Any]:
+    entry = _VISUALIZATION_RESOURCES.get(digest)
     if entry is None:
         raise ResourceRequestError("visualization_resource_unavailable")
     try:
-        validated = VisualizationPackV1.model_validate(entry["pack"])
+        validated = validate_visualization_pack(entry["pack"])
         expected_uri = VISUALIZATION_URI_TEMPLATE.format(digest=digest)
         if validated.resource_uri != expected_uri:
             raise ValueError("digest mismatch")
@@ -770,10 +785,11 @@ def _visualization_resource(digest: str) -> dict[str, Any]:
         if regenerated != entry["text"]:
             raise ValueError("content mismatch")
     except Exception:
+        _remove_visualization_resource(digest)
         raise ResourceRequestError(
             "visualization_resource_unavailable"
         ) from None
-    _VISUALIZATION_RESOURCES[digest] = entry
+    _VISUALIZATION_RESOURCES.move_to_end(digest)
     return {
         "resource_version": "visualization.v1",
         "uri": entry["uri"],

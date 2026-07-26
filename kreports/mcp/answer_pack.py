@@ -380,17 +380,17 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "dcf_valuation_bridge",
             "기업가치·순부채·자기자본 브리지",
             [
-                ("forecast_period_present_value", "예측기간 PV"),
-                ("terminal_value", "할인 전 터미널가치"),
-                ("terminal_value_present_value", "터미널가치 PV"),
+                ("forecast_period_present_value", "예측기간 PV(KRW)"),
+                ("terminal_value", "할인 전 터미널가치(KRW)"),
+                ("terminal_value_present_value", "터미널가치 PV(KRW)"),
                 ("gordon_growth_formula", "Gordon 성장 공식"),
-                ("final_year_discount_factor", "최종연도 할인계수"),
-                ("enterprise_value", "기업가치"),
+                ("final_year_discount_factor", "최종연도 할인계수(ratio)"),
+                ("enterprise_value", "기업가치(KRW)"),
                 ("enterprise_value_formula", "기업가치 조정 공식"),
-                ("debt", "이자부부채"),
-                ("cash", "현금"),
-                ("net_debt", "순부채"),
-                ("equity_value", "자기자본가치"),
+                ("debt", "이자부부채(KRW)"),
+                ("cash", "현금(KRW)"),
+                ("net_debt", "순부채(KRW)"),
+                ("equity_value", "자기자본가치(KRW)"),
                 ("formula", "브리지 공식"),
             ],
             bridge_rows,
@@ -399,10 +399,10 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "dcf_sensitivity",
             "WACC·영구성장률 5x5 민감도",
             [
-                ("wacc", "WACC"),
-                ("terminal_growth", "영구성장률"),
+                ("wacc", "WACC(ratio)"),
+                ("terminal_growth", "영구성장률(ratio)"),
                 ("status", "상태"),
-                ("enterprise_value", "기업가치"),
+                ("enterprise_value", "기업가치(KRW)"),
             ],
             sensitivity,
         ),
@@ -673,49 +673,58 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
             data_ref="subsidiary_contribution",
             encodings={"x": {"field": "name"}, "y": {"field": "revenue_share_pct"}},
         ))
+        visible_row_ids = {
+            str(row.get("entity_key")): str(index)
+            for index, row in enumerate(visible_diagram_rows, start=1)
+            if row.get("entity_key") not in {None, ""}
+        }
+        structure_rows = [{
+            "row_id": "0",
+            "parent_row_id": None,
+            "name": subject,
+            "relation": "root",
+            "ownership_pct": None,
+            "year": year,
+            "qsc_status": None,
+        }]
+        for index, row in enumerate(visible_diagram_rows, start=1):
+            parent_key = str(row.get("parent_entity_key") or "")
+            structure_rows.append({
+                "row_id": str(index),
+                "parent_row_id": (
+                    "0"
+                    if row.get("parent_is_root")
+                    else visible_row_ids.get(parent_key, "0")
+                ),
+                "name": row.get("name"),
+                "relation": row.get("relation"),
+                "ownership_pct": row.get("ownership_pct"),
+                "year": year,
+                "qsc_status": row.get("qsc_status"),
+            })
+        if omitted_count > 0:
+            structure_rows.append({
+                "row_id": str(len(visible_diagram_rows) + 1),
+                "parent_row_id": "0",
+                "name": f"{omitted_count}개 노드는 가독성을 위해 생략",
+                "relation": "omitted",
+                "ownership_pct": None,
+                "year": year,
+                "qsc_status": None,
+            })
         pack["tables"].append(_table(
             "subsidiary_structure_facts",
             "연결실체 구조도 근거",
             [
                 ("row_id", "행 ID"),
+                ("parent_row_id", "상위 행 ID"),
                 ("name", "회사"),
                 ("relation", "관계"),
+                ("ownership_pct", "지분율(%)"),
                 ("year", "연도"),
                 ("qsc_status", "QSC"),
             ],
-            [
-                {
-                    "row_id": "0",
-                    "name": subject,
-                    "relation": "root",
-                    "year": year,
-                    "qsc_status": None,
-                },
-                *[
-                    {
-                        "row_id": str(index),
-                        "name": row.get("name"),
-                        "relation": row.get("relation"),
-                        "year": year,
-                        "qsc_status": row.get("qsc_status"),
-                    }
-                    for index, row in enumerate(
-                        visible_diagram_rows,
-                        start=1,
-                    )
-                ],
-                *(
-                    [{
-                        "row_id": str(len(visible_diagram_rows) + 1),
-                        "name": f"{omitted_count}개 노드는 가독성을 위해 생략",
-                        "relation": "omitted",
-                        "year": year,
-                        "qsc_status": None,
-                    }]
-                    if omitted_count > 0
-                    else []
-                ),
-            ],
+            structure_rows,
             note="구조도 노드와 간선은 이 표의 행만 사용합니다.",
         ))
     pack["diagrams"].append({
@@ -877,7 +886,6 @@ def _build_disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:
     pack = _base_pack("공시 이벤트 타임라인", result)
     events = [event for event in result.get("events") or [] if isinstance(event, dict)]
     event_rows = []
-    timeline_events = []
     for event in events:
         row = {
             "event_date": event.get("event_date"),
@@ -887,13 +895,6 @@ def _build_disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:
             "rcept_no": parent_rcept_no(str(event.get("rcept_no") or "")),
         }
         event_rows.append(row)
-        timeline_events.append({
-            "date": row["event_date"],
-            "title": row["event_title"],
-            "entity": row["corp_name"],
-            "event_type": row["event_type"],
-            "rcept_no": row["rcept_no"],
-        })
     if event_rows:
         pack["tables"].append(_table(
             "disclosure_events",
@@ -910,7 +911,7 @@ def _build_disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:
         pack["timelines"].append({
             "id": "disclosure_event_timeline",
             "title": "공시 이벤트 타임라인",
-            "events": timeline_events,
+            "table_ref": "disclosure_events",
         })
     counts = result.get("event_type_counts") or {}
     if counts:

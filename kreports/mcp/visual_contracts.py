@@ -1,6 +1,7 @@
 """Strict, portable visualization contracts with canonical table fallbacks."""
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal
 import hashlib
 import html
@@ -34,7 +35,12 @@ _PUBLIC_SOURCE_LABELS = {
 
 
 def _strict_model_config() -> ConfigDict:
-    return ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+    return ConfigDict(
+        extra="forbid",
+        strict=True,
+        populate_by_name=True,
+        revalidate_instances="always",
+    )
 
 
 def _bounded_text(value: str, *, field_name: str = "text") -> str:
@@ -89,6 +95,20 @@ def _validate_json_value(value: Any, *, depth: int = 0) -> None:
     raise TypeError("row values must be JSON-safe")
 
 
+def _contains_fact(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (bool, int, float)):
+        return True
+    if isinstance(value, list):
+        return any(_contains_fact(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_fact(item) for item in value.values())
+    return False
+
+
 class ColumnSpecV1(BaseModel):
     model_config = _strict_model_config()
 
@@ -135,8 +155,12 @@ class TableSpecV1(BaseModel):
                 raise ValueError(f"row contains unknown column: {sorted(unknown)[0]}")
             for value in row.values():
                 _validate_json_value(value)
+            if not any(_contains_fact(value) for value in row.values()):
+                raise ValueError("table row must contain a declared fact")
         if self.status == "usable" and not self.rows:
             raise ValueError("usable table must contain at least one row")
+        if self.status == "missing" and self.rows:
+            raise ValueError("missing table cannot carry fact rows")
         return self
 
 
@@ -238,17 +262,9 @@ class TimelineSpecV1(BaseModel):
     id: str
     title: str
     table_ref: str
-    events: list[dict[str, Any]] = Field(default_factory=list, max_length=MAX_ROWS)
 
     _id = field_validator("id", "table_ref")(_validate_identifier)
     _title = field_validator("title")(_bounded_title)
-
-    @field_validator("events")
-    @classmethod
-    def _events(cls, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        for value in values:
-            _validate_json_value(value)
-        return values
 
 
 class SummarySpecV1(BaseModel):
@@ -472,8 +488,30 @@ class VisualizationPackV1(BaseModel):
         return self
 
 
+def validate_visualization_pack(
+    pack: VisualizationPackV1 | dict[str, Any],
+) -> VisualizationPackV1:
+    """Fresh-validate a detached payload at every trust boundary."""
+    payload = (
+        pack.model_dump(
+            mode="json",
+            exclude_none=False,
+            round_trip=True,
+        )
+        if isinstance(pack, VisualizationPackV1)
+        else deepcopy(pack)
+    )
+    return VisualizationPackV1.model_validate(payload)
+
+
 def _canonical_diagram_definition(table: TableSpecV1) -> str:
     lines = ["flowchart TD"]
+    node_ids = {
+        str(row.get("row_id", index)): (
+            "P" if index == 0 else f"N{index}"
+        )
+        for index, row in enumerate(table.rows)
+    }
     for index, row in enumerate(table.rows):
         label = next(
             (
@@ -511,8 +549,23 @@ def _canonical_diagram_definition(table: TableSpecV1) -> str:
             )
         lines.append(f'  {node_id}["{rendered_label}"]')
         if index:
-            relation = _mermaid_text(row.get("relation") or "-")
-            lines.append(f'  P -->|"{relation}"| N{index}')
+            relation = _safe_text(row.get("relation") or "-")
+            ownership = row.get("ownership_pct")
+            edge_label = relation
+            if ownership is not None and ownership != "":
+                rendered_ownership = (
+                    f"{ownership:g}"
+                    if isinstance(ownership, (int, float))
+                    else str(ownership)
+                )
+                edge_label += f" / 지분율 {rendered_ownership}%"
+            parent_node = node_ids.get(
+                str(row.get("parent_row_id") or ""),
+                "P",
+            )
+            lines.append(
+                f'  {parent_node} -->|"{_mermaid_text(edge_label)}"| N{index}'
+            )
     return "\n".join(lines)
 
 
@@ -588,7 +641,7 @@ def _canonical_table(raw: dict[str, Any], *, pack_status: str) -> dict[str, Any]
             for key in seen
             if key in raw_row
         }
-        if row and any(value is not None and value != "" for value in row.values()):
+        if row and any(_contains_fact(value) for value in row.values()):
             rows.append(row)
     status = pack_status if rows else "missing"
     note = raw.get("note")
@@ -770,7 +823,6 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
                 "id": raw_timeline.get("id"),
                 "title": _safe_text(raw_timeline.get("title") or raw_timeline.get("id")),
                 "table_ref": table_ref,
-                "events": _safe_value(raw_timeline.get("events") or []),
             })
     if not tables or not any(table["rows"] for table in tables):
         tables = [{
@@ -898,16 +950,24 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
                 "id": "dcf_projections", "title": "DCF 예측",
                 "columns": [
                     {"field": "year", "label": "연도"},
-                    {"field": "revenue", "label": "매출", "unit": "원"},
-                    {"field": "ufcf", "label": "UFCF", "unit": "원"},
+                    {"field": "revenue", "label": "매출", "unit": "KRW"},
+                    {"field": "ufcf", "label": "UFCF", "unit": "KRW"},
                 ], "rows": projections,
             },
             {
                 "id": "dcf_sensitivity", "title": "DCF 민감도",
                 "columns": [
-                    {"field": "wacc", "label": "WACC", "unit": "%"},
-                    {"field": "terminal_growth", "label": "영구성장률", "unit": "%"},
-                    {"field": "enterprise_value", "label": "기업가치", "unit": "원"},
+                    {"field": "wacc", "label": "WACC", "unit": "ratio"},
+                    {
+                        "field": "terminal_growth",
+                        "label": "영구성장률",
+                        "unit": "ratio",
+                    },
+                    {
+                        "field": "enterprise_value",
+                        "label": "기업가치",
+                        "unit": "KRW",
+                    },
                     {"field": "status", "label": "상태"},
                 ], "rows": sensitivity,
             },
@@ -952,17 +1012,67 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
             "encodings": {"x": {"field": "metric"}, "y": {"field": "subject_value"}},
         })
     elif family == "group_graph":
-        rows = result.get("entities") or []
+        entity_name = _safe_text(result.get("entity_name") or "대상 회사")
+        entities = [
+            row for row in (result.get("entities") or [])
+            if (
+                isinstance(row, dict)
+                and any(
+                    _contains_fact(row.get(key))
+                    for key in ("name", "relation", "ownership_pct")
+                )
+            )
+        ][: MAX_ROWS - 1]
+        visible_entities = _hierarchy_closed_group_rows(entities, limit=8)
+        omitted_count = len(entities) - len(visible_entities)
+        entity_row_ids = {
+            str(row.get("entity_key")): str(row.get("entity_key"))
+            for row in visible_entities
+            if row.get("entity_key") not in {None, ""}
+        }
+        rows = []
+        if visible_entities:
+            rows.append({
+                "row_id": "root",
+                "parent_row_id": None,
+                "name": entity_name,
+                "relation": "root",
+                "ownership_pct": None,
+            })
+        for index, row in enumerate(visible_entities, start=1):
+            row_id = str(row.get("entity_key") or index)
+            parent_key = str(row.get("parent_entity_key") or "")
+            rows.append({
+                "row_id": row_id,
+                "parent_row_id": (
+                    entity_row_ids.get(parent_key, "root")
+                    if not row.get("parent_is_root")
+                    else "root"
+                ),
+                "name": row.get("name"),
+                "relation": row.get("relation"),
+                "ownership_pct": row.get("ownership_pct"),
+            })
+        if omitted_count > 0:
+            rows.append({
+                "row_id": "omitted",
+                "parent_row_id": "root",
+                "name": f"{omitted_count}개 노드는 가독성을 위해 생략",
+                "relation": "omitted",
+                "ownership_pct": None,
+            })
         pack["tables"].append({
             "id": "group_entities", "title": "그룹 실체",
             "columns": [
+                {"field": "row_id", "label": "행 ID"},
+                {"field": "parent_row_id", "label": "상위 행 ID"},
                 {"field": "name", "label": "회사"},
                 {"field": "relation", "label": "관계"},
                 {"field": "ownership_pct", "label": "지분율", "unit": "%"},
             ], "rows": rows,
         })
         definition = _group_definition(
-            _safe_text(result.get("entity_name") or "대상 회사"),
+            entity_name,
             rows,
         )
         pack["diagrams"].append({
@@ -1016,6 +1126,48 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
             "table_ref": "disclosure_events",
         })
     return pack
+
+
+def _hierarchy_closed_group_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    entity_keys = {
+        str(row.get("entity_key"))
+        for row in rows
+        if row.get("entity_key") not in {None, ""}
+    }
+    visible: list[dict[str, Any]] = []
+    visible_keys: set[str] = set()
+    pending = list(rows)
+    while pending and len(visible) < limit:
+        progressed = False
+        for row in list(pending):
+            parent_key = str(row.get("parent_entity_key") or "")
+            parent_is_root = (
+                row.get("parent_is_root") is True
+                or (
+                    "parent_is_root" not in row
+                    and parent_key not in entity_keys
+                )
+            )
+            if (
+                parent_key
+                and not parent_is_root
+                and parent_key not in visible_keys
+            ):
+                continue
+            pending.remove(row)
+            visible.append(row)
+            if row.get("entity_key") not in {None, ""}:
+                visible_keys.add(str(row["entity_key"]))
+            progressed = True
+            if len(visible) == limit:
+                break
+        if not progressed:
+            break
+    return visible
 
 
 def build_visualization_pack(result: dict[str, Any]) -> VisualizationPackV1:
@@ -1116,13 +1268,19 @@ def _public_source_label(value: str) -> str:
     return _PUBLIC_SOURCE_LABELS.get(value, "로컬 공시 캐시")
 
 
+def _presentation_cell(column_key: str, value: Any) -> Any:
+    if column_key == "source_table" and isinstance(value, str):
+        return _public_source_label(value)
+    return value
+
+
 def render_visualization_markdown(
     pack: VisualizationPackV1,
     *,
     mermaid: bool,
 ) -> str:
     """Render canonical tables, optionally followed by safe Mermaid diagrams."""
-    validated = VisualizationPackV1.model_validate(pack)
+    validated = validate_visualization_pack(pack)
     lines: list[str] = [
         f"시각화 데이터 상태: {_markdown_cell(validated.status)}",
     ]
@@ -1142,7 +1300,10 @@ def render_visualization_markdown(
         lines.append("| " + " | ".join("---" for _ in headers) + " |")
         for row in table.rows:
             lines.append("| " + " | ".join(
-                _markdown_cell(row.get(column.key, "-"))
+                _markdown_cell(_presentation_cell(
+                    column.key,
+                    row.get(column.key, "-"),
+                ))
                 for column in table.columns
             ) + " |")
         if not table.rows:
@@ -1186,7 +1347,7 @@ def render_visualization_markdown(
 
 def render_visualization_html(pack: VisualizationPackV1) -> str:
     """Render a bounded, self-contained HTML table resource from validated facts."""
-    validated = VisualizationPackV1.model_validate(pack)
+    validated = validate_visualization_pack(pack)
     pieces = [
         "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\">",
         "<meta name=\"referrer\" content=\"no-referrer\">",
@@ -1215,7 +1376,10 @@ def render_visualization_html(pack: VisualizationPackV1) -> str:
         for row in rows:
             pieces.append("<tr>")
             for column in table.columns:
-                value = row.get(column.key, "-")
+                value = _presentation_cell(
+                    column.key,
+                    row.get(column.key, "-"),
+                )
                 if isinstance(value, (dict, list)):
                     value = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 pieces.append(f"<td>{html.escape(_safe_text(value))}</td>")

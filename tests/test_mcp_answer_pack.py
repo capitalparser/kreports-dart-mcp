@@ -136,7 +136,13 @@ def test_attach_meta_adds_disclosure_event_timeline_pack():
 
     pack = out["answer_pack"]
     assert pack["summary"]["title"] == "공시 이벤트 타임라인"
-    assert pack["timelines"][0]["events"][0]["rcept_no"] == "20250301000001"
+    assert pack["timelines"][0]["table_ref"] == "disclosure_events"
+    assert "events" not in pack["timelines"][0]
+    event_table = next(
+        table for table in pack["tables"]
+        if table["id"] == "disclosure_events"
+    )
+    assert event_table["rows"][0]["rcept_no"] == "20250301000001"
     assert any(chart["id"] == "event_type_distribution" and chart["type"] == "bar" for chart in pack["charts"])
     assert pack["sources"][0]["url"].endswith("20250301000001")
 

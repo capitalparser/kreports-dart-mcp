@@ -309,6 +309,39 @@ def test_dcf_answer_pack_preserves_all_review_layers_and_escapes_subject():
     assert len(next(t for t in pack["tables"] if t["id"] == "dcf_sensitivity")["rows"]) == 25
 
 
+def test_dcf_answer_pack_declares_ratio_and_krw_units_for_valuation_facts():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("build_dcf_model_pack", _model_result())
+    tables = {table["id"]: table for table in pack["tables"]}
+    sensitivity_units = {
+        column["field"]: column.get("unit")
+        for column in tables["dcf_sensitivity"]["columns"]
+    }
+    assert sensitivity_units == {
+        "wacc": "ratio",
+        "terminal_growth": "ratio",
+        "status": None,
+        "enterprise_value": "KRW",
+    }
+
+    bridge_units = {
+        column["field"]: column.get("unit")
+        for column in tables["dcf_valuation_bridge"]["columns"]
+    }
+    for field in (
+        "forecast_period_present_value",
+        "terminal_value",
+        "terminal_value_present_value",
+        "enterprise_value",
+        "debt",
+        "cash",
+        "net_debt",
+        "equity_value",
+    ):
+        assert bridge_units[field] == "KRW"
+
+
 def test_dcf_narrative_is_bounded_reviewable_and_not_a_conclusion():
     from kreports.mcp.renderers import render_answer
 
