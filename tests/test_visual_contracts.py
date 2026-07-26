@@ -102,6 +102,104 @@ def test_contracts_are_strict_and_enforce_reference_and_column_integrity():
         })
 
 
+def test_chart_contract_rejects_mixed_units_on_one_quantitative_channel():
+    mixed_table = _table(
+        columns=[
+            {"field": "year", "label": "연도"},
+            {"field": "amount", "label": "금액", "unit": "KRW"},
+            {"field": "margin", "label": "마진", "unit": "ratio"},
+        ],
+        rows=[{"year": 2024, "amount": 100, "margin": 0.1}],
+    )
+    with pytest.raises(ValidationError, match="mixed units"):
+        VisualizationPackV1.model_validate(_pack(
+            tables=[mixed_table],
+            charts=[{
+                "id": "mixed",
+                "type": "line",
+                "title": "금지 혼합축",
+                "data_ref": "facts",
+                "encodings": {
+                    "x": {"field": "year"},
+                    "y": {"fields": ["amount", "margin"]},
+                },
+            }],
+        ))
+
+
+def test_chart_contract_rejects_mixed_per_row_units_even_when_grouped():
+    mixed_table = _table(
+        columns=[
+            {"field": "metric", "label": "지표"},
+            {"field": "value", "label": "값"},
+            {"field": "unit", "label": "단위"},
+        ],
+        rows=[
+            {"metric": "매출", "value": 100, "unit": "KRW"},
+            {"metric": "마진", "value": 0.1, "unit": "ratio"},
+        ],
+    )
+    with pytest.raises(ValidationError, match="mixed row units"):
+        VisualizationPackV1.model_validate(_pack(
+            tables=[mixed_table],
+            charts=[{
+                "id": "mixed",
+                "type": "bar",
+                "title": "금지 혼합 비교",
+                "data_ref": "facts",
+                "encodings": {
+                    "x": {"field": "metric"},
+                    "y": {"field": "value"},
+                    "color": {"field": "unit"},
+                },
+            }],
+        ))
+
+
+def test_chart_contract_requires_homogeneous_row_unit_to_be_visible():
+    homogeneous_table = _table(
+        columns=[
+            {"field": "metric", "label": "지표"},
+            {"field": "value", "label": "값"},
+            {"field": "unit", "label": "단위"},
+        ],
+        rows=[
+            {"metric": "ROE", "value": 0.1, "unit": "ratio"},
+            {"metric": "ROA", "value": 0.05, "unit": "ratio"},
+        ],
+    )
+    with pytest.raises(ValidationError, match="unit grouping must be visible"):
+        VisualizationPackV1.model_validate(_pack(
+            tables=[homogeneous_table],
+            charts=[{
+                "id": "hidden_unit",
+                "type": "bar",
+                "title": "단위 없는 비교",
+                "data_ref": "facts",
+                "encodings": {
+                    "x": {"field": "metric"},
+                    "y": {"field": "value"},
+                },
+            }],
+        ))
+
+    pack = VisualizationPackV1.model_validate(_pack(
+        tables=[homogeneous_table],
+        charts=[{
+            "id": "visible_unit",
+            "type": "bar",
+            "title": "동일 단위 비교 (ratio)",
+            "data_ref": "facts",
+            "encodings": {
+                "x": {"field": "metric"},
+                "y": {"field": "value"},
+                "color": {"field": "unit"},
+            },
+        }],
+    ))
+    assert pack.charts[0].encodings.color.field == "unit"
+
+
 @pytest.mark.parametrize(
     "bad_value",
     [
@@ -542,7 +640,107 @@ def test_direct_peer_distribution_preserves_mixed_metric_units_per_row():
             assert value in rendered
 
 
-def test_all_direct_visual_families_declare_units_for_every_numeric_measure():
+def test_direct_peer_mixed_units_suppress_quantitative_chart_with_limitation():
+    pack = build_visualization_pack({
+        "_visual_family": "peer_distribution",
+        "_visual_status": "usable",
+        "results": {
+            2025: {
+                "ROE": {
+                    "subject_value": 0.12,
+                    "p25": 0.05,
+                    "p50": 0.10,
+                    "p75": 0.15,
+                    "percentile": 70,
+                    "n": 30,
+                    "unit": "ratio",
+                },
+                "감사보수": {
+                    "subject_value": 1_200_000,
+                    "p25": 900_000,
+                    "p50": 1_100_000,
+                    "p75": 1_400_000,
+                    "percentile": 60,
+                    "n": 30,
+                    "unit": "KRW",
+                },
+            },
+        },
+    })
+
+    assert not pack.charts
+    assert "peer_chart_suppressed:mixed_units:KRW,ratio" in pack.limitations
+    table = next(item for item in pack.tables if item.id == "peer_metric_matrix")
+    assert {row["unit"] for row in table.rows} == {"ratio", "KRW"}
+
+
+@pytest.mark.parametrize(
+    ("unit", "subject_value"),
+    [("ratio", 0.12), ("KRW", 1_200_000)],
+)
+def test_direct_peer_homogeneous_units_keep_one_unit_visible_chart(
+    unit,
+    subject_value,
+):
+    pack = build_visualization_pack({
+        "_visual_family": "peer_distribution",
+        "_visual_status": "usable",
+        "results": {
+            2025: {
+                "metric-a": {
+                    "subject_value": subject_value,
+                    "p25": subject_value,
+                    "p50": subject_value,
+                    "p75": subject_value,
+                    "percentile": 50,
+                    "n": 30,
+                    "unit": unit,
+                },
+                "metric-b": {
+                    "subject_value": subject_value,
+                    "p25": subject_value,
+                    "p50": subject_value,
+                    "p75": subject_value,
+                    "percentile": 50,
+                    "n": 30,
+                    "unit": unit,
+                },
+            },
+        },
+    })
+    assert len(pack.charts) == 1
+    chart = pack.charts[0]
+    assert chart.title.endswith(f"({unit})")
+    assert chart.encodings.color is not None
+    assert chart.encodings.color.field == "unit"
+    assert not any(
+        item.startswith("peer_chart_suppressed:")
+        for item in pack.limitations
+    )
+
+
+def test_direct_peer_missing_units_suppress_quantitative_chart():
+    pack = build_visualization_pack({
+        "_visual_family": "peer_distribution",
+        "_visual_status": "usable",
+        "results": {
+            2025: {
+                "ROE": {
+                    "subject_value": 0.12,
+                    "p25": 0.05,
+                    "p50": 0.10,
+                    "p75": 0.15,
+                    "percentile": 70,
+                    "n": 30,
+                },
+            },
+        },
+    })
+    assert not pack.charts
+    assert "peer_chart_suppressed:missing_units" in pack.limitations
+
+
+def test_all_direct_visual_families_keep_numeric_units_and_chart_channels_safe():
     payloads = [
         {
             "_visual_family": "financial_trend",
@@ -619,6 +817,7 @@ def test_all_direct_visual_families_declare_units_for_every_numeric_measure():
     for payload in payloads:
         pack = build_visualization_pack(payload)
         assert pack.status == "usable"
+        tables = {table.id: table for table in pack.tables}
         for table in pack.tables:
             columns = {column.key: column for column in table.columns}
             for row in table.rows:
@@ -641,6 +840,69 @@ def test_all_direct_visual_families_declare_units_for_every_numeric_measure():
                             table.id,
                             field,
                         )
+        for chart in pack.charts:
+            table = tables[chart.data_ref]
+            columns = {column.key: column for column in table.columns}
+            encodings = chart.encodings.model_dump(exclude_none=True)
+            for channel_name in ("y", "color", "band"):
+                channel = encodings.get(channel_name)
+                if channel is None:
+                    continue
+                fields = (
+                    [channel["field"]]
+                    if channel.get("field")
+                    else channel["fields"]
+                )
+                numeric_fields = [
+                    field
+                    for field in fields
+                    if any(
+                        isinstance(row.get(field), (int, float))
+                        and not isinstance(row.get(field), bool)
+                        for row in table.rows
+                    )
+                ]
+                if not numeric_fields:
+                    continue
+                static_units = {
+                    columns[field].unit
+                    for field in numeric_fields
+                }
+                assert len(static_units) == 1, (
+                    payload["_visual_family"],
+                    chart.id,
+                    channel_name,
+                    static_units,
+                )
+                if static_units != {None}:
+                    continue
+                assert "unit" in columns, (
+                    payload["_visual_family"],
+                    chart.id,
+                    channel_name,
+                    "unit metadata lost",
+                )
+                row_units = {
+                    row.get("unit")
+                    for row in table.rows
+                    if any(
+                        row.get(field) is not None
+                        for field in numeric_fields
+                    )
+                }
+                assert len(row_units) == 1 and None not in row_units, (
+                    payload["_visual_family"],
+                    chart.id,
+                    channel_name,
+                    row_units,
+                )
+                assert (
+                    encodings.get("color", {}).get("field") == "unit"
+                ), (
+                    payload["_visual_family"],
+                    chart.id,
+                    "row unit not visibly encoded",
+                )
 
 
 def test_diagram_may_only_summarize_rows_in_referenced_table():

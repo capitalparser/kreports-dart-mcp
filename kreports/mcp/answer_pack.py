@@ -15,6 +15,19 @@ from kreports.mcp.contracts import build_answer_envelope
 
 
 PACK_VERSION = "answer_pack.v1"
+_DCF_CANDIDATE_METRICS = {
+    "revenue_growth": ("매출 성장률", "ratio"),
+    "operating_margin": ("영업이익률", "ratio"),
+    "cash_conversion": ("현금전환율", "ratio"),
+    "tax_rate": ("세율", "ratio"),
+    "capex_to_revenue": ("매출 대비 CAPEX 비율", "ratio"),
+    "da_to_revenue": ("매출 대비 감가상각비 비율", "ratio"),
+    "nwc_to_revenue": ("매출 대비 운전자본 비율", "ratio"),
+    "wacc": ("가중평균자본비용 WACC", "ratio"),
+    "terminal_growth": ("영구성장률", "ratio"),
+    "normalized_revenue": ("정규화 매출", "KRW"),
+    "normalized_operating_profit": ("정규화 영업이익", "KRW"),
+}
 
 
 def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] | None:
@@ -108,14 +121,32 @@ def _subject_label(result: dict[str, Any]) -> str:
     return "대상 조건"
 
 
-def _columns(fields: list[tuple[str, str]]) -> list[dict[str, str]]:
-    return [{"field": field, "label": label} for field, label in fields]
+def _columns(
+    fields: list[
+        tuple[str, str]
+        | tuple[str, str, str | None]
+    ],
+) -> list[dict[str, str | None]]:
+    columns = []
+    for definition in fields:
+        field, label = definition[:2]
+        column: dict[str, str | None] = {
+            "field": field,
+            "label": label,
+        }
+        if len(definition) == 3:
+            column["unit"] = definition[2]
+        columns.append(column)
+    return columns
 
 
 def _table(
     table_id: str,
     title: str,
-    columns: list[tuple[str, str]],
+    columns: list[
+        tuple[str, str]
+        | tuple[str, str, str | None]
+    ],
     rows: list[dict[str, Any]],
     *,
     note: str | None = None,
@@ -226,21 +257,30 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
             },
         ))
 
-    assumption_labels = {
-        "revenue_growth": "매출 성장률",
-        "operating_margin": "영업이익률",
-        "cash_conversion": "현금전환",
-    }
     basis_labels = {
         "historical_median": "과거 중앙값",
         "operating_cf_to_net_income": "영업현금흐름 대비 순이익",
+        "analyst_input": "분석가 입력",
     }
     assumption_rows = []
     for key, raw_value in (result.get("candidate_assumptions") or {}).items():
         value = raw_value if isinstance(raw_value, dict) else {"value": raw_value}
+        normalized_key = str(key)
+        registered = _DCF_CANDIDATE_METRICS.get(normalized_key)
+        label = registered[0] if registered else normalized_key
+        unit = (
+            str(value.get("unit"))
+            if value.get("unit") not in {None, ""}
+            else (
+                registered[1]
+                if registered
+                else _dcf_assumption_unit(normalized_key, None)
+            )
+        )
         assumption_rows.append({
-            "metric": assumption_labels.get(str(key), "기타 입력값"),
+            "metric": label,
             "value": value.get("value"),
+            "unit": unit,
             "basis": (
                 basis_labels.get(str(value.get("basis")), "산정 근거 미확보")
                 if value.get("basis")
@@ -248,20 +288,55 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
             ),
         })
     if assumption_rows:
+        candidate_units = {
+            str(row.get("unit"))
+            for row in assumption_rows
+            if row.get("unit") not in {None, ""}
+        }
+        missing_units = any(
+            row.get("unit") in {None, ""}
+            for row in assumption_rows
+        )
+        homogeneous_unit = (
+            next(iter(candidate_units))
+            if len(candidate_units) == 1 and not missing_units
+            else None
+        )
         pack["tables"].append(_table(
             "candidate_assumptions",
             "DCF 입력 후보",
-            [("metric", "입력값"), ("value", "값"), ("basis", "근거")],
+            [
+                ("metric", "입력값"),
+                ("value", "값", homogeneous_unit),
+                ("unit", "값 단위"),
+                ("basis", "근거"),
+            ],
             assumption_rows,
         ))
-        pack["charts"].append(_chart(
-            "dcf_input_bridge",
-            "bar",
-            "공시 기반 입력 후보",
-            data_ref="candidate_assumptions",
-            encodings={"x": {"field": "metric"}, "y": {"field": "value"}},
-            note="가치평가 결론이 아니라 공시 기반 입력 후보입니다.",
-        ))
+        if homogeneous_unit:
+            pack["charts"].append(_chart(
+                "dcf_input_bridge",
+                "bar",
+                f"공시 기반 입력 후보 ({homogeneous_unit})",
+                data_ref="candidate_assumptions",
+                encodings={
+                    "x": {"field": "metric"},
+                    "y": {"field": "value"},
+                    "color": {"field": "unit"},
+                },
+                note="가치평가 결론이 아니라 공시 기반 입력 후보입니다.",
+            ))
+        else:
+            limitation = (
+                "dcf_candidate_chart_suppressed:missing_units"
+                if missing_units
+                else "dcf_candidate_chart_suppressed:mixed_units:"
+                + ",".join(sorted(candidate_units))
+            )
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                limitation,
+            ]
     return pack
 
 
@@ -572,7 +647,7 @@ def _build_audit_fee_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("audit_fee_m", "감사보수(백만원)"),
                 ("audit_hours", "감사시간(시간)"),
                 ("non_audit_fee_m", "비감사보수(백만원)"),
-                ("nas_ratio", "비감사보수 비율"),
+                ("nas_ratio", "비감사보수 비율", "ratio"),
             ],
             rows,
         ))
@@ -1003,18 +1078,41 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             data_ref="peer_metric_matrix",
             encodings={"x": {"field": "year"}, "y": {"field": "metric"}, "color": {"field": "percentile"}},
         ))
-        pack["charts"].append(_chart(
-            "peer_band",
-            "band",
-            "대상회사 vs Peer 사분위",
-            data_ref="peer_metric_matrix",
-            encodings={
-                "x": {"field": "year"},
-                "y": {"field": "subject_value"},
-                "band": {"fields": ["p25", "p50", "p75"]},
-                "series": {"field": "metric"},
-            },
-        ))
+        peer_units = {
+            str(row.get("unit"))
+            for row in rows
+            if row.get("unit") not in {None, ""}
+        }
+        missing_units = any(
+            row.get("unit") in {None, ""}
+            for row in rows
+        )
+        if len(peer_units) == 1 and not missing_units:
+            unit = next(iter(peer_units))
+            pack["charts"].append(_chart(
+                "peer_band",
+                "band",
+                f"대상회사 vs Peer 사분위 ({unit})",
+                data_ref="peer_metric_matrix",
+                encodings={
+                    "x": {"field": "year"},
+                    "y": {"field": "subject_value"},
+                    "band": {"fields": ["p25", "p50", "p75"]},
+                    "series": {"field": "metric"},
+                    "color": {"field": "unit"},
+                },
+            ))
+        else:
+            limitation = (
+                "peer_band_suppressed:missing_units"
+                if missing_units
+                else "peer_band_suppressed:mixed_units:"
+                + ",".join(sorted(peer_units))
+            )
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                limitation,
+            ]
     cohort_metadata = result.get("cohort_metadata")
     if isinstance(cohort_metadata, dict):
         exclusion_counts = cohort_metadata.get("exclusion_counts") or {}

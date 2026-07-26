@@ -415,10 +415,55 @@ class VisualizationPackV1(BaseModel):
             if table is None:
                 raise ValueError(f"chart references unknown table: {chart.data_ref}")
             declared = {column.key for column in table.columns}
-            for channel in chart.encodings.model_dump(exclude_none=True).values():
+            columns = {column.key: column for column in table.columns}
+            encodings = chart.encodings.model_dump(exclude_none=True)
+            for channel_name, channel in encodings.items():
                 fields = [channel["field"]] if channel.get("field") else channel["fields"]
                 if not set(fields).issubset(declared):
                     raise ValueError("chart encoding references undeclared column")
+                if channel_name not in {"y", "color", "band"}:
+                    continue
+                numeric_fields = [
+                    field
+                    for field in fields
+                    if any(
+                        isinstance(row.get(field), (int, float, Decimal))
+                        and not isinstance(row.get(field), bool)
+                        for row in table.rows
+                    )
+                ]
+                if not numeric_fields:
+                    continue
+                static_units = {
+                    columns[field].unit
+                    for field in numeric_fields
+                }
+                if len(static_units) > 1:
+                    raise ValueError(
+                        "chart quantitative channel has mixed units"
+                    )
+                if static_units != {None} or "unit" not in declared:
+                    continue
+                row_units = {
+                    str(row.get("unit"))
+                    for row in table.rows
+                    if any(row.get(field) is not None for field in numeric_fields)
+                    and row.get("unit") not in {None, ""}
+                }
+                missing_row_unit = any(
+                    any(row.get(field) is not None for field in numeric_fields)
+                    and row.get("unit") in {None, ""}
+                    for row in table.rows
+                )
+                if len(row_units) != 1 or missing_row_unit:
+                    raise ValueError(
+                        "chart quantitative channel has mixed row units"
+                    )
+                color = encodings.get("color") or {}
+                if color.get("field") != "unit":
+                    raise ValueError(
+                        "chart row unit grouping must be visible"
+                    )
         for diagram in self.diagrams:
             table = tables.get(diagram.table_ref)
             if table is None:
@@ -1017,11 +1062,37 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
                 {"field": "unit", "label": "값 단위"},
             ], "rows": rows,
         })
-        pack["charts"].append({
-            "id": "peer_distribution", "type": "bar", "title": "Peer 분포",
-            "data_ref": "peer_metric_matrix",
-            "encodings": {"x": {"field": "metric"}, "y": {"field": "subject_value"}},
-        })
+        peer_units = {
+            str(row.get("unit"))
+            for row in rows
+            if row.get("unit") not in {None, ""}
+        }
+        missing_units = any(
+            row.get("unit") in {None, ""}
+            for row in rows
+        )
+        if rows and len(peer_units) == 1 and not missing_units:
+            unit = next(iter(peer_units))
+            pack["charts"].append({
+                "id": "peer_distribution",
+                "type": "bar",
+                "title": f"Peer 분포 ({unit})",
+                "data_ref": "peer_metric_matrix",
+                "encodings": {
+                    "x": {"field": "metric"},
+                    "y": {"field": "subject_value"},
+                    "color": {"field": "unit"},
+                },
+            })
+        elif rows:
+            limitation = (
+                "peer_chart_suppressed:missing_units"
+                if missing_units
+                else "peer_chart_suppressed:mixed_units:"
+                + ",".join(sorted(peer_units))
+            )
+            if limitation not in pack["limitations"]:
+                pack["limitations"].append(limitation)
     elif family == "group_graph":
         entity_name = _safe_text(result.get("entity_name") or "대상 회사")
         entities = [

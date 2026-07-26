@@ -1,3 +1,5 @@
+import pytest
+
 from kreports.mcp.tools import _attach_meta
 
 
@@ -64,6 +66,120 @@ def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():
     assert any(table["id"] == "candidate_assumptions" for table in pack["tables"])
     assert any(chart["id"] == "financial_trend" and chart["type"] == "line" for chart in pack["charts"])
     assert out["answer"]
+
+
+def test_dcf_candidate_registry_preserves_semantic_labels_and_mixed_units():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_dcf_input_candidates", {
+        "subject": {"corp_name": "A"},
+        "candidate_assumptions": {
+            "revenue_growth": {"value": 0.1, "basis": "historical_median"},
+            "operating_margin": {"value": 0.12, "basis": "historical_median"},
+            "cash_conversion": {"value": 1.1, "basis": "historical_median"},
+            "tax_rate": {"value": 0.2, "basis": "historical_median"},
+            "capex_to_revenue": {"value": 0.05, "basis": "historical_median"},
+            "da_to_revenue": {"value": 0.04, "basis": "historical_median"},
+            "nwc_to_revenue": {"value": 0.15, "basis": "historical_median"},
+            "wacc": {"value": 0.1, "basis": "analyst_input"},
+            "terminal_growth": {"value": 0.03, "basis": "analyst_input"},
+            "normalized_revenue": {
+                "value": 1_000_000,
+                "basis": "analyst_input",
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "candidate_assumptions"
+    )
+    rows = {row["metric"]: row for row in table["rows"]}
+    expected = {
+        "매출 성장률": "ratio",
+        "영업이익률": "ratio",
+        "현금전환율": "ratio",
+        "세율": "ratio",
+        "매출 대비 CAPEX 비율": "ratio",
+        "매출 대비 감가상각비 비율": "ratio",
+        "매출 대비 운전자본 비율": "ratio",
+        "가중평균자본비용 WACC": "ratio",
+        "영구성장률": "ratio",
+        "정규화 매출": "KRW",
+    }
+    assert {
+        key: row["unit"]
+        for key, row in rows.items()
+    } == expected
+    assert all(row["metric"] != "기타 입력값" for row in rows.values())
+    value_column = next(
+        column for column in table["columns"]
+        if column["field"] == "value"
+    )
+    assert value_column.get("unit") is None
+    assert not any(
+        chart["id"] == "dcf_input_bridge"
+        for chart in pack["charts"]
+    )
+    assert "dcf_candidate_chart_suppressed:mixed_units:KRW,ratio" in (
+        pack["limitations"]
+    )
+
+
+def test_homogeneous_dcf_candidates_use_static_and_visible_ratio_unit():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_dcf_input_candidates", {
+        "candidate_assumptions": {
+            "revenue_growth": {"value": 0.1},
+            "tax_rate": {"value": 0.2},
+            "capex_to_revenue": {"value": 0.05},
+        },
+        "data_quality": {"status": "usable"},
+    })
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "candidate_assumptions"
+    )
+    value_column = next(
+        column for column in table["columns"]
+        if column["field"] == "value"
+    )
+    assert value_column["unit"] == "ratio"
+    chart = next(
+        chart for chart in pack["charts"]
+        if chart["id"] == "dcf_input_bridge"
+    )
+    assert chart["title"].endswith("(ratio)")
+    assert chart["encodings"]["color"]["field"] == "unit"
+
+
+def test_unknown_dcf_candidate_preserves_key_and_suppresses_unitless_chart():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_dcf_input_candidates", {
+        "candidate_assumptions": {
+            "custom_review_metric": {"value": 123},
+        },
+        "data_quality": {"status": "usable"},
+    })
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "candidate_assumptions"
+    )
+    assert table["rows"][0] == {
+        "metric": "custom_review_metric",
+        "value": 123,
+        "unit": None,
+        "basis": "산정 근거 미확보",
+    }
+    assert not any(
+        chart["id"] == "dcf_input_bridge"
+        for chart in pack["charts"]
+    )
+    assert "dcf_candidate_chart_suppressed:missing_units" in (
+        pack["limitations"]
+    )
 
 
 def test_attach_meta_adds_subsidiary_answer_pack_with_mermaid_and_contribution_table():
@@ -188,6 +304,198 @@ def test_attach_meta_adds_peer_benchmark_pack():
     assert columns["percentile"]["unit"] == "%"
     assert columns["n"]["unit"] == "개"
     assert any(chart["id"] == "peer_percentile_matrix" and chart["type"] == "heatmap" for chart in pack["charts"])
+    assert not any(chart["id"] == "peer_band" for chart in pack["charts"])
+    assert "peer_band_suppressed:mixed_units:KRW,ratio" in pack["limitations"]
+
+
+@pytest.mark.parametrize("unit", ["ratio", "KRW"])
+def test_real_peer_homogeneous_units_keep_unit_visible_band(unit):
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_to_industry_multi", {
+        "subject": {"corp_name": "A"},
+        "results": {
+            2025: {
+                "metric-a": {
+                    "p25": 1,
+                    "p50": 2,
+                    "p75": 3,
+                    "subject_value": 2,
+                    "percentile": 50,
+                    "n": 30,
+                    "unit": unit,
+                },
+                "metric-b": {
+                    "p25": 2,
+                    "p50": 3,
+                    "p75": 4,
+                    "subject_value": 3,
+                    "percentile": 50,
+                    "n": 30,
+                    "unit": unit,
+                },
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+    band = next(chart for chart in pack["charts"] if chart["id"] == "peer_band")
+    assert band["title"].endswith(f"({unit})")
+    assert band["encodings"]["color"]["field"] == "unit"
+
+
+def test_real_peer_missing_units_suppress_raw_value_band():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_to_industry_multi", {
+        "subject": {"corp_name": "A"},
+        "results": {
+            2025: {
+                "ROE": {
+                    "p25": 0.05,
+                    "p50": 0.10,
+                    "p75": 0.15,
+                    "subject_value": 0.12,
+                    "percentile": 70,
+                    "n": 30,
+                },
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+    assert any(
+        chart["id"] == "peer_percentile_matrix"
+        for chart in pack["charts"]
+    )
+    assert not any(chart["id"] == "peer_band" for chart in pack["charts"])
+    assert "peer_band_suppressed:missing_units" in pack["limitations"]
+
+
+def test_audit_peer_nas_ratio_is_explicitly_a_ratio_in_all_views():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.visual_contracts import (
+        VisualizationPackV1,
+        render_visualization_html,
+        render_visualization_markdown,
+    )
+
+    pack_dict = build_answer_pack("compare_peer_audit_fees", {
+        "subject_metrics": {
+            "corp_name": "A",
+            "audit_fee_m": 100,
+            "audit_hours": 500,
+            "non_audit_fee_m": 20,
+            "nas_ratio": 0.2,
+        },
+        "peers": [{
+            "corp_name": "B",
+            "audit_fee_m": 90,
+            "audit_hours": 450,
+            "non_audit_fee_m": 9,
+            "nas_ratio": 0.1,
+        }],
+        "data_quality": {"status": "usable"},
+    })
+    pack = VisualizationPackV1.model_validate(pack_dict)
+    table = next(
+        table for table in pack.tables
+        if table.id == "audit_fee_peer_distribution"
+    )
+    nas = next(column for column in table.columns if column.key == "nas_ratio")
+    assert nas.label == "비감사보수 비율"
+    assert nas.unit == "ratio"
+    for rendered in (
+        render_visualization_markdown(pack, mermaid=False),
+        render_visualization_html(pack),
+    ):
+        assert "비감사보수 비율 (ratio)" in rendered
+        assert "0.2" in rendered and "0.1" in rendered
+
+
+def test_answer_pack_ratio_and_percent_column_inventory_is_explicit():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    cases = [
+        (
+            "get_dcf_input_candidates",
+            {
+                "candidate_assumptions": {
+                    "revenue_growth": {"value": 0.1},
+                    "operating_margin": {"value": 0.2},
+                },
+                "data_quality": {"status": "usable"},
+            },
+            "candidate_assumptions",
+            {"value": "ratio"},
+        ),
+        (
+            "compare_peer_audit_fees",
+            {
+                "subject_metrics": {
+                    "corp_name": "A",
+                    "audit_fee_m": 100,
+                    "nas_ratio": 0.2,
+                },
+                "data_quality": {"status": "usable"},
+            },
+            "audit_fee_peer_distribution",
+            {"nas_ratio": "ratio"},
+        ),
+        (
+            "get_subsidiary_auditors",
+            {
+                "subject": {"corp_name": "A"},
+                "subsidiaries": [{
+                    "name": "B",
+                    "ownership_pct": 80,
+                    "asset_share_pct": 12,
+                    "revenue_share_pct": 14,
+                }],
+                "data_quality": {"status": "usable"},
+            },
+            "subsidiary_contribution",
+            {
+                "ownership_pct": "%",
+                "asset_share_pct": "%",
+                "revenue_share_pct": "%",
+            },
+        ),
+        (
+            "compare_to_industry_multi",
+            {
+                "results": {
+                    2025: {
+                        "ROE": {
+                            "subject_value": 0.12,
+                            "percentile": 70,
+                            "p25": 0.05,
+                            "p50": 0.10,
+                            "p75": 0.15,
+                            "n": 30,
+                            "unit": "ratio",
+                        },
+                    },
+                },
+                "data_quality": {"status": "usable"},
+            },
+            "peer_metric_matrix",
+            {"percentile": "%"},
+        ),
+    ]
+
+    for tool_name, result, table_id, expected in cases:
+        pack = build_answer_pack(tool_name, result)
+        table = next(
+            table for table in pack["tables"]
+            if table["id"] == table_id
+        )
+        units = {
+            column["field"]: column.get("unit")
+            for column in table["columns"]
+        }
+        assert {
+            field: units[field]
+            for field in expected
+        } == expected
 
 
 def test_answer_pack_normalizes_legacy_quality_through_the_v1_contract():
