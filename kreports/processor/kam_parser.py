@@ -15,11 +15,12 @@ _BLOCK_TAG_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _TAG_RE = re.compile(r"<[^>]{0,1000}>")
-_NUMBERED_TITLE_RE = re.compile(
-    r"^\s*(?:\(?\d{1,2}\)?[.)]|[가-하][.)]|[IVX]{1,5}[.)])\s*(.+?)\s*$",
+_TITLE_MARKER_RE = re.compile(
+    r"^\s*(?:(?P<arabic>\(?\d{1,2}\)?)[.)]|"
+    r"(?P<korean>[가-하])[.)]|"
+    r"(?P<roman>[IVX]{1,5})[.)])\s*(?P<title>.+?)\s*$",
     flags=re.IGNORECASE,
 )
-_ARABIC_NUMBER_RE = re.compile(r"^\s*\(?(\d{1,2})\)?[.)]\s*")
 _NOTE_RE = re.compile(
     r"(?:관련\s*(?:재무제표\s*)?)?(?:주석|note)\s*[제]?\s*(\d+(?:[.-]\d+)?)",
     flags=re.IGNORECASE,
@@ -52,6 +53,8 @@ _TRAILING_HEADINGS = (
     "auditor'sresponsibilitiesfortheauditof thefinancialstatements".replace(" ", ""),
     "auditorresponsibilitiesfortheauditof thefinancialstatements".replace(" ", ""),
 )
+MAX_TITLE_BLOCK_LINES = 8
+MAX_TITLE_BLOCK_CHARS = 800
 
 
 @dataclass(frozen=True)
@@ -118,105 +121,97 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", title).strip()
 
 
-def _numbered_title(
-    lines: list[str],
-    index: int,
-    *,
-    in_response: bool,
-    expected_number: int | None,
-) -> tuple[str, int] | None:
-    match = _NUMBERED_TITLE_RE.match(lines[index])
+def _title_marker(line: str) -> tuple[str, str, str] | None:
+    match = _TITLE_MARKER_RE.match(line)
     if not match:
         return None
-    first = _normalize_title(match.group(1))
-    if not first or first.endswith((".", "。")):
+    title = _normalize_title(match.group("title"))
+    if not title or title.endswith((".", "。")):
         return None
-    parts = [first]
-    for candidate_index, candidate in enumerate(
-        lines[index + 1:index + 5],
-        start=index + 1,
-    ):
-        if _matches_heading(candidate, _REASON_HEADINGS):
-            return _normalize_title(" ".join(parts)), candidate_index
-        if (
-            _NUMBERED_TITLE_RE.match(candidate)
-            or _matches_heading(
-                candidate,
-                _KAM_HEADINGS
-                + _RESPONSE_HEADINGS
-                + _TRAILING_HEADINGS,
-            )
-        ):
-            return None
-        normalized_candidate = _normalize_title(candidate)
-        if _compact(normalized_candidate) == _compact(parts[-1]):
+    for family in ("arabic", "roman", "korean"):
+        marker = match.group(family)
+        if marker is None:
             continue
-        if in_response:
-            following_index = candidate_index + 1
-            if (
-                following_index >= len(lines)
-                or not _matches_heading(
-                    lines[following_index],
-                    _REASON_HEADINGS,
-                )
-                or expected_number is None
-                or _numbered_ordinal(lines[index]) != expected_number
-            ):
-                return None
-        if len(parts) > 1 or len(candidate) > 200:
-            return None
-        parts.append(normalized_candidate)
+        identity = marker.strip("()").upper()
+        return family, identity, title
     return None
 
 
-def _numbered_ordinal(line: str) -> int | None:
-    match = _ARABIC_NUMBER_RE.match(line)
-    return int(match.group(1)) if match else None
+def _reason_anchored_title(
+    lines: list[str],
+    reason_index: int,
+    *,
+    in_response: bool,
+    accepted_marker_family: str | None,
+) -> tuple[int, str, str | None] | None:
+    if reason_index == 0:
+        return None
+    scan_start = max(0, reason_index - MAX_TITLE_BLOCK_LINES)
+    marker_candidate: tuple[int, str, str] | None = None
+    boundary_headings = (
+        _KAM_HEADINGS
+        + _REASON_HEADINGS
+        + _RESPONSE_HEADINGS
+        + _TRAILING_HEADINGS
+    )
+    for index in range(reason_index - 1, scan_start - 1, -1):
+        line = lines[index]
+        if _matches_heading(line, boundary_headings):
+            break
+        marker = _title_marker(line)
+        if marker is not None:
+            family, _, first_title = marker
+            marker_candidate = (index, family, first_title)
+            break
+
+    if marker_candidate is not None:
+        start, family, first_title = marker_candidate
+        block = lines[start:reason_index]
+        if (
+            sum(len(line) for line in block) <= MAX_TITLE_BLOCK_CHARS
+            and (not in_response or family == accepted_marker_family)
+        ):
+            parts: list[str] = []
+            for value in (first_title, *block[1:]):
+                normalized = _normalize_title(value)
+                if parts and _compact(normalized) == _compact(parts[-1]):
+                    continue
+                parts.append(normalized)
+            title = _normalize_title(" ".join(parts))
+            if title:
+                return start, title, family
+
+    immediate_index = reason_index - 1
+    immediate = lines[immediate_index]
+    if (
+        _title_marker(immediate) is not None
+        or _matches_heading(immediate, boundary_headings)
+        or len(immediate) > MAX_TITLE_BLOCK_CHARS
+    ):
+        return None
+    title = _normalize_title(immediate)
+    return (immediate_index, title, None) if title else None
 
 
 def _title_starts(lines: list[str]) -> list[tuple[int, str]]:
     starts: list[tuple[int, str]] = []
-    covered_until = -1
     in_response = False
-    last_numbered_title: int | None = None
+    accepted_marker_family: str | None = None
     for index, line in enumerate(lines):
         if _matches_heading(line, _REASON_HEADINGS):
+            candidate = _reason_anchored_title(
+                lines,
+                index,
+                in_response=in_response,
+                accepted_marker_family=accepted_marker_family,
+            )
+            if candidate is not None:
+                start, title, marker_family = candidate
+                starts.append((start, title))
+                accepted_marker_family = marker_family
             in_response = False
         elif _matches_heading(line, _RESPONSE_HEADINGS):
             in_response = True
-        expected_number = (
-            last_numbered_title + 1
-            if last_numbered_title is not None
-            else len(starts) + 1 if starts else None
-        )
-        numbered = _numbered_title(
-            lines,
-            index,
-            in_response=in_response,
-            expected_number=expected_number,
-        )
-        title = numbered[0] if numbered is not None else None
-        if numbered is not None:
-            covered_until = max(covered_until, numbered[1] - 1)
-        if title is None and (
-            index > covered_until
-            and index + 1 < len(lines)
-            and _matches_heading(lines[index + 1], _REASON_HEADINGS)
-            and len(line) <= 200
-            and not _matches_heading(
-                line,
-                _KAM_HEADINGS
-                + _REASON_HEADINGS
-                + _RESPONSE_HEADINGS
-                + _TRAILING_HEADINGS,
-            )
-        ):
-            title = _normalize_title(line)
-        if title:
-            starts.append((index, title))
-            numbered_ordinal = _numbered_ordinal(line)
-            if numbered_ordinal is not None:
-                last_numbered_title = numbered_ordinal
     return starts
 
 

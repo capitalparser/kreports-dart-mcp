@@ -219,6 +219,136 @@ def test_parser_joins_multiword_wrapped_numbered_next_matter(
     assert excluded_response_fragment not in items[0].audit_response_text
 
 
+@pytest.mark.parametrize(
+    ("body", "expected_title", "excluded_response_fragment", "first_response"),
+    [
+        pytest.param(
+            """
+            Key Audit Matters
+            I. Revenue recognition
+            Why the matter was determined to be a key audit matter
+            Contract cut-off requires significant judgment.
+            How the matter was addressed in the audit
+            1. Inspect contract samples
+            II. Goodwill
+            impairment assessment
+            Why the matter was considered to be one of the most significant matters in the audit
+            The recoverable amount depends on significant assumptions.
+            Audit response
+            We tested cash-flow forecasts and the discount rate.
+            """,
+            "Goodwill impairment assessment",
+            "II. Goodwill",
+            "1. Inspect contract samples",
+            id="roman",
+        ),
+        pytest.param(
+            """
+            핵심감사사항
+            가. 수익인식
+            핵심감사사항으로 선정한 이유
+            기간귀속 판단에 유의적인 위험이 있습니다.
+            감사인이 수행한 주요 절차
+            1. 계약 표본 검사
+            나. 영업권
+            손상 평가
+            핵심감사사항으로 결정한 이유
+            회수가능액 추정에 유의적인 판단이 포함됩니다.
+            감사에서 다루어진 방법
+            현금흐름과 할인율을 검사했습니다.
+            """,
+            "영업권 손상 평가",
+            "나. 영업권",
+            "1. 계약 표본 검사",
+            id="korean",
+        ),
+        pytest.param(
+            """
+            핵심감사사항
+            1. 수익인식
+            핵심감사사항으로 선정한 이유
+            기간귀속 판단에 유의적인 위험이 있습니다.
+            감사인이 수행한 주요 절차
+            1. 계약 표본 검사
+            3. 영업권
+            손상 평가
+            핵심감사사항으로 결정한 이유
+            회수가능액 추정에 유의적인 판단이 포함됩니다.
+            감사에서 다루어진 방법
+            현금흐름과 할인율을 검사했습니다.
+            """,
+            "영업권 손상 평가",
+            "3. 영업권",
+            "1. 계약 표본 검사",
+            id="nonconsecutive-arabic",
+        ),
+        pytest.param(
+            """
+            핵심감사사항
+            1. 수익인식
+            핵심감사사항으로 선정한 이유
+            기간귀속 판단에 유의적인 위험이 있습니다.
+            감사인이 수행한 주요 절차
+            1. 계약 표본 검사
+            2. 영업권 및
+            현금창출단위의
+            손상 평가
+            핵심감사사항으로 결정한 이유
+            회수가능액 추정에 유의적인 판단이 포함됩니다.
+            감사에서 다루어진 방법
+            현금흐름과 할인율을 검사했습니다.
+            """,
+            "영업권 및 현금창출단위의 손상 평가",
+            "2. 영업권 및",
+            "1. 계약 표본 검사",
+            id="three-line-title",
+        ),
+    ],
+)
+def test_parser_uses_reason_anchor_for_wrapped_marker_families(
+    body,
+    expected_title,
+    excluded_response_fragment,
+    first_response,
+):
+    from kreports.processor.kam_parser import extract_kam_items
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 2
+    assert items[0].audit_response_text == first_response
+    assert excluded_response_fragment not in items[0].audit_response_text
+    assert items[1].title == expected_title
+
+
+def test_parser_does_not_promote_numbered_procedures_before_unnumbered_matter():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    Key Audit Matters
+    I. Revenue recognition
+    Why the matter was determined to be a key audit matter
+    Contract cut-off requires significant judgment.
+    How the matter was addressed in the audit
+    1. Inspect contract samples.
+    2. Recalculate contract cut-off.
+    3. Confirm management assumptions.
+    Goodwill impairment assessment
+    Why the matter was considered to be one of the most significant matters in the audit
+    The recoverable amount depends on significant assumptions.
+    Audit response
+    We tested cash-flow forecasts and the discount rate.
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 2
+    assert items[0].title == "Revenue recognition"
+    assert "2. Recalculate contract cut-off." in items[0].audit_response_text
+    assert "3. Confirm management assumptions." in items[0].audit_response_text
+    assert items[1].title == "Goodwill impairment assessment"
+
+
 def test_parser_deduplicates_numbered_title_followed_by_same_unnumbered_title():
     from kreports.processor.kam_parser import extract_kam_items
 
