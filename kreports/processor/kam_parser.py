@@ -17,7 +17,6 @@ _TITLE_MARKER_RE = re.compile(
     r"(?P<roman>[IVX]{1,5})[.)])\s*(?P<title>.+?)\s*$",
     flags=re.IGNORECASE,
 )
-_CDATA_DECL_RE = re.compile(r"<!\[CDATA", re.IGNORECASE)
 _NOTE_RE = re.compile(
     r"(?:관련\s*(?:재무제표\s*)?)?(?:주석|note)\s*[제]?\s*(\d+(?:[.-]\d+)?)",
     flags=re.IGNORECASE,
@@ -175,6 +174,13 @@ class StructuredLine:
     is_table_header: bool = False
     is_table_cell: bool = False
     is_explicit_heading: bool = False
+    is_empty_explicit_heading: bool = False
+
+
+@dataclass(frozen=True)
+class _StructureParseResult:
+    lines: list[StructuredLine]
+    limitations: list[str]
 
 
 @dataclass(frozen=True)
@@ -223,34 +229,16 @@ def _compact(value: str) -> str:
 
 def _input_structure_limitations(full_text: str) -> list[str]:
     value = full_text or ""
-    bounded = value[:MAX_INPUT_CHARS]
     limitations: list[str] = []
     if len(value) > MAX_INPUT_CHARS:
         limitations.append("input_truncated")
-
-    position = 0
-    while True:
-        match = _CDATA_DECL_RE.search(bounded, position)
-        if match is None:
-            break
-        payload_start = match.end()
-        if (
-            payload_start >= len(bounded)
-            or bounded[payload_start] != "["
-        ):
-            limitations.append("malformed_cdata")
-            break
-        end = bounded.find("]]>", payload_start + 1)
-        if end < 0:
-            limitations.append("malformed_cdata")
-            break
-        position = end + len("]]>")
     return limitations
 
 
-def _structured_lines(full_text: str) -> list[StructuredLine]:
+def _structured_lines(full_text: str) -> _StructureParseResult:
     bounded = (full_text or "")[:MAX_INPUT_CHARS]
     lines: list[StructuredLine] = []
+    limitations: list[str] = []
     tag_stack: list[_TagFrame] = []
     buffer: list[str] = []
     block_id = 0
@@ -295,6 +283,35 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         )
         for frame in tag_stack:
             frame.emitted_content = True
+        block_id += 1
+        blank_before = False
+
+    def emit_empty_explicit_boundary(frame_index: int) -> None:
+        nonlocal block_id, blank_before
+        frame = tag_stack[frame_index]
+        if not frame.explicit_heading or frame.emitted_content:
+            return
+        tag_path = tuple(
+            candidate.tag
+            for candidate in tag_stack[:frame_index + 1]
+        )
+        lines.append(
+            StructuredLine(
+                text="",
+                origin=current_origin(),
+                block_id=block_id,
+                blank_before=blank_before,
+                tag_path=tag_path,
+                is_title_container="title" in tag_path,
+                is_table_header="th" in tag_path,
+                is_table_cell=any(
+                    tag in {"td", "th"}
+                    for tag in tag_path
+                ),
+                is_explicit_heading=True,
+                is_empty_explicit_heading=True,
+            )
+        )
         block_id += 1
         blank_before = False
 
@@ -479,6 +496,7 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             if tag in block_tags or matching_index is None:
                 flush()
             if matching_index is not None:
+                emit_empty_explicit_boundary(matching_index)
                 del tag_stack[matching_index:]
             else:
                 # Any stray close makes an active strong ancestry unreliable,
@@ -495,18 +513,37 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             append_text(f"&#{name};")
 
         def unknown_decl(self, data: str) -> None:
+            if data[:len("CDATA")].lower() != "cdata":
+                return
             if data[:len("CDATA[")].lower() == "cdata[":
                 append_text(data[len("CDATA["):])
+                return
+            if "malformed_cdata" not in limitations:
+                limitations.append("malformed_cdata")
 
     parser = StructureParser()
     parser.feed(bounded)
+    unconsumed = parser.rawdata
+    parser_context = parser.cdata_elem
     parser.close()
+    if (
+        parser_context is None
+        and re.match(r"<!\[cdata", unconsumed, flags=re.IGNORECASE)
+        and "malformed_cdata" not in limitations
+    ):
+        limitations.append("malformed_cdata")
     flush()
-    return lines
+    return _StructureParseResult(
+        lines=lines,
+        limitations=limitations,
+    )
 
 
 def _plain_lines(full_text: str) -> list[str]:
-    return [line.text for line in _structured_lines(full_text)]
+    return [
+        line.text
+        for line in _structured_lines(full_text).lines
+    ]
 
 
 def _matches_heading(line: str, headings: tuple[str, ...]) -> bool:
@@ -728,6 +765,19 @@ def _discover_title_boundary(
         return None
     title = _title_parts(title_values)
     if not title:
+        if structured_lines is not None:
+            empty_explicit_positions = [
+                index
+                for index in range(scan_start, reason_index)
+                if structured_lines[index].is_empty_explicit_heading
+            ]
+            if empty_explicit_positions:
+                return _TitleBoundary(
+                    start=empty_explicit_positions[-1],
+                    title="",
+                    marker=None,
+                    has_explicit_structure=True,
+                )
         return None
     return _TitleBoundary(
         start=start,
@@ -916,10 +966,11 @@ def _discover_matter_frames(
     return frames
 
 
-def _has_ambiguous_plain_boundary(
+def _ambiguous_plain_boundary_starts(
     lines: list[str],
     structured_lines: list[StructuredLine],
-) -> bool:
+) -> set[int]:
+    ambiguous_starts: set[int] = set()
     heading_frames = _discover_heading_frames(lines)
     for position in range(1, len(heading_frames)):
         previous = heading_frames[position - 1]
@@ -942,7 +993,12 @@ def _has_ambiguous_plain_boundary(
             continue
         candidate_line = structured_lines[current.reason_heading - 1]
         if candidate_line.is_table_cell:
-            return True
+            ambiguous_starts.add(
+                candidate_title.start
+                if candidate_title is not None
+                else current.reason_heading - 1
+            )
+            continue
         marker_positions = [
             index
             for index in range(lower, current.reason_heading)
@@ -965,8 +1021,12 @@ def _has_ambiguous_plain_boundary(
             continue
         if procedure_score > 0 and title_score == 0:
             continue
-        return True
-    return False
+        ambiguous_starts.add(
+            candidate_title.start
+            if candidate_title is not None
+            else current.reason_heading - 1
+        )
+    return ambiguous_starts
 
 
 def _topic(title: str) -> str | None:
@@ -1045,7 +1105,7 @@ def _candidate_items_from_frames(
             )
         reason = "\n".join(reason_lines).strip()
         response = "\n".join(response_lines).strip()
-        if not reason or not response:
+        if not frame.title or not reason or not response:
             items.append(None)
             continue
         body = "\n".join(matter_lines).strip()
@@ -1091,14 +1151,23 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
     """Return KAM items with an explicit completeness/ambiguity outcome."""
     try:
         input_limitations = _input_structure_limitations(full_text)
-        if input_limitations:
+        structure = _structured_lines(full_text)
+        structure_limitations = list(
+            dict.fromkeys(
+                [
+                    *input_limitations,
+                    *structure.limitations,
+                ]
+            )
+        )
+        if structure_limitations:
             return KamParseOutcome(
                 items=[],
                 status="error",
-                limitations=input_limitations,
+                limitations=structure_limitations,
             )
         structured_lines = _trim_structured_to_kam(
-            _structured_lines(full_text)
+            structure.lines
         )
         lines = [line.text for line in structured_lines]
         if not lines:
@@ -1106,12 +1175,6 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
                 items=[],
                 status="no_kam",
                 limitations=[],
-            )
-        if _has_ambiguous_plain_boundary(lines, structured_lines):
-            return KamParseOutcome(
-                items=[],
-                status="ambiguous",
-                limitations=["ambiguous_boundary"],
             )
         if _has_incomplete_explicit_matter(lines, structured_lines):
             return KamParseOutcome(
@@ -1121,19 +1184,36 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
             )
         frames = _discover_matter_frames(lines, structured_lines)
         candidate_items = _candidate_items_from_frames(lines, frames)
-        explicit_frame_count = sum(
-            frame.has_explicit_title_structure
-            for frame in frames
+        invalid_frames = [
+            frame
+            for frame, item in zip(
+                frames,
+                candidate_items,
+                strict=True,
+            )
+            if item is None
+        ]
+        ambiguous_starts = _ambiguous_plain_boundary_starts(
+            lines,
+            structured_lines,
         )
-        valid_explicit_frame_count = sum(
-            frame.has_explicit_title_structure and item is not None
-            for frame, item in zip(frames, candidate_items, strict=True)
-        )
-        if valid_explicit_frame_count != explicit_frame_count:
+        if invalid_frames and (
+            any(
+                frame.title_start in ambiguous_starts
+                for frame in invalid_frames
+            )
+            or not ambiguous_starts
+        ):
             return KamParseOutcome(
                 items=[],
                 status="error",
                 limitations=["incomplete_kam_structure"],
+            )
+        if ambiguous_starts:
+            return KamParseOutcome(
+                items=[],
+                status="ambiguous",
+                limitations=["ambiguous_boundary"],
             )
         items = _deduplicate_items(
             [item for item in candidate_items if item is not None]
