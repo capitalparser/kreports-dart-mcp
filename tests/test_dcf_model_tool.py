@@ -112,6 +112,27 @@ def test_dcf_tool_input_is_explicit_strict_and_defaults_to_five_years():
             wacc=0.03,
             terminal_growth=0.03,
         )
+    with pytest.raises(ValidationError):
+        BuildDcfModelPackInput(
+            company="00126380",
+            base_year=2024,
+            wacc=1e20,
+        )
+    with pytest.raises(ValidationError):
+        BuildDcfModelPackInput(
+            company="회" * 201,
+            base_year=2024,
+        )
+    with pytest.raises(ValidationError):
+        BuildDcfModelPackInput(
+            company="00126380",
+            base_year=2024,
+            normalized_revenue=1000,
+            normalization_reason="근" * 1001,
+        )
+    schema = BuildDcfModelPackInput.model_json_schema()["properties"]
+    assert schema["company"]["maxLength"] == 200
+    assert schema["normalization_reason"]["anyOf"][0]["maxLength"] == 1000
 
 
 def test_dcf_handler_forwards_all_explicit_layers(monkeypatch):
@@ -404,3 +425,152 @@ def test_dcf_exact_identity_resolution_uses_immutable_sqlite_reads(
     assert corp_code == "00126380"
     assert subject["corp_name"] == "삼성전자"
     assert after == before
+
+
+def test_dcf_public_facade_contains_missing_db_without_creating_files(
+    tmp_path,
+    monkeypatch,
+):
+    from sqlalchemy import create_engine
+
+    import kreports.db.engine as engine_module
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+
+    missing_path = tmp_path / "missing-runtime.db"
+    monkeypatch.setattr(
+        engine_module,
+        "engine",
+        create_engine(f"sqlite:///{missing_path}"),
+    )
+
+    result = build_dcf_model_pack("00126380", 2024)
+
+    assert result["error_code"] == "dcf_source_unavailable"
+    assert result["data_quality"]["status"] == "missing"
+    assert result["data_quality"]["limitations"] == [
+        "runtime_db_unavailable"
+    ]
+    assert not missing_path.exists()
+    assert not Path(f"{missing_path}-wal").exists()
+    assert not Path(f"{missing_path}-shm").exists()
+
+
+def test_dcf_public_facade_contains_pre_rebuild_schema_without_writes(
+    tmp_path,
+    monkeypatch,
+):
+    from sqlalchemy import create_engine, text
+
+    import kreports.db.engine as engine_module
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+
+    database_path = tmp_path / "pre-rebuild.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE companies (
+                corp_code TEXT PRIMARY KEY,
+                stock_code TEXT,
+                corp_name TEXT,
+                market TEXT,
+                induty_code TEXT
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO companies
+            VALUES ('00126380', '005930', '삼성전자', 'KOSPI', '26110')
+        """))
+    engine.dispose()
+    monkeypatch.setattr(engine_module, "engine", engine)
+    before = (
+        database_path.stat().st_size,
+        database_path.stat().st_mtime_ns,
+        database_path.read_bytes(),
+    )
+
+    result = build_dcf_model_pack("00126380", 2024)
+
+    after = (
+        database_path.stat().st_size,
+        database_path.stat().st_mtime_ns,
+        database_path.read_bytes(),
+    )
+    assert result["error_code"] == "dcf_source_unavailable"
+    assert result["data_quality"]["limitations"] == [
+        "missing_schema:financial_facts_compact"
+    ]
+    assert after == before
+    assert not Path(f"{database_path}-wal").exists()
+    assert not Path(f"{database_path}-shm").exists()
+
+
+def test_dcf_public_facade_contains_identity_query_failure(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine, text
+
+    import kreports.db.engine as engine_module
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+
+    database_path = tmp_path / "missing-identity-schema.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE financial_facts_compact (
+                corp_code TEXT, bsns_year INTEGER, fs_div TEXT,
+                metric_key TEXT, metric_name TEXT, amount TEXT,
+                source_account_id TEXT, source_account_nm TEXT,
+                fetched_at TEXT
+            )
+        """))
+    engine.dispose()
+    monkeypatch.setattr(engine_module, "engine", engine)
+
+    result = build_dcf_model_pack("00126380", 2024)
+
+    assert result["error_code"] == "dcf_source_unavailable"
+    assert result["data_quality"]["limitations"] == [
+        "identity_query_unavailable:OperationalError"
+    ]
+
+
+def test_dcf_public_facade_contains_nonempty_wal_without_writes(
+    tmp_path,
+    monkeypatch,
+):
+    from sqlalchemy import create_engine
+
+    import kreports.db.engine as engine_module
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+
+    database_path = tmp_path / "uncheckpointed.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.begin():
+        pass
+    engine.dispose()
+    wal_path = Path(f"{database_path}-wal")
+    wal_path.write_bytes(b"uncheckpointed")
+    before = {
+        path: (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
+        for path in (database_path, wal_path)
+    }
+    monkeypatch.setattr(engine_module, "engine", engine)
+
+    result = build_dcf_model_pack("00126380", 2024)
+
+    after = {
+        path: (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
+        for path in (database_path, wal_path)
+    }
+    assert result["error_code"] == "dcf_source_unavailable"
+    assert result["data_quality"]["limitations"] == [
+        "runtime_db_unavailable:uncheckpointed_wal"
+    ]
+    assert after == before
+
+
+def test_dcf_public_facade_bounds_direct_company_error_payload():
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+
+    result = build_dcf_model_pack("회" * 201, 2024)
+
+    assert "200자" in result["error"]
+    assert result["company"] == "회" * 200

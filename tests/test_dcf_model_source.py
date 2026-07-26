@@ -153,6 +153,106 @@ def test_dcf_source_fails_closed_when_duplicate_recency_discriminators_tie(
     assert "duplicate_ambiguous:revenue" in result.limitations
 
 
+def test_dcf_source_treats_malformed_conflicting_recency_as_ambiguous(
+    tmp_path,
+):
+    from kreports.analysis.dcf_source import load_dcf_actuals
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'malformed-recency.db'}")
+    _schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO financial_facts_compact
+            (id, corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_account_id, source_account_nm, fetched_at)
+            VALUES
+            (1, '00126380', 2024, 'CFS', 'revenue', '매출', 1000,
+             'ifrs-full_Revenue', '매출', '2025-04-01T00:00:00'),
+            (2, '00126380', 2024, 'CFS', 'revenue', '매출', 1200,
+             'ifrs-full_Revenue', '매출', 'not-an-iso-timestamp')
+        """))
+
+    result = load_dcf_actuals("00126380", 2024, "CFS", read_engine=engine)
+
+    assert result.status == "partial"
+    assert result.facts == ()
+    assert "revenue" in result.missing_metrics
+    assert "duplicate_ambiguous:revenue" in result.limitations
+
+
+def test_dcf_source_uses_integer_id_only_after_comparable_timestamp_tie(
+    tmp_path,
+):
+    from kreports.analysis.dcf_source import load_dcf_actuals
+
+    cases = (
+        (
+            "mixed-awareness",
+            "1",
+            "2",
+            "2025-04-01T00:00:00",
+            "2025-04-01T00:00:00+09:00",
+            None,
+        ),
+        (
+            "malformed-id",
+            "bad-id",
+            "2",
+            "2025-04-01T00:00:00",
+            "2025-04-01T00:00:00",
+            None,
+        ),
+        (
+            "integer-tie-break",
+            "1",
+            "2",
+            "2025-04-01T00:00:00",
+            "2025-04-01T00:00:00",
+            1200,
+        ),
+    )
+    for name, first_id, second_id, first_time, second_time, expected in cases:
+        engine = create_engine(f"sqlite:///{tmp_path / f'{name}.db'}")
+        _schema(engine)
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO financial_facts_compact
+                (id, corp_code, bsns_year, fs_div, metric_key, metric_name,
+                 amount, source_account_id, source_account_nm, fetched_at)
+                VALUES
+                (:first_id, '00126380', 2024, 'CFS', 'revenue', '매출',
+                 1000, 'ifrs-full_Revenue', '매출', :first_time),
+                (:second_id, '00126380', 2024, 'CFS', 'revenue', '매출',
+                 1200, 'ifrs-full_Revenue', '매출', :second_time)
+            """), {
+                "first_id": first_id,
+                "second_id": second_id,
+                "first_time": first_time,
+                "second_time": second_time,
+            })
+
+        result = load_dcf_actuals(
+            "00126380",
+            2024,
+            "CFS",
+            read_engine=engine,
+        )
+
+        revenue = next(
+            (
+                fact.amount
+                for fact in result.facts
+                if fact.metric_key == "revenue"
+            ),
+            None,
+        )
+        assert revenue == expected
+        if expected is None:
+            assert "duplicate_ambiguous:revenue" in result.limitations
+        else:
+            assert "duplicate_resolved_latest:revenue" in result.limitations
+
+
 def test_dcf_source_fails_closed_for_missing_partial_corrupt_and_nonempty_wal(
     tmp_path,
     monkeypatch,

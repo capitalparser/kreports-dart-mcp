@@ -301,21 +301,29 @@ class GetDcfInputCandidatesInput(GetQualityOfEarningsPackInput):
 
 
 class BuildDcfModelPackInput(ToolInput):
-    company: str = Field(description="corp_code / 종목코드 / 정확한 회사명")
+    company: str = Field(
+        min_length=1,
+        max_length=200,
+        description="corp_code / 종목코드 / 정확한 회사명",
+    )
     base_year: Year
     fs_div: FsDiv = "CFS"
     forecast_years: int = Field(5, ge=1, le=10)
-    revenue_growth: float | None = Field(None, gt=-1)
-    operating_margin: float | None = None
+    revenue_growth: float | None = Field(None, gt=-1, le=10)
+    operating_margin: float | None = Field(None, ge=-10, le=10)
     tax_rate: float | None = Field(None, ge=0, le=1)
-    da_to_revenue: float | None = Field(None, ge=0)
-    capex_to_revenue: float | None = Field(None, ge=0)
-    nwc_to_revenue: float | None = None
-    wacc: float | None = Field(None, gt=0)
-    terminal_growth: float | None = Field(None, gt=-1)
-    normalized_revenue: float | None = Field(None, gt=0)
-    normalized_operating_profit: float | None = None
-    normalization_reason: str | None = None
+    da_to_revenue: float | None = Field(None, ge=0, le=10)
+    capex_to_revenue: float | None = Field(None, ge=0, le=10)
+    nwc_to_revenue: float | None = Field(None, ge=-10, le=10)
+    wacc: float | None = Field(None, gt=0, le=1)
+    terminal_growth: float | None = Field(None, gt=-1, le=1)
+    normalized_revenue: float | None = Field(None, gt=0, le=1e24)
+    normalized_operating_profit: float | None = Field(
+        None,
+        ge=-1e24,
+        le=1e24,
+    )
+    normalization_reason: str | None = Field(None, max_length=1000)
 
     @field_validator(
         "base_year",

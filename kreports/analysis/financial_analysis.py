@@ -775,37 +775,58 @@ def _resolve_dcf_company_exact(
     company: str,
 ) -> tuple[str | None, dict | None, str | None]:
     """Resolve only an exact corp/stock code or one normalized exact name."""
-    from kreports.analysis.dcf_source import dcf_read_engine
+    from kreports.analysis.dcf_source import (
+        DcfSourceUnavailable,
+        dcf_read_engine,
+    )
+    from kreports.analysis.dcf_model import MAX_COMPANY_LENGTH
 
     if not isinstance(company, str) or not company.strip():
         return None, None, "회사 식별자는 비어 있지 않은 문자열이어야 합니다."
     identifier = company.strip()
-    with dcf_read_engine() as read_engine:
-        with read_engine.connect() as connection:
-            if identifier.isdigit() and len(identifier) in {6, 8}:
-                column = "corp_code" if len(identifier) == 8 else "stock_code"
-                rows = connection.execute(text(f"""
-                    SELECT corp_code, stock_code, corp_name, market, induty_code
-                    FROM companies
-                    WHERE {column}=:identifier
-                    ORDER BY corp_code
-                    LIMIT 2
-                """), {"identifier": identifier}).mappings().all()
-            elif identifier.isdigit():
-                rows = []
-            else:
-                normalized = _normalized_exact_company_name(identifier)
-                rows = [
-                    row
-                    for row in connection.execute(text("""
+    if len(identifier) > MAX_COMPANY_LENGTH:
+        return (
+            None,
+            None,
+            f"회사 식별자는 {MAX_COMPANY_LENGTH}자 이하여야 합니다.",
+        )
+    try:
+        with dcf_read_engine() as read_engine:
+            with read_engine.connect() as connection:
+                if identifier.isdigit() and len(identifier) in {6, 8}:
+                    column = (
+                        "corp_code" if len(identifier) == 8 else "stock_code"
+                    )
+                    rows = connection.execute(text(f"""
                         SELECT corp_code, stock_code, corp_name, market,
                                induty_code
                         FROM companies
+                        WHERE {column}=:identifier
                         ORDER BY corp_code
-                    """)).mappings().all()
-                    if _normalized_exact_company_name(str(row["corp_name"]))
-                    == normalized
-                ][:2]
+                        LIMIT 2
+                    """), {"identifier": identifier}).mappings().all()
+                elif identifier.isdigit():
+                    rows = []
+                else:
+                    normalized = _normalized_exact_company_name(identifier)
+                    rows = [
+                        row
+                        for row in connection.execute(text("""
+                            SELECT corp_code, stock_code, corp_name, market,
+                                   induty_code
+                            FROM companies
+                            ORDER BY corp_code
+                        """)).mappings().all()
+                        if _normalized_exact_company_name(
+                            str(row["corp_name"])
+                        ) == normalized
+                    ][:2]
+    except DcfSourceUnavailable:
+        raise
+    except Exception as exc:
+        raise DcfSourceUnavailable(
+            f"identity_query_unavailable:{type(exc).__name__}"
+        ) from exc
     if len(rows) == 1:
         subject = dict(rows[0])
         return str(subject["corp_code"]), subject, None
@@ -843,16 +864,39 @@ def build_dcf_model_pack(
     """Build an exact-year, source-grounded and reviewable DCF model pack."""
     from kreports.analysis.dcf_model import (
         DcfScenarioInput,
+        MAX_COMPANY_LENGTH,
         build_dcf_valuation,
         dcf_result_to_dict,
     )
     from kreports.analysis.dcf_source import load_dcf_actuals
+    from kreports.analysis.dcf_source import (
+        DcfSourceUnavailable,
+        dcf_source_failure,
+    )
 
-    corp_code, subject, resolution_error = _resolve_dcf_company_exact(company)
+    try:
+        corp_code, subject, resolution_error = _resolve_dcf_company_exact(
+            company
+        )
+    except DcfSourceUnavailable as exc:
+        unavailable = dcf_source_failure(exc)
+        return {
+            "error": "DCF 읽기 전용 소스를 사용할 수 없습니다.",
+            "error_code": "dcf_source_unavailable",
+            "company": str(company)[:MAX_COMPANY_LENGTH],
+            "data_quality": {
+                "status": "missing",
+                "source": "financial_facts_compact",
+                "source_status": unavailable.status,
+                "covered_years": [],
+                "missing_fields": list(unavailable.missing_metrics),
+                "limitations": list(unavailable.limitations),
+            },
+        }
     if resolution_error or corp_code is None or subject is None:
         return {
             "error": resolution_error or "정확한 기업 식별에 실패했습니다.",
-            "company": company,
+            "company": str(company)[:MAX_COMPANY_LENGTH],
             "match_policy": "exact_identifier_or_unique_normalized_exact_name",
         }
     scenario = DcfScenarioInput(

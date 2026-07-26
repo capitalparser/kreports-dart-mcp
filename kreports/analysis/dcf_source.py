@@ -10,7 +10,7 @@ from typing import Iterator
 from sqlalchemy import create_engine, inspect, text
 
 import kreports.db.engine as engine_module
-from kreports.analysis.dcf_model import DcfActualFact
+from kreports.analysis.dcf_model import DcfActualFact, parse_dcf_timestamp
 from kreports.semantic.metrics import DCF_MODEL_METRICS, metric_definition
 
 
@@ -29,6 +29,17 @@ _REQUIRED_COLUMNS = {
 
 class DcfSourceUnavailable(RuntimeError):
     """The local compact source cannot be read without unsafe fallback."""
+
+
+def dcf_source_failure(limitation: object) -> DcfSourceResult:
+    """Return the bounded fail-closed source contract used by public adapters."""
+    rendered = str(limitation).strip()[:200] or "runtime_db_unavailable"
+    return DcfSourceResult(
+        status="missing",
+        facts=(),
+        missing_metrics=DCF_MODEL_METRICS,
+        limitations=(rendered,),
+    )
 
 
 @dataclass(frozen=True)
@@ -159,16 +170,13 @@ def _select_row(metric_key: str, rows: list[dict]) -> tuple[dict | None, str | N
         value = row.get("_id")
         if value is None or isinstance(value, bool):
             return None
-        try:
-            return int(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-
-    def recency_key(row: dict) -> tuple[str, int]:
-        return (
-            str(row.get("fetched_at") or ""),
-            row_id(row) if row_id(row) is not None else -1,
-        )
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and stripped.lstrip("+-").isdigit():
+                return int(stripped)
+        return None
 
     if len(rows) == 1:
         return rows[0], None
@@ -180,29 +188,77 @@ def _select_row(metric_key: str, rows: list[dict]) -> tuple[dict | None, str | N
         )
         for row in rows
     }
-    if len(signatures) == 1:
-        return sorted(
-            rows,
-            key=recency_key,
-            reverse=True,
-        )[0], None
-    has_timestamp = any(row.get("fetched_at") for row in rows)
-    has_id = any(row_id(row) is not None for row in rows)
-    if not has_timestamp and not has_id:
+    identical_facts = len(signatures) == 1
+
+    parsed_timestamps = []
+    for row in rows:
+        try:
+            parsed_timestamps.append(
+                parse_dcf_timestamp(row.get("fetched_at"))
+            )
+        except (TypeError, ValueError):
+            return None, f"duplicate_ambiguous:{metric_key}"
+    present = [
+        timestamp
+        for timestamp in parsed_timestamps
+        if timestamp is not None
+    ]
+    if present and len(present) != len(parsed_timestamps):
         return None, f"duplicate_ambiguous:{metric_key}"
-    ordered = sorted(
-        rows,
-        key=recency_key,
-        reverse=True,
-    )
-    top = ordered[0]
-    runner_up = ordered[1]
+    if present and len({
+        timestamp.tzinfo is not None
+        and timestamp.utcoffset() is not None
+        for timestamp in present
+    }) > 1:
+        return None, f"duplicate_ambiguous:{metric_key}"
+
+    if present:
+        latest = max(present)
+        finalists = [
+            row
+            for row, timestamp in zip(
+                rows,
+                parsed_timestamps,
+                strict=True,
+            )
+            if timestamp == latest
+        ]
+        if len(finalists) == 1:
+            return (
+                finalists[0],
+                None
+                if identical_facts
+                else f"duplicate_resolved_latest:{metric_key}",
+            )
+    else:
+        finalists = rows
+
+    finalist_ids = [row_id(row) for row in finalists]
+    if identical_facts and (
+        any(value is None for value in finalist_ids)
+        or len(set(finalist_ids)) != len(finalist_ids)
+    ):
+        return min(
+            finalists,
+            key=lambda row: (
+                str(row.get("source_account_nm") or ""),
+                str(row.get("source_account_id") or ""),
+                str(row.get("fetched_at") or ""),
+            ),
+        ), None
     if (
-        str(top.get("fetched_at") or "") == str(runner_up.get("fetched_at") or "")
-        and row_id(top) == row_id(runner_up)
+        any(value is None for value in finalist_ids)
+        or len(set(finalist_ids)) != len(finalist_ids)
     ):
         return None, f"duplicate_ambiguous:{metric_key}"
-    return top, f"duplicate_resolved_latest:{metric_key}"
+    latest_id = max(value for value in finalist_ids if value is not None)
+    selected = finalists[finalist_ids.index(latest_id)]
+    return (
+        selected,
+        None
+        if identical_facts
+        else f"duplicate_resolved_latest:{metric_key}",
+    )
 
 
 def _load_with_engine(
@@ -347,9 +403,4 @@ def load_dcf_actuals(
                 fs_div,
             )
     except DcfSourceUnavailable as exc:
-        return DcfSourceResult(
-            status="missing",
-            facts=(),
-            missing_metrics=DCF_MODEL_METRICS,
-            limitations=(str(exc),),
-        )
+        return dcf_source_failure(exc)

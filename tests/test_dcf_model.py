@@ -425,18 +425,277 @@ def test_decimal_bounds_reject_pathological_values_and_arithmetic_fails_typed():
         _scenario(wacc=Decimal("1E+999999"))
 
     facts = tuple(
-        replace(fact, amount=Decimal("900000000000000000000"))
+        replace(fact, amount=Decimal("1E+24"))
         if fact.metric_key == "revenue"
         else fact
         for fact in _facts()
     )
     result = build_dcf_valuation(
-        _scenario(revenue_growth=Decimal("999999999999999999")),
+        _scenario(
+            forecast_years=10,
+            revenue_growth=Decimal("10"),
+        ),
         facts,
     )
     assert result.status == "invalid_model"
     assert result.enterprise_value is None
     assert "arithmetic_invalid" in result.missing_inputs
+
+
+def test_decimal_bounds_use_normalized_significance_and_allow_tiny_wacc():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    trailing = build_dcf_valuation(
+        _scenario(wacc=Decimal("0.1" + ("0" * 40))),
+        _facts(),
+    )
+    tiny = build_dcf_valuation(
+        _scenario(
+            wacc=Decimal("1E-19"),
+            terminal_growth=Decimal("-0.01"),
+        ),
+        _facts(),
+    )
+
+    assert trailing.status == "complete_model"
+    assert trailing.assumptions[6].value == Decimal("0.1")
+    assert tiny.status == "complete_model"
+    assert tiny.sensitivity[12].wacc == Decimal("1E-19")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("revenue_growth", Decimal("10.0001")),
+        ("operating_margin", Decimal("10.0001")),
+        ("operating_margin", Decimal("-10.0001")),
+        ("da_to_revenue", Decimal("10.0001")),
+        ("capex_to_revenue", Decimal("10.0001")),
+        ("nwc_to_revenue", Decimal("10.0001")),
+        ("nwc_to_revenue", Decimal("-10.0001")),
+        ("wacc", Decimal("1.0001")),
+        ("terminal_growth", Decimal("1.0001")),
+    ],
+)
+def test_dcf_domain_rejects_unsupported_economic_rate_bounds(field, value):
+    with pytest.raises(ValueError, match=field):
+        _scenario(**{field: value})
+
+
+def test_result_recomputes_projection_revenue_from_normalized_base():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    result = build_dcf_valuation(_scenario(), _facts())
+    contradictory = replace(
+        result.projections[0],
+        revenue=result.projections[0].revenue + Decimal("1"),
+    )
+
+    with pytest.raises(ValueError, match="projection revenue"):
+        replace(
+            result,
+            projections=(contradictory, *result.projections[1:]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "changes"),
+    [
+        ("ebit", {"ebit": Decimal("111")}),
+        ("tax_rate", {"tax_rate": Decimal("0.21")}),
+        (
+            "depreciation_amortization",
+            {"depreciation_amortization": Decimal("56")},
+        ),
+        ("capex", {"capex": Decimal("45")}),
+        (
+            "nwc_balance",
+            {
+                "nwc_balance": Decimal("221"),
+                "nwc_change": Decimal("71"),
+            },
+        ),
+        ("nwc_change", {"nwc_change": Decimal("71")}),
+        ("discount_factor", {"discount_factor": Decimal("0.90")}),
+    ],
+)
+def test_result_recomputes_projection_drivers_from_assumptions(
+    field_name,
+    changes,
+):
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    def money(value):
+        return value.quantize(Decimal("0.01"))
+
+    result = build_dcf_valuation(_scenario(), _facts())
+    row = result.projections[0]
+    values = {
+        "ebit": row.ebit,
+        "tax_rate": row.tax_rate,
+        "depreciation_amortization": row.depreciation_amortization,
+        "capex": row.capex,
+        "nwc_balance": row.nwc_balance,
+        "nwc_change": row.nwc_change,
+        "discount_factor": row.discount_factor,
+        **changes,
+    }
+    values["after_tax_ebit"] = money(
+        values["ebit"] * (Decimal(1) - values["tax_rate"])
+    )
+    values["ufcf"] = money(
+        values["after_tax_ebit"]
+        + values["depreciation_amortization"]
+        - values["capex"]
+        - values["nwc_change"]
+    )
+    values["present_value"] = money(
+        values["ufcf"] * values["discount_factor"]
+    )
+    contradictory = replace(row, **values)
+
+    with pytest.raises(ValueError, match=f"projection {field_name}"):
+        replace(
+            result,
+            projections=(contradictory, *result.projections[1:]),
+        )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"confidence": "enterprise_complete_equity_partial"},
+        {"missing_inputs": ("cash_and_equivalents",)},
+    ],
+)
+def test_complete_result_confidence_and_missing_bridge_semantics(changes):
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    result = build_dcf_valuation(_scenario(), _facts())
+
+    with pytest.raises(ValueError, match="bridge semantics"):
+        replace(result, **changes)
+
+
+def test_partial_and_invalid_result_missing_status_semantics():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    partial = build_dcf_valuation(_scenario(wacc=None), _facts())
+    zero_revenue = tuple(
+        replace(fact, amount=Decimal("0"))
+        if fact.metric_key == "revenue"
+        else fact
+        for fact in _facts()
+    )
+    invalid = build_dcf_valuation(_scenario(), zero_revenue)
+
+    with pytest.raises(ValueError, match="status semantics"):
+        replace(partial, missing_inputs=())
+    with pytest.raises(ValueError, match="status semantics"):
+        replace(invalid, missing_inputs=())
+
+
+def test_projection_direct_contract_rejects_impossible_domains():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    row = build_dcf_valuation(_scenario(), _facts()).projections[0]
+
+    with pytest.raises(ValueError, match="revenue"):
+        replace(row, revenue=Decimal("0"))
+    with pytest.raises(ValueError, match="depreciation"):
+        replace(
+            row,
+            depreciation_amortization=Decimal("-1"),
+            ufcf=row.ufcf - row.depreciation_amortization - Decimal("1"),
+            present_value=(
+                (
+                    row.ufcf
+                    - row.depreciation_amortization
+                    - Decimal("1")
+                )
+                * row.discount_factor
+            ).quantize(Decimal("0.01")),
+        )
+    with pytest.raises(ValueError, match="discount_factor"):
+        replace(
+            row,
+            discount_factor=Decimal("1.01"),
+            present_value=(row.ufcf * Decimal("1.01")).quantize(
+                Decimal("0.01")
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "field_name"),
+    [
+        ({"unit": "million_KRW"}, "unit"),
+        ({"source_account_id": None}, "source_account_id"),
+        ({"source_account_name": " "}, "source_account_name"),
+        ({"source_table": "financials"}, "source_table"),
+        ({"fetched_at": "not-an-iso-timestamp"}, "fetched_at"),
+    ],
+)
+def test_actual_fact_direct_contract_requires_canonical_traceability(
+    changes,
+    field_name,
+):
+    fact = _facts()[0]
+
+    with pytest.raises((TypeError, ValueError), match=field_name):
+        replace(fact, **changes)
+
+    synthetic = replace(
+        fact,
+        source_account_id="financials.revenue",
+        source_account_name="매출액",
+    )
+    assert synthetic.source_account_id == "financials.revenue"
+
+
+def test_builder_revalidates_frozen_actual_fact_instances():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = list(_facts())
+    object.__setattr__(facts[0], "unit", "USD")
+
+    with pytest.raises(ValueError, match="unit"):
+        build_dcf_valuation(_scenario(), tuple(facts))
+
+
+def test_dcf_domain_bounds_base_and_normalized_amounts():
+    largest = Decimal("1E+24")
+    assert replace(_facts()[0], amount=largest).amount == largest
+
+    with pytest.raises(ValueError, match="amount"):
+        replace(
+            _facts()[0],
+            amount=Decimal("1000000000000000000000001"),
+        )
+    with pytest.raises(ValueError, match="normalized_revenue"):
+        _scenario(
+            normalized_revenue=Decimal(
+                "1000000000000000000000001"
+            ),
+            normalization_reason="상한 테스트",
+        )
+    with pytest.raises(ValueError, match="normalized_operating_profit"):
+        _scenario(
+            normalized_operating_profit=Decimal(
+                "-1000000000000000000000001"
+            ),
+            normalization_reason="상한 테스트",
+        )
+
+
+def test_dcf_domain_bounds_company_and_normalization_reason_text():
+    with pytest.raises(ValueError, match="company"):
+        _scenario(company="회" * 201)
+    with pytest.raises(ValueError, match="normalization_reason"):
+        _scenario(
+            normalized_revenue=Decimal("1000"),
+            normalization_reason="근" * 1001,
+        )
 
 
 def test_dcf_discloses_nwc_definition_capex_sign_and_bridge_exclusions():

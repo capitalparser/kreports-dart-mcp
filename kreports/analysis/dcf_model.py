@@ -6,8 +6,11 @@ MCP presentation remain in their dedicated adapters.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import datetime
 from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Literal
+
+from kreports.semantic.metrics import DCF_MODEL_METRICS
 
 
 MONEY_QUANTUM = Decimal("0.01")
@@ -18,10 +21,17 @@ ROUNDING_POLICY = (
     "Decimal arithmetic; monetary values ROUND_HALF_UP to 0.01 KRW and "
     "discount factors ROUND_HALF_UP to 10 decimal places."
 )
+MAX_REVENUE_GROWTH = Decimal("10")
+MAX_ABS_OPERATING_RATIO = Decimal("10")
+MAX_WACC = Decimal("1")
+MAX_TERMINAL_GROWTH = Decimal("1")
+MAX_ABS_BASE_AMOUNT = Decimal("1E+24")
+MAX_COMPANY_LENGTH = 200
+MAX_NORMALIZATION_REASON_LENGTH = 1_000
 _MAX_DECIMAL_TEXT = 128
 _MAX_DECIMAL_DIGITS = 38
-_MAX_DECIMAL_EXPONENT = 18
 _MAX_DECIMAL_ADJUSTED = 30
+_MIN_DECIMAL_ADJUSTED = -30
 _MAX_PUBLIC_TEXT = 1_000
 _ASSUMPTION_KEYS = (
     "revenue_growth",
@@ -33,18 +43,7 @@ _ASSUMPTION_KEYS = (
     "wacc",
     "terminal_growth",
 )
-_ACTUAL_METRIC_KEYS = {
-    "revenue",
-    "operating_profit",
-    "depreciation_amortization",
-    "purchase_ppe",
-    "purchase_intangible_assets",
-    "trade_receivables",
-    "inventories",
-    "trade_payables",
-    "cash_and_equivalents",
-    "interest_bearing_debt",
-}
+_ACTUAL_METRIC_KEYS = frozenset(DCF_MODEL_METRICS)
 
 
 def _decimal(value: Any, field_name: str) -> Decimal | None:
@@ -62,10 +61,19 @@ def _decimal(value: Any, field_name: str) -> Decimal | None:
     if not converted.is_finite():
         raise ValueError(f"{field_name} must be finite")
     decimal_tuple = converted.as_tuple()
+    significant_digits = list(decimal_tuple.digits)
+    while len(significant_digits) > 1 and significant_digits[-1] == 0:
+        significant_digits.pop()
     if (
-        len(decimal_tuple.digits) > _MAX_DECIMAL_DIGITS
-        or abs(decimal_tuple.exponent) > _MAX_DECIMAL_EXPONENT
-        or abs(converted.adjusted()) > _MAX_DECIMAL_ADJUSTED
+        len(significant_digits) > _MAX_DECIMAL_DIGITS
+        or (
+            converted != 0
+            and not (
+                _MIN_DECIMAL_ADJUSTED
+                <= converted.adjusted()
+                <= _MAX_DECIMAL_ADJUSTED
+            )
+        )
     ):
         raise ValueError(f"{field_name} exceeds decimal precision bounds")
     return converted
@@ -91,6 +99,7 @@ def _text(
     field_name: str,
     *,
     optional: bool = False,
+    max_length: int = _MAX_PUBLIC_TEXT,
 ) -> str | None:
     if value is None and optional:
         return None
@@ -99,7 +108,7 @@ def _text(
     normalized = value.strip()
     if not normalized:
         raise ValueError(f"{field_name} must be nonblank")
-    if len(normalized) > _MAX_PUBLIC_TEXT:
+    if len(normalized) > max_length:
         raise ValueError(f"{field_name} exceeds text limit")
     return normalized
 
@@ -112,6 +121,27 @@ def _year(value: Any, field_name: str) -> int:
     return value
 
 
+def parse_dcf_timestamp(
+    value: Any,
+    field_name: str = "fetched_at",
+) -> datetime | None:
+    """Parse the bounded ISO timestamp contract used for DCF provenance."""
+    rendered = _text(value, field_name, optional=True)
+    if rendered is None:
+        return None
+    if "T" not in rendered and " " not in rendered:
+        raise ValueError(f"{field_name} must be an ISO timestamp")
+    candidate = (
+        f"{rendered[:-1]}+00:00"
+        if rendered.endswith("Z")
+        else rendered
+    )
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO timestamp") from exc
+
+
 @dataclass(frozen=True)
 class DcfActualFact:
     metric_key: str
@@ -119,8 +149,8 @@ class DcfActualFact:
     unit: str
     year: int
     fs_div: Literal["CFS", "OFS"]
-    source_account_id: str | None
-    source_account_name: str | None
+    source_account_id: str
+    source_account_name: str
     source_table: str
     fetched_at: str | None
 
@@ -129,40 +159,42 @@ class DcfActualFact:
         if metric_key not in _ACTUAL_METRIC_KEYS:
             raise ValueError("metric_key is not a DCF actual metric")
         amount = _required_decimal(self.amount, f"{metric_key}.amount")
+        if abs(amount) > MAX_ABS_BASE_AMOUNT:
+            raise ValueError(
+                f"{metric_key}.amount exceeds the supported bound"
+            )
         if self.fs_div not in {"CFS", "OFS"}:
             raise ValueError("actual fact fs_div must be CFS or OFS")
+        unit = _text(self.unit, "unit")
+        if unit != "KRW":
+            raise ValueError("unit must be canonical KRW")
+        source_table = _text(self.source_table, "source_table")
+        if source_table != "financial_facts_compact":
+            raise ValueError(
+                "source_table must be financial_facts_compact"
+            )
         object.__setattr__(self, "metric_key", metric_key)
         object.__setattr__(self, "amount", amount)
-        object.__setattr__(self, "unit", _text(self.unit, "unit"))
+        object.__setattr__(self, "unit", unit)
         object.__setattr__(self, "year", _year(self.year, "year"))
         object.__setattr__(
             self,
             "source_account_id",
-            _text(
-                self.source_account_id,
-                "source_account_id",
-                optional=True,
-            ),
+            _text(self.source_account_id, "source_account_id"),
         )
         object.__setattr__(
             self,
             "source_account_name",
-            _text(
-                self.source_account_name,
-                "source_account_name",
-                optional=True,
-            ),
+            _text(self.source_account_name, "source_account_name"),
         )
         object.__setattr__(
             self,
             "source_table",
-            _text(self.source_table, "source_table"),
+            source_table,
         )
-        object.__setattr__(
-            self,
-            "fetched_at",
-            _text(self.fetched_at, "fetched_at", optional=True),
-        )
+        fetched_at = _text(self.fetched_at, "fetched_at", optional=True)
+        parse_dcf_timestamp(fetched_at)
+        object.__setattr__(self, "fetched_at", fetched_at)
 
 
 @dataclass(frozen=True)
@@ -184,7 +216,11 @@ class DcfScenarioInput:
     normalization_reason: str | None = None
 
     def __post_init__(self) -> None:
-        company = _text(self.company, "company")
+        company = _text(
+            self.company,
+            "company",
+            max_length=MAX_COMPANY_LENGTH,
+        )
         object.__setattr__(self, "base_year", _year(self.base_year, "base_year"))
         if self.fs_div not in {"CFS", "OFS"}:
             raise ValueError("fs_div must be CFS or OFS")
@@ -215,16 +251,48 @@ class DcfScenarioInput:
             )
         if self.revenue_growth is not None and self.revenue_growth <= -1:
             raise ValueError("revenue_growth must be greater than -1")
+        if (
+            self.revenue_growth is not None
+            and self.revenue_growth > MAX_REVENUE_GROWTH
+        ):
+            raise ValueError(
+                f"revenue_growth must be at most {MAX_REVENUE_GROWTH}"
+            )
+        if (
+            self.operating_margin is not None
+            and abs(self.operating_margin) > MAX_ABS_OPERATING_RATIO
+        ):
+            raise ValueError(
+                "operating_margin exceeds the supported absolute bound"
+            )
         if self.tax_rate is not None and not 0 <= self.tax_rate <= 1:
             raise ValueError("tax_rate must be between 0 and 1")
         for field_name in ("da_to_revenue", "capex_to_revenue"):
             value = getattr(self, field_name)
             if value is not None and value < 0:
                 raise ValueError(f"{field_name} must be non-negative")
+            if value is not None and value > MAX_ABS_OPERATING_RATIO:
+                raise ValueError(f"{field_name} exceeds the supported bound")
+        if (
+            self.nwc_to_revenue is not None
+            and abs(self.nwc_to_revenue) > MAX_ABS_OPERATING_RATIO
+        ):
+            raise ValueError(
+                "nwc_to_revenue exceeds the supported absolute bound"
+            )
         if self.wacc is not None and self.wacc <= 0:
             raise ValueError("wacc must be greater than zero")
+        if self.wacc is not None and self.wacc > MAX_WACC:
+            raise ValueError(f"wacc must be at most {MAX_WACC}")
         if self.terminal_growth is not None and self.terminal_growth <= -1:
             raise ValueError("terminal_growth must be greater than -1")
+        if (
+            self.terminal_growth is not None
+            and self.terminal_growth > MAX_TERMINAL_GROWTH
+        ):
+            raise ValueError(
+                f"terminal_growth must be at most {MAX_TERMINAL_GROWTH}"
+            )
         if (
             self.wacc is not None
             and self.terminal_growth is not None
@@ -233,10 +301,26 @@ class DcfScenarioInput:
             raise ValueError("terminal_growth must be less than wacc")
         if self.normalized_revenue is not None and self.normalized_revenue <= 0:
             raise ValueError("normalized_revenue must be greater than zero")
+        if (
+            self.normalized_revenue is not None
+            and self.normalized_revenue > MAX_ABS_BASE_AMOUNT
+        ):
+            raise ValueError(
+                "normalized_revenue exceeds the supported bound"
+            )
+        if (
+            self.normalized_operating_profit is not None
+            and abs(self.normalized_operating_profit)
+            > MAX_ABS_BASE_AMOUNT
+        ):
+            raise ValueError(
+                "normalized_operating_profit exceeds the supported bound"
+            )
         normalization_reason = _text(
             self.normalization_reason,
             "normalization_reason",
             optional=True,
+            max_length=MAX_NORMALIZATION_REASON_LENGTH,
         )
         if (
             self.normalized_revenue is not None
@@ -369,12 +453,20 @@ class DcfProjection:
             )
         if self.formula != UFCF_FORMULA:
             raise ValueError("projection.formula is invalid")
+        if self.revenue <= 0:
+            raise ValueError("projection.revenue must be positive")
         if not 0 <= self.tax_rate <= 1:
             raise ValueError("projection.tax_rate is invalid")
+        if self.depreciation_amortization < 0:
+            raise ValueError(
+                "projection.depreciation_amortization must be non-negative"
+            )
         if self.capex < 0:
             raise ValueError("projection.capex must be a positive outflow")
-        if self.discount_factor <= 0:
-            raise ValueError("projection.discount_factor must be positive")
+        if not 0 < self.discount_factor <= 1:
+            raise ValueError(
+                "projection.discount_factor must be within (0, 1]"
+            )
         if self.after_tax_ebit != _money(
             self.ebit * (Decimal(1) - self.tax_rate)
         ):
@@ -507,9 +599,27 @@ class DcfValuationResult:
             raise TypeError("result.normalization is invalid")
         if tuple(item.key for item in self.assumptions) != _ASSUMPTION_KEYS:
             raise ValueError("result assumptions do not match the DCF contract")
+        actuals_by_metric: dict[str, list[DcfActualFact]] = {}
         for fact in self.actuals:
             if fact.year != base_year or fact.fs_div != self.fs_div:
                 raise ValueError("result actual basis does not reconcile")
+            actuals_by_metric.setdefault(fact.metric_key, []).append(fact)
+        for normalized_metric in (
+            self.normalization.revenue,
+            self.normalization.operating_profit,
+        ):
+            source_facts = actuals_by_metric.get(
+                normalized_metric.metric_key,
+                [],
+            )
+            expected_original = (
+                source_facts[0].amount if len(source_facts) == 1 else None
+            )
+            if normalized_metric.original_actual != expected_original:
+                raise ValueError(
+                    f"normalization {normalized_metric.metric_key} "
+                    "does not reconcile"
+                )
 
         for field_name in (
             "forecast_period_present_value",
@@ -537,6 +647,19 @@ class DcfValuationResult:
         object.__setattr__(self, "company", company)
         object.__setattr__(self, "base_year", base_year)
 
+        expected_cash = (
+            actuals_by_metric["cash_and_equivalents"][0].amount
+            if len(actuals_by_metric.get("cash_and_equivalents", [])) == 1
+            else None
+        )
+        expected_debt = (
+            actuals_by_metric["interest_bearing_debt"][0].amount
+            if len(actuals_by_metric.get("interest_bearing_debt", [])) == 1
+            else None
+        )
+        if self.cash != expected_cash or self.debt != expected_debt:
+            raise ValueError("result bridge facts do not reconcile")
+
         if self.status == "complete_model":
             if (
                 len(self.projections) != self.forecast_years
@@ -552,6 +675,26 @@ class DcfValuationResult:
                 "enterprise_complete_equity_partial",
             }:
                 raise ValueError("complete result confidence does not reconcile")
+            expected_bridge_missing = {
+                key
+                for key, value in (
+                    ("cash_and_equivalents", expected_cash),
+                    ("interest_bearing_debt", expected_debt),
+                )
+                if value is None
+            }
+            expected_confidence = (
+                "complete_equity"
+                if not expected_bridge_missing
+                else "enterprise_complete_equity_partial"
+            )
+            if (
+                self.confidence != expected_confidence
+                or set(self.missing_inputs) != expected_bridge_missing
+            ):
+                raise ValueError(
+                    "complete result bridge semantics do not reconcile"
+                )
             if any(assumption.value is None for assumption in self.assumptions):
                 raise ValueError("complete result assumptions are incomplete")
             expected_years = tuple(
@@ -559,6 +702,104 @@ class DcfValuationResult:
             )
             if tuple(row.year for row in self.projections) != expected_years:
                 raise ValueError("projection years do not reconcile")
+            assumptions = {
+                assumption.key: assumption.value
+                for assumption in self.assumptions
+            }
+            revenue_growth = assumptions["revenue_growth"]
+            operating_margin = assumptions["operating_margin"]
+            tax_rate = assumptions["tax_rate"]
+            da_to_revenue = assumptions["da_to_revenue"]
+            capex_to_revenue = assumptions["capex_to_revenue"]
+            nwc_to_revenue = assumptions["nwc_to_revenue"]
+            wacc = assumptions["wacc"]
+            terminal_growth = assumptions["terminal_growth"]
+            assert all(
+                value is not None
+                for value in (
+                    revenue_growth,
+                    operating_margin,
+                    tax_rate,
+                    da_to_revenue,
+                    capex_to_revenue,
+                    nwc_to_revenue,
+                    wacc,
+                    terminal_growth,
+                )
+            )
+            normalized_revenue = (
+                self.normalization.revenue.normalized_amount
+            )
+            if normalized_revenue is None or normalized_revenue <= 0:
+                raise ValueError("normalized base revenue does not reconcile")
+            for metric_key in _ENTERPRISE_ACTUALS:
+                if len(actuals_by_metric.get(metric_key, [])) != 1:
+                    raise ValueError(
+                        f"complete result actual {metric_key} "
+                        "does not reconcile"
+                    )
+            previous_revenue = normalized_revenue
+            previous_nwc = _money(
+                actuals_by_metric["trade_receivables"][0].amount
+                + actuals_by_metric["inventories"][0].amount
+                - actuals_by_metric["trade_payables"][0].amount
+            )
+            for index, projection in enumerate(self.projections, 1):
+                expected_revenue = _money(
+                    previous_revenue
+                    * (Decimal(1) + revenue_growth)
+                )
+                expected_ebit = _money(
+                    expected_revenue * operating_margin
+                )
+                expected_after_tax = _money(
+                    expected_ebit * (Decimal(1) - tax_rate)
+                )
+                expected_da = _money(
+                    expected_revenue * da_to_revenue
+                )
+                expected_capex = _money(
+                    expected_revenue * capex_to_revenue
+                )
+                expected_nwc = _money(
+                    expected_revenue * nwc_to_revenue
+                )
+                expected_nwc_change = _money(
+                    expected_nwc - previous_nwc
+                )
+                expected_ufcf = _money(
+                    expected_after_tax
+                    + expected_da
+                    - expected_capex
+                    - expected_nwc_change
+                )
+                expected_discount_factor = _rate(
+                    Decimal(1)
+                    / ((Decimal(1) + wacc) ** index)
+                )
+                expected_present_value = _money(
+                    expected_ufcf * expected_discount_factor
+                )
+                expected_values = {
+                    "revenue": expected_revenue,
+                    "ebit": expected_ebit,
+                    "tax_rate": tax_rate,
+                    "after_tax_ebit": expected_after_tax,
+                    "depreciation_amortization": expected_da,
+                    "capex": expected_capex,
+                    "nwc_balance": expected_nwc,
+                    "nwc_change": expected_nwc_change,
+                    "ufcf": expected_ufcf,
+                    "discount_factor": expected_discount_factor,
+                    "present_value": expected_present_value,
+                }
+                for field_name, expected_value in expected_values.items():
+                    if getattr(projection, field_name) != expected_value:
+                        raise ValueError(
+                            f"projection {field_name} does not reconcile"
+                        )
+                previous_revenue = expected_revenue
+                previous_nwc = expected_nwc
             if self.forecast_period_present_value != _money(
                 sum(row.present_value for row in self.projections)
             ):
@@ -568,13 +809,6 @@ class DcfValuationResult:
                 + self.terminal_value_present_value
             ):
                 raise ValueError("enterprise value does not reconcile")
-            assumptions = {
-                assumption.key: assumption.value
-                for assumption in self.assumptions
-            }
-            wacc = assumptions["wacc"]
-            terminal_growth = assumptions["terminal_growth"]
-            assert wacc is not None and terminal_growth is not None
             if self.terminal_value != _money(
                 self.projections[-1].ufcf
                 * (Decimal(1) + terminal_growth)
@@ -640,6 +874,22 @@ class DcfValuationResult:
                 self.equity_value is not None,
             )):
                 raise ValueError("partial or invalid result does not reconcile")
+            missing_set = set(self.missing_inputs)
+            if (
+                self.status == "partial_model"
+                and not missing_set.intersection(
+                    (*_ASSUMPTION_KEYS, *_ENTERPRISE_ACTUALS)
+                )
+            ) or (
+                self.status == "invalid_model"
+                and not missing_set.intersection(
+                    {"base_revenue_nonpositive", "arithmetic_invalid"}
+                )
+            ):
+                raise ValueError(
+                    "partial or invalid result status semantics "
+                    "do not reconcile"
+                )
 
         if self.cash is not None and self.debt is not None:
             expected_net_debt = _money(self.debt - self.cash)
@@ -998,11 +1248,22 @@ def build_dcf_valuation(
     source_limitations: tuple[str, ...] = (),
 ) -> DcfValuationResult:
     """Build a DCF result and fail typed on bounded Decimal arithmetic errors."""
-    immutable_actuals = tuple(actuals)
     if not isinstance(scenario, DcfScenarioInput):
         raise TypeError("scenario must be DcfScenarioInput")
+    immutable_actuals = tuple(actuals)
     if not all(isinstance(fact, DcfActualFact) for fact in immutable_actuals):
         raise TypeError("actuals must contain only DcfActualFact")
+    scenario = DcfScenarioInput(**{
+        field.name: getattr(scenario, field.name)
+        for field in fields(DcfScenarioInput)
+    })
+    immutable_actuals = tuple(
+        DcfActualFact(**{
+            field.name: getattr(fact, field.name)
+            for field in fields(DcfActualFact)
+        })
+        for fact in immutable_actuals
+    )
     try:
         return _build_dcf_valuation_unchecked(
             scenario,
