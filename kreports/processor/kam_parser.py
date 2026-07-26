@@ -19,6 +19,7 @@ _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(?:\(?\d{1,2}\)?[.)]|[가-하][.)]|[IVX]{1,5}[.)])\s*(.+?)\s*$",
     flags=re.IGNORECASE,
 )
+_ARABIC_NUMBER_RE = re.compile(r"^\s*\(?(\d{1,2})\)?[.)]\s*")
 _NOTE_RE = re.compile(
     r"(?:관련\s*(?:재무제표\s*)?)?(?:주석|note)\s*[제]?\s*(\d+(?:[.-]\d+)?)",
     flags=re.IGNORECASE,
@@ -122,6 +123,7 @@ def _numbered_title(
     index: int,
     *,
     in_response: bool,
+    expected_number: int | None,
 ) -> tuple[str, int] | None:
     match = _NUMBERED_TITLE_RE.match(lines[index])
     if not match:
@@ -157,7 +159,8 @@ def _numbered_title(
                     lines[following_index],
                     _REASON_HEADINGS,
                 )
-                or len(normalized_candidate.split()) != 1
+                or expected_number is None
+                or _numbered_ordinal(lines[index]) != expected_number
             ):
                 return None
         if len(parts) > 1 or len(candidate) > 200:
@@ -166,16 +169,32 @@ def _numbered_title(
     return None
 
 
+def _numbered_ordinal(line: str) -> int | None:
+    match = _ARABIC_NUMBER_RE.match(line)
+    return int(match.group(1)) if match else None
+
+
 def _title_starts(lines: list[str]) -> list[tuple[int, str]]:
     starts: list[tuple[int, str]] = []
     covered_until = -1
     in_response = False
+    last_numbered_title: int | None = None
     for index, line in enumerate(lines):
         if _matches_heading(line, _REASON_HEADINGS):
             in_response = False
         elif _matches_heading(line, _RESPONSE_HEADINGS):
             in_response = True
-        numbered = _numbered_title(lines, index, in_response=in_response)
+        expected_number = (
+            last_numbered_title + 1
+            if last_numbered_title is not None
+            else len(starts) + 1 if starts else None
+        )
+        numbered = _numbered_title(
+            lines,
+            index,
+            in_response=in_response,
+            expected_number=expected_number,
+        )
         title = numbered[0] if numbered is not None else None
         if numbered is not None:
             covered_until = max(covered_until, numbered[1] - 1)
@@ -195,6 +214,9 @@ def _title_starts(lines: list[str]) -> list[tuple[int, str]]:
             title = _normalize_title(line)
         if title:
             starts.append((index, title))
+            numbered_ordinal = _numbered_ordinal(line)
+            if numbered_ordinal is not None:
+                last_numbered_title = numbered_ordinal
     return starts
 
 

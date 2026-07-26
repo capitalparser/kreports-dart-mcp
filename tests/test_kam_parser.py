@@ -108,6 +108,7 @@ def test_parser_merges_duplicate_wrapped_title_and_keeps_numbered_procedures():
     assert items[0].title == "매출 및 수익 인식"
     assert "1. 표본 계약서" in items[0].audit_response_text
     assert "2. 보고기간 전후" in items[0].audit_response_text
+    assert "3. 재고자산 평가" not in items[0].audit_response_text
     assert items[1].title == "재고자산 평가"
     assert "표본 재고" in items[1].audit_response_text
 
@@ -159,6 +160,63 @@ def test_parser_joins_wrapped_numbered_next_matter_inside_response_state():
     assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
     assert items[0].audit_response_text == "1. 계약 표본 검사"
     assert "표본 재고" in items[1].audit_response_text
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_title", "excluded_response_fragment"),
+    [
+        pytest.param(
+            """
+            핵심감사사항
+            1. 수익인식
+            핵심감사사항으로 선정한 이유
+            기간귀속 판단에 유의적인 위험이 있습니다.
+            감사인이 수행한 주요 절차
+            1. 계약 표본 검사
+            2. 영업권
+            손상 평가
+            핵심감사사항으로 결정한 이유
+            현금창출단위의 회수가능액 추정에 유의적인 판단이 포함됩니다.
+            감사에서 다루어진 방법
+            현금흐름과 할인율을 검사했습니다.
+            """,
+            "영업권 손상 평가",
+            "2. 영업권",
+            id="korean",
+        ),
+        pytest.param(
+            """
+            Key Audit Matters
+            1. Revenue recognition
+            Why the matter was determined to be a key audit matter
+            Contract cut-off requires significant judgment.
+            How the matter was addressed in the audit
+            1. Inspect contract samples
+            2. Goodwill
+            impairment assessment
+            Why the matter was considered to be one of the most significant matters in the audit
+            The recoverable amount depends on significant assumptions.
+            Audit response
+            We tested cash-flow forecasts and the discount rate.
+            """,
+            "Goodwill impairment assessment",
+            "2. Goodwill",
+            id="english",
+        ),
+    ],
+)
+def test_parser_joins_multiword_wrapped_numbered_next_matter(
+    body,
+    expected_title,
+    excluded_response_fragment,
+):
+    from kreports.processor.kam_parser import extract_kam_items
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 2
+    assert items[1].title == expected_title
+    assert excluded_response_fragment not in items[0].audit_response_text
 
 
 def test_parser_deduplicates_numbered_title_followed_by_same_unnumbered_title():
