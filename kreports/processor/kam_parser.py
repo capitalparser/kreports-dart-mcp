@@ -4,13 +4,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from hashlib import sha1
 from html import unescape
+from html.parser import HTMLParser
 import re
 
 
 PARSER_VERSION = "v1"
 MAX_INPUT_CHARS = 2_000_000
 
-_HTML_TOKEN_RE = re.compile(r"<[^>]{0,1000}>|[^<]+")
 _TITLE_MARKER_RE = re.compile(
     r"^\s*(?:(?P<arabic>\(?\d{1,2}\)?)[.)]|"
     r"(?P<korean>[가-하])[.)]|"
@@ -188,6 +188,7 @@ class _TitleBoundary:
     start: int
     title: str
     marker: tuple[str, str] | None
+    has_explicit_structure: bool
 
 
 @dataclass
@@ -196,6 +197,7 @@ class _MatterFrame:
     title: str
     heading_frames: list[_HeadingFrame]
     marker: tuple[str, str] | None
+    has_explicit_title_structure: bool
 
 
 @dataclass(frozen=True)
@@ -268,26 +270,27 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         block_id += 1
         blank_before = False
 
-    def explicit_heading(tag: str, token: str) -> bool:
+    def explicit_heading(
+        tag: str,
+        parsed_attributes: list[tuple[str, str | None]],
+    ) -> bool:
         if tag in {"title", "th"}:
             return True
         if tag != "td":
             return False
-        attributes: dict[str, str] = {}
-        for match in re.finditer(
-            r"""([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))""",
-            token,
-        ):
-            attributes[match.group(1).lower()] = next(
-                value
-                for value in match.groups()[1:]
-                if value is not None
-            )
+        role_values = [
+            value or ""
+            for name, value in parsed_attributes
+            if name.lower() == "role"
+        ]
         # Generic table cells are strong title evidence only when the source
         # declares the exact semantic role. Class/id names are presentation
         # details and substring token inference creates false title evidence
         # for values such as ``not-title`` and ``data-title-value``.
-        return attributes.get("role", "").strip().lower() == "heading"
+        return (
+            len(role_values) == 1
+            and role_values[0].strip().lower() == "heading"
+        )
 
     def clear_strong_ancestry() -> None:
         strong_index = next(
@@ -371,48 +374,87 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             clear_strong_ancestry()
 
     block_tags = {"title", "p", "td", "th", "tr", "table", "br"}
-    for token in _HTML_TOKEN_RE.findall(bounded):
-        if token.startswith("<"):
-            match = re.match(r"<\s*(/?)\s*([A-Za-z0-9]+)", token)
-            if not match:
-                continue
-            closing = bool(match.group(1))
-            tag = match.group(2).lower()
-            if tag not in block_tags:
-                continue
-            flush()
-            if closing:
-                matching_index = next(
-                    (
-                        index
-                        for index in range(len(tag_stack) - 1, -1, -1)
-                        if tag_stack[index].tag == tag
-                    ),
-                    None,
-                )
-                if matching_index is not None:
-                    del tag_stack[matching_index:]
-                else:
-                    # A mismatched close is evidence that the structural
-                    # ancestry is unreliable. Fail closed instead of allowing
-                    # an unmatched TITLE/TH/role=heading TD to leak forward.
-                    clear_strong_ancestry()
-            elif tag != "br" and not token.rstrip().endswith("/>"):
-                prepare_opening(tag)
-                tag_stack.append(
-                    _TagFrame(
-                        tag=tag,
-                        explicit_heading=explicit_heading(tag, token),
-                    )
-                )
-            continue
-        text = unescape(token)
-        text = re.sub(r"&cr;|&#13;", "\n", text, flags=re.IGNORECASE)
-        pieces = text.splitlines(keepends=True)
+
+    def append_text(value: str) -> None:
+        value = unescape(value)
+        value = re.sub(r"&cr;|&#13;", "\n", value, flags=re.IGNORECASE)
+        pieces = value.splitlines(keepends=True)
         for piece in pieces:
             buffer.append(piece.rstrip("\r\n"))
             if piece.endswith(("\n", "\r")):
                 flush()
+
+    class StructureParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+
+        def handle_starttag(
+            self,
+            tag: str,
+            attrs: list[tuple[str, str | None]],
+        ) -> None:
+            tag = tag.lower()
+            raw_tag = self.get_starttag_text() or ""
+            if re.search(r"/\s*>$", raw_tag):
+                if tag in block_tags:
+                    flush()
+                return
+            if tag not in block_tags:
+                tag_stack.append(
+                    _TagFrame(tag=tag, explicit_heading=False)
+                )
+                return
+            flush()
+            if tag == "br":
+                return
+            prepare_opening(tag)
+            tag_stack.append(
+                _TagFrame(
+                    tag=tag,
+                    explicit_heading=explicit_heading(tag, attrs),
+                )
+            )
+
+        def handle_startendtag(
+            self,
+            tag: str,
+            attrs: list[tuple[str, str | None]],
+        ) -> None:
+            del attrs
+            if tag.lower() in block_tags:
+                flush()
+
+        def handle_endtag(self, tag: str) -> None:
+            tag = tag.lower()
+            matching_index = next(
+                (
+                    index
+                    for index in range(len(tag_stack) - 1, -1, -1)
+                    if tag_stack[index].tag == tag
+                ),
+                None,
+            )
+            if tag in block_tags or matching_index is None:
+                flush()
+            if matching_index is not None:
+                del tag_stack[matching_index:]
+            else:
+                # Any stray close makes an active strong ancestry unreliable,
+                # including ignored presentation tags such as DIV and SPAN.
+                clear_strong_ancestry()
+
+        def handle_data(self, data: str) -> None:
+            append_text(data)
+
+        def handle_entityref(self, name: str) -> None:
+            append_text(f"&{name};")
+
+        def handle_charref(self, name: str) -> None:
+            append_text(f"&#{name};")
+
+    parser = StructureParser()
+    parser.feed(bounded)
+    parser.close()
     flush()
     return lines
 
@@ -566,6 +608,7 @@ def _discover_title_boundary(
     reason_index: int,
     response_owned: bool,
     current_marker: tuple[str, str] | None,
+    structured_lines: list[StructuredLine] | None = None,
 ) -> _TitleBoundary | None:
     """Discover one reason-anchored title without segmenting any fields."""
     if reason_index <= lower:
@@ -644,6 +687,13 @@ def _discover_title_boundary(
         start=start,
         title=title,
         marker=selected_marker,
+        has_explicit_structure=(
+            structured_lines is not None
+            and any(
+                line.is_explicit_heading
+                for line in structured_lines[start:reason_index]
+            )
+        ),
     )
 
 
@@ -721,19 +771,6 @@ def _is_semantically_equivalent_heading_pair(
     )
 
 
-def _has_explicit_title_structure(
-    structured_lines: list[StructuredLine] | None,
-    title: _TitleBoundary,
-    reason_heading: int,
-) -> bool:
-    if structured_lines is None:
-        return False
-    return any(
-        line.is_explicit_heading
-        for line in structured_lines[title.start:reason_heading]
-    )
-
-
 def _discover_matter_frames(
     lines: list[str],
     structured_lines: list[StructuredLine] | None = None,
@@ -750,6 +787,7 @@ def _discover_matter_frames(
             reason_index=heading_frame.reason_heading,
             response_owned=previous_response is not None,
             current_marker=frames[-1].marker if frames else None,
+            structured_lines=structured_lines,
         )
         if title is None:
             continue
@@ -760,11 +798,7 @@ def _discover_matter_frames(
                 frames[-1].heading_frames[-1],
                 heading_frame,
             )
-            and not _has_explicit_title_structure(
-                structured_lines,
-                title,
-                heading_frame.reason_heading,
-            )
+            and not title.has_explicit_structure
             and not _has_clear_title_evidence(title.title)
         ):
             frames[-1].heading_frames.append(heading_frame)
@@ -776,6 +810,7 @@ def _discover_matter_frames(
                 title=title.title,
                 heading_frames=[heading_frame],
                 marker=title.marker,
+                has_explicit_title_structure=title.has_explicit_structure,
             )
         )
         previous_response = _last_response_heading(heading_frame)
@@ -793,10 +828,17 @@ def _has_ambiguous_plain_boundary(
         lower = _last_response_heading(previous) + 1
         if current.reason_heading <= lower:
             continue
-        candidate_lines = structured_lines[lower:current.reason_heading]
-        if any(
-            line.is_explicit_heading
-            for line in candidate_lines
+        candidate_title = _discover_title_boundary(
+            lines,
+            lower=lower,
+            reason_index=current.reason_heading,
+            response_owned=True,
+            current_marker=None,
+            structured_lines=structured_lines,
+        )
+        if (
+            candidate_title is not None
+            and candidate_title.has_explicit_structure
         ):
             continue
         candidate_line = structured_lines[current.reason_heading - 1]

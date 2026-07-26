@@ -413,6 +413,212 @@ def test_parse_outcome_sanitizes_multiple_mixed_case_malformed_blocks():
     assert first.items == []
 
 
+@pytest.mark.parametrize(
+    "page_container",
+    [
+        pytest.param("TITLE", id="title"),
+        pytest.param("TH", id="table-header"),
+        pytest.param('TD role="heading"', id="explicit-heading-cell"),
+    ],
+)
+def test_parse_outcome_does_not_assign_unrelated_strong_page_heading(
+    page_container,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    tag = page_container.split()[0]
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TITLE>1. 수익인식</TITLE>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>계약 표본 검사</P>
+    <{page_container}>Page 2</{tag}>
+    <P>2. 매출채권 표본 추출</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>복합계약 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>추가 감사절차</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        pytest.param(
+            'role="heading" title="1 > 0"',
+            id="double-quoted-role-first",
+        ),
+        pytest.param(
+            'title="1 > 0" role="heading"',
+            id="double-quoted-role-last",
+        ),
+        pytest.param(
+            "role='heading' title='1 > 0'",
+            id="single-quoted-role-first",
+        ),
+        pytest.param(
+            "title='1 > 0' role='heading'",
+            id="single-quoted-role-last",
+        ),
+    ],
+)
+def test_parse_outcome_preserves_quoted_greater_than_in_heading_attributes(
+    attributes,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    def heading(value):
+        return f"<TD {attributes}>{value}</TD>"
+
+    body = f"""
+    <TITLE>Key Audit Matters</TITLE>
+    {heading("Revenue recognition")}
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    {heading("Classification of leases")}
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Lease classification requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We reviewed management's classification.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "Revenue recognition",
+        "Classification of leases",
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformed_self_close",
+    [
+        pytest.param("<TITLE/ >", id="slash-space"),
+        pytest.param("<TITLE / >", id="space-slash-space"),
+        pytest.param("<tItLe / >", id="mixed-case"),
+    ],
+)
+def test_parse_outcome_does_not_open_malformed_self_closing_title(
+    malformed_self_close,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TITLE>1. 수익인식</TITLE>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>계약 표본 검사</P>
+    {malformed_self_close}2. 매출채권 표본 추출
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>복합계약 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>추가 감사절차</P>
+    """
+
+    first = parse_kam_items(body)
+    second = parse_kam_items(body)
+
+    assert first == second
+    assert first.status == "ambiguous"
+    assert first.items == []
+
+
+@pytest.mark.parametrize(
+    "stray_close",
+    [
+        pytest.param("</DIV>", id="div"),
+        pytest.param("</SPAN>", id="span"),
+        pytest.param("</sPaN>", id="mixed-case-span"),
+    ],
+)
+def test_parse_outcome_clears_strong_ancestry_on_any_stray_close(stray_close):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TITLE>1. 수익인식</TITLE>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>계약 표본 검사</P>
+    <TITLE>{stray_close}
+    <P>2. 매출채권 표본 추출</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>복합계약 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>추가 감사절차</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
+@pytest.mark.parametrize(
+    "duplicate_roles",
+    [
+        pytest.param(
+            'role="heading" role="cell"',
+            id="heading-then-cell",
+        ),
+        pytest.param(
+            'role="cell" role="heading"',
+            id="cell-then-heading",
+        ),
+        pytest.param(
+            'ROLE="HEADING" role="cell"',
+            id="mixed-case-heading-then-cell",
+        ),
+        pytest.param(
+            "role=cell ROLE=HEADING",
+            id="unquoted-cell-then-heading",
+        ),
+        pytest.param(
+            "role=heading ROLE=heading",
+            id="duplicate-unquoted-heading",
+        ),
+    ],
+)
+def test_parse_outcome_rejects_duplicate_role_heading_evidence(
+    duplicate_roles,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TABLE>
+    <TR><TH>1. 수익인식</TH></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>기간귀속 판단 위험</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>계약 표본 검사</TD></TR>
+    <TR><TD {duplicate_roles}>2. 매출채권 표본 추출</TD></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>복합계약 판단 위험</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>추가 감사절차</TD></TR>
+    </TABLE>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
 def test_parser_collapses_only_adjacent_exact_full_matter_duplicates():
     from kreports.processor.kam_parser import extract_kam_items
 
