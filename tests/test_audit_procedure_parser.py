@@ -162,6 +162,17 @@ def test_extract_procedure_steps_preserves_independent_chained_actions():
     assert [step.method for step in steps] == ["inquiry", "inspection"]
 
 
+def test_extract_procedure_steps_preserves_specialist_and_model_validation():
+    steps = extract_procedure_steps(
+        _kam_item("전문가를 활용하여 가치평가 모델을 검증하였습니다.")
+    )
+
+    assert [step.method for step in steps] == [
+        "specialist_involvement",
+        "valuation_model_test",
+    ]
+
+
 def test_extract_procedure_steps_keeps_unknown_action_as_other():
     steps = extract_procedure_steps(
         _kam_item("해당 매출 자료를 대사하여 차이를 조사하였습니다.")

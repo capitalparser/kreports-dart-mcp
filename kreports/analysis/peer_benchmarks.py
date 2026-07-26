@@ -774,21 +774,32 @@ def select_peer_group(
     if subject_row is None:
         return {"error": f"corp_code '{corp_code}' 미등록"}
 
-    fs_div_used = resolve_fs_div_for_company(
-        corp_code,
-        year,
-        fs_strategy,
-        read_engine=_read_engine,
-    )
+    if _read_engine is None:
+        fs_div_used = resolve_fs_div_for_company(
+            corp_code,
+            year,
+            fs_strategy,
+        )
+    else:
+        fs_div_used = resolve_fs_div_for_company(
+            corp_code,
+            year,
+            fs_strategy,
+            read_engine=_read_engine,
+        )
+    peer_kwargs = {
+        "corp_code": corp_code,
+        "prefix_len_start": prefix_len_start,
+        "min_n": 5,
+        "exclude_other_sectors": exclude_other_sectors,
+        "size_bucket_decade": size_bucket_decade,
+        "fs_div": fs_div_used,
+        "year": year,
+    }
+    if _read_engine is not None:
+        peer_kwargs["read_engine"] = _read_engine
     pr = resolve_peers(
-        corp_code=corp_code,
-        prefix_len_start=prefix_len_start,
-        min_n=5,
-        exclude_other_sectors=exclude_other_sectors,
-        size_bucket_decade=size_bucket_decade,
-        fs_div=fs_div_used,
-        year=year,
-        read_engine=_read_engine,
+        **peer_kwargs,
     )
 
     peers: list[dict] = []

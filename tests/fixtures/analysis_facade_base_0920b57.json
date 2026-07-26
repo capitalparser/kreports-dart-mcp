@@ -130,29 +130,43 @@
         "record_count": 1,
         "records": [
           {
+            "assertion_hints": [],
             "dcm_no": null,
             "kam_topic": "revenue",
             "linkages": [
               {
                 "category": "audit_report_kam",
+                "confidence_basis": "explicit_keyword_map_match",
                 "key": "revenue",
-                "label": "KAM: 수익인식"
+                "label": "KAM: 수익인식",
+                "matching_phrase": "매출"
               },
               {
                 "category": "financial_statement_account",
+                "confidence_basis": "explicit_keyword_map_match",
                 "key": "revenue",
-                "label": "재무제표: 매출액"
+                "label": "재무제표: 매출액",
+                "matching_phrase": "매출"
               },
               {
                 "category": "accounting_note",
+                "confidence_basis": "explicit_keyword_map_match",
                 "key": "revenue_policy",
-                "label": "주석: 수익인식 회계정책"
+                "label": "주석: 수익인식 회계정책",
+                "matching_phrase": "매출"
               }
             ],
+            "linked_event_keys": [],
+            "linked_metric_keys": [],
+            "linked_note_keys": [],
+            "method": null,
+            "parser_version": null,
             "procedure_excerpt": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
             "procedure_length": 40,
             "procedure_ordinal": 0,
+            "procedure_text": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
             "procedure_type": "substantive_test",
+            "quality_status": null,
             "rcept_no": "20250401000001",
             "section_ordinal": 0,
             "source_type": "audit_report",
@@ -179,7 +193,7 @@
       }
     ],
     "data_quality": {
-      "interpretation": "Procedure items are parsed hints from cached audit-report KAM response paragraphs. The linkages explain which audit-report KAM, financial-statement account, accounting note, or disclosure-event evidence should be checked with the procedure.",
+      "interpretation": "Procedure items are parsed hints from cached audit-report KAM response paragraphs. The linkages explain which audit-report KAM, financial-statement account, accounting note, or disclosure-event evidence should be checked with the procedure. Each linkage is a navigation aid, not evidence that the audit procedure was sufficient or appropriately performed.",
       "source": "audit_procedure_items",
       "status": "usable"
     },
@@ -201,6 +215,7 @@
       "keyword": null,
       "limit": 10,
       "market": null,
+      "method": null,
       "procedure_type": null,
       "year": 2024
     },
@@ -1286,8 +1301,18 @@
   },
   "peer_procedures": {
     "companies_with_procedures": 3,
+    "coverage": {
+      "denominator_full_body_kam_receipts": 0,
+      "full_body_kam_receipts_with_procedures": 0,
+      "quality_gaps": {
+        "error": 0,
+        "missing": 0,
+        "summary_only": 0
+      },
+      "rate": 0.0
+    },
     "data_quality": {
-      "coverage_note": "Parsed from cached KAM sections; coverage increases as source_documents and extractors backfill.",
+      "coverage_note": "The coverage denominator is full_body KAM receipts only. Summary-only, missing, and error KAMs are separate gaps.",
       "source": "audit_procedure_items",
       "status": "usable"
     },
@@ -1295,6 +1320,7 @@
     "peer_kam_topic_counts": {
       "revenue": 2
     },
+    "peer_method_counts": {},
     "peer_procedure_type_counts": {
       "substantive_test": 2
     },
@@ -1321,6 +1347,7 @@
       "market": "KOSPI",
       "stock_code": "000001"
     },
+    "subject_method_counts": {},
     "subject_procedure_type_counts": {
       "substantive_test": 1
     },
