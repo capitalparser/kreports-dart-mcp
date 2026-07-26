@@ -619,6 +619,76 @@ def test_parse_outcome_rejects_duplicate_role_heading_evidence(
     assert outcome.items == []
 
 
+@pytest.mark.parametrize(
+    "self_closing_boundaries",
+    [
+        pytest.param("<TITLE/>", id="title"),
+        pytest.param("<TITLE / >", id="malformed-spaced-title"),
+        pytest.param("<tAbLe/>", id="mixed-case-table"),
+        pytest.param("<P/>", id="paragraph"),
+        pytest.param(
+            '<TD role="heading"/>',
+            id="no-content-explicit-heading-cell",
+        ),
+        pytest.param(
+            "<TITLE/><TABLE/><P/>",
+            id="multiple-blocks",
+        ),
+        pytest.param(
+            "<DiV/><tItLe / ><SPAN/>",
+            id="unknown-and-malformed-mixed-case",
+        ),
+    ],
+)
+def test_parse_outcome_self_closing_blocks_clear_prior_empty_title(
+    self_closing_boundaries,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TITLE>1. 수익인식</TITLE>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>계약 표본 검사</P>
+    <TITLE>{self_closing_boundaries}
+    <P>2. 매출채권 표본 추출</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>복합계약 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>추가 감사절차</P>
+    """
+
+    first = parse_kam_items(body)
+    second = parse_kam_items(body)
+
+    assert first == second
+    assert first.status == "ambiguous"
+    assert first.items == []
+
+
+def test_parse_outcome_preserves_br_as_a_line_boundary():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.<BR/>We recalculated cut-off.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert len(outcome.items) == 1
+    assert outcome.items[0].audit_response_text == (
+        "We inspected contract samples.\nWe recalculated cut-off."
+    )
+
+
 def test_parser_collapses_only_adjacent_exact_full_matter_duplicates():
     from kreports.processor.kam_parser import extract_kam_items
 

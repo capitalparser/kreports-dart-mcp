@@ -388,6 +388,19 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         def __init__(self) -> None:
             super().__init__(convert_charrefs=False)
 
+        @staticmethod
+        def handle_self_closing(tag: str) -> None:
+            tag = tag.lower()
+            flush()
+            if tag == "br":
+                return
+            if tag in block_tags:
+                prepare_opening(tag)
+            # A no-content event cannot own heading evidence. It terminates
+            # any prior strong scope instead of silently carrying that scope
+            # into the next text block.
+            clear_strong_ancestry()
+
         def handle_starttag(
             self,
             tag: str,
@@ -396,8 +409,7 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             tag = tag.lower()
             raw_tag = self.get_starttag_text() or ""
             if re.search(r"/\s*>$", raw_tag):
-                if tag in block_tags:
-                    flush()
+                self.handle_self_closing(tag)
                 return
             if tag not in block_tags:
                 tag_stack.append(
@@ -421,8 +433,7 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             attrs: list[tuple[str, str | None]],
         ) -> None:
             del attrs
-            if tag.lower() in block_tags:
-                flush()
+            self.handle_self_closing(tag)
 
         def handle_endtag(self, tag: str) -> None:
             tag = tag.lower()
