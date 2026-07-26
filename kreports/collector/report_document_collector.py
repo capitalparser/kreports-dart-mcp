@@ -1,14 +1,17 @@
 """Persist business/audit report body sections from DART source documents."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
+from pathlib import Path
 import re
 from datetime import datetime
 
+from sqlalchemy import and_, create_engine, inspect, or_, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from kreports.analysis.queries import extract_accounting_note_chapters
 from kreports.collector.fetcher import (
@@ -20,6 +23,7 @@ from kreports.collector.fetcher import (
     parse_viewer_tree_nodes,
 )
 from kreports.config import settings
+import kreports.db.engine as _engine_module
 from kreports.db.engine import engine, get_session
 from kreports.db.models import (
     AccountingNoteChapter,
@@ -44,14 +48,72 @@ from kreports.processor.audit_report_parser import (
     extract_audit_procedure_items,
     extract_audit_report_sections,
 )
-from kreports.processor.kam_parser import PARSER_VERSION, ParsedKamItem, extract_kam_items
+from kreports.processor.kam_parser import (
+    PARSER_VERSION,
+    ParsedKamItem,
+    extract_kam_items,
+    kam_detail_heading_status,
+)
 from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
 from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 from kreports.runtime import raw_persistence_allowed, raw_storage_policy, require_raw_backfill_mode, require_runtime_write
 
 logger = logging.getLogger(__name__)
-_MIN_FULL_KAM_BODY_LENGTH = 300
+_KAM_SOURCE_TABLES = {
+    "companies",
+    "evidence_documents",
+    "report_documents",
+    "report_sections",
+    "source_documents",
+}
+
+
+class _KamReadDatabaseUnavailable(RuntimeError):
+    pass
+
+
+@contextmanager
+def _kam_read_session():
+    """Open a non-committing immutable session for KAM dry runs."""
+    source_engine = _engine_module.engine
+    if source_engine.dialect.name != "sqlite":
+        with Session(bind=source_engine) as session:
+            yield session
+        return
+
+    database = source_engine.url.database
+    if database in {None, "", ":memory:"}:
+        with Session(bind=source_engine) as session:
+            yield session
+        return
+
+    database_path = Path(str(database)).expanduser().resolve()
+    if not database_path.is_file():
+        raise _KamReadDatabaseUnavailable("runtime_db_unavailable")
+    wal_path = Path(f"{database_path}-wal")
+    if wal_path.exists() and wal_path.stat().st_size > 0:
+        raise _KamReadDatabaseUnavailable(
+            "runtime_db_unavailable:uncheckpointed_wal"
+        )
+    readonly_engine = create_engine(
+        (
+            f"sqlite:///file:{database_path.as_posix()}"
+            "?mode=ro&immutable=1&uri=true"
+        ),
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        with Session(bind=readonly_engine) as session:
+            tables = set(inspect(session.get_bind()).get_table_names())
+            missing = sorted(_KAM_SOURCE_TABLES - tables)
+            if missing:
+                raise _KamReadDatabaseUnavailable(
+                    "runtime_db_unavailable:missing_source_tables"
+                )
+            yield session
+    finally:
+        readonly_engine.dispose()
 
 
 def _raw_persistence_blocked_result(*, meta: dict | None = None) -> dict:
@@ -1448,7 +1510,12 @@ def index_audit_procedures_from_sections(
     return totals
 
 
-def _kam_rebuild_targets(*, year: int, market: str | None) -> list[dict]:
+def _kam_rebuild_targets(
+    session,
+    *,
+    year: int,
+    market: str | None,
+) -> list[dict]:
     """Load cached KAM source candidates grouped by exact receipt."""
     targets: dict[tuple[str, str], dict] = {}
 
@@ -1484,62 +1551,61 @@ def _kam_rebuild_targets(*, year: int, market: str | None) -> list[dict]:
         if candidate_type is not None:
             target[candidate_type].append(row)
 
-    with get_session() as session:
-        source_query = (
-            session.query(SourceDocument)
-            .join(Company, Company.corp_code == SourceDocument.corp_code)
-            .filter(
-                SourceDocument.bsns_year == year,
-                SourceDocument.source_type == "audit_report",
-                SourceDocument.content_type != "derived_report_sections",
-            )
+    source_query = (
+        session.query(SourceDocument)
+        .join(Company, Company.corp_code == SourceDocument.corp_code)
+        .filter(
+            SourceDocument.bsns_year == year,
+            SourceDocument.source_type == "audit_report",
+            SourceDocument.content_type != "derived_report_sections",
         )
-        evidence_query = (
-            session.query(EvidenceDocument)
-            .join(Company, Company.corp_code == EvidenceDocument.corp_code)
-            .filter(
-                EvidenceDocument.bsns_year == year,
-                EvidenceDocument.source_type == "audit_report",
-            )
+    )
+    evidence_query = (
+        session.query(EvidenceDocument)
+        .join(Company, Company.corp_code == EvidenceDocument.corp_code)
+        .filter(
+            EvidenceDocument.bsns_year == year,
+            EvidenceDocument.source_type == "audit_report",
         )
-        section_query = (
-            session.query(ReportSection)
-            .join(Company, Company.corp_code == ReportSection.corp_code)
-            .filter(
-                ReportSection.bsns_year == year,
-                ReportSection.source_type == "audit_report",
-                ReportSection.section_key == "kam",
-            )
+    )
+    section_query = (
+        session.query(ReportSection)
+        .join(Company, Company.corp_code == ReportSection.corp_code)
+        .filter(
+            ReportSection.bsns_year == year,
+            ReportSection.source_type == "audit_report",
+            ReportSection.section_key == "kam",
         )
-        report_query = (
-            session.query(ReportDocument)
-            .join(Company, Company.corp_code == ReportDocument.corp_code)
-            .filter(
-                ReportDocument.bsns_year == year,
-                ReportDocument.source_type == "audit_report",
-            )
+    )
+    report_query = (
+        session.query(ReportDocument)
+        .join(Company, Company.corp_code == ReportDocument.corp_code)
+        .filter(
+            ReportDocument.bsns_year == year,
+            ReportDocument.source_type == "audit_report",
         )
-        if market:
-            source_query = source_query.filter(Company.market == market)
-            evidence_query = evidence_query.filter(Company.market == market)
-            section_query = section_query.filter(Company.market == market)
-            report_query = report_query.filter(Company.market == market)
-        for row in source_query.order_by(SourceDocument.rcept_no, SourceDocument.id).all():
-            add_target(row, candidate_type="source_documents")
-        for row in evidence_query.order_by(EvidenceDocument.rcept_no, EvidenceDocument.id).all():
-            add_target(row, candidate_type="evidence_documents")
-        for row in section_query.order_by(ReportSection.rcept_no, ReportSection.ordinal).all():
-            add_target(row, candidate_type="report_sections")
-        for row in report_query.order_by(ReportDocument.rcept_no, ReportDocument.id).all():
-            add_target(row, candidate_type=None)
-        # Detach scalar state before the session closes.
-        for target in targets.values():
-            for source in target["source_documents"]:
-                session.expunge(source)
-            for evidence in target["evidence_documents"]:
-                session.expunge(evidence)
-            for section in target["report_sections"]:
-                session.expunge(section)
+    )
+    if market:
+        source_query = source_query.filter(Company.market == market)
+        evidence_query = evidence_query.filter(Company.market == market)
+        section_query = section_query.filter(Company.market == market)
+        report_query = report_query.filter(Company.market == market)
+    for row in source_query.order_by(SourceDocument.rcept_no, SourceDocument.id).all():
+        add_target(row, candidate_type="source_documents")
+    for row in evidence_query.order_by(EvidenceDocument.rcept_no, EvidenceDocument.id).all():
+        add_target(row, candidate_type="evidence_documents")
+    for row in section_query.order_by(ReportSection.rcept_no, ReportSection.ordinal).all():
+        add_target(row, candidate_type="report_sections")
+    for row in report_query.order_by(ReportDocument.rcept_no, ReportDocument.id).all():
+        add_target(row, candidate_type=None)
+    # Detach scalar state before the caller's read session closes.
+    for target in targets.values():
+        for source in target["source_documents"]:
+            session.expunge(source)
+        for evidence in target["evidence_documents"]:
+            session.expunge(evidence)
+        for section in target["report_sections"]:
+            session.expunge(section)
 
     return [targets[key] for key in sorted(targets)]
 
@@ -1560,11 +1626,13 @@ def _recover_kam_items(
         )
     for source in target["source_documents"]:
         try:
-            body = _load_source_document_content(
-                source_document_id=source.id,
-                storage_uri=source.storage_uri,
-                doc_hash=source.doc_hash,
-            )
+            if source.storage_uri:
+                body = RawDocumentStore().read(
+                    source.storage_uri,
+                    expected_hash=source.doc_hash,
+                )
+            else:
+                body = source.raw_content or ""
         except Exception as exc:
             limitations.append(f"source_documents.raw_body:read_error:{type(exc).__name__}")
             continue
@@ -1609,23 +1677,34 @@ def _recover_kam_items(
                     evidence.generated_at,
                 )
             limitations.append("evidence_documents.normalized_text:no_kam_items")
+    derived_summaries: list[tuple[object, str]] = []
+    structured_failure_at: datetime | None = None
     for section in target["report_sections"]:
         body = (section.body_text or "").strip()
-        if len(body) < _MIN_FULL_KAM_BODY_LENGTH:
+        if not body:
             continue
         items = extract_kam_items(body)
         if items:
             return (
                 items,
-                "report_sections.long_body",
+                "report_sections.structured_body",
                 limitations,
                 section.fetched_at,
             )
-        limitations.append("report_sections.long_body:no_kam_items")
-    for section in target["report_sections"]:
-        body = (section.body_text or "").strip()
-        if not body or len(body) >= _MIN_FULL_KAM_BODY_LENGTH:
+        has_reason_heading, has_response_heading = (
+            kam_detail_heading_status(body)
+        )
+        if has_reason_heading or has_response_heading:
+            structured_failure_at = (
+                structured_failure_at or section.fetched_at
+            )
             continue
+        derived_summaries.append((section, body))
+    if structured_failure_at is not None:
+        limitations.append("report_sections.structured_body:parse_error")
+        return [], "none", limitations, structured_failure_at
+    if derived_summaries:
+        section, body = derived_summaries[0]
         topics = classify_kam_topics(body)
         title = (section.section_title or "").strip() or body[:120]
         item = ParsedKamItem(
@@ -1643,7 +1722,7 @@ def _recover_kam_items(
         limitations.append("full KAM body unavailable; summary fields were not inferred")
         return (
             [item],
-            "report_sections.short_summary",
+            "report_sections.derived_summary",
             limitations,
             section.fetched_at,
         )
@@ -1700,16 +1779,6 @@ def _persist_rebuilt_kam_items(
         for item in persisted_items
     ]
     with get_session() as session:
-        session.execute(
-            text(
-                "DELETE FROM kam_items "
-                "WHERE rcept_no=:rcept_no AND source_type=:source_type"
-            ),
-            {
-                "rcept_no": target["rcept_no"],
-                "source_type": target["source_type"],
-            },
-        )
         stmt = sqlite_insert(KamItem).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
@@ -1737,6 +1806,24 @@ def _persist_rebuilt_kam_items(
             },
         )
         session.execute(stmt)
+        current_keys = or_(
+            *[
+                and_(
+                    KamItem.ordinal == row["ordinal"],
+                    KamItem.full_body_hash == row["full_body_hash"],
+                )
+                for row in rows
+            ]
+        )
+        (
+            session.query(KamItem)
+            .filter(
+                KamItem.rcept_no == target["rcept_no"],
+                KamItem.source_type == target["source_type"],
+                ~current_keys,
+            )
+            .delete(synchronize_session=False)
+        )
     return len(rows)
 
 
@@ -1747,11 +1834,54 @@ def rebuild_kam_items(
     dry_run: bool = False,
 ) -> dict:
     """Reconstruct matter-level KAMs from existing local evidence only."""
-    targets = _kam_rebuild_targets(year=year, market=market)
+    if dry_run:
+        try:
+            with _kam_read_session() as session:
+                targets = _kam_rebuild_targets(
+                    session,
+                    year=year,
+                    market=market,
+                )
+        except _KamReadDatabaseUnavailable as exc:
+            return {
+                "year": year,
+                "market": market,
+                "dry_run": True,
+                "database_status": "unavailable",
+                "total": 0,
+                "full_body": 0,
+                "summary_only": 0,
+                "missing": 0,
+                "error": 0,
+                "receipt_counts": {
+                    "full_body": 0,
+                    "summary_only": 0,
+                    "missing": 0,
+                    "error": 0,
+                },
+                "item_counts": {
+                    "full_body": 0,
+                    "summary_only": 0,
+                    "missing": 0,
+                    "error": 0,
+                },
+                "items_total": 0,
+                "rows_written": 0,
+                "receipts": [],
+                "limitations": [str(exc)],
+            }
+    else:
+        with get_session() as session:
+            targets = _kam_rebuild_targets(
+                session,
+                year=year,
+                market=market,
+            )
     totals: dict[str, object] = {
         "year": year,
         "market": market,
         "dry_run": dry_run,
+        "database_status": "available",
         "total": len(targets),
         "full_body": 0,
         "summary_only": 0,
@@ -1772,6 +1902,7 @@ def rebuild_kam_items(
         "items_total": 0,
         "rows_written": 0,
         "receipts": [],
+        "limitations": [],
     }
     for target in targets:
         items, source_basis, limitations, source_fetched_at = (
@@ -1781,6 +1912,7 @@ def rebuild_kam_items(
             status = items[0].quality_status
         elif any(
             ":read_error:" in limitation
+            or limitation.endswith(":parse_error")
             or limitation.startswith("receipt_consistency_error:")
             for limitation in limitations
         ):

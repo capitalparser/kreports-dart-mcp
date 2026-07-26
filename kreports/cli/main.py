@@ -1938,11 +1938,17 @@ def rebuild_kam_items_cmd(
     result = rebuild_kam_items(year=year, market=market, dry_run=dry_run)
     typer.echo(
         f"KAM rebuild {'dry-run' if dry_run else 'complete'}: "
-        f"total={result['total']} "
-        f"full_body={result['full_body']} "
-        f"summary_only={result['summary_only']} "
-        f"missing={result['missing']} "
-        f"error={result['error']} "
+        f"database_status={result['database_status']} "
+        f"receipts_total={result['total']} "
+        f"receipt_full_body={result['receipt_counts']['full_body']} "
+        f"receipt_summary_only={result['receipt_counts']['summary_only']} "
+        f"receipt_missing={result['receipt_counts']['missing']} "
+        f"receipt_error={result['receipt_counts']['error']} "
+        f"matter_items_total={result['items_total']} "
+        f"item_full_body={result['item_counts']['full_body']} "
+        f"item_summary_only={result['item_counts']['summary_only']} "
+        f"item_missing={result['item_counts']['missing']} "
+        f"item_error={result['item_counts']['error']} "
         f"rows_written={result['rows_written']}"
     )
     for receipt in result["receipts"]:

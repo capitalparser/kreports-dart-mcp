@@ -28,6 +28,8 @@ _KAM_HEADINGS = ("핵심감사사항", "keyauditmatters")
 _REASON_HEADINGS = (
     "핵심감사사항으로선정한이유",
     "핵심감사사항으로결정한이유",
+    "whythematterwasdeterminedtobeakeyauditmatter",
+    "whythematterwasconsideredtobeoneofthemostsignificantmattersintheaudit",
     "whythematterwasconsideredtobeoneofmostsignificanceintheaudit",
     "whythematterwasconsideredsignificant",
 )
@@ -103,19 +105,59 @@ def _trim_to_kam(lines: list[str]) -> list[str]:
     return lines[start:end]
 
 
+def _normalize_title(title: str) -> str:
+    title = title.strip(" :-–—")
+    title_parts = title.split()
+    if (
+        len(title_parts) > 1
+        and all(len(part) == 1 for part in title_parts)
+        and all(re.fullmatch(r"[가-힣]", part) for part in title_parts)
+    ):
+        return "".join(title_parts)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def _numbered_title(
+    lines: list[str],
+    index: int,
+) -> tuple[str, int] | None:
+    match = _NUMBERED_TITLE_RE.match(lines[index])
+    if not match:
+        return None
+    first = _normalize_title(match.group(1))
+    if not first or first.endswith((".", "。")):
+        return None
+    parts = [first]
+    for candidate in lines[index + 1:index + 5]:
+        if _matches_heading(candidate, _REASON_HEADINGS):
+            return _normalize_title(" ".join(parts)), index + len(parts)
+        if (
+            _NUMBERED_TITLE_RE.match(candidate)
+            or _matches_heading(
+                candidate,
+                _KAM_HEADINGS
+                + _RESPONSE_HEADINGS
+                + _TRAILING_HEADINGS,
+            )
+        ):
+            return None
+        if len(parts) > 1 or len(candidate) > 200:
+            return None
+        parts.append(_normalize_title(candidate))
+    return None
+
+
 def _title_starts(lines: list[str]) -> list[tuple[int, str]]:
     starts: list[tuple[int, str]] = []
+    covered_until = -1
     for index, line in enumerate(lines):
-        match = _NUMBERED_TITLE_RE.match(line)
-        lookahead = lines[index + 1:index + 4]
-        has_reason_after = any(
-            _matches_heading(item, _REASON_HEADINGS)
-            for item in lookahead
-        )
-        if match:
-            title = match.group(1).strip(" :-–—")
-        elif (
-            index + 1 < len(lines)
+        numbered = _numbered_title(lines, index)
+        title = numbered[0] if numbered is not None else None
+        if numbered is not None:
+            covered_until = max(covered_until, numbered[1] - 1)
+        if title is None and (
+            index > covered_until
+            and index + 1 < len(lines)
             and _matches_heading(lines[index + 1], _REASON_HEADINGS)
             and len(line) <= 200
             and not _matches_heading(
@@ -126,17 +168,8 @@ def _title_starts(lines: list[str]) -> list[tuple[int, str]]:
                 + _TRAILING_HEADINGS,
             )
         ):
-            title = line.strip(" :-–—")
-        else:
-            continue
-        title_parts = title.split()
-        if (
-            len(title_parts) > 1
-            and all(len(part) == 1 for part in title_parts)
-            and all(re.fullmatch(r"[가-힣]", part) for part in title_parts)
-        ):
-            title = "".join(title_parts)
-        if title and (has_reason_after if match else True):
+            title = _normalize_title(line)
+        if title:
             starts.append((index, title))
     return starts
 
@@ -188,6 +221,15 @@ def _notes(value: str) -> list[str]:
     return notes
 
 
+def kam_detail_heading_status(full_text: str) -> tuple[bool, bool]:
+    """Return whether explicit reason and audit-response headings are present."""
+    lines = _plain_lines(full_text)
+    return (
+        any(_matches_heading(line, _REASON_HEADINGS) for line in lines),
+        any(_matches_heading(line, _RESPONSE_HEADINGS) for line in lines),
+    )
+
+
 def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
     """Extract complete, matter-level KAMs from a cached filing body.
 
@@ -208,7 +250,7 @@ def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
         body = "\n".join(matter_lines).strip()
         items.append(
             ParsedKamItem(
-                ordinal=item_index + 1,
+                ordinal=len(items) + 1,
                 title=title,
                 normalized_topic=_topic(title),
                 reason_text=reason,
