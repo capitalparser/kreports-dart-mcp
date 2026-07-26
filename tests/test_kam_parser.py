@@ -931,6 +931,56 @@ def test_parse_outcome_rejects_any_incomplete_explicit_frame(invalid_matter):
     assert "incomplete_kam_structure" in outcome.limitations
 
 
+@pytest.mark.parametrize(
+    ("reason_body", "response_body"),
+    [
+        pytest.param(
+            "Cash-flow forecasts require significant judgment.",
+            "We tested management's forecasts.",
+            id="complete-body",
+        ),
+        pytest.param(
+            "   ",
+            "We tested management's forecasts.",
+            id="empty-reason",
+        ),
+        pytest.param(
+            "Cash-flow forecasts require significant judgment.",
+            "   ",
+            id="empty-response",
+        ),
+        pytest.param("   ", "   ", id="both-empty"),
+    ],
+)
+def test_parse_outcome_preserves_ambiguous_generic_td_boundary(
+    reason_body,
+    response_body,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <TABLE>
+    <TR><TD>Goodwill impairment</TD></TR>
+    <TR><TD>Why the matter was determined to be a key audit matter</TD></TR>
+    <TR><TD>{reason_body}</TD></TR>
+    <TR><TD>How the matter was addressed in the audit</TD></TR>
+    <TR><TD>{response_body}</TD></TR>
+    </TABLE>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+    assert outcome.limitations == ["ambiguous_boundary"]
+
+
 def test_parse_outcome_gives_incomplete_frame_precedence_over_unrelated_ambiguity():
     from kreports.processor.kam_parser import parse_kam_items
 

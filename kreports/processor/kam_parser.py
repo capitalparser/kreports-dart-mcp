@@ -1155,6 +1155,7 @@ def _deduplicate_items(
 
 def _classify_matter_boundaries(
     lines: list[str],
+    structured_lines: list[StructuredLine],
     frames: list[_MatterFrame],
     candidate_items: list[ParsedKamItem | None],
     ambiguous_starts: set[int],
@@ -1169,6 +1170,12 @@ def _classify_matter_boundaries(
                 if frame.title_start in ambiguous_starts
                 else "valid"
             )
+        elif (
+            frame.title_start in ambiguous_starts
+            and structured_lines[frame.title_start].is_table_cell
+            and not structured_lines[frame.title_start].is_explicit_heading
+        ):
+            classification = "ambiguous"
         else:
             next_start = (
                 frames[index + 1].title_start
@@ -1239,6 +1246,7 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
         )
         boundary_classifications = _classify_matter_boundaries(
             lines,
+            structured_lines,
             frames,
             candidate_items,
             ambiguous_starts,
