@@ -52,7 +52,7 @@ class GroupGraphUnavailable(RuntimeError):
 
 
 def _required_text(name: str, value: Any) -> None:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         raise TypeError(f"{name} must be a non-empty string")
 
 
@@ -764,6 +764,31 @@ def group_entity_from_record(
     )
 
 
+def group_relationship_from_record(
+    row: dict[str, Any],
+    *,
+    requested_year: int,
+    selected_receipt: str,
+) -> GroupRelationship:
+    """Build one relationship and bind it to the selected graph snapshot."""
+    relationship = GroupRelationship(
+        str(row["relationship_key"]),
+        str(row["parent_entity_key"]),
+        str(row["child_entity_key"]),
+        str(row["relation_type"]),
+        row.get("ownership_pct"),
+        int(row["effective_year"]),
+        str(row["source_rcept_no"]),
+        str(row["source_table"]),
+        int(row["source_ordinal"]),
+    )
+    if relationship.effective_year != requested_year:
+        raise ValueError("relationship year does not match requested snapshot")
+    if relationship.source_rcept_no != selected_receipt:
+        raise ValueError("relationship receipt does not match selected snapshot")
+    return relationship
+
+
 def _entity_identity_signature(entity: GroupEntity) -> tuple[Any, ...]:
     return (
         entity.original_name,
@@ -892,12 +917,10 @@ def _build_group_graph_unchecked(
         }:
             limitations.add(entity.resolution_reason)
     relationship_candidates = tuple(
-        GroupRelationship(
-            str(row["relationship_key"]), str(row["parent_entity_key"]),
-            str(row["child_entity_key"]), str(row["relation_type"]),
-            row["ownership_pct"], int(row["effective_year"]),
-            str(row["source_rcept_no"]), str(row["source_table"]),
-            int(row["source_ordinal"]),
+        group_relationship_from_record(
+            dict(row),
+            requested_year=year,
+            selected_receipt=selected_receipt,
         )
         for row in relationship_rows
     )

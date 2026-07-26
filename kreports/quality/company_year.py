@@ -34,7 +34,11 @@ from kreports.db.models import (
     SourceDocument,
 )
 from kreports.runtime import require_runtime_write
-from kreports.analysis.group_graph import classify_qsc, group_entity_from_record
+from kreports.analysis.group_graph import (
+    classify_qsc,
+    group_entity_from_record,
+    group_relationship_from_record,
+)
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 from kreports.db.quality_snapshot import QUALITY_VERSION
 from kreports.analysis.audit_reporting import audit_fee_availability
@@ -567,7 +571,10 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
                     GroupRelationshipRecord.child_entity_key,
                     GroupRelationshipRecord.relation_type,
                     GroupRelationshipRecord.ownership_pct,
+                    GroupRelationshipRecord.effective_year,
                     GroupRelationshipRecord.source_rcept_no,
+                    GroupRelationshipRecord.source_table,
+                    GroupRelationshipRecord.source_ordinal,
                 )
                 .filter(
                     GroupRelationshipRecord.parent_corp_code == corp_code,
@@ -616,7 +623,9 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             .scalar()
             or 0
         )
-    if canonical_entities and canonical_relationships:
+    if canonical_entities:
+        if not canonical_relationships:
+            return "partial", "D"
         entity_keys = {entity.entity_key for entity in canonical_entities}
         child_keys = {
             relationship.child_entity_key
@@ -639,6 +648,15 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
                     requested_year=year,
                 )
             except (TypeError, ValueError):
+                graph_conflict = True
+        for relationship in canonical_relationships:
+            try:
+                group_relationship_from_record(
+                    relationship._asdict(),
+                    requested_year=year,
+                    selected_receipt=str(selected_receipt),
+                )
+            except (KeyError, TypeError, ValueError):
                 graph_conflict = True
         entity_claims: dict[str, set[tuple]] = defaultdict(set)
         for entity in canonical_entities:

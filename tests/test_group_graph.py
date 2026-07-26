@@ -813,6 +813,98 @@ def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
     assert _group_audit_status_and_grade("00000001", 2025) == ("partial", "D")
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("ownership_pct", 0, ("available", "A")),
+        ("ownership_pct", 100, ("available", "A")),
+        ("ownership_pct", 150, ("partial", "D")),
+        ("ownership_pct", -1, ("partial", "D")),
+        ("ownership_pct", float("nan"), ("partial", "D")),
+        ("relation_type", " ", ("partial", "D")),
+        ("parent_entity_key", "c", ("partial", "D")),
+        ("effective_year", 2024, ("partial", "D")),
+        ("source_rcept_no", "r2", ("partial", "D")),
+    ],
+)
+def test_quality_validates_selected_relationship_contract(
+    temp_engine,
+    field,
+    value,
+    expected,
+):
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        GroupComponentMetricRecord,
+        GroupEntityRecord,
+        GroupRelationshipRecord,
+    )
+    from kreports.quality.company_year import _group_audit_status_and_grade
+
+    relationship = {
+        "parent_corp_code": "00000001",
+        "effective_year": 2025,
+        "relationship_key": "rel",
+        "parent_entity_key": "p",
+        "child_entity_key": "c",
+        "relation_type": "subsidiary",
+        "ownership_pct": 80,
+        "source_rcept_no": "r1",
+        "source_table": "SUB",
+        "source_ordinal": 1,
+    }
+    relationship[field] = value
+    with get_session() as session:
+        session.add_all([
+            GroupEntityRecord(
+                parent_corp_code="00000001",
+                effective_year=2025,
+                entity_key=key,
+                original_name=name,
+                normalized_name=name.lower(),
+                resolved_corp_code=corp_code,
+                resolution_status="resolved",
+                resolution_reason="corp_code",
+                source_rcept_no="r1",
+                source_table="SUB",
+                source_ordinal=ordinal,
+            )
+            for ordinal, (key, name, corp_code) in enumerate((
+                ("p", "Parent", "00000001"),
+                ("c", "Child", "00000002"),
+            ))
+        ])
+        session.add(GroupRelationshipRecord(**relationship))
+        for metric_key, amount in (("assets", 10), ("revenue", 5)):
+            session.add(GroupComponentMetricRecord(
+                parent_corp_code="00000001",
+                effective_year=2025,
+                metric_identity=f"r1:SUB:1:{metric_key}",
+                source_rcept_no="r1",
+                entity_key="c",
+                metric_key=metric_key,
+                amount=amount,
+                unit="KRW",
+                numerator_source_rcept_no="r1",
+                numerator_source_table="SUB",
+                denominator_amount=100,
+                denominator_unit="KRW",
+                denominator_source_rcept_no="fin-r1",
+                denominator_source_table="financials",
+                fs_div="CFS",
+                period="2025",
+                elimination_basis="before_elimination",
+                share_pct=amount,
+                qsc_status="qsc",
+                qsc_basis="asset_share_pct>=10.0",
+                qsc_evidence_refs_json='["fin-r1","r1"]',
+                qsc_threshold_pct=10,
+                quality_status="usable",
+            ))
+
+    assert _group_audit_status_and_grade("00000001", 2025) == expected
+
+
 def test_quality_a_never_combines_relationships_and_metrics_across_receipts(
     temp_engine,
 ):
