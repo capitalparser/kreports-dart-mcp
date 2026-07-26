@@ -22,6 +22,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_02_company_year_quality",
         "20260711_03_backfill_run_lifecycle",
         "20260711_04_backfill_owner_identity",
+        "20260711_05_kam_items",
     ]
     assert second == []
 
@@ -193,6 +194,46 @@ def test_backfill_owner_migration_is_append_only_and_enforces_active_lease(
         ].text
         == "status = 'running'"
     )
+
+
+def test_kam_item_migration_appends_matter_level_provenance(temp_engine):
+    from kreports.db.migrations import MIGRATIONS, _checksum
+
+    assert [migration.revision for migration in MIGRATIONS[:4]] == [
+        "20260711_01_quality_contract",
+        "20260711_02_company_year_quality",
+        "20260711_03_backfill_run_lifecycle",
+        "20260711_04_backfill_owner_identity",
+    ]
+    assert _checksum(MIGRATIONS[2]) == (
+        "b5a958e21c751e72e4243b5f4a35b03ff41f313a87e5e058e7a9623bfaf4f324"
+    )
+    assert _checksum(MIGRATIONS[3]) == (
+        "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
+    )
+    columns = {
+        column["name"]
+        for column in inspect(temp_engine).get_columns("kam_items")
+    }
+    assert {
+        "rcept_no",
+        "dcm_no",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+        "ordinal",
+        "title",
+        "normalized_topic",
+        "reason_text",
+        "audit_response_text",
+        "related_note_references_json",
+        "full_body_hash",
+        "full_body_length",
+        "source_basis",
+        "parser_version",
+        "quality_status",
+        "fetched_at",
+    }.issubset(columns)
 
 
 def test_backfill_owner_migration_repairs_duplicate_running_leases_atomically(

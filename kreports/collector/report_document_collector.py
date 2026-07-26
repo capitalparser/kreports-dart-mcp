@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime
@@ -28,8 +29,10 @@ from kreports.db.models import (
     BusinessAffiliateAuditor,
     Company,
     Disclosure,
+    EvidenceDocument,
     ExtractionRun,
     FetchLog,
+    KamItem,
     ReportDocument,
     ReportSection,
     SourceDocument,
@@ -41,12 +44,14 @@ from kreports.processor.audit_report_parser import (
     extract_audit_procedure_items,
     extract_audit_report_sections,
 )
+from kreports.processor.kam_parser import PARSER_VERSION, ParsedKamItem, extract_kam_items
 from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
 from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 from kreports.runtime import raw_persistence_allowed, raw_storage_policy, require_raw_backfill_mode, require_runtime_write
 
 logger = logging.getLogger(__name__)
+_MIN_FULL_KAM_BODY_LENGTH = 300
 
 
 def _raw_persistence_blocked_result(*, meta: dict | None = None) -> dict:
@@ -1440,6 +1445,382 @@ def index_audit_procedures_from_sections(
             totals["failed"] += 1
             if len(totals["errors"]) < 20:
                 totals["errors"].append({"rcept_no": row["rcept_no"], "error": str(exc)})
+    return totals
+
+
+def _kam_rebuild_targets(*, year: int, market: str | None) -> list[dict]:
+    """Load cached KAM source candidates grouped by exact receipt."""
+    targets: dict[tuple[str, str], dict] = {}
+
+    def add_target(row, *, candidate_type: str | None) -> None:
+        key = (row.rcept_no, row.source_type)
+        target = targets.setdefault(
+            key,
+            {
+                "rcept_no": row.rcept_no,
+                "dcm_no": getattr(row, "dcm_no", None),
+                "corp_code": row.corp_code,
+                "bsns_year": row.bsns_year,
+                "source_type": row.source_type,
+                "source_documents": [],
+                "evidence_documents": [],
+                "report_sections": [],
+                "consistency_errors": [],
+            },
+        )
+        comparisons = (
+            ("corp_code", target["corp_code"], row.corp_code),
+            ("bsns_year", target["bsns_year"], row.bsns_year),
+            ("dcm_no", target.get("dcm_no"), getattr(row, "dcm_no", None)),
+        )
+        for field, expected, actual in comparisons:
+            if expected is None or actual is None or expected == actual:
+                continue
+            error = f"{field}:{expected}!={actual}"
+            if error not in target["consistency_errors"]:
+                target["consistency_errors"].append(error)
+        if target.get("dcm_no") is None and getattr(row, "dcm_no", None):
+            target["dcm_no"] = row.dcm_no
+        if candidate_type is not None:
+            target[candidate_type].append(row)
+
+    with get_session() as session:
+        source_query = (
+            session.query(SourceDocument)
+            .join(Company, Company.corp_code == SourceDocument.corp_code)
+            .filter(
+                SourceDocument.bsns_year == year,
+                SourceDocument.source_type == "audit_report",
+                SourceDocument.content_type != "derived_report_sections",
+            )
+        )
+        evidence_query = (
+            session.query(EvidenceDocument)
+            .join(Company, Company.corp_code == EvidenceDocument.corp_code)
+            .filter(
+                EvidenceDocument.bsns_year == year,
+                EvidenceDocument.source_type == "audit_report",
+            )
+        )
+        section_query = (
+            session.query(ReportSection)
+            .join(Company, Company.corp_code == ReportSection.corp_code)
+            .filter(
+                ReportSection.bsns_year == year,
+                ReportSection.source_type == "audit_report",
+                ReportSection.section_key == "kam",
+            )
+        )
+        report_query = (
+            session.query(ReportDocument)
+            .join(Company, Company.corp_code == ReportDocument.corp_code)
+            .filter(
+                ReportDocument.bsns_year == year,
+                ReportDocument.source_type == "audit_report",
+            )
+        )
+        if market:
+            source_query = source_query.filter(Company.market == market)
+            evidence_query = evidence_query.filter(Company.market == market)
+            section_query = section_query.filter(Company.market == market)
+            report_query = report_query.filter(Company.market == market)
+        for row in source_query.order_by(SourceDocument.rcept_no, SourceDocument.id).all():
+            add_target(row, candidate_type="source_documents")
+        for row in evidence_query.order_by(EvidenceDocument.rcept_no, EvidenceDocument.id).all():
+            add_target(row, candidate_type="evidence_documents")
+        for row in section_query.order_by(ReportSection.rcept_no, ReportSection.ordinal).all():
+            add_target(row, candidate_type="report_sections")
+        for row in report_query.order_by(ReportDocument.rcept_no, ReportDocument.id).all():
+            add_target(row, candidate_type=None)
+        # Detach scalar state before the session closes.
+        for target in targets.values():
+            for source in target["source_documents"]:
+                session.expunge(source)
+            for evidence in target["evidence_documents"]:
+                session.expunge(evidence)
+            for section in target["report_sections"]:
+                session.expunge(section)
+
+    return [targets[key] for key in sorted(targets)]
+
+
+def _recover_kam_items(
+    target: dict,
+) -> tuple[list[ParsedKamItem], str, list[str], datetime | None]:
+    limitations: list[str] = []
+    if target["consistency_errors"]:
+        return (
+            [],
+            "none",
+            [
+                f"receipt_consistency_error:{error}"
+                for error in target["consistency_errors"]
+            ],
+            None,
+        )
+    for source in target["source_documents"]:
+        try:
+            body = _load_source_document_content(
+                source_document_id=source.id,
+                storage_uri=source.storage_uri,
+                doc_hash=source.doc_hash,
+            )
+        except Exception as exc:
+            limitations.append(f"source_documents.raw_body:read_error:{type(exc).__name__}")
+            continue
+        items = extract_kam_items(body)
+        if items:
+            return (
+                items,
+                "source_documents.raw_body",
+                limitations,
+                source.fetched_at,
+            )
+        limitations.append("source_documents.raw_body:no_kam_items")
+    for evidence in target["evidence_documents"]:
+        if evidence.full_text_uri:
+            try:
+                body = RawDocumentStore().read(
+                    evidence.full_text_uri,
+                    expected_hash=evidence.full_text_hash,
+                )
+            except Exception as exc:
+                limitations.append(
+                    f"evidence_documents.full_text_uri:read_error:{type(exc).__name__}"
+                )
+            else:
+                items = extract_kam_items(body)
+                if items:
+                    return (
+                        items,
+                        "evidence_documents.full_text_uri",
+                        limitations,
+                        evidence.generated_at,
+                    )
+                limitations.append("evidence_documents.full_text_uri:no_kam_items")
+        normalized = (evidence.normalized_text or "").strip()
+        if normalized:
+            items = extract_kam_items(normalized)
+            if items:
+                return (
+                    items,
+                    "evidence_documents.normalized_text",
+                    limitations,
+                    evidence.generated_at,
+                )
+            limitations.append("evidence_documents.normalized_text:no_kam_items")
+    for section in target["report_sections"]:
+        body = (section.body_text or "").strip()
+        if len(body) < _MIN_FULL_KAM_BODY_LENGTH:
+            continue
+        items = extract_kam_items(body)
+        if items:
+            return (
+                items,
+                "report_sections.long_body",
+                limitations,
+                section.fetched_at,
+            )
+        limitations.append("report_sections.long_body:no_kam_items")
+    for section in target["report_sections"]:
+        body = (section.body_text or "").strip()
+        if not body or len(body) >= _MIN_FULL_KAM_BODY_LENGTH:
+            continue
+        topics = classify_kam_topics(body)
+        title = (section.section_title or "").strip() or body[:120]
+        item = ParsedKamItem(
+            ordinal=1,
+            title=title,
+            normalized_topic=topics[0] if topics else None,
+            reason_text=None,
+            audit_response_text=None,
+            related_note_references=[],
+            full_body=body,
+            full_body_hash=_sha1(body),
+            full_body_length=len(body),
+            quality_status="summary_only",
+        )
+        limitations.append("full KAM body unavailable; summary fields were not inferred")
+        return (
+            [item],
+            "report_sections.short_summary",
+            limitations,
+            section.fetched_at,
+        )
+    return [], "none", limitations, None
+
+
+def _persist_rebuilt_kam_items(
+    *,
+    target: dict,
+    items: list[ParsedKamItem],
+    source_basis: str,
+    quality_status: str,
+    source_fetched_at: datetime | None,
+) -> int:
+    require_runtime_write("persist reconstructed KAM items")
+    fetched_at = source_fetched_at or datetime.utcnow()
+    persisted_items = items or [
+        ParsedKamItem(
+            ordinal=0,
+            title="",
+            normalized_topic=None,
+            reason_text=None,
+            audit_response_text=None,
+            related_note_references=[],
+            full_body="",
+            full_body_hash=_sha1(""),
+            full_body_length=0,
+            quality_status=quality_status,
+        )
+    ]
+    rows = [
+        {
+            "rcept_no": target["rcept_no"],
+            "dcm_no": target.get("dcm_no"),
+            "corp_code": target["corp_code"],
+            "bsns_year": target["bsns_year"],
+            "source_type": target["source_type"],
+            "ordinal": item.ordinal,
+            "title": item.title or None,
+            "normalized_topic": item.normalized_topic,
+            "reason_text": item.reason_text,
+            "audit_response_text": item.audit_response_text,
+            "related_note_references_json": json.dumps(
+                item.related_note_references,
+                ensure_ascii=False,
+            ),
+            "full_body_hash": item.full_body_hash,
+            "full_body_length": item.full_body_length,
+            "source_basis": source_basis,
+            "parser_version": item.parser_version or PARSER_VERSION,
+            "quality_status": quality_status,
+            "fetched_at": fetched_at,
+        }
+        for item in persisted_items
+    ]
+    with get_session() as session:
+        session.execute(
+            text(
+                "DELETE FROM kam_items "
+                "WHERE rcept_no=:rcept_no AND source_type=:source_type"
+            ),
+            {
+                "rcept_no": target["rcept_no"],
+                "source_type": target["source_type"],
+            },
+        )
+        stmt = sqlite_insert(KamItem).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                "rcept_no",
+                "source_type",
+                "ordinal",
+                "full_body_hash",
+            ],
+            set_={
+                "dcm_no": stmt.excluded.dcm_no,
+                "corp_code": stmt.excluded.corp_code,
+                "bsns_year": stmt.excluded.bsns_year,
+                "title": stmt.excluded.title,
+                "normalized_topic": stmt.excluded.normalized_topic,
+                "reason_text": stmt.excluded.reason_text,
+                "audit_response_text": stmt.excluded.audit_response_text,
+                "related_note_references_json": (
+                    stmt.excluded.related_note_references_json
+                ),
+                "full_body_length": stmt.excluded.full_body_length,
+                "source_basis": stmt.excluded.source_basis,
+                "parser_version": stmt.excluded.parser_version,
+                "quality_status": stmt.excluded.quality_status,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        session.execute(stmt)
+    return len(rows)
+
+
+def rebuild_kam_items(
+    year: int,
+    market: str | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Reconstruct matter-level KAMs from existing local evidence only."""
+    targets = _kam_rebuild_targets(year=year, market=market)
+    totals: dict[str, object] = {
+        "year": year,
+        "market": market,
+        "dry_run": dry_run,
+        "total": len(targets),
+        "full_body": 0,
+        "summary_only": 0,
+        "missing": 0,
+        "error": 0,
+        "receipt_counts": {
+            "full_body": 0,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 0,
+        },
+        "item_counts": {
+            "full_body": 0,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 0,
+        },
+        "items_total": 0,
+        "rows_written": 0,
+        "receipts": [],
+    }
+    for target in targets:
+        items, source_basis, limitations, source_fetched_at = (
+            _recover_kam_items(target)
+        )
+        if items:
+            status = items[0].quality_status
+        elif any(
+            ":read_error:" in limitation
+            or limitation.startswith("receipt_consistency_error:")
+            for limitation in limitations
+        ):
+            status = "error"
+        else:
+            status = "missing"
+        totals[status] = int(totals[status]) + 1
+        totals["receipt_counts"][status] += 1
+        totals["item_counts"][status] += len(items)
+        totals["items_total"] = int(totals["items_total"]) + len(items)
+        if not dry_run:
+            totals["rows_written"] = int(totals["rows_written"]) + (
+                _persist_rebuilt_kam_items(
+                    target=target,
+                    items=items,
+                    source_basis=source_basis,
+                    quality_status=status,
+                    source_fetched_at=source_fetched_at,
+                )
+            )
+        totals["receipts"].append(
+            {
+                "rcept_no": target["rcept_no"],
+                "corp_code": target["corp_code"],
+                "quality_status": status,
+                "source_basis": source_basis,
+                "source_fetched_at": (
+                    source_fetched_at.isoformat()
+                    if source_fetched_at is not None
+                    else None
+                ),
+                "item_count": len(items),
+                "titles": [item.title for item in items],
+                "has_reason": [bool(item.reason_text) for item in items],
+                "has_audit_response": [
+                    bool(item.audit_response_text) for item in items
+                ],
+                "limitations": limitations,
+            }
+        )
     return totals
 
 

@@ -260,6 +260,27 @@ def test_extract_audit_report_sections_does_not_treat_auditor_responsibility_phr
     assert "kam" not in sections
 
 
+def test_extract_audit_report_sections_trims_inline_english_responsibility_boilerplate():
+    xml = """
+    <DOCUMENT>
+      <TITLE>Key Audit Matters</TITLE>
+      <P>1. Revenue recognition</P>
+      <P>Why the matter was considered significant</P>
+      <P>Cut-off requires significant judgment.</P>
+      <P>How the matter was addressed in the audit</P>
+      <P>We tested a sample of contracts.</P>
+      <P>Auditor's Responsibilities for the Audit of the Financial Statements</P>
+      <P>We identify and assess the risks of material misstatement.</P>
+    </DOCUMENT>
+    """
+
+    sections = extract_audit_report_sections(xml)
+
+    assert "kam" in sections
+    assert "sample of contracts" in sections["kam"]["body_text"]
+    assert "risks of material misstatement" not in sections["kam"]["body_text"]
+
+
 def test_extract_audit_report_sections_trims_other_matter_before_attached_financials():
     xml = """
     <DOCUMENT>

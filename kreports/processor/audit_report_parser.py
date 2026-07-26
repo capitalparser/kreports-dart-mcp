@@ -85,13 +85,19 @@ _SIGNATURE_MARKERS = (
     "대표이사",
 )
 
+_KAM_RESPONSIBILITY_MARKERS = (
+    "재무제표감사에 대한 감사인의 책임",
+    "Auditor's Responsibilities for the Audit of the Financial Statements",
+    "Auditor Responsibilities for the Audit of the Financial Statements",
+)
+
 _SECTION_SPECIFIC_TRAILING_MARKERS: dict[str, tuple[str, ...]] = {
     "other_matter": _AUDIT_REPORT_TRAILING_MARKERS + _SIGNATURE_MARKERS,
     "emphasis": _AUDIT_REPORT_TRAILING_MARKERS,
     "going_concern": _AUDIT_REPORT_TRAILING_MARKERS,
     "basis_for_opinion": _AUDIT_REPORT_TRAILING_MARKERS,
     "audit_opinion": _AUDIT_REPORT_TRAILING_MARKERS,
-    "kam": _AUDIT_REPORT_TRAILING_MARKERS,
+    "kam": _AUDIT_REPORT_TRAILING_MARKERS + _KAM_RESPONSIBILITY_MARKERS,
 }
 
 

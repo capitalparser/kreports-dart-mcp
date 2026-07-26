@@ -1916,6 +1916,45 @@ def rebuild_audit_matter_items_cmd(
     _json_print(rebuild_audit_matter_items(year=year, limit=limit))
 
 
+@app.command("rebuild-kam-items")
+def rebuild_kam_items_cmd(
+    year: int = typer.Option(..., "--year", help="대상 사업연도"),
+    market: Optional[str] = typer.Option(
+        None,
+        "--market",
+        help="시장 필터: KOSPI/KOSDAQ/KONEX",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="품질 분포만 계산하고 kam_items에 쓰지 않음",
+    ),
+):
+    """로컬 원문 증거에서 접수번호별 KAM matter를 재구성한다."""
+    from kreports.collector.report_document_collector import rebuild_kam_items
+
+    if not dry_run:
+        init_db()
+    result = rebuild_kam_items(year=year, market=market, dry_run=dry_run)
+    typer.echo(
+        f"KAM rebuild {'dry-run' if dry_run else 'complete'}: "
+        f"total={result['total']} "
+        f"full_body={result['full_body']} "
+        f"summary_only={result['summary_only']} "
+        f"missing={result['missing']} "
+        f"error={result['error']} "
+        f"rows_written={result['rows_written']}"
+    )
+    for receipt in result["receipts"]:
+        if receipt["quality_status"] not in {"missing", "error"}:
+            continue
+        typer.echo(
+            f"- {receipt['rcept_no']} {receipt['quality_status']} "
+            f"source={receipt['source_basis']} "
+            f"limitations={';'.join(receipt['limitations']) or '-'}"
+        )
+
+
 @app.command("rebuild-disclosure-events")
 def rebuild_disclosure_events_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 공시 제출연도"),

@@ -152,6 +152,48 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_05_kam_items",
+        description="Add reconstructed key audit matter items",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS kam_items (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              rcept_no VARCHAR(80) NOT NULL,
+              dcm_no VARCHAR(20),
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              source_type VARCHAR(30) NOT NULL,
+              ordinal SMALLINT NOT NULL,
+              title VARCHAR(500),
+              normalized_topic VARCHAR(80),
+              reason_text TEXT,
+              audit_response_text TEXT,
+              related_note_references_json TEXT NOT NULL DEFAULT '[]',
+              full_body_hash VARCHAR(40) NOT NULL,
+              full_body_length INTEGER NOT NULL DEFAULT 0,
+              source_basis VARCHAR(80) NOT NULL,
+              parser_version VARCHAR(30) NOT NULL DEFAULT 'v1',
+              quality_status VARCHAR(20) NOT NULL,
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_kam_item_source_ordinal_body
+                UNIQUE (rcept_no, source_type, ordinal, full_body_hash)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_kam_item_corp_year
+            ON kam_items (corp_code, bsns_year)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_kam_item_quality_year
+            ON kam_items (bsns_year, quality_status)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_kam_item_receipt
+            ON kam_items (rcept_no, source_type)
+            """,
+        ),
+    ),
 )
 
 

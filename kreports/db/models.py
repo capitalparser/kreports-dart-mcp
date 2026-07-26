@@ -427,6 +427,43 @@ class ReportSection(Base):
     )
 
 
+class KamItem(Base):
+    """Matter-level KAM reconstructed from the best cached source body."""
+    __tablename__ = "kam_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rcept_no = Column(String(80), nullable=False)
+    dcm_no = Column(String(20), nullable=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_type = Column(String(30), nullable=False)
+    ordinal = Column(SmallInteger, nullable=False)
+    title = Column(String(500), nullable=True)
+    normalized_topic = Column(String(80), nullable=True)
+    reason_text = Column(Text, nullable=True)
+    audit_response_text = Column(Text, nullable=True)
+    related_note_references_json = Column(Text, nullable=False, default="[]")
+    full_body_hash = Column(String(40), nullable=False)
+    full_body_length = Column(Integer, nullable=False, default=0)
+    source_basis = Column(String(80), nullable=False)
+    parser_version = Column(String(30), nullable=False, default="v1")
+    quality_status = Column(String(20), nullable=False)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "rcept_no",
+            "source_type",
+            "ordinal",
+            "full_body_hash",
+            name="uq_kam_item_source_ordinal_body",
+        ),
+        Index("idx_kam_item_corp_year", "corp_code", "bsns_year"),
+        Index("idx_kam_item_quality_year", "bsns_year", "quality_status"),
+        Index("idx_kam_item_receipt", "rcept_no", "source_type"),
+    )
+
+
 class EvidenceDocument(Base):
     """Markdown-like evidence bundle derived from normalized report tables.
 
