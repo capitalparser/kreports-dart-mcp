@@ -18,6 +18,9 @@ from kreports.analysis.peer import (
 )
 
 from kreports.analysis._shared import _clean_dict, _display_text, _has_db_column
+from kreports.analysis.audit_procedure_evidence import (
+    procedure_database_preflight,
+)
 from kreports.analysis.company_profile import get_industry_name, resolve_corp_code
 from kreports.analysis.audit_reporting import (
     AUDIT_MATTER_KEYS,
@@ -1572,11 +1575,62 @@ def compare_peer_audit_procedures(
     _peer_group: dict | None = None,
 ) -> dict:
     """Compare KAM audit procedure patterns for a subject and its peer group."""
+    available, unavailable_reason = procedure_database_preflight(set())
+    if not available:
+        return {
+            "subject": (
+                (_peer_group or {}).get("subject")
+                or {"corp_code": company}
+            ),
+            "year": year,
+            "peer_count": 0,
+            "companies_with_procedures": 0,
+            "subject_procedure_type_counts": {},
+            "peer_procedure_type_counts": {},
+            "subject_method_counts": {},
+            "peer_method_counts": {},
+            "peer_kam_topic_counts": {},
+            "coverage": {
+                "denominator_full_body_kam_receipts": 0,
+                "full_body_kam_receipts_with_procedures": 0,
+                "rate": 0.0,
+                "quality_gaps": {},
+            },
+            "data_quality": {
+                "status": "unavailable",
+                "source": "runtime_db",
+                "coverage_note": unavailable_reason,
+            },
+        }
     base = _peer_group if _peer_group is not None else select_peer_group(
         company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
     )
     if "error" in base:
         return base
+    available, unavailable_reason = procedure_database_preflight()
+    if not available:
+        return {
+            "subject": base.get("subject") or {"corp_code": company},
+            "year": year,
+            "peer_count": len(base.get("peers", [])),
+            "companies_with_procedures": 0,
+            "subject_procedure_type_counts": {},
+            "peer_procedure_type_counts": {},
+            "subject_method_counts": {},
+            "peer_method_counts": {},
+            "peer_kam_topic_counts": {},
+            "coverage": {
+                "denominator_full_body_kam_receipts": 0,
+                "full_body_kam_receipts_with_procedures": 0,
+                "rate": 0.0,
+                "quality_gaps": {},
+            },
+            "data_quality": {
+                "status": "unavailable",
+                "source": "runtime_db",
+                "coverage_note": unavailable_reason,
+            },
+        }
     subject = base["subject"]
     peer_codes = [subject["corp_code"]] + [peer["corp_code"] for peer in base.get("peers", [])]
     if not peer_codes:
@@ -1609,15 +1663,31 @@ def compare_peer_audit_procedures(
                     THEN 1 ELSE 0
                 END
             ), 0) AS full_body_kams_with_procedures,
-            COALESCE(SUM(
-                CASE WHEN ki.quality_status='summary_only' THEN 1 ELSE 0 END
-            ), 0) AS summary_only,
-            COALESCE(SUM(
-                CASE WHEN ki.quality_status='missing' THEN 1 ELSE 0 END
-            ), 0) AS missing,
-            COALESCE(SUM(
-                CASE WHEN ki.quality_status='error' THEN 1 ELSE 0 END
-            ), 0) AS error
+            COUNT(DISTINCT CASE
+                WHEN ki.quality_status='full_body'
+                THEN ki.rcept_no || '|' || ki.source_type
+            END) AS full_body_kam_receipts,
+            COUNT(DISTINCT CASE
+                WHEN ki.quality_status='full_body'
+                 AND EXISTS (
+                    SELECT 1
+                    FROM audit_procedure_items api
+                    WHERE api.kam_item_id=ki.id
+                 )
+                THEN ki.rcept_no || '|' || ki.source_type
+            END) AS full_body_kam_receipts_with_procedures,
+            COUNT(DISTINCT CASE
+                WHEN ki.quality_status='summary_only'
+                THEN ki.rcept_no || '|' || ki.source_type
+            END) AS summary_only,
+            COUNT(DISTINCT CASE
+                WHEN ki.quality_status='missing'
+                THEN ki.rcept_no || '|' || ki.source_type
+            END) AS missing,
+            COUNT(DISTINCT CASE
+                WHEN ki.quality_status='error'
+                THEN ki.rcept_no || '|' || ki.source_type
+            END) AS error
         FROM kam_items ki
         WHERE ki.bsns_year=:year AND ki.corp_code IN :corp_codes
     """).bindparams(bindparam("corp_codes", expanding=True))
@@ -1640,7 +1710,7 @@ def compare_peer_audit_procedures(
             year=year,
             limit=max(500, len(peer_codes) * 10),
         )
-        aggregated: dict[tuple[str, str, str, str], int] = {}
+        aggregated: dict[tuple[str, str, str, str, str | None], int] = {}
         names = {row["corp_code"]: row.get("corp_name") for row in evidence_rows}
         for row in evidence_rows:
             key = (
@@ -1648,6 +1718,7 @@ def compare_peer_audit_procedures(
                 row.get("corp_name") or names.get(row["corp_code"]) or "",
                 row.get("kam_topic") or "unknown",
                 row.get("procedure_type") or "other",
+                row.get("method"),
             )
             aggregated[key] = aggregated.get(key, 0) + 1
         rows = [
@@ -1655,11 +1726,11 @@ def compare_peer_audit_procedures(
                 "corp_code": cc,
                 "corp_name": name,
                 "kam_topic": topic,
-                "method": None,
                 "procedure_type": ptype,
+                "method": method,
                 "cnt": cnt,
             }
-            for (cc, name, topic, ptype), cnt in aggregated.items()
+            for (cc, name, topic, ptype, method), cnt in aggregated.items()
         ]
         if rows:
             row_source = "kam_items.full_body"
@@ -1692,9 +1763,11 @@ def compare_peer_audit_procedures(
                     + int(row["cnt"] or 0)
                 )
 
-    full_body_kams = int(coverage_row.get("full_body_kams") or 0)
-    with_procedures = int(
-        coverage_row.get("full_body_kams_with_procedures") or 0
+    full_body_receipts = int(
+        coverage_row.get("full_body_kam_receipts") or 0
+    )
+    receipt_with_procedures = int(
+        coverage_row.get("full_body_kam_receipts_with_procedures") or 0
     )
 
     return _clean_dict({
@@ -1708,11 +1781,16 @@ def compare_peer_audit_procedures(
         "peer_method_counts": peer_method_counts,
         "peer_kam_topic_counts": peer_topic_counts,
         "coverage": {
-            "denominator_full_body_kams": full_body_kams,
-            "full_body_kams_with_procedures": with_procedures,
+            "denominator_full_body_kam_receipts": full_body_receipts,
+            "full_body_kam_receipts_with_procedures": (
+                receipt_with_procedures
+            ),
             "rate": (
-                round(with_procedures * 100.0 / full_body_kams, 1)
-                if full_body_kams
+                round(
+                    receipt_with_procedures * 100.0 / full_body_receipts,
+                    1,
+                )
+                if full_body_receipts
                 else 0.0
             ),
             "quality_gaps": {
@@ -1728,7 +1806,7 @@ def compare_peer_audit_procedures(
             "status": "usable" if rows else "missing",
             "source": row_source,
             "coverage_note": (
-                "The coverage denominator is full_body KAM items only. "
+                "The coverage denominator is full_body KAM receipts only. "
                 "Summary-only, missing, and error KAMs are separate gaps."
             ),
         },

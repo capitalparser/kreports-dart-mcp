@@ -9,7 +9,10 @@ from sqlalchemy import bindparam, text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis import queries as _queries
-from kreports.analysis.audit_procedure_evidence import classify_audit_procedure_linkages
+from kreports.analysis.audit_procedure_evidence import (
+    classify_audit_procedure_linkages,
+    procedure_database_preflight,
+)
 
 from kreports.analysis._shared import _clean_dict, _dedupe_confirmed_facts, _df_to_records, _display_text, _has_db_column, _has_db_table
 from kreports.analysis.company_profile import (
@@ -1162,6 +1165,30 @@ def search_audit_procedures(
     allowed_methods = set(PROCEDURE_METHODS)
     if method and method not in allowed_methods:
         return {"error": "invalid method", "allowed": sorted(allowed_methods)}
+    available, unavailable_reason = procedure_database_preflight()
+    if not available:
+        return {
+            "query": {
+                "company": company,
+                "year": year,
+                "market": market,
+                "induty_prefix": induty_prefix,
+                "kam_topic": kam_topic,
+                "procedure_type": procedure_type,
+                "method": method,
+                "keyword": keyword,
+                "limit": limit,
+                "include_excerpt": include_excerpt,
+            },
+            "total_companies": 0,
+            "total_procedures": 0,
+            "companies": [],
+            "data_quality": {
+                "status": "unavailable",
+                "source": "runtime_db",
+                "interpretation": unavailable_reason,
+            },
+        }
     limit = max(1, min(int(limit), 500))
     params: dict[str, object] = {"row_limit": limit * 10}
     filters, subject = build_company_filters(
@@ -1251,6 +1278,7 @@ def search_audit_procedures(
 
     for row in rows:
         text_value = _display_text(row.pop("procedure_text") or "")
+        row["procedure_text"] = text_value
         if include_excerpt:
             row["procedure_excerpt"] = text_value[:900]
         for source_key, output_key in (

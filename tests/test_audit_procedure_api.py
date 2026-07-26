@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from sqlalchemy import create_engine, text
+
 from kreports.analysis.api import search_audit_procedures
 from kreports.analysis.peer_benchmarks import compare_peer_audit_procedures
 from kreports.db.engine import get_session
@@ -117,6 +119,7 @@ def test_search_audit_procedures_exposes_structured_linkage_contract(temp_engine
 
     record = result["companies"][0]["records"][0]
     assert record["method"] == "cutoff_test"
+    assert record["procedure_text"].startswith("기말 전후")
     assert record["assertion_hints"] == ["cutoff", "occurrence"]
     assert record["linked_metric_keys"] == ["revenue"]
     assert record["linked_note_keys"] == ["revenue_policy"]
@@ -221,8 +224,8 @@ def test_peer_procedure_coverage_uses_full_body_kams_only(temp_engine):
         },
     )
 
-    assert result["coverage"]["denominator_full_body_kams"] == 2
-    assert result["coverage"]["full_body_kams_with_procedures"] == 1
+    assert result["coverage"]["denominator_full_body_kam_receipts"] == 2
+    assert result["coverage"]["full_body_kam_receipts_with_procedures"] == 1
     assert result["coverage"]["rate"] == 50.0
     assert result["coverage"]["quality_gaps"] == {
         "summary_only": 1,
@@ -230,3 +233,150 @@ def test_peer_procedure_coverage_uses_full_body_kams_only(temp_engine):
         "error": 1,
     }
     assert result["subject_method_counts"] == {"inspection": 1}
+
+
+def test_procedure_read_surfaces_do_not_create_missing_sqlite_file(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.engine as engine_module
+    from kreports.analysis.audit_procedure_evidence import (
+        build_audit_procedure_evidence_map,
+    )
+
+    db_path = tmp_path / "missing-procedure.db"
+    missing_engine = create_engine(f"sqlite:///{db_path}")
+    monkeypatch.setattr(engine_module, "engine", missing_engine)
+
+    evidence = build_audit_procedure_evidence_map(year=2025)
+    search = search_audit_procedures(year=2025)
+    peer = compare_peer_audit_procedures(
+        "000001",
+        year=2025,
+        _peer_group={
+            "subject": {"corp_code": "00000001"},
+            "peers": [],
+            "selection_policy": {},
+        },
+    )
+
+    assert evidence["database_status"] == "unavailable"
+    assert search["data_quality"]["status"] == "unavailable"
+    assert peer["data_quality"]["status"] == "unavailable"
+    assert not db_path.exists()
+
+
+def test_procedure_read_surfaces_report_unmigrated_schema_without_crash(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.engine as engine_module
+    from kreports.analysis.audit_procedure_evidence import (
+        build_audit_procedure_evidence_map,
+    )
+
+    db_path = tmp_path / "legacy-procedure.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as conn:
+        conn.execute(text("CREATE TABLE companies (corp_code VARCHAR(8))"))
+        conn.execute(
+            text(
+                "CREATE TABLE kam_items ("
+                "id INTEGER PRIMARY KEY, corp_code VARCHAR(8), "
+                "bsns_year INTEGER, rcept_no VARCHAR(80), "
+                "source_type VARCHAR(30), quality_status VARCHAR(20))"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE audit_procedure_items ("
+                "id INTEGER PRIMARY KEY, corp_code VARCHAR(8), "
+                "bsns_year INTEGER, rcept_no VARCHAR(80), "
+                "source_type VARCHAR(30), procedure_type VARCHAR(50), "
+                "procedure_text TEXT)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE report_sections ("
+                "id INTEGER PRIMARY KEY, corp_code VARCHAR(8), "
+                "bsns_year INTEGER, rcept_no VARCHAR(80), "
+                "source_type VARCHAR(30))"
+            )
+        )
+    monkeypatch.setattr(engine_module, "engine", legacy_engine)
+
+    evidence = build_audit_procedure_evidence_map(year=2025)
+    search = search_audit_procedures(year=2025)
+    peer = compare_peer_audit_procedures(
+        "000001",
+        year=2025,
+        _peer_group={
+            "subject": {"corp_code": "00000001"},
+            "peers": [],
+            "selection_policy": {},
+        },
+    )
+
+    assert evidence["database_status"] == "unavailable"
+    assert evidence["database_reason"].startswith("missing_columns:")
+    assert search["data_quality"]["status"] == "unavailable"
+    assert peer["data_quality"]["status"] == "unavailable"
+
+
+def test_peer_full_body_fallback_preserves_procedure_method(temp_engine):
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000001",
+                    stock_code="000001",
+                    corp_name="대상",
+                    market="KOSPI",
+                ),
+                Company(
+                    corp_code="00000002",
+                    stock_code="000002",
+                    corp_name="피어",
+                    market="KOSPI",
+                ),
+            ]
+        )
+        for corp_code, receipt, response in (
+            ("00000001", "F1", "계약서를 검사하였습니다."),
+            ("00000002", "F2", "거래처에 외부조회서를 발송하였습니다."),
+        ):
+            session.add(
+                KamItem(
+                    rcept_no=receipt,
+                    corp_code=corp_code,
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    ordinal=1,
+                    title="수익인식",
+                    normalized_topic="revenue",
+                    reason_text="위험",
+                    audit_response_text=response,
+                    related_note_references_json="[]",
+                    full_body_hash=receipt.ljust(40, "0"),
+                    full_body_length=500,
+                    source_basis="source_documents.full_body",
+                    parser_version="kam.v1",
+                    quality_status="full_body",
+                    fetched_at=datetime(2026, 3, 1),
+                )
+            )
+
+    result = compare_peer_audit_procedures(
+        "000001",
+        year=2025,
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "대상"},
+            "peers": [{"corp_code": "00000002", "corp_name": "피어"}],
+            "selection_policy": {},
+        },
+    )
+
+    assert result["data_quality"]["source"] == "kam_items.full_body"
+    assert result["subject_method_counts"] == {"inspection": 1}
+    assert result["peer_method_counts"] == {"confirmation": 1}

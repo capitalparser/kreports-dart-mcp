@@ -54,7 +54,7 @@ def test_classify_audit_procedure_linkages_maps_impairment_to_valuation_evidence
 
     keys = {(row["category"], row["key"]) for row in rows}
     assert ("audit_report_kam", "impairment") in keys
-    assert ("financial_statement_account", "impairment") in keys
+    assert ("financial_statement_account", "assets") in keys
     assert ("accounting_note", "impairment_assumption") in keys
 
 
@@ -210,3 +210,61 @@ def test_evidence_map_uses_full_body_denominator_and_reports_other_gaps(temp_eng
     assert [row["rcept_no"] for row in result["missing_procedure_kams"]] == [
         "20260301000002_100"
     ]
+
+
+def test_evidence_map_uses_receipt_denominator_and_eighty_percent_target(
+    temp_engine,
+):
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        for receipt in range(1, 6):
+            for matter in range(1, 3 if receipt == 1 else 2):
+                item = KamItem(
+                    rcept_no=f"R{receipt}",
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    ordinal=matter,
+                    title="수익인식",
+                    normalized_topic="revenue",
+                    reason_text="위험",
+                    audit_response_text="계약서를 검사하였습니다.",
+                    related_note_references_json="[]",
+                    full_body_hash=f"{receipt}{matter}".ljust(40, "0"),
+                    full_body_length=500,
+                    source_basis="source_documents.full_body",
+                    parser_version="kam.v1",
+                    quality_status="full_body",
+                    fetched_at=datetime(2026, 3, 1),
+                )
+                session.add(item)
+                session.flush()
+                if receipt <= 4:
+                    session.add(
+                        AuditProcedureItem(
+                            kam_item_id=item.id,
+                            rcept_no=item.rcept_no,
+                            corp_code=item.corp_code,
+                            bsns_year=2025,
+                            source_type="audit_report",
+                            section_ordinal=matter,
+                            procedure_ordinal=1,
+                            procedure_type="substantive_test",
+                            method="inspection",
+                            procedure_text="계약서를 검사하였습니다.",
+                        )
+                    )
+
+    result = build_audit_procedure_evidence_map(year=2025)
+
+    assert result["counts"]["full_body_kam_receipts"] == 5
+    assert result["counts"]["full_body_kam_receipts_with_procedures"] == 4
+    assert result["rates"]["procedure_coverage"] == 80.0
+    assert result["verdict"] == "pass"

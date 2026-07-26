@@ -100,6 +100,22 @@ def test_extract_procedure_steps_rejects_generic_auditor_responsibility():
     assert extract_procedure_steps(item) == []
 
 
+@pytest.mark.parametrize(
+    "text_value",
+    [
+        "감사인은 재무제표에 대한 감사를 수행할 책임이 있습니다.",
+        "감사절차에는 질문, 검사, 관찰 및 확인이 포함될 수 있습니다.",
+        "계약서 검토",
+        "내부통제 확인",
+        "We are responsible for performing the audit in accordance with standards.",
+    ],
+)
+def test_extract_procedure_steps_rejects_boilerplate_and_noun_only_phrases(
+    text_value,
+):
+    assert extract_procedure_steps(_kam_item(text_value)) == []
+
+
 def test_extract_procedure_steps_keeps_unknown_action_as_other():
     steps = extract_procedure_steps(
         _kam_item("해당 매출 자료를 대사하여 차이를 조사하였습니다.")
@@ -107,6 +123,31 @@ def test_extract_procedure_steps_keeps_unknown_action_as_other():
 
     assert len(steps) == 1
     assert steps[0].method == "other"
+
+
+def test_extract_procedure_steps_keeps_unknown_comparison_action_as_other():
+    steps = extract_procedure_steps(
+        _kam_item("당기 수치를 전기 및 예산과 비교하였습니다.")
+    )
+
+    assert [step.method for step in steps] == ["other"]
+
+
+def test_extract_procedure_steps_splits_compound_action_lists():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "계약서를 검사하였으며 거래처에 외부조회서를 발송하였습니다.\n"
+            "계약서 검사, 외부조회 및 기간귀속 테스트를 수행하였습니다."
+        )
+    )
+
+    assert [step.method for step in steps] == [
+        "inspection",
+        "confirmation",
+        "inspection",
+        "confirmation",
+        "cutoff_test",
+    ]
 
 
 def test_extract_procedure_steps_requires_full_body_quality():
@@ -221,5 +262,110 @@ def test_replace_procedure_steps_does_not_infer_summary_only_rows(temp_engine):
         item_id = item.id
 
     assert replace_procedure_steps_for_kam(item_id) == 0
+    with get_session() as session:
+        assert session.query(AuditProcedureItem).count() == 0
+
+
+def test_replace_procedure_steps_cleans_exact_rows_after_quality_downgrade(
+    temp_engine,
+):
+    with get_session() as session:
+        item = KamItem(
+            rcept_no="20260301000004_100",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text="위험",
+            audit_response_text="계약서를 검사하였습니다.",
+            related_note_references_json="[]",
+            full_body_hash="4" * 40,
+            full_body_length=500,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime(2026, 3, 1),
+        )
+        session.add(item)
+        session.flush()
+        item_id = item.id
+
+    assert replace_procedure_steps_for_kam(item_id) == 1
+    with get_session() as session:
+        session.get(KamItem, item_id).quality_status = "summary_only"
+
+    assert replace_procedure_steps_for_kam(item_id) == 0
+    with get_session() as session:
+        assert (
+            session.query(AuditProcedureItem)
+            .filter(AuditProcedureItem.kam_item_id == item_id)
+            .count()
+            == 0
+        )
+
+
+def test_replace_procedure_steps_cleans_deleted_and_replaced_kam_rows(
+    temp_engine,
+):
+    with get_session() as session:
+        old = KamItem(
+            rcept_no="20260301000005_100",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text="위험",
+            audit_response_text="계약서를 검사하였습니다.",
+            related_note_references_json="[]",
+            full_body_hash="5" * 40,
+            full_body_length=500,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime(2026, 3, 1),
+        )
+        session.add(old)
+        session.flush()
+        old_id = old.id
+    assert replace_procedure_steps_for_kam(old_id) == 1
+
+    with get_session() as session:
+        replacement = KamItem(
+            rcept_no="20260301000005_100",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text="위험 변경",
+            audit_response_text="기간귀속 테스트를 수행하였습니다.",
+            related_note_references_json="[]",
+            full_body_hash="6" * 40,
+            full_body_length=510,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime(2026, 3, 2),
+        )
+        session.add(replacement)
+        session.flush()
+        replacement_id = replacement.id
+
+    assert replace_procedure_steps_for_kam(replacement_id) == 1
+    with get_session() as session:
+        assert (
+            session.query(AuditProcedureItem)
+            .filter(AuditProcedureItem.kam_item_id == old_id)
+            .count()
+            == 0
+        )
+        session.delete(session.get(KamItem, replacement_id))
+
+    assert replace_procedure_steps_for_kam(replacement_id) == 0
     with get_session() as session:
         assert session.query(AuditProcedureItem).count() == 0

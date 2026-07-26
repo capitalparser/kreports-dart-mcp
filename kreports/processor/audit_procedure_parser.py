@@ -40,7 +40,14 @@ _METHOD_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cutoff_test", ("기간귀속", "cut-off", "cutoff", "컷오프")),
     (
         "valuation_model_test",
-        ("할인모형", "가치평가모형", "평가모형", "valuation model", "모델 검증"),
+        (
+            "할인모형",
+            "가치평가모형",
+            "가치평가 모델",
+            "평가모형",
+            "valuation model",
+            "모델 검증",
+        ),
     ),
     ("analytical_procedure", ("분석적 절차", "추세 분석", "analytical procedure")),
     ("sampling", ("표본", "샘플", "sample")),
@@ -77,6 +84,7 @@ _ACTION_SIGNALS = (
     "대사",
     "조사",
     "확인",
+    "비교",
     "수행",
     "inspect",
     "inquir",
@@ -98,6 +106,10 @@ _RESPONSIBILITY_BOILERPLATE = (
     "감사기준에 따라 감사를 수행",
     "our responsibility",
     "professional skepticism",
+    "책임이 있습니다",
+    "포함될 수 있습니다",
+    "responsible for",
+    "in accordance with",
 )
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -151,41 +163,72 @@ def _normalize_clause(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _candidate_clauses(source: str) -> list[tuple[str, int, int]]:
+def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
     bounded = (source or "")[:MAX_INPUT_CHARS]
     pattern = re.compile(r"(?:\r?\n+|[;；]+|(?<=[.!?。])\s+)")
-    clauses: list[tuple[str, int, int]] = []
+    clauses: list[tuple[str, int, int, bool]] = []
 
     def append_raw(raw: str, absolute_start: int) -> None:
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
             r"분석|테스트|평가|추출|활용|대사|조사|확인)"
-            r"(?:하고|한\s+뒤)),?\s+"
+            r"(?:하고|한\s+뒤|하였으며|했으며)),?\s+"
         )
+
+        def append_piece(piece: str, piece_start: int, piece_end: int) -> None:
+            parts = [
+                value.strip()
+                for value in re.split(r"\s*(?:,|및)\s*", piece)
+                if value.strip()
+            ]
+            recognized = sum(_method(value) != "other" for value in parts)
+            is_action_list = (
+                len(parts) >= 2
+                and recognized >= 2
+                and bool(
+                    re.search(
+                        r"(?:하였습니다|했습니다|하였다|했다|수행하였습니다)"
+                        r"[.!?。]?$",
+                        piece,
+                    )
+                )
+            )
+            if not is_action_list:
+                normalized = _normalize_clause(piece)
+                if normalized:
+                    clauses.append(
+                        (normalized, piece_start, piece_end, False)
+                    )
+                return
+            cursor = 0
+            for part in parts:
+                local = piece.find(part, cursor)
+                cursor = local + len(part)
+                clauses.append(
+                    (
+                        _normalize_clause(part),
+                        piece_start + local,
+                        piece_start + local + len(part),
+                        True,
+                    )
+                )
+
         local_start = 0
         for boundary in conjunction.finditer(raw):
             local_end = boundary.end(1)
             piece = raw[local_start:local_end]
-            normalized = _normalize_clause(piece)
-            if normalized:
-                clauses.append(
-                    (
-                        normalized,
-                        absolute_start + local_start,
-                        absolute_start + local_end,
-                    )
-                )
+            append_piece(
+                piece,
+                absolute_start + local_start,
+                absolute_start + local_end,
+            )
             local_start = boundary.end()
         piece = raw[local_start:]
-        normalized = _normalize_clause(piece)
-        if normalized:
-            clauses.append(
-                (
-                    normalized,
-                    absolute_start + local_start,
-                    absolute_start + len(raw),
-                )
-            )
+        append_piece(
+            piece,
+            absolute_start + local_start,
+            absolute_start + len(raw),
+        )
 
     start = 0
     for match in pattern.finditer(bounded):
@@ -195,11 +238,25 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int]]:
     return clauses
 
 
-def _is_action_clause(clause: str) -> bool:
+def _is_action_clause(clause: str, *, compound_context: bool = False) -> bool:
     lowered = clause.lower()
     if any(marker in lowered for marker in _RESPONSIBILITY_BOILERPLATE):
         return False
-    return any(signal in lowered for signal in _ACTION_SIGNALS)
+    if not any(signal in lowered for signal in _ACTION_SIGNALS):
+        return False
+    if compound_context:
+        return _method(clause) != "other" or bool(
+            re.search(r"(?:하였|했|합니다|하였다)", clause)
+        )
+    return bool(
+        re.search(
+            r"(?:하였습니다|했습니다|하였다|했다|하였으며|했으며|하고|"
+            r"한\s+뒤|수행하였|발송하였|활용하였|평가하였|"
+            r"inspect(?:ed)?|inquir(?:ed)?|observ(?:ed)?|confirm(?:ed)?|"
+            r"test(?:ed)?|evaluat(?:ed)?|compar(?:ed)?)",
+            lowered,
+        )
+    )
 
 
 def _method(clause: str) -> str:
@@ -240,9 +297,12 @@ def extract_procedure_steps(kam_item: ParsedKamItem) -> list[ParsedProcedureStep
 
     steps: list[ParsedProcedureStep] = []
     seen_text: set[str] = set()
-    for clause, source_start, source_end in _candidate_clauses(source):
+    for clause, source_start, source_end, compound_context in _candidate_clauses(source):
         normalized_key = re.sub(r"\s+", "", clause).lower()
-        if normalized_key in seen_text or not _is_action_clause(clause):
+        if normalized_key in seen_text or not _is_action_clause(
+            clause,
+            compound_context=compound_context,
+        ):
             continue
         seen_text.add(normalized_key)
         ordinal = len(steps) + 1
@@ -287,7 +347,31 @@ def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
     with get_session() as session:
         stored = session.get(KamItem, int(kam_item_id))
         if stored is None:
+            (
+                session.query(AuditProcedureItem)
+                .filter(AuditProcedureItem.kam_item_id == int(kam_item_id))
+                .delete(synchronize_session=False)
+            )
             return 0
+        stale_sibling_ids = [
+            int(row[0])
+            for row in (
+                session.query(KamItem.id)
+                .filter(
+                    KamItem.rcept_no == stored.rcept_no,
+                    KamItem.source_type == stored.source_type,
+                    KamItem.ordinal == stored.ordinal,
+                    KamItem.id != stored.id,
+                )
+                .all()
+            )
+        ]
+        if stale_sibling_ids:
+            (
+                session.query(AuditProcedureItem)
+                .filter(AuditProcedureItem.kam_item_id.in_(stale_sibling_ids))
+                .delete(synchronize_session=False)
+            )
         parsed = ParsedKamItem(
             ordinal=stored.ordinal,
             title=stored.title or "",
@@ -313,6 +397,11 @@ def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
         )
         steps = extract_procedure_steps(parsed)
         if stored.quality_status != "full_body":
+            (
+                session.query(AuditProcedureItem)
+                .filter(AuditProcedureItem.kam_item_id == stored.id)
+                .delete(synchronize_session=False)
+            )
             return 0
 
         now = stored.fetched_at or datetime.utcnow()

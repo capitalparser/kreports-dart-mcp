@@ -385,8 +385,7 @@ def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monke
         "20250218800508_10316977",
     ]
     assert "감가상각개시시점" in first_kam_body
-    assert "internal_control" in procedure_types
-    assert "substantive_test" in procedure_types
+    assert procedure_types == []
 
 
 def test_collect_business_report_collects_summary_and_attached_audit_reports(temp_engine, monkeypatch):
@@ -1074,7 +1073,7 @@ def test_compare_peer_kam_topics_reports_reason_and_procedure_coverage(temp_engi
 def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
-    from kreports.db.models import AuditProcedureItem
+    from kreports.db.models import AuditProcedureItem, KamItem
 
     monkeypatch.setattr(collector_module, "engine", temp_engine)
 
@@ -1096,6 +1095,27 @@ def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypa
             ordinal=0,
             fetched_at=datetime.utcnow(),
         ))
+        session.add(KamItem(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            ordinal=0,
+            title="가치평가",
+            normalized_topic="impairment",
+            reason_text="추정 위험",
+            audit_response_text=(
+                "가치평가 모델의 적절성을 평가하였습니다.\n"
+                "미래현금흐름 추정 통제의 운영효과성을 테스트하였습니다."
+            ),
+            related_note_references_json="[]",
+            full_body_hash="v" * 40,
+            full_body_length=500,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime.utcnow(),
+        ))
 
     out = index_audit_procedures_from_sections(year=2024)
 
@@ -1111,7 +1131,7 @@ def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypa
     assert procedure_types == ["estimation_assumption", "internal_control"]
 
 
-def test_index_audit_procedures_falls_back_to_evidence_documents(temp_engine, monkeypatch):
+def test_index_audit_procedures_does_not_infer_evidence_document_summary(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
 
@@ -1142,9 +1162,9 @@ def test_index_audit_procedures_falls_back_to_evidence_documents(temp_engine, mo
 
     out = index_audit_procedures_from_sections(year=2025)
 
-    assert out["source_basis"] == "evidence_documents"
-    assert out["ok"] == 1
-    assert out["rows_written"] == 2
+    assert out["source_basis"] == "kam_items.full_body"
+    assert out["ok"] == 0
+    assert out["rows_written"] == 0
     with get_session() as session:
         procedure_types = [
             row.procedure_type
@@ -1152,4 +1172,4 @@ def test_index_audit_procedures_falls_back_to_evidence_documents(temp_engine, mo
             .order_by(AuditProcedureItem.procedure_ordinal)
             .all()
         ]
-    assert procedure_types == ["internal_control", "substantive_test"]
+    assert procedure_types == []

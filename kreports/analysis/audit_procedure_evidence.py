@@ -8,9 +8,10 @@ procedure.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import bindparam, create_engine, inspect, text
 
 import kreports.db.engine as engine_module
 from kreports.processor.audit_procedure_parser import ParsedProcedureStep
@@ -23,6 +24,78 @@ class EvidenceLink:
     label: str
     matching_phrase: str
     confidence_basis: str
+
+
+def procedure_database_preflight(
+    required_tables: set[str] | None = None,
+) -> tuple[bool, str | None]:
+    """Check procedure schema without creating a missing SQLite database."""
+    required = (
+        {
+            "companies",
+            "kam_items",
+            "audit_procedure_items",
+        }
+        if required_tables is None
+        else required_tables
+    )
+    source_engine = engine_module.engine
+    audit_procedure_columns: set[str] | None = None
+    if source_engine.dialect.name == "sqlite":
+        database = source_engine.url.database
+        if database not in {None, "", ":memory:"}:
+            database_path = Path(str(database)).expanduser().resolve()
+            if not database_path.is_file():
+                return False, "runtime_db_unavailable"
+            readonly_engine = create_engine(
+                (
+                    f"sqlite:///file:{database_path.as_posix()}"
+                    "?mode=ro&immutable=1&uri=true"
+                ),
+                connect_args={"check_same_thread": False},
+            )
+            try:
+                readonly_inspector = inspect(readonly_engine)
+                tables = set(readonly_inspector.get_table_names())
+                if "audit_procedure_items" in tables:
+                    audit_procedure_columns = {
+                        str(column["name"])
+                        for column in readonly_inspector.get_columns(
+                            "audit_procedure_items"
+                        )
+                    }
+            except Exception as exc:
+                return False, f"runtime_db_unavailable:{type(exc).__name__}"
+            finally:
+                readonly_engine.dispose()
+        else:
+            tables = set(inspect(source_engine).get_table_names())
+    else:
+        tables = set(inspect(source_engine).get_table_names())
+    missing = sorted(required - tables)
+    if missing:
+        return False, f"missing_schema:{','.join(missing)}"
+    if "audit_procedure_items" in required:
+        columns = audit_procedure_columns or {
+            str(column["name"])
+            for column in inspect(source_engine).get_columns(
+                "audit_procedure_items"
+            )
+        }
+        required_columns = {
+            "kam_item_id",
+            "method",
+            "assertion_hints_json",
+            "linked_metric_keys_json",
+            "linked_note_keys_json",
+            "linked_event_keys_json",
+            "parser_version",
+            "quality_status",
+        }
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            return False, f"missing_columns:{','.join(missing_columns)}"
+    return True, None
 
 
 def link_procedure_evidence(
@@ -102,32 +175,32 @@ _TOPIC_TO_LINKS: dict[str, list[dict[str, str]]] = {
     ],
     "inventory": [
         {"category": "audit_report_kam", "key": "inventory", "label": "KAM: 재고자산"},
-        {"category": "financial_statement_account", "key": "inventory", "label": "재무제표: 재고자산"},
+        {"category": "financial_statement_account", "key": "inventories", "label": "재무제표: 재고자산"},
         {"category": "accounting_note", "key": "inventory_policy", "label": "주석: 재고자산 평가정책"},
     ],
     "impairment": [
         {"category": "audit_report_kam", "key": "impairment", "label": "KAM: 손상검사"},
-        {"category": "financial_statement_account", "key": "impairment", "label": "재무제표: 손상 관련 자산"},
+        {"category": "financial_statement_account", "key": "assets", "label": "재무제표: 손상 관련 자산"},
         {"category": "accounting_note", "key": "impairment_assumption", "label": "주석: 회수가능액 및 주요 가정"},
     ],
     "fair_value": [
         {"category": "audit_report_kam", "key": "fair_value", "label": "KAM: 공정가치"},
-        {"category": "financial_statement_account", "key": "fair_value", "label": "재무제표: 공정가치 측정 항목"},
+        {"category": "financial_statement_account", "key": "assets", "label": "재무제표: 공정가치 측정 항목"},
         {"category": "accounting_note", "key": "fair_value_hierarchy", "label": "주석: 공정가치 서열체계"},
     ],
     "provision": [
         {"category": "audit_report_kam", "key": "provision", "label": "KAM: 충당부채/우발부채"},
-        {"category": "financial_statement_account", "key": "provision", "label": "재무제표: 충당부채"},
+        {"category": "financial_statement_account", "key": "liabilities", "label": "재무제표: 충당부채"},
         {"category": "accounting_note", "key": "contingency", "label": "주석: 우발부채 및 약정사항"},
     ],
     "consolidation": [
         {"category": "audit_report_kam", "key": "consolidation", "label": "KAM: 연결/종속기업"},
-        {"category": "financial_statement_account", "key": "subsidiary_investment", "label": "재무제표: 종속기업 투자"},
+        {"category": "financial_statement_account", "key": "assets", "label": "재무제표: 종속기업 투자"},
         {"category": "accounting_note", "key": "consolidation_scope", "label": "주석: 연결범위"},
     ],
     "tax": [
         {"category": "audit_report_kam", "key": "tax", "label": "KAM: 법인세"},
-        {"category": "financial_statement_account", "key": "deferred_tax", "label": "재무제표: 이연법인세"},
+        {"category": "financial_statement_account", "key": "tax_expense", "label": "재무제표: 법인세"},
         {"category": "accounting_note", "key": "income_tax", "label": "주석: 법인세"},
     ],
 }
@@ -227,6 +300,36 @@ def build_audit_procedure_evidence_map(
     This is a diagnostic surface. It does not fetch DART and it does not write
     rows back to SQLite.
     """
+    available, unavailable_reason = procedure_database_preflight(
+        {
+            "companies",
+            "kam_items",
+            "audit_procedure_items",
+            "report_sections",
+        }
+    )
+    if not available:
+        return {
+            "verdict": "unavailable",
+            "database_status": "unavailable",
+            "database_reason": unavailable_reason,
+            "year": int(year),
+            "company": company,
+            "market": market,
+            "counts": {},
+            "sample": {},
+            "rates": {},
+            "quality_gaps": {},
+            "required_gaps": ["procedure_database_unavailable"],
+            "missing_procedure_kams": [],
+            "samples": [],
+            "data_quality": {
+                "status": "unavailable",
+                "source": "runtime_db",
+                "note": unavailable_reason,
+            },
+        }
+
     company_filter, params = _resolve_company_filter(company)
     market_filter = "AND c.market=:market" if market else ""
     if market:
@@ -255,15 +358,31 @@ def build_audit_procedure_evidence_map(
                                 THEN 1 ELSE 0
                             END
                         ), 0) AS full_body_kam_items_with_procedures,
-                        COALESCE(SUM(
-                            CASE WHEN ki.quality_status='summary_only' THEN 1 ELSE 0 END
-                        ), 0) AS summary_only,
-                        COALESCE(SUM(
-                            CASE WHEN ki.quality_status='missing' THEN 1 ELSE 0 END
-                        ), 0) AS missing,
-                        COALESCE(SUM(
-                            CASE WHEN ki.quality_status='error' THEN 1 ELSE 0 END
-                        ), 0) AS error
+                        COUNT(DISTINCT CASE
+                            WHEN ki.quality_status='full_body'
+                            THEN ki.rcept_no || '|' || ki.source_type
+                        END) AS full_body_kam_receipts,
+                        COUNT(DISTINCT CASE
+                            WHEN ki.quality_status='full_body'
+                             AND EXISTS (
+                                SELECT 1
+                                FROM audit_procedure_items api
+                                WHERE api.kam_item_id=ki.id
+                             )
+                            THEN ki.rcept_no || '|' || ki.source_type
+                        END) AS full_body_kam_receipts_with_procedures,
+                        COUNT(DISTINCT CASE
+                            WHEN ki.quality_status='summary_only'
+                            THEN ki.rcept_no || '|' || ki.source_type
+                        END) AS summary_only,
+                        COUNT(DISTINCT CASE
+                            WHEN ki.quality_status='missing'
+                            THEN ki.rcept_no || '|' || ki.source_type
+                        END) AS missing,
+                        COUNT(DISTINCT CASE
+                            WHEN ki.quality_status='error'
+                            THEN ki.rcept_no || '|' || ki.source_type
+                        END) AS error
                     FROM kam_items ki
                     JOIN companies c ON c.corp_code=ki.corp_code
                     WHERE ki.bsns_year=:year
@@ -447,6 +566,15 @@ def build_audit_procedure_evidence_map(
             )
             or 0
         ),
+        "full_body_kam_receipts": int(
+            structured_kam_summary.get("full_body_kam_receipts") or 0
+        ),
+        "full_body_kam_receipts_with_procedures": int(
+            structured_kam_summary.get(
+                "full_body_kam_receipts_with_procedures"
+            )
+            or 0
+        ),
     }
     sample = {
         "kam_sections": len(kam_rows),
@@ -454,33 +582,35 @@ def build_audit_procedure_evidence_map(
         "procedure_items_for_linkage_probe": len(linkage_probe_rows),
     }
     required_gaps: list[str] = []
-    if short_count:
-        required_gaps.append("short_kam_body")
-    if procedure_item_count == 0:
-        required_gaps.append("audit_procedure_items")
+    structured_count = int(structured_kam_summary.get("kam_items") or 0)
+    if structured_count == 0:
+        if short_count:
+            required_gaps.append("short_kam_body")
+        if procedure_item_count == 0:
+            required_gaps.append("audit_procedure_items")
     if procedure_item_count > 0 and linked_probe_count == 0:
         required_gaps.append("procedure_evidence_linkages")
 
-    full_body_kams = counts["full_body_kam_items"]
-    full_body_with_procedures = counts[
-        "full_body_kam_items_with_procedures"
+    full_body_receipts = counts["full_body_kam_receipts"]
+    receipts_with_procedures = counts[
+        "full_body_kam_receipts_with_procedures"
     ]
-    if full_body_kams and full_body_with_procedures < full_body_kams:
-        required_gaps.append("full_body_kam_without_procedure")
+    coverage_rate = (
+        round(receipts_with_procedures * 100.0 / full_body_receipts, 1)
+        if full_body_receipts
+        else 0.0
+    )
+    if full_body_receipts and coverage_rate < 80.0:
+        required_gaps.append("procedure_coverage_below_80")
 
-    if (
-        "short_kam_body" in required_gaps
-        or "audit_procedure_items" in required_gaps
-        or "full_body_kam_without_procedure" in required_gaps
-    ):
+    if required_gaps:
         verdict = "fail"
-    elif required_gaps:
-        verdict = "conditional"
     else:
         verdict = "pass"
 
     return {
         "verdict": verdict,
+        "database_status": "available",
         "year": int(year),
         "company": company,
         "market": market,
@@ -495,9 +625,7 @@ def build_audit_procedure_evidence_map(
                 round(linked_probe_count * 100.0 / len(linkage_probe_rows), 1) if linkage_probe_rows else 0.0
             ),
             "procedure_coverage": (
-                round(full_body_with_procedures * 100.0 / full_body_kams, 1)
-                if full_body_kams
-                else 0.0
+                coverage_rate
             ),
         },
         "quality_gaps": {
@@ -512,7 +640,7 @@ def build_audit_procedure_evidence_map(
             "source": "report_sections.audit_report_kam + audit_procedure_items",
             "note": (
                 "This diagnostic does not fetch new raw DART documents; it tests whether cached "
-                "full-body audit-report KAM items can support procedure-level answers. "
+                "full-body audit-report KAM receipts can support procedure-level answers. "
                 "Summary-only, missing, and error receipts are separate quality gaps."
             ),
         },

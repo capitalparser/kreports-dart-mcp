@@ -28,7 +28,6 @@ from kreports.db.engine import engine, get_session
 from kreports.db.models import (
     AccountingNoteChapter,
     AccountingPolicyItem,
-    AuditProcedureItem,
     Auditor,
     BusinessAffiliateAuditor,
     Company,
@@ -45,8 +44,10 @@ from kreports.storage.raw_documents import RawDocumentStore
 from kreports.processor.audit_parser import parse_auditor_from_doc_xml, parse_bsns_year
 from kreports.processor.audit_report_parser import (
     classify_kam_topics,
-    extract_audit_procedure_items,
     extract_audit_report_sections,
+)
+from kreports.processor.audit_procedure_parser import (
+    replace_procedure_steps_for_kam,
 )
 from kreports.processor.kam_parser import (
     PARSER_VERSION,
@@ -703,76 +704,23 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
 
 
 def _persist_audit_procedure_items_from_sections(meta: dict, section_rows: list[dict]) -> int:
-    """Persist procedure-level rows derived from KAM sections."""
+    """Compatibility entrypoint backed only by structured full-body KAMs."""
     require_runtime_write("persist audit procedure items")
-    rows: list[dict] = []
-    now = datetime.utcnow()
-    for section in section_rows:
-        if section.get("section_key") != "kam":
-            continue
-        body = section.get("body_text") or ""
-        topics = classify_kam_topics(body) or [None]
-        procedure_items = extract_audit_procedure_items(body)
-        for ordinal, item in enumerate(procedure_items):
-            text_value = item["procedure_text"]
-            rows.append({
-                "rcept_no": section["rcept_no"],
-                "dcm_no": section.get("dcm_no"),
-                "corp_code": section["corp_code"],
-                "bsns_year": section["bsns_year"],
-                "source_type": section["source_type"],
-                "kam_topic": topics[0],
-                "procedure_type": item["procedure_type"],
-                "procedure_text": text_value,
-                "procedure_hash": _sha1(text_value),
-                "procedure_length": len(text_value),
-                "section_ordinal": section["ordinal"],
-                "procedure_ordinal": ordinal,
-                "fetched_at": now,
-            })
     with get_session() as session:
-        session.execute(
-            text(
-                "DELETE FROM audit_procedure_items "
-                "WHERE rcept_no=:rcept_no AND source_type=:source_type"
-            ),
-            {"rcept_no": meta["rcept_no"], "source_type": meta["source_type"]},
-        )
-        if not rows:
-            return 0
-        stmt = sqlite_insert(AuditProcedureItem).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["rcept_no", "source_type", "section_ordinal", "procedure_ordinal"],
-            set_={
-                "corp_code": stmt.excluded.corp_code,
-                "dcm_no": stmt.excluded.dcm_no,
-                "bsns_year": stmt.excluded.bsns_year,
-                "kam_topic": stmt.excluded.kam_topic,
-                "procedure_type": stmt.excluded.procedure_type,
-                "procedure_text": stmt.excluded.procedure_text,
-                "procedure_hash": stmt.excluded.procedure_hash,
-                "procedure_length": stmt.excluded.procedure_length,
-                "fetched_at": stmt.excluded.fetched_at,
-            },
-        )
-        session.execute(stmt)
-    return len(rows)
-
-
-def _evidence_kam_body(normalized_text: str) -> str:
-    marker = "report_section/kam"
-    start = (normalized_text or "").find(marker)
-    if start < 0:
-        return ""
-    line_start = normalized_text.rfind("\n", 0, start)
-    if line_start < 0:
-        line_start = 0
-    else:
-        line_start += 1
-    next_section = normalized_text.find("\n## report_section/", start + len(marker))
-    if next_section < 0:
-        next_section = len(normalized_text)
-    return normalized_text[line_start:next_section].strip()
+        kam_ids = [
+            int(row[0])
+            for row in (
+                session.query(KamItem.id)
+                .filter(
+                    KamItem.rcept_no == meta["rcept_no"],
+                    KamItem.source_type == meta["source_type"],
+                    KamItem.quality_status == "full_body",
+                )
+                .order_by(KamItem.ordinal, KamItem.id)
+                .all()
+            )
+        ]
+    return sum(replace_procedure_steps_for_kam(kam_id) for kam_id in kam_ids)
 
 
 def _persist_auditors_from_business_report(meta: dict, *, content: str) -> int:
@@ -1428,14 +1376,13 @@ def index_audit_procedures_from_sections(
     limit: int | None = None,
     progress_callback=None,
 ) -> dict:
-    """Build audit-procedure index from already persisted KAM sections."""
+    """Build procedure index from structured full-body KAM items only."""
     sql = """
         SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type,
-               section_key, section_title, body_text, body_hash, body_length,
-               ordinal, fetched_at
-        FROM report_sections
+               ordinal, quality_status
+        FROM kam_items
         WHERE source_type='audit_report'
-          AND section_key='kam'
+          AND quality_status='full_body'
     """
     params: dict[str, object] = {}
     if year is not None:
@@ -1447,59 +1394,18 @@ def index_audit_procedures_from_sections(
         params["limit"] = int(limit)
 
     with engine.connect() as conn:
-        rows = [dict(row) for row in conn.execute(text(sql), params).mappings().all()]
-        source_basis = "report_sections"
-        if not rows:
-            evidence_sql = """
-                SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type,
-                       title AS section_title, normalized_text, text_hash, text_length,
-                       generated_at
-                FROM evidence_documents
-                WHERE source_type='audit_report'
-                  AND normalized_text LIKE '%report_section/kam%'
-            """
-            if year is not None:
-                evidence_sql += " AND bsns_year=:year"
-            evidence_sql += " ORDER BY bsns_year, rcept_no"
-            if limit is not None:
-                evidence_sql += " LIMIT :limit"
-            evidence_rows = conn.execute(text(evidence_sql), params).mappings().all()
-            rows = []
-            for ordinal, row in enumerate(evidence_rows):
-                body_text = _evidence_kam_body(row["normalized_text"])
-                if not body_text:
-                    continue
-                rows.append({
-                    "id": row["id"],
-                    "rcept_no": row["rcept_no"],
-                    "dcm_no": row["dcm_no"],
-                    "corp_code": row["corp_code"],
-                    "bsns_year": row["bsns_year"],
-                    "source_type": row["source_type"],
-                    "section_key": "kam",
-                    "section_title": row["section_title"],
-                    "body_text": body_text,
-                    "body_hash": row["text_hash"],
-                    "body_length": len(body_text),
-                    "ordinal": ordinal,
-                    "fetched_at": row["generated_at"],
-                })
-            source_basis = "evidence_documents"
+        rows = [
+            dict(row)
+            for row in conn.execute(text(sql), params).mappings().all()
+        ]
+    source_basis = "kam_items.full_body"
 
     totals = {"source_basis": source_basis, "total": len(rows), "ok": 0, "failed": 0, "rows_written": 0, "errors": []}
     for idx, row in enumerate(rows, 1):
         if progress_callback:
             progress_callback(idx, totals["total"], row["corp_code"], row["bsns_year"], row["rcept_no"])
-        meta = {
-            "rcept_no": row["rcept_no"],
-            "dcm_no": row.get("dcm_no"),
-            "corp_code": row["corp_code"],
-            "bsns_year": row["bsns_year"],
-            "source_type": row["source_type"],
-            "report_nm": "persisted_report_section",
-        }
         try:
-            count = _persist_audit_procedure_items_from_sections(meta, [row])
+            count = replace_procedure_steps_for_kam(int(row["id"]))
             totals["ok"] += 1
             totals["rows_written"] += count
         except Exception as exc:
