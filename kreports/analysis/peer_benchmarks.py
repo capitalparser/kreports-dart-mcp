@@ -531,6 +531,28 @@ _ALL_METRICS = [
 ]
 
 
+def _with_typed_cohort_metadata(
+    result: dict,
+    cohort: PeerCohort | None,
+) -> dict:
+    if cohort is None:
+        return result
+    return {
+        **result,
+        "cohort_metadata": {
+            "profile": cohort.profile,
+            "requested_year": cohort.requested_year,
+            "fs_div": cohort.fs_div,
+            "total_candidates": cohort.total_candidates,
+            "eligible_count": cohort.eligible_count,
+            "selected_count": len(cohort.members),
+            "exclusion_counts": dict(cohort.exclusion_counts),
+            "denominator_metadata": dict(cohort.denominator_metadata),
+            "limitations": list(cohort.limitations),
+        },
+    }
+
+
 def compare_to_industry_multi(
     company: str,
     metrics: Optional[list[str]] = None,
@@ -540,6 +562,7 @@ def compare_to_industry_multi(
     prefix_len_start: int = 3,
     exclude_other_sectors: bool = True,
     size_bucket_decade: Optional[float] = None,
+    _cohort: PeerCohort | None = None,
 ) -> dict:
     """다지표·다년도 동종업종 분포 + subject percentile.
 
@@ -567,7 +590,11 @@ def compare_to_industry_multi(
           "note": str,
         }
     """
-    corp_code = resolve_corp_code(company)
+    corp_code = (
+        _cohort.subject_corp_code
+        if _cohort is not None
+        else resolve_corp_code(company)
+    )
     if corp_code is None:
         return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
 
@@ -589,18 +616,36 @@ def compare_to_industry_multi(
         return {"error": f"corp_code '{corp_code}' 미등록"}
     subject_name, subject_induty = subject_row[0], subject_row[1]
     requested_fs_div = fs_div
-    if fs_strategy.lower() == "auto":
+    if _cohort is not None and _cohort.fs_div is not None:
+        fs_div = _cohort.fs_div
+    elif fs_strategy.lower() == "auto":
         fs_div = resolve_fs_div_for_company(corp_code, None, "auto")
 
     # Peer 풀은 한 번만 결정 (subject의 최신 Q4 연도 기준)
-    pr = resolve_peers(
-        corp_code,
-        prefix_len_start=prefix_len_start,
-        min_n=5,
-        exclude_other_sectors=exclude_other_sectors,
-        size_bucket_decade=size_bucket_decade,
-        fs_div=fs_div,
-    )
+    if _cohort is not None:
+        pr = PeerResolution(
+            peer_corp_codes=[member.corp_code for member in _cohort.members],
+            matched_prefix_len=prefix_len_start,
+            sector_group=classify_sector(subject_induty),
+            n_peers=len(_cohort.members),
+            excluded_categories=[],
+            size_bucket_applied=size_bucket_decade,
+            resolved_year=(
+                _cohort.requested_year
+                if _cohort.fs_div is not None
+                else None
+            ),
+            note="typed explainable peer cohort",
+        )
+    else:
+        pr = resolve_peers(
+            corp_code,
+            prefix_len_start=prefix_len_start,
+            min_n=5,
+            exclude_other_sectors=exclude_other_sectors,
+            size_bucket_decade=size_bucket_decade,
+            fs_div=fs_div,
+        )
 
     subject_meta = {
         "corp_code": corp_code,
@@ -609,7 +654,7 @@ def compare_to_industry_multi(
     }
 
     if pr.n_peers == 0:
-        return {
+        return _with_typed_cohort_metadata({
             "subject": subject_meta,
             "sector_group": pr.sector_group.value,
             "matched_prefix_len": pr.matched_prefix_len,
@@ -625,7 +670,7 @@ def compare_to_industry_multi(
             "metrics": metrics,
             "results": {},
             "note": pr.note,
-        }
+        }, _cohort)
 
     # 최신 연도: resolve_peers가 산정한 결과 우선, 없으면 (peers + subject)에서 MAX
     latest_year = pr.resolved_year
@@ -645,7 +690,7 @@ def compare_to_industry_multi(
         latest_year = latest_row[0] if latest_row and latest_row[0] else None
 
     if latest_year is None:
-        return {
+        return _with_typed_cohort_metadata({
             "subject": subject_meta,
             "sector_group": pr.sector_group.value,
             "matched_prefix_len": pr.matched_prefix_len,
@@ -661,7 +706,7 @@ def compare_to_industry_multi(
             "metrics": metrics,
             "results": {},
             "note": (pr.note + " · " if pr.note else "") + "최신 Q4 재무 데이터 없음",
-        }
+        }, _cohort)
 
     years = list(range(int(latest_year) - years_back + 1, int(latest_year) + 1))
 
@@ -704,7 +749,7 @@ def compare_to_industry_multi(
                 }
             results[y] = row_y
 
-    return {
+    result = {
         "subject": subject_meta,
         "sector_group": pr.sector_group.value,
         "matched_prefix_len": pr.matched_prefix_len,
@@ -721,6 +766,7 @@ def compare_to_industry_multi(
         "results": results,
         "note": pr.note,
     }
+    return _with_typed_cohort_metadata(result, _cohort)
 
 
 def select_peer_group(

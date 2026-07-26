@@ -34,6 +34,44 @@ _MAX_RETURNED_EXCLUSIONS = 50
 _SIZE_OUTLIER_DECADES = 2.0
 
 
+def _require_tuple(name: str, value: object) -> tuple:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{name} must be a tuple")
+    return value
+
+
+def _validate_pairs(
+    name: str,
+    value: object,
+    *,
+    numeric_values: bool = False,
+) -> None:
+    pairs = _require_tuple(name, value)
+    keys: set[str] = set()
+    for pair in pairs:
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise TypeError(f"{name} entries must be two-item tuples")
+        key, item_value = pair
+        if not isinstance(key, str) or not key:
+            raise TypeError(f"{name} keys must be non-empty strings")
+        if key in keys:
+            raise ValueError(f"{name} keys must be unique")
+        keys.add(key)
+        if numeric_values and item_value is not None:
+            if (
+                not isinstance(item_value, (int, float))
+                or isinstance(item_value, bool)
+                or not math.isfinite(float(item_value))
+            ):
+                raise TypeError(f"{name} values must be finite numbers or None")
+
+
+def _validate_string_tuple(name: str, value: object) -> None:
+    items = _require_tuple(name, value)
+    if any(not isinstance(item, str) or not item for item in items):
+        raise TypeError(f"{name} entries must be non-empty strings")
+
+
 class PeerDatabaseUnavailable(RuntimeError):
     """The runtime database cannot be inspected without risking a write."""
 
@@ -51,6 +89,37 @@ class PeerMember:
     metric_bases: tuple[tuple[str, str], ...] = ()
     limitations: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("corp_code", self.corp_code),
+            ("corp_name", self.corp_name),
+            ("induty_code", self.induty_code),
+        ):
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"{name} must be a non-empty string")
+        if self.fs_div not in {"CFS", "OFS"}:
+            raise ValueError("fs_div must be CFS or OFS")
+        if (
+            not isinstance(self.score, (int, float))
+            or isinstance(self.score, bool)
+            or not math.isfinite(float(self.score))
+        ):
+            raise TypeError("score must be a finite number")
+        _validate_string_tuple("reason_codes", self.reason_codes)
+        _validate_pairs(
+            "score_components",
+            self.score_components,
+            numeric_values=True,
+        )
+        _validate_pairs("metric_values", self.metric_values, numeric_values=True)
+        _validate_pairs("metric_bases", self.metric_bases)
+        if any(
+            not isinstance(value, str) or not value
+            for _key, value in self.metric_bases
+        ):
+            raise TypeError("metric_bases values must be non-empty strings")
+        _validate_string_tuple("limitations", self.limitations)
+
 
 @dataclass(frozen=True)
 class PeerExclusion:
@@ -58,6 +127,19 @@ class PeerExclusion:
     corp_name: str
     reason_code: str
     secondary_reason_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("corp_code", self.corp_code),
+            ("corp_name", self.corp_name),
+            ("reason_code", self.reason_code),
+        ):
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"{name} must be a non-empty string")
+        _validate_string_tuple(
+            "secondary_reason_codes",
+            self.secondary_reason_codes,
+        )
 
 
 @dataclass(frozen=True)
@@ -77,6 +159,85 @@ class PeerCohort:
     score_policy: tuple[tuple[str, str], ...] = ()
     limitations: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.subject_corp_code, str) or not self.subject_corp_code:
+            raise TypeError("subject_corp_code must be a non-empty string")
+        if not isinstance(self.subject_name, str) or not self.subject_name:
+            raise TypeError("subject_name must be a non-empty string")
+        if not isinstance(self.requested_year, int) or isinstance(
+            self.requested_year, bool
+        ):
+            raise TypeError("requested_year must be an integer")
+        if self.profile not in _PEER_PROFILES:
+            raise ValueError(f"unsupported peer profile: {self.profile}")
+        if not 1900 <= self.requested_year <= 9999:
+            raise ValueError("requested_year must be a four-digit year")
+        if self.fs_div not in {None, "CFS", "OFS"}:
+            raise ValueError("fs_div must be CFS, OFS, or None")
+        members = _require_tuple("members", self.members)
+        exclusions = _require_tuple("exclusions", self.exclusions)
+        if any(not isinstance(member, PeerMember) for member in members):
+            raise TypeError("members entries must be PeerMember")
+        if any(
+            not isinstance(exclusion, PeerExclusion)
+            for exclusion in exclusions
+        ):
+            raise TypeError("exclusions entries must be PeerExclusion")
+        _validate_pairs("exclusion_counts", self.exclusion_counts)
+        if any(
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+            for _reason, count in self.exclusion_counts
+        ):
+            raise TypeError("exclusion_counts values must be non-negative integers")
+        for name, value in (
+            ("total_candidates", self.total_candidates),
+            ("eligible_count", self.eligible_count),
+        ):
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise TypeError(f"{name} must be a non-negative integer")
+        if self.eligible_count > self.total_candidates:
+            raise ValueError("eligible_count cannot exceed total_candidates")
+        if len(self.members) > self.eligible_count:
+            raise ValueError("members cannot exceed eligible_count")
+        if len(self.exclusions) > _MAX_RETURNED_EXCLUSIONS:
+            raise ValueError(
+                f"exclusions cannot exceed {_MAX_RETURNED_EXCLUSIONS}"
+            )
+        _validate_pairs(
+            "subject_metrics",
+            self.subject_metrics,
+            numeric_values=True,
+        )
+        _validate_pairs("subject_metric_bases", self.subject_metric_bases)
+        _validate_pairs("score_policy", self.score_policy)
+        _validate_string_tuple("limitations", self.limitations)
+
+    @property
+    def denominator_metadata(
+        self,
+    ) -> tuple[tuple[str, int | bool], ...]:
+        counts = dict(self.exclusion_counts)
+        subject_excluded = counts.get("subject", 0)
+        outside_limit = counts.get("outside_limit", 0)
+        return (
+            ("company_universe", self.total_candidates),
+            ("subject_excluded", subject_excluded),
+            (
+                "candidate_peers",
+                max(0, self.total_candidates - subject_excluded),
+            ),
+            ("common_eligible", self.eligible_count),
+            ("selected", len(self.members)),
+            ("outside_limit", outside_limit),
+            ("outside_limit_is_presentation_exclusion", True),
+        )
+
 
 @dataclass(frozen=True)
 class PeerMetricComparison:
@@ -92,6 +253,52 @@ class PeerMetricComparison:
     confidence: str
     limitations: tuple[str, ...] = ()
     ties: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.metric_key, str) or not self.metric_key:
+            raise TypeError("metric_key must be a non-empty string")
+        _require_tuple("peer_values", self.peer_values)
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            for value in self.peer_values
+        ):
+            raise TypeError("peer_values entries must be finite numbers")
+        for name, value in (
+            ("n", self.n),
+            ("unavailable_count", self.unavailable_count),
+            ("ties", self.ties),
+        ):
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise TypeError(f"{name} must be a non-negative integer")
+        if self.n != len(self.peer_values):
+            raise ValueError("n must equal the number of peer_values")
+        if tuple(sorted(self.peer_values)) != self.peer_values:
+            raise ValueError("peer_values must be sorted")
+        if self.subject_value is not None and (
+            not isinstance(self.subject_value, (int, float))
+            or isinstance(self.subject_value, bool)
+            or not math.isfinite(float(self.subject_value))
+        ):
+            raise TypeError("subject_value must be a finite number or None")
+        if self.percentile is not None and not 0 <= self.percentile <= 100:
+            raise ValueError("percentile must be between 0 and 100")
+        if self.decile is not None and not 1 <= self.decile <= 10:
+            raise ValueError("decile must be between 1 and 10")
+        if not isinstance(self.unit, str) or not self.unit:
+            raise TypeError("unit must be a non-empty string")
+        if self.basis is not None and (
+            not isinstance(self.basis, str) or not self.basis
+        ):
+            raise TypeError("basis must be a non-empty string or None")
+        if not isinstance(self.confidence, str) or not self.confidence:
+            raise TypeError("confidence must be a non-empty string")
+        _validate_string_tuple("limitations", self.limitations)
 
     @property
     def distribution_values(self) -> tuple[float, ...]:
@@ -457,8 +664,17 @@ def _table_columns(read_engine, table_name: str) -> set[str]:
     return {str(column["name"]) for column in inspector.get_columns(table_name)}
 
 
+def _profile_table_available(
+    read_engine,
+    table_name: str,
+    required_columns: set[str],
+) -> bool:
+    columns = _table_columns(read_engine, table_name)
+    return bool(columns) and required_columns <= columns
+
+
 def _resolve_company_row(conn, company: str):
-    return conn.execute(
+    exact_rows = conn.execute(
         text(
             """
             SELECT corp_code, corp_name, stock_code, market, induty_code
@@ -466,20 +682,60 @@ def _resolve_company_row(conn, company: str):
             WHERE corp_code=:company
                OR stock_code=:company
                OR corp_name=:company
-               OR corp_name LIKE :company_like
             ORDER BY
                 CASE
                     WHEN corp_code=:company THEN 0
                     WHEN stock_code=:company THEN 1
-                    WHEN corp_name=:company THEN 2
-                    ELSE 3
+                    ELSE 2
                 END,
                 corp_code
-            LIMIT 1
+            LIMIT 6
             """
         ),
-        {"company": company, "company_like": f"%{company}%"},
-    ).mappings().first()
+        {"company": company},
+    ).mappings().all()
+    if exact_rows:
+        first = exact_rows[0]
+        if first["corp_code"] == company or first["stock_code"] == company:
+            return first
+        if len(exact_rows) == 1:
+            return first
+        _raise_ambiguous_company(company, exact_rows)
+
+    escaped = (
+        str(company)
+        .replace("!", "!!")
+        .replace("%", "!%")
+        .replace("_", "!_")
+    )
+    substring_rows = conn.execute(
+        text(
+            """
+            SELECT corp_code, corp_name, stock_code, market, induty_code
+            FROM companies
+            WHERE corp_name LIKE :company_like ESCAPE '!'
+            ORDER BY corp_code
+            LIMIT 6
+            """
+        ),
+        {"company_like": f"%{escaped}%"},
+    ).mappings().all()
+    if len(substring_rows) == 1:
+        return substring_rows[0]
+    if len(substring_rows) > 1:
+        _raise_ambiguous_company(company, substring_rows)
+    return None
+
+
+def _raise_ambiguous_company(company: str, rows) -> None:
+    identities = ", ".join(
+        f"{row['corp_code']}:{row['corp_name']}"
+        for row in rows[:5]
+    )
+    suffix = ", ..." if len(rows) > 5 else ""
+    raise ValueError(
+        f"ambiguous company '{company}': {identities}{suffix}"
+    )
 
 
 def _financial_metrics(row) -> dict[str, float | None]:
@@ -533,14 +789,30 @@ def _audit_fee_metrics(row, columns: set[str]) -> tuple[dict[str, float | None],
     contract_hours = value("contract_hours")
     legacy_fee = value("audit_fee_m")
     legacy_hours = value("audit_hours")
-    if actual_fee is not None or actual_hours is not None:
-        fee, hours, basis = actual_fee, actual_hours, "actual"
-    elif contract_fee is not None or contract_hours is not None:
-        fee, hours, basis = contract_fee, contract_hours, "contract"
-    elif legacy_fee is not None or legacy_hours is not None:
-        fee, hours, basis = legacy_fee, legacy_hours, "legacy_inferred"
-    else:
+    if all(
+        value is None
+        for value in (
+            actual_fee,
+            actual_hours,
+            contract_fee,
+            contract_hours,
+            legacy_fee,
+            legacy_hours,
+        )
+    ):
         return {}, {}
+    if actual_fee is not None:
+        fee, fee_basis = actual_fee, "actual"
+    elif contract_fee is not None:
+        fee, fee_basis = contract_fee, "contract"
+    else:
+        fee, fee_basis = legacy_fee, "legacy_inferred"
+    if actual_hours is not None:
+        hours, hours_basis = actual_hours, "actual"
+    elif contract_hours is not None:
+        hours, hours_basis = contract_hours, "contract"
+    else:
+        hours, hours_basis = legacy_hours, "legacy_inferred"
     metrics = {
         "audit_fee": fee * 1_000_000 if fee is not None else None,
         "audit_hours": hours,
@@ -552,12 +824,21 @@ def _audit_fee_metrics(row, columns: set[str]) -> tuple[dict[str, float | None],
         "audit_hours_contract": contract_hours,
         "nas_ratio": (
             value("nas_ratio")
-            if basis in {"actual", "legacy_inferred"}
+            if fee_basis in {"actual", "legacy_inferred"}
             else None
         ),
     }
+    exact_bases = {
+        "audit_fee": fee_basis,
+        "audit_hours": hours_basis,
+        "audit_fee_actual": "actual",
+        "audit_hours_actual": "actual",
+        "audit_fee_contract": "contract",
+        "audit_hours_contract": "contract",
+        "nas_ratio": fee_basis,
+    }
     bases = {
-        key: basis
+        key: exact_bases[key]
         for key, metric_value in metrics.items()
         if metric_value is not None
     }
@@ -622,10 +903,9 @@ def _profile_evidence(
 ) -> tuple[bool, dict[str, float | None], dict[str, str], tuple[str, ...]]:
     if profile == "investor":
         return True, {}, {}, ()
-    tables = set(inspect(read_engine).get_table_names())
     if profile == "audit_fee":
         columns = _table_columns(read_engine, "audit_fees")
-        if not columns:
+        if not {"corp_code", "bsns_year"} <= columns:
             return False, {}, {}, ("audit_fee_schema_unavailable",)
         selected = [
             name
@@ -652,28 +932,46 @@ def _profile_evidence(
         metrics, bases = _audit_fee_metrics(row, columns)
         return bool(metrics), metrics, bases, ()
     if profile == "audit_risk":
-        evidence_queries: list[str] = []
-        if "auditors" in tables:
-            evidence_queries.append(
+        evidence_specs = (
+            (
+                "auditors",
+                {"corp_code", "bsns_year", "fs_div"},
                 "SELECT 1 FROM auditors "
-                "WHERE corp_code=:cc AND bsns_year=:year AND fs_div=:fs LIMIT 1"
-            )
-        if "report_sections" in tables:
-            evidence_queries.append(
+                "WHERE corp_code=:cc AND bsns_year=:year AND fs_div=:fs LIMIT 1",
+            ),
+            (
+                "report_sections",
+                {"corp_code", "bsns_year", "source_type"},
                 "SELECT 1 FROM report_sections "
                 "WHERE corp_code=:cc AND bsns_year=:year "
-                "AND source_type='audit_report' LIMIT 1"
-            )
-        if "audit_matter_items" in tables:
-            evidence_queries.append(
+                "AND source_type='audit_report' LIMIT 1",
+            ),
+            (
+                "audit_matter_items",
+                {"corp_code", "bsns_year"},
                 "SELECT 1 FROM audit_matter_items "
-                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1"
-            )
-        if "kam_items" in tables:
-            evidence_queries.append(
+                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1",
+            ),
+            (
+                "kam_items",
+                {"id", "corp_code", "bsns_year"},
                 "SELECT 1 FROM kam_items "
-                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1"
-            )
+                "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1",
+            ),
+        )
+        evidence_queries: list[str] = []
+        limitations: list[str] = []
+        valid_tables: set[str] = set()
+        for table_name, required_columns, query in evidence_specs:
+            if _profile_table_available(
+                read_engine,
+                table_name,
+                required_columns,
+            ):
+                evidence_queries.append(query)
+                valid_tables.add(table_name)
+            else:
+                limitations.append(f"profile_schema_unavailable:{table_name}")
         exists = any(
             conn.execute(
                 text(query),
@@ -682,19 +980,24 @@ def _profile_evidence(
             is not None
             for query in evidence_queries
         )
-        limitations: tuple[str, ...] = ()
-        if "kam_items" not in tables or conn.execute(
+        if "kam_items" not in valid_tables or conn.execute(
             text(
                 "SELECT 1 FROM kam_items "
                 "WHERE corp_code=:cc AND bsns_year=:year LIMIT 1"
             ),
             {"cc": corp_code, "year": year},
         ).first() is None:
-            limitations = ("kam_evidence_unavailable",)
-        return exists, {}, {}, limitations
+            limitations.append("kam_evidence_unavailable")
+        return exists, {}, {}, tuple(dict.fromkeys(limitations))
     if profile == "accounting_policy":
-        if "accounting_policy_items" not in tables:
-            return False, {}, {}, ("accounting_policy_schema_unavailable",)
+        if not _profile_table_available(
+            read_engine,
+            "accounting_policy_items",
+            {"corp_code", "bsns_year", "fs_div", "item_key"},
+        ):
+            return False, {}, {}, (
+                "profile_schema_unavailable:accounting_policy_items",
+            )
         count = conn.execute(
             text(
                 "SELECT COUNT(DISTINCT item_key) FROM accounting_policy_items "
@@ -703,12 +1006,41 @@ def _profile_evidence(
             {"cc": corp_code, "year": year, "fs": fs_div},
         ).scalar_one()
         return count > 0, {}, {}, ()
-    if "kam_items" not in tables or "audit_procedure_items" not in tables:
-        return False, {}, {}, ("kam_procedure_schema_unavailable",)
+    missing_profile_tables = [
+        table_name
+        for table_name, required_columns in (
+            (
+                "kam_items",
+                {"id", "corp_code", "bsns_year", "normalized_topic"},
+            ),
+            (
+                "audit_procedure_items",
+                {
+                    "corp_code",
+                    "bsns_year",
+                    "kam_item_id",
+                    "procedure_type",
+                },
+            ),
+        )
+        if not _profile_table_available(
+            read_engine,
+            table_name,
+            required_columns,
+        )
+    ]
+    if missing_profile_tables:
+        return False, {}, {}, tuple(
+            f"profile_schema_unavailable:{table_name}"
+            for table_name in missing_profile_tables
+        )
     count = conn.execute(
         text(
-            "SELECT COUNT(*) FROM audit_procedure_items "
-            "WHERE corp_code=:cc AND bsns_year=:year"
+            "SELECT COUNT(*) FROM audit_procedure_items p "
+            "JOIN kam_items k ON k.id=p.kam_item_id "
+            "AND k.corp_code=p.corp_code AND k.bsns_year=p.bsns_year "
+            "WHERE p.corp_code=:cc AND p.bsns_year=:year "
+            "AND p.kam_item_id IS NOT NULL"
         ),
         {"cc": corp_code, "year": year},
     ).scalar_one()
@@ -726,7 +1058,38 @@ def _profile_overlap(
     if profile == "accounting_policy":
         table, field, extra = "accounting_policy_items", "item_key", "AND fs_div=:fs"
     elif profile == "kam_procedure":
-        table, field, extra = "audit_procedure_items", "procedure_type", ""
+        params = {
+            "subject": subject_corp_code,
+            "candidate": candidate_corp_code,
+            "year": year,
+        }
+
+        def linked_keys(corp_param: str) -> set[str]:
+            return {
+                f"{row[0]}:{row[1] or 'unknown'}"
+                for row in conn.execute(
+                    text(
+                        "SELECT DISTINCT p.procedure_type, k.normalized_topic "
+                        "FROM audit_procedure_items p "
+                        "JOIN kam_items k ON k.id=p.kam_item_id "
+                        "AND k.corp_code=p.corp_code "
+                        "AND k.bsns_year=p.bsns_year "
+                        f"WHERE p.corp_code=:{corp_param} "
+                        "AND p.bsns_year=:year AND p.kam_item_id IS NOT NULL"
+                    ),
+                    params,
+                )
+                if row[0]
+            }
+
+        subject_keys = linked_keys("subject")
+        candidate_keys = linked_keys("candidate")
+        union = subject_keys | candidate_keys
+        return (
+            round(len(subject_keys & candidate_keys) / len(union), 6)
+            if union
+            else 0.0
+        )
     else:
         return 1.0
     params = {
@@ -942,15 +1305,6 @@ def build_peer_cohort(
                 if value is not None
             }
             candidate_bases.update(profile_bases)
-            if profile == "audit_fee":
-                subject_fee_basis = subject_bases.get("audit_fee")
-                candidate_fee_basis = candidate_bases.get("audit_fee")
-                if (
-                    subject_fee_basis is None
-                    or candidate_fee_basis != subject_fee_basis
-                ):
-                    exclude(candidate, "missing_required_metric", "audit_fee_basis_mismatch")
-                    continue
             components = {
                 "industry_specificity": _industry_specificity(
                     subject_industry, candidate_industry
@@ -1071,6 +1425,10 @@ def compare_metric(
     values.sort()
     n = len(values)
     limitations: list[str] = list(cohort.limitations)
+    if cohort.eligible_count > len(cohort.members):
+        limitations.append(
+            f"cohort_truncated:{len(cohort.members)}/{cohort.eligible_count}"
+        )
     if subject_value is None:
         limitations.append("subject_metric_unavailable")
     if unavailable:
@@ -1160,7 +1518,9 @@ def cohort_to_peer_group(cohort: PeerCohort) -> dict:
             "fs_div": cohort.fs_div,
             "total_candidates": cohort.total_candidates,
             "eligible_count": cohort.eligible_count,
+            "selected_count": len(cohort.members),
             "exclusion_counts": dict(cohort.exclusion_counts),
+            "denominator_metadata": dict(cohort.denominator_metadata),
             "limitations": list(cohort.limitations),
             "subject_metric_count": sum(
                 value is not None for value in subject_metrics.values()

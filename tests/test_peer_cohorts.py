@@ -109,6 +109,59 @@ def test_metric_rank_thresholds_are_fail_closed(
         assert comparison.confidence == "insufficient_n"
 
 
+def test_metric_comparison_discloses_selected_cohort_truncation(temp_engine):
+    from kreports.analysis.peer import build_peer_cohort, compare_metric
+
+    _seed_financial_cohort(temp_engine, peer_count=100)
+    cohort = build_peer_cohort("00000001", 2024, "investor", 5)
+    comparison = compare_metric(cohort, "operating_margin")
+
+    assert cohort.eligible_count == 100
+    assert len(cohort.members) == 5
+    assert dict(cohort.denominator_metadata) == {
+        "company_universe": 101,
+        "subject_excluded": 1,
+        "candidate_peers": 100,
+        "common_eligible": 100,
+        "selected": 5,
+        "outside_limit": 95,
+        "outside_limit_is_presentation_exclusion": True,
+    }
+    assert "cohort_truncated:5/100" in comparison.limitations
+    assert comparison.n == 5
+    assert comparison.confidence == "sufficient_n"
+
+
+def test_typed_constructors_reject_mutable_or_invalid_contracts():
+    from kreports.analysis.peer import PeerCohort, PeerMember
+
+    with pytest.raises(TypeError, match="reason_codes must be a tuple"):
+        PeerMember(
+            corp_code="00000001",
+            corp_name="A",
+            induty_code="26410",
+            fs_div="CFS",
+            score=1.0,
+            reason_codes=["listed"],  # type: ignore[arg-type]
+            score_components=(),
+            metric_values=(),
+        )
+
+    with pytest.raises(ValueError, match="unsupported peer profile"):
+        PeerCohort(
+            subject_corp_code="00000001",
+            subject_name="A",
+            requested_year=2024,
+            profile="invalid",
+            fs_div="CFS",
+            members=(),
+            exclusions=(),
+            exclusion_counts=(),
+            total_candidates=1,
+            eligible_count=0,
+        )
+
+
 def test_unknown_profile_and_metric_fail_closed(temp_engine):
     from kreports.analysis.peer import build_peer_cohort, compare_metric
 
@@ -263,6 +316,8 @@ def test_audit_fee_profile_never_mixes_actual_and_contract_populations(temp_engi
                     bsns_year=2024,
                     actual_fee_m=100,
                     actual_hours=1_000,
+                    contract_fee_m=95,
+                    contract_hours=950,
                     audit_fee_m=100,
                     audit_hours=1_000,
                     compatibility_basis="actual",
@@ -289,13 +344,21 @@ def test_audit_fee_profile_never_mixes_actual_and_contract_populations(temp_engi
         )
 
     cohort = build_peer_cohort("00000001", 2024, "audit_fee", 10)
-    comparison = compare_metric(cohort, "audit_fee")
+    selected = compare_metric(cohort, "audit_fee")
+    contract = compare_metric(cohort, "audit_fee_contract")
 
-    assert [member.corp_code for member in cohort.members] == ["00000002"]
-    assert dict(cohort.exclusion_counts)["missing_required_metric"] == 1
-    assert comparison.basis == "actual"
-    assert comparison.subject_value == 100_000_000
-    assert comparison.peer_values == (110_000_000.0,)
+    assert {member.corp_code for member in cohort.members} == {
+        "00000002",
+        "00000003",
+    }
+    assert selected.basis == "actual"
+    assert selected.subject_value == 100_000_000
+    assert selected.peer_values == (110_000_000.0,)
+    assert selected.unavailable_count == 1
+    assert contract.basis == "contract"
+    assert contract.subject_value == 95_000_000
+    assert contract.peer_values == (90_000_000.0,)
+    assert contract.unavailable_count == 1
 
 
 @pytest.mark.parametrize(
@@ -309,6 +372,7 @@ def test_auditor_profiles_require_requested_year_evidence(temp_engine, profile):
         AccountingPolicyItem,
         Auditor,
         AuditProcedureItem,
+        KamItem,
     )
 
     _seed_financial_cohort(temp_engine, peer_count=2)
@@ -335,12 +399,28 @@ def test_auditor_profiles_require_requested_year_evidence(temp_engine, profile):
                     )
                 )
             else:
+                kam = KamItem(
+                    corp_code=corp_code,
+                    bsns_year=2024,
+                    rcept_no=f"R{corp_code}",
+                    source_type="audit_report",
+                    ordinal=1,
+                    normalized_topic="revenue",
+                    full_body_hash=f"H{corp_code}",
+                    full_body_length=100,
+                    source_basis="full_body",
+                    quality_status="verified",
+                )
+                session.add(kam)
+                session.flush()
                 session.add(
                     AuditProcedureItem(
                         corp_code=corp_code,
                         bsns_year=2024,
                         rcept_no=f"R{corp_code}",
                         source_type="audit_report",
+                        kam_item_id=kam.id,
+                        kam_topic="revenue",
                         procedure_type="inspection",
                         procedure_text="inspected invoices",
                         section_ordinal=1,
@@ -351,6 +431,65 @@ def test_auditor_profiles_require_requested_year_evidence(temp_engine, profile):
     cohort = build_peer_cohort("00000001", 2024, profile, 10)
 
     assert [member.corp_code for member in cohort.members] == ["00000002"]
+    assert dict(cohort.exclusion_counts)["missing_profile_evidence"] == 1
+
+
+def test_kam_procedure_profile_requires_linked_kam_row(temp_engine):
+    from kreports.analysis.peer import build_peer_cohort
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditProcedureItem, KamItem
+
+    _seed_financial_cohort(temp_engine, peer_count=2)
+    with get_session() as session:
+        linked: dict[str, KamItem] = {}
+        for corp_code in ("00000001", "00000003"):
+            kam = KamItem(
+                corp_code=corp_code,
+                bsns_year=2024,
+                rcept_no=f"R{corp_code}",
+                source_type="audit_report",
+                ordinal=1,
+                normalized_topic="revenue",
+                full_body_hash=f"H{corp_code}",
+                full_body_length=100,
+                source_basis="full_body",
+                quality_status="verified",
+            )
+            session.add(kam)
+            session.flush()
+            linked[corp_code] = kam
+            session.add(
+                AuditProcedureItem(
+                    corp_code=corp_code,
+                    bsns_year=2024,
+                    rcept_no=f"R{corp_code}",
+                    source_type="audit_report",
+                    kam_item_id=kam.id,
+                    kam_topic="revenue",
+                    procedure_type="inspection",
+                    procedure_text="inspected invoices",
+                    section_ordinal=1,
+                    procedure_ordinal=1,
+                )
+            )
+        session.add(
+            AuditProcedureItem(
+                corp_code="00000002",
+                bsns_year=2024,
+                rcept_no="R00000002",
+                source_type="audit_report",
+                kam_item_id=None,
+                kam_topic="revenue",
+                procedure_type="inspection",
+                procedure_text="unlinked procedure",
+                section_ordinal=1,
+                procedure_ordinal=1,
+            )
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "kam_procedure", 10)
+
+    assert [member.corp_code for member in cohort.members] == ["00000003"]
     assert dict(cohort.exclusion_counts)["missing_profile_evidence"] == 1
 
 
@@ -399,6 +538,44 @@ def test_requested_year_is_never_replaced_by_a_newer_year(temp_engine):
     assert cohort.fs_div is None
     assert cohort.members == ()
     assert "subject_year_unavailable" in cohort.limitations
+
+
+def test_company_lookup_rejects_ambiguous_and_escapes_like_wildcards(temp_engine):
+    from kreports.analysis.peer import build_peer_cohort
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        for index, name in enumerate(
+            ("Alpha Holdings", "Beta Holdings", "A%Corp", "AXCorp"),
+            start=1,
+        ):
+            corp_code = f"{index:08d}"
+            session.add(
+                Company(
+                    corp_code=corp_code,
+                    stock_code=f"{index:06d}",
+                    corp_name=name,
+                    induty_code="26410",
+                )
+            )
+            session.add(
+                Financial(
+                    corp_code=corp_code,
+                    year=2024,
+                    quarter=4,
+                    fs_div="CFS",
+                    revenue=100,
+                    operating_profit=10,
+                    total_assets=200,
+                )
+            )
+
+    with pytest.raises(ValueError, match="ambiguous company.*Alpha Holdings.*Beta Holdings"):
+        build_peer_cohort("Holdings", 2024, "investor", 5)
+
+    literal = build_peer_cohort("%Corp", 2024, "investor", 5)
+    assert literal.subject_name == "A%Corp"
 
 
 def test_missing_and_pre_migration_databases_do_not_create_or_change_files(
@@ -464,3 +641,63 @@ def test_nonempty_wal_fails_closed_without_file_changes(monkeypatch, tmp_path):
         assert after == before
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize(
+    ("profile", "partial_table"),
+    [
+        ("audit_risk", "auditors"),
+        ("audit_risk", "report_sections"),
+        ("audit_risk", "audit_matter_items"),
+        ("audit_risk", "kam_items"),
+        ("accounting_policy", "accounting_policy_items"),
+        ("kam_procedure", "audit_procedure_items"),
+    ],
+)
+def test_partial_profile_tables_fail_closed_without_operational_error(
+    temp_engine,
+    profile,
+    partial_table,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text(f"DROP TABLE {partial_table}"))
+        connection.execute(text(f"CREATE TABLE {partial_table} (id INTEGER PRIMARY KEY)"))
+
+    cohort = build_peer_cohort("00000001", 2024, profile, 5)
+
+    assert f"profile_schema_unavailable:{partial_table}" in cohort.limitations
+    assert cohort.members == ()
+
+
+def test_real_peer_facade_propagates_typed_cohort_metadata_to_answer_pack(
+    temp_engine,
+):
+    from kreports.analysis import api
+    from kreports.analysis.peer import build_peer_cohort
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    _seed_financial_cohort(temp_engine, peer_count=5)
+    cohort = build_peer_cohort("00000001", 2024, "investor", 3)
+
+    result = api.compare_to_industry_multi(
+        "00000001",
+        metrics=["영업이익률"],
+        years_back=1,
+        _cohort=cohort,
+    )
+    pack = build_answer_pack("compare_to_industry_multi", result)
+
+    assert result["results"][2024]["영업이익률"]["n"] == 3
+    assert result["cohort_metadata"]["selected_count"] == 3
+    assert result["cohort_metadata"]["eligible_count"] == 5
+    table = next(
+        table
+        for table in pack["tables"]
+        if table["id"] == "peer_cohort_metadata"
+    )
+    assert table["rows"][0]["profile"] == "investor"

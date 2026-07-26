@@ -507,8 +507,16 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 "fs_div": cohort_metadata.get("fs_div"),
                 "total_candidates": cohort_metadata.get("total_candidates"),
                 "eligible_count": cohort_metadata.get("eligible_count"),
+                "selected_count": cohort_metadata.get("selected_count"),
                 "exclusion_reason": reason,
                 "exclusion_count": count,
+                "exclusion_scope": (
+                    "presentation"
+                    if reason == "outside_limit"
+                    else "universe"
+                    if reason == "subject"
+                    else "common_eligibility"
+                ),
             }
             for reason, count in sorted(exclusion_counts.items())
         ] or [{
@@ -517,8 +525,10 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             "fs_div": cohort_metadata.get("fs_div"),
             "total_candidates": cohort_metadata.get("total_candidates"),
             "eligible_count": cohort_metadata.get("eligible_count"),
+            "selected_count": cohort_metadata.get("selected_count"),
             "exclusion_reason": None,
             "exclusion_count": 0,
+            "exclusion_scope": None,
         }]
         pack["tables"].append(_table(
             "peer_cohort_metadata",
@@ -529,8 +539,10 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("fs_div", "재무제표 기준"),
                 ("total_candidates", "전체 후보"),
                 ("eligible_count", "적격 후보"),
+                ("selected_count", "선정 후보"),
                 ("exclusion_reason", "제외 사유"),
                 ("exclusion_count", "제외 수"),
+                ("exclusion_scope", "제외 단계"),
             ],
             metadata_rows,
         ))

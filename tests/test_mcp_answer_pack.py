@@ -15,6 +15,7 @@ def test_peer_answer_pack_surfaces_typed_cohort_denominators_conditionally():
                 "fs_div": "CFS",
                 "total_candidates": 20,
                 "eligible_count": 8,
+                "selected_count": 5,
                 "exclusion_counts": {"year_unavailable": 4},
             },
         },
@@ -30,8 +31,10 @@ def test_peer_answer_pack_surfaces_typed_cohort_denominators_conditionally():
             "fs_div": "CFS",
             "total_candidates": 20,
             "eligible_count": 8,
+            "selected_count": 5,
             "exclusion_reason": "year_unavailable",
             "exclusion_count": 4,
+            "exclusion_scope": "common_eligibility",
         }
     ]
 
