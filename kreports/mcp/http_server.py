@@ -11,8 +11,6 @@ import logging
 import os
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
-from typing import Any
-
 from mcp.server.fastmcp.server import StreamableHTTPASGIApp
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -22,6 +20,8 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 from kreports.mcp.server import server
+from kreports.mcp.prompts import list_prompts
+from kreports.mcp.resources import list_resource_templates, list_resources
 from kreports.mcp.tools import ALL_TOOLS
 from kreports.quality.release_gate import evaluate_release_gate, runtime_db_unavailable_report
 
@@ -96,6 +96,18 @@ async def _health(_: Request) -> JSONResponse:
             "transport": "streamable-http",
             "tool_count": len(ALL_TOOLS),
             "tools": [tool.name for tool in ALL_TOOLS],
+            "resource_count": (
+                len(list_resources()) + len(list_resource_templates())
+            ),
+            "resources": [
+                resource.uri for resource in list_resources()
+            ],
+            "resource_templates": [
+                resource.uri_template
+                for resource in list_resource_templates()
+            ],
+            "prompt_count": len(list_prompts()),
+            "prompts": [prompt.name for prompt in list_prompts()],
         }
     )
 
