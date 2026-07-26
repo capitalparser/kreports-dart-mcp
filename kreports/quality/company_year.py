@@ -25,6 +25,9 @@ from kreports.db.models import (
     ExtractionRun,
     FetchLog,
     FinancialFactCompact,
+    GroupEntityRecord,
+    GroupRelationshipRecord,
+    GroupComponentMetricRecord,
     ReportDocument,
     ReportSection,
     SourceDocument,
@@ -516,6 +519,43 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
     if fetch_outcome == "error":
         return "error", "D"
     with get_session() as session:
+        canonical_entity_count = int(
+            session.query(func.count(GroupEntityRecord.id))
+            .filter(
+                GroupEntityRecord.parent_corp_code == corp_code,
+                GroupEntityRecord.effective_year == year,
+            )
+            .scalar()
+            or 0
+        )
+        canonical_relationships = (
+            session.query(
+                GroupRelationshipRecord.child_entity_key,
+                GroupRelationshipRecord.ownership_pct,
+            )
+            .filter(
+                GroupRelationshipRecord.parent_corp_code == corp_code,
+                GroupRelationshipRecord.effective_year == year,
+            )
+            .all()
+        )
+        canonical_metrics = (
+            session.query(
+                GroupComponentMetricRecord.entity_key,
+                GroupComponentMetricRecord.metric_key,
+                GroupComponentMetricRecord.share_pct,
+                GroupComponentMetricRecord.denominator_amount,
+                GroupComponentMetricRecord.denominator_unit,
+                GroupComponentMetricRecord.denominator_source_rcept_no,
+                GroupComponentMetricRecord.numerator_source_rcept_no,
+                GroupComponentMetricRecord.qsc_status,
+            )
+            .filter(
+                GroupComponentMetricRecord.parent_corp_code == corp_code,
+                GroupComponentMetricRecord.effective_year == year,
+            )
+            .all()
+        )
         component_count = int(
             session.query(func.count(BusinessAffiliateAuditor.id))
             .filter(
@@ -525,13 +565,41 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             .scalar()
             or 0
         )
+    if canonical_entity_count and canonical_relationships:
+        child_keys = {
+            relationship.child_entity_key
+            for relationship in canonical_relationships
+        }
+        metrics_by_child: dict[str, dict[str, tuple]] = (
+            defaultdict(dict)
+        )
+        for metric in canonical_metrics:
+            metrics_by_child[metric.entity_key][metric.metric_key] = metric
+        ownership_complete = all(
+            relationship.ownership_pct is not None
+            for relationship in canonical_relationships
+        )
+        evidence_complete = bool(child_keys) and all(
+            {
+                "assets", "revenue",
+            }.issubset(metrics_by_child.get(child_key, {}))
+            and all(
+                metric.share_pct is not None
+                and metric.denominator_amount is not None
+                and metric.denominator_unit
+                and metric.denominator_source_rcept_no
+                and metric.numerator_source_rcept_no
+                and metric.qsc_status in {"qsc", "not_qsc"}
+                for metric in metrics_by_child[child_key].values()
+            )
+            for child_key in child_keys
+        )
+        if ownership_complete and evidence_complete:
+            return "available", "A"
+        return "partial", "D"
     if not component_count:
         return fetch_outcome or "missing", "D"
-    # QSC classifications currently exist only as transient API calculations.
-    # The affiliate ledger has no receipt-bound qsc/not_qsc field, component
-    # revenue, or FS-division denominator identity.  Amounts therefore cannot
-    # prove a classification, and Group A is withheld until canonical evidence
-    # is persisted.
+    # Legacy affiliate rows and transient amounts cannot prove QSC.
     return "partial", "D"
 
 

@@ -25,6 +25,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_05_kam_items",
         "20260711_06_audit_procedure_linkage",
         "20260711_07_audit_fee_availability",
+        "20260711_08_group_audit_graph",
     ]
     assert second == []
 
@@ -295,7 +296,7 @@ def test_audit_fee_availability_migration_is_append_only_and_nullable(temp_engin
     assert _checksum(MIGRATIONS[5]) == (
         "d35015b9c185fcf69b62fcf74224cc21b2607ea61047a0505b588bbc1e8cd637"
     )
-    assert MIGRATIONS[-1].revision == "20260711_07_audit_fee_availability"
+    assert MIGRATIONS[6].revision == "20260711_07_audit_fee_availability"
     columns = {
         column["name"]: column
         for column in inspect(temp_engine).get_columns("audit_fees")

@@ -259,6 +259,116 @@ MIGRATIONS = (
             ),
         ),
     ),
+    Migration(
+        revision="20260711_08_group_audit_graph",
+        description="Add receipt-bound group audit entity graph",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS group_entities (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              parent_corp_code VARCHAR(8) NOT NULL,
+              effective_year SMALLINT NOT NULL,
+              entity_key VARCHAR(120) NOT NULL,
+              original_name VARCHAR(300) NOT NULL,
+              normalized_name VARCHAR(300) NOT NULL,
+              resolved_corp_code VARCHAR(8),
+              stock_code VARCHAR(6),
+              market VARCHAR(10),
+              resolution_status VARCHAR(24) NOT NULL,
+              resolution_reason VARCHAR(80) NOT NULL,
+              listed_state VARCHAR(20),
+              component_auditor_name VARCHAR(100),
+              component_auditor_year SMALLINT,
+              component_auditor_rcept_no VARCHAR(80),
+              auditor_gap_reason VARCHAR(80),
+              source_rcept_no VARCHAR(80) NOT NULL,
+              source_table VARCHAR(80) NOT NULL,
+              source_ordinal SMALLINT NOT NULL,
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_group_entity_source
+                UNIQUE (parent_corp_code, effective_year, source_rcept_no,
+                        source_table, source_ordinal, entity_key)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_entity_parent_year
+            ON group_entities (parent_corp_code, effective_year)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_entity_resolved_year
+            ON group_entities (resolved_corp_code, effective_year)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS group_relationships (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              parent_corp_code VARCHAR(8) NOT NULL,
+              effective_year SMALLINT NOT NULL,
+              relationship_key VARCHAR(160) NOT NULL,
+              parent_entity_key VARCHAR(120) NOT NULL,
+              child_entity_key VARCHAR(120) NOT NULL,
+              relation_type VARCHAR(40) NOT NULL,
+              ownership_pct FLOAT,
+              source_rcept_no VARCHAR(80) NOT NULL,
+              source_table VARCHAR(80) NOT NULL,
+              source_ordinal SMALLINT NOT NULL,
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_group_relationship_source
+                UNIQUE (parent_corp_code, effective_year, source_rcept_no,
+                        source_table, source_ordinal, relationship_key)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_relationship_parent_year
+            ON group_relationships (parent_corp_code, effective_year)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_relationship_nodes
+            ON group_relationships (parent_entity_key, child_entity_key)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS group_component_metrics (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              parent_corp_code VARCHAR(8) NOT NULL,
+              effective_year SMALLINT NOT NULL,
+              metric_identity VARCHAR(180) NOT NULL,
+              entity_key VARCHAR(120) NOT NULL,
+              metric_key VARCHAR(40) NOT NULL,
+              amount FLOAT,
+              unit VARCHAR(30),
+              numerator_source_rcept_no VARCHAR(80),
+              numerator_source_table VARCHAR(80),
+              denominator_amount FLOAT,
+              denominator_unit VARCHAR(30),
+              denominator_source_rcept_no VARCHAR(80),
+              denominator_source_table VARCHAR(80),
+              fs_div VARCHAR(3),
+              period VARCHAR(40),
+              elimination_basis VARCHAR(40),
+              share_pct FLOAT,
+              qsc_status VARCHAR(20) NOT NULL,
+              qsc_basis VARCHAR(200) NOT NULL DEFAULT '',
+              qsc_threshold_pct FLOAT NOT NULL DEFAULT 10.0,
+              quality_status VARCHAR(24) NOT NULL,
+              gap_reason VARCHAR(80),
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_group_metric_source
+                UNIQUE (parent_corp_code, effective_year, metric_identity)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_metric_parent_year
+            ON group_component_metrics (parent_corp_code, effective_year)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_metric_entity_kind
+            ON group_component_metrics (entity_key, metric_key)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_group_metric_qsc_year
+            ON group_component_metrics (effective_year, qsc_status)
+            """,
+        ),
+    ),
 )
 
 

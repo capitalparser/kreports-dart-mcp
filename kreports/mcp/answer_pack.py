@@ -289,7 +289,12 @@ def _build_investor_signals_pack(result: dict[str, Any]) -> dict[str, Any]:
 def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
     subject = _subject_label(result)
     year = result.get("bsns_year")
-    subsidiaries = [row for row in result.get("subsidiaries") or [] if isinstance(row, dict)]
+    graph = result.get("group_graph") if isinstance(result.get("group_graph"), dict) else {}
+    graph_rows = graph.get("entities") if isinstance(graph.get("entities"), list) else []
+    subsidiaries = [
+        row for row in (graph_rows or result.get("subsidiaries") or [])
+        if isinstance(row, dict)
+    ]
     pack = _base_pack(f"{subject} 연결실체 구조", result)
     rows = []
     for item in subsidiaries:
@@ -304,7 +309,16 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
             "revenue_share_pct": item.get("revenue_share_pct"),
             "qsc_status": item.get("qsc_status"),
             "auditor_nm": auditor.get("auditor_nm"),
+            **({
+                "source_rcept_no": item.get("source_rcept_no"),
+                "parent_entity_key": item.get("parent_entity_key"),
+                "entity_key": item.get("entity_key"),
+            } if graph_rows else {}),
         })
+        if item.get("asset_amount_m") is None and item.get("asset_amount") is not None:
+            rows[-1]["asset_amount_m"] = float(item["asset_amount"]) / 1_000_000
+        if item.get("revenue_amount_m") is None and item.get("revenue_amount") is not None:
+            rows[-1]["revenue_amount_m"] = float(item["revenue_amount"]) / 1_000_000
     if rows:
         pack["tables"].append(_table(
             "subsidiary_contribution",
@@ -319,6 +333,7 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("revenue_share_pct", "매출비중"),
                 ("qsc_status", "QSC"),
                 ("auditor_nm", "감사인"),
+                *((("source_rcept_no", "출처 접수번호"),) if graph_rows else ()),
             ],
             rows,
         ))
@@ -340,21 +355,48 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
         "id": "subsidiary_structure",
         "type": "mermaid",
         "title": "연결실체 구조도",
-        "definition": _subsidiary_mermaid(subject, year, subsidiaries),
+        "definition": _subsidiary_mermaid(
+            subject, year, subsidiaries,
+            canonical=bool(graph_rows),
+        ),
     })
+    warnings = []
+    if len(subsidiaries) > 8:
+        warnings.append(f"graph_nodes_omitted:{len(subsidiaries) - 8}")
+    if result.get("truncated") or graph.get("truncated"):
+        warnings.append("upstream_result_truncated")
+    if warnings:
+        pack["warnings"] = warnings
     return pack
 
 
-def _subsidiary_mermaid(subject: str, year: Any, subsidiaries: list[dict[str, Any]]) -> str:
+def _subsidiary_mermaid(
+    subject: str,
+    year: Any,
+    subsidiaries: list[dict[str, Any]],
+    *,
+    canonical: bool = False,
+) -> str:
     lines = ["flowchart TD", f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]']
-    for idx, item in enumerate(subsidiaries[:8], start=1):
+    visible = subsidiaries[:8]
+    node_ids = {
+        str(item.get("entity_key") or f"row:{idx}"): f"N{idx}"
+        for idx, item in enumerate(visible, start=1)
+    }
+    for idx, item in enumerate(visible, start=1):
         label = (
             f"{item.get('relation') or '-'} / 지분율 {_fmt_pct(item.get('ownership_pct'))}<br/>"
             f"자산 {_fmt_pct(item.get('asset_share_pct'))} / 매출 {_fmt_pct(item.get('revenue_share_pct'))}"
         )
         qsc = _qsc_label(item.get("qsc_status"))
+        parent_key = str(item.get("parent_entity_key") or "")
+        parent_node = node_ids.get(parent_key, "P") if canonical else "P"
         lines.append(
-            f'  P -->|"{_mermaid_label(label)}"| N{idx}["{_mermaid_label(item.get("name"))}<br/>{_mermaid_label(qsc)}"]'
+            f'  {parent_node} -->|"{_mermaid_label(label)}"| N{idx}["{_mermaid_label(item.get("name"))}<br/>{_mermaid_label(qsc)}"]'
+        )
+    if len(subsidiaries) > len(visible):
+        lines.append(
+            f'  OMIT["{len(subsidiaries) - len(visible)}개 노드는 가독성을 위해 생략"]'
         )
     if not subsidiaries:
         lines.append('  P -->|"캐시 없음"| N0["연결/투자 실체 미확보"]')

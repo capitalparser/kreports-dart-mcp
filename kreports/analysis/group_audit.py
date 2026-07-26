@@ -12,6 +12,11 @@ from kreports.db.models import BusinessAffiliateAuditor, Disclosure
 
 from kreports.analysis._shared import _clean_dict, _has_db_column, _has_db_table, _pct
 from kreports.analysis.company_profile import resolve_company_identifier
+from kreports.analysis.group_graph import (
+    GroupGraphUnavailable,
+    build_group_graph,
+    classify_qsc,
+)
 
 
 _SUBSIDIARY_SLIM_FIELDS = (
@@ -38,16 +43,68 @@ _QSC_CRITERION = {
 
 def _classify_qsc(asset_share_pct: float | None, revenue_share_pct: float | None) -> dict:
     """Classify Quantitatively Significant Component using the configured group-audit threshold."""
-    basis: list[str] = []
-    if asset_share_pct is not None and asset_share_pct >= _QSC_THRESHOLD_PCT:
-        basis.append(f"asset_share_pct>={_QSC_THRESHOLD_PCT}")
-    if revenue_share_pct is not None and revenue_share_pct >= _QSC_THRESHOLD_PCT:
-        basis.append(f"revenue_share_pct>={_QSC_THRESHOLD_PCT}")
-    if basis:
-        return {"is_qsc": True, "qsc_status": "qsc", "qsc_basis": basis}
-    if asset_share_pct is not None and revenue_share_pct is not None:
-        return {"is_qsc": False, "qsc_status": "not_qsc", "qsc_basis": []}
-    return {"is_qsc": None, "qsc_status": "undetermined", "qsc_basis": []}
+    result = classify_qsc(asset_share_pct, revenue_share_pct)
+    return {
+        "is_qsc": True if result.status == "qsc" else False
+        if result.status == "not_qsc" else None,
+        "qsc_status": result.status,
+        "qsc_basis": list(result.basis),
+    }
+
+
+def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
+    if year is None:
+        return None
+    try:
+        graph = build_group_graph(corp_code, year)
+    except GroupGraphUnavailable:
+        return None
+    if not graph.entities:
+        return None
+    entities = {entity.entity_key: entity for entity in graph.entities}
+    metrics: dict[str, dict[str, Any]] = {}
+    for metric in graph.metrics:
+        metrics.setdefault(metric.entity_key, {})[metric.metric_key] = metric
+    rows = []
+    for edge in graph.relationships:
+        entity = entities[edge.child_entity_key]
+        by_metric = metrics.get(entity.entity_key, {})
+        asset = by_metric.get("assets")
+        revenue = by_metric.get("revenue")
+        qsc_status = (
+            asset.qsc_status if asset is not None
+            else revenue.qsc_status if revenue is not None
+            else "undetermined"
+        )
+        rows.append({
+            "entity_key": entity.entity_key,
+            "parent_entity_key": edge.parent_entity_key,
+            "name": entity.original_name,
+            "relation": edge.relation_type,
+            "ownership_pct": edge.ownership_pct,
+            "asset_amount": asset.amount if asset else None,
+            "asset_share_pct": asset.share_pct if asset else None,
+            "revenue_amount": revenue.amount if revenue else None,
+            "revenue_share_pct": revenue.share_pct if revenue else None,
+            "qsc_status": qsc_status,
+            "qsc_basis": list(asset.qsc_basis if asset else revenue.qsc_basis if revenue else ()),
+            "corp_code": entity.resolved_corp_code,
+            "auditor": {
+                "auditor_nm": entity.component_auditor_name,
+                "bsns_year": entity.component_auditor_year,
+                "rcept_no": entity.component_auditor_rcept_no,
+            } if entity.component_auditor_name else None,
+            "auditor_gap_reason": entity.auditor_gap_reason,
+            "source_rcept_no": edge.source_rcept_no,
+            "source_table": edge.source_table,
+        })
+    return {
+        "parent_name": graph.parent_name,
+        "year": graph.year,
+        "entities": rows,
+        "limitations": list(graph.limitations),
+        "truncated": graph.truncated,
+    }
 
 
 def _component_importance_sort_key(item: dict) -> tuple:
@@ -372,7 +429,7 @@ def get_subsidiary_auditors(
             "감사인 정보도 회사명 정확매칭이 확인된 경우에만 표시합니다."
         )
 
-        return _clean_dict({
+        result = _clean_dict({
             "corp_code": corp_code,
             "parent_rcept_no": cached_rows[0]["parent_rcept_no"],
             "bsns_year": latest_year,
@@ -396,6 +453,11 @@ def get_subsidiary_auditors(
                 "coverage_note": coverage_note,
             },
         })
+        canonical_graph = _canonical_graph_payload(corp_code, latest_year)
+        if canonical_graph is not None:
+            result["group_graph"] = canonical_graph
+            result["data_quality"]["canonical_graph"] = "available"
+        return result
     if row is None:
         return {
             "corp_code": corp_code,

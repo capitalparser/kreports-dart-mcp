@@ -163,7 +163,9 @@ def _mermaid_label(value: Any) -> str:
 def _render_subsidiary_auditors(result: dict) -> str:
     subject = _subject_label(result)
     year = result.get("bsns_year")
-    subsidiaries = result.get("subsidiaries") or []
+    graph = result.get("group_graph") if isinstance(result.get("group_graph"), dict) else {}
+    canonical = bool(graph.get("entities"))
+    subsidiaries = graph.get("entities") or result.get("subsidiaries") or []
     totals = result.get("consolidated_totals") or {}
     qsc_criterion = result.get("qsc_criterion") or {}
     data_quality = result.get("data_quality") or {}
@@ -183,37 +185,65 @@ def _render_subsidiary_auditors(result: dict) -> str:
         "flowchart TD",
         f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]',
     ]
-    for idx, item in enumerate(subsidiaries[:8], start=1):
+    visible = subsidiaries[:8]
+    node_ids = {
+        str(item.get("entity_key") or f"row:{idx}"): f"N{idx}"
+        for idx, item in enumerate(visible, start=1)
+    }
+    for idx, item in enumerate(visible, start=1):
         relation = item.get("relation") or "-"
         ownership = _fmt_ownership(item.get("ownership_pct"))
         asset_share = _fmt_pct(item.get("asset_share_pct"))
         revenue_share = _fmt_pct(item.get("revenue_share_pct"))
         qsc_status = _fmt_qsc_status(item.get("qsc_status"))
+        parent_node = node_ids.get(str(item.get("parent_entity_key") or ""), "P")
         lines.append(
-            f'  P -->|"{_mermaid_label(relation)} / 지분율 {ownership}<br/>자산 {asset_share} / 매출 {revenue_share}"| '
+            f'  {parent_node} -->|"{_mermaid_label(relation)} / 지분율 {ownership}<br/>자산 {asset_share} / 매출 {revenue_share}"| '
             f'N{idx}["{_mermaid_label(item.get("name"))}<br/>{qsc_status}"]'
+        )
+    if len(subsidiaries) > len(visible):
+        lines.append(
+            f'  OMIT["{len(subsidiaries) - len(visible)}개 노드는 가독성을 위해 생략"]'
         )
     if not subsidiaries:
         lines.append('  P -->|"캐시 없음"| N0["연결/투자 실체 미확보"]')
     lines.extend(["```", "", "표:"])
-    lines.append("| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | QSC | 감사인 |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
-    for item in subsidiaries[:12]:
+    if canonical:
+        lines.append("| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | QSC | 감사인 | 출처 접수번호 |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|---|")
+    else:
+        lines.append("| 회사 | 관계 | 지분율 | 자산(백만원) | 자산비중 | 매출(백만원) | 매출비중 | QSC | 감사인 |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
+    for item in subsidiaries:
         auditor = item.get("auditor")
         auditor_name = auditor.get("auditor_nm") if isinstance(auditor, dict) else None
+        asset_amount_m = item.get("asset_amount_m")
+        if asset_amount_m is None and item.get("asset_amount") is not None:
+            asset_amount_m = float(item["asset_amount"]) / 1_000_000
+        revenue_amount_m = item.get("revenue_amount_m")
+        if revenue_amount_m is None and item.get("revenue_amount") is not None:
+            revenue_amount_m = float(item["revenue_amount"]) / 1_000_000
         lines.append(
-            f"| {item.get('name') or '-'} "
-            f"| {item.get('relation') or '-'} "
+            f"| {_markdown_cell(item.get('name'))} "
+            f"| {_markdown_cell(item.get('relation'))} "
             f"| {_fmt_ownership(item.get('ownership_pct'))} "
-            f"| {_fmt_amount_m(item.get('asset_amount_m'))} "
+            f"| {_fmt_amount_m(asset_amount_m)} "
             f"| {_fmt_pct(item.get('asset_share_pct'))} "
-            f"| {_fmt_amount_m(item.get('revenue_amount_m'))} "
+            f"| {_fmt_amount_m(revenue_amount_m)} "
             f"| {_fmt_pct(item.get('revenue_share_pct'))} "
             f"| {_fmt_qsc_status(item.get('qsc_status'))} "
-            f"| {auditor_name or '-'} |"
+            f"| {_markdown_cell(auditor_name)} "
+            + (
+                f"| {_markdown_cell(item.get('source_rcept_no'))} |"
+                if canonical else "|"
+            )
         )
     if not subsidiaries:
-        lines.append("| 미확보 | - | - | 미확보 | 미확보 | 미확보 | 미확보 | 미판정 | - |")
+        lines.append(
+            "| 미확보 | - | - | 미확보 | 미확보 | 미확보 | 미확보 | 미판정 | - | - |"
+            if canonical
+            else "| 미확보 | - | - | 미확보 | 미확보 | 미확보 | 미확보 | 미판정 | - |"
+        )
 
     lines.append("")
     lines.append("근거:")
@@ -223,6 +253,12 @@ def _render_subsidiary_auditors(result: dict) -> str:
     lines.append(f"- 반환 {result.get('count', len(subsidiaries))}건 / 전체 {result.get('total', len(subsidiaries))}건")
     if result.get("truncated"):
         lines.append("- 결과가 잘렸습니다. 전체 구조 확인이 필요하면 limit을 늘려 재조회해야 합니다.")
+    if graph.get("truncated"):
+        lines.append("- 상위 그래프 결과가 잘렸습니다. 현재 표는 반환된 행 전체만 포함합니다.")
+    if len(subsidiaries) > 8:
+        lines.append(
+            f"- 구조도는 가독성을 위해 {len(subsidiaries) - 8}개 노드를 생략했지만 표에는 반환 행 전체를 표시했습니다."
+        )
 
     coverage_note = data_quality.get("coverage_note")
     lines.append("")
@@ -230,6 +266,15 @@ def _render_subsidiary_auditors(result: dict) -> str:
     lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'local_subsidiary_auditor_matrix')}")
     lines.append(f"- {coverage_note or '현재 결과는 로컬 사업보고서 파생 캐시 기준입니다.'}")
     return "\n".join(lines)
+
+
+def _markdown_cell(value: Any) -> str:
+    return (
+        str(value or "-")
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\n", "<br/>")
+    )
 
 
 def _render_kam_topics(result: dict) -> str:

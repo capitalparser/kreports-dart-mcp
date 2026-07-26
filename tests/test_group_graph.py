@@ -1,0 +1,352 @@
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+
+import pytest
+from sqlalchemy import create_engine, event, inspect, text
+
+from kreports.analysis.group_graph import (
+    ComponentMetric,
+    GroupEntity,
+    GroupGraph,
+    GroupGraphUnavailable,
+    GroupRelationship,
+    QscResult,
+    build_group_graph,
+    classify_qsc,
+    compute_component_share,
+    normalize_entity_name,
+)
+
+
+def test_qsc_boundary_and_missing_contract():
+    assert classify_qsc(9.9, 10.0).status == "qsc"
+    assert classify_qsc(10.0, 2.0).status == "qsc"
+    assert classify_qsc(9.9, 9.9).status == "not_qsc"
+    assert classify_qsc(None, 12.0).status == "qsc"
+    assert classify_qsc(None, 9.9).status == "undetermined"
+    assert classify_qsc(None, None).status == "undetermined"
+    for value in (float("nan"), float("inf"), -1.0, 101.0):
+        with pytest.raises((TypeError, ValueError)):
+            classify_qsc(value, None)
+
+
+def test_component_share_requires_compatible_complete_evidence():
+    assert compute_component_share(
+        10, "KRW", "2025", "CFS", "before_elimination", "r1",
+        100, "KRW", "2025", "CFS", "before_elimination", "r2",
+    ) == (10.0, None)
+    assert compute_component_share(
+        10, "KRW", "2025", "CFS", "before_elimination", "r1",
+        0, "KRW", "2025", "CFS", "before_elimination", "r2",
+    )[1] == "denominator_not_positive"
+    assert compute_component_share(
+        10, "KRW", "2025", "CFS", "before_elimination", "r1",
+        100, "USD", "2025", "CFS", "before_elimination", "r2",
+    )[1] == "unit_mismatch"
+    assert compute_component_share(
+        10, "KRW", "2025", "CFS", "before_elimination", "",
+        100, "KRW", "2025", "CFS", "before_elimination", "r2",
+    )[1] == "incomplete_evidence_identity"
+
+
+def test_names_normalize_only_identity_noise_and_keep_original():
+    assert normalize_entity_name("  (주) 에이·비씨[주1] ") == "에이비씨"
+    assert normalize_entity_name("ABC Co., Ltd.") == "abc"
+    assert normalize_entity_name("Incubator") == "incubator"
+    entity = GroupEntity(
+        entity_key="e1", original_name="(주) 에이비씨[주1]",
+        normalized_name="에이비씨", resolution_status="unresolved",
+        resolution_reason="unlisted", listed_state="N", source_rcept_no="r1",
+        source_table="SUB_CMPN", source_ordinal=1,
+    )
+    assert entity.original_name == "(주) 에이비씨[주1]"
+    with pytest.raises(FrozenInstanceError):
+        entity.original_name = "changed"  # type: ignore[misc]
+
+
+def test_typed_contracts_reject_invalid_values_and_references():
+    with pytest.raises(ValueError):
+        QscResult("maybe", (), 10.0, ())
+    edge = GroupRelationship(
+        "r", "p", "missing", "subsidiary", None, 2025, "r1", "T", 0,
+    )
+    with pytest.raises(ValueError, match="unknown entity"):
+        GroupGraph("Parent", 2025, (), (edge,))
+    with pytest.raises(TypeError):
+        ComponentMetric(
+            "m", "e", "assets", float("nan"), "KRW", "r1", "T", 100,
+            "KRW", "r2", "financials", "CFS", "2025", "before_elimination",
+            None, "undetermined", (), 10.0, "invalid_amount",
+        )
+
+
+def test_multilevel_paths_cycles_orphans_and_row_order_are_deterministic():
+    rows = [
+        {"parent": "Parent", "child": "Middle", "ownership_pct": 100.0, "source_rcept_no": "r1"},
+        {"parent": "Middle", "child": "Leaf", "ownership_pct": 80.0, "source_rcept_no": "r1"},
+    ]
+    graph = GroupGraph.from_rows("Parent", rows)
+    assert graph.path_to("Leaf") == ("Parent", "Middle", "Leaf")
+    assert GroupGraph.from_rows("Parent", list(reversed(rows))) == graph
+
+    cycle = GroupGraph.from_rows("Parent", rows + [
+        {"parent": "Leaf", "child": "Parent", "source_rcept_no": "r1"},
+        {"parent": "Unknown", "child": "Leaf", "source_rcept_no": "r1"},
+    ])
+    assert "cycle_detected" in cycle.limitations
+    assert "orphan_edge" in cycle.limitations
+
+
+def test_repeated_unresolved_names_do_not_collapse():
+    graph = GroupGraph.from_rows("Parent", [
+        {"parent": "Parent", "child": "Same", "source_rcept_no": "r1", "source_ordinal": 1},
+        {"parent": "Parent", "child": "Same", "source_rcept_no": "r2", "source_ordinal": 1},
+    ])
+    assert len([entity for entity in graph.entities if entity.original_name == "Same"]) == 2
+
+
+def test_migration_08_schema_and_prior_checksums(temp_engine):
+    from kreports.db.migrations import MIGRATIONS, _checksum, apply_schema_migrations
+
+    prior = [_checksum(item) for item in MIGRATIONS[:7]]
+    with temp_engine.begin() as conn:
+        apply_schema_migrations(conn)
+        assert apply_schema_migrations(conn) == []
+    assert MIGRATIONS[-1].revision == "20260711_08_group_audit_graph"
+    assert prior == [_checksum(item) for item in MIGRATIONS[:7]]
+    tables = set(inspect(temp_engine).get_table_names())
+    assert {"group_entities", "group_relationships", "group_component_metrics"} <= tables
+    assert inspect(temp_engine).get_indexes("group_entities")
+
+
+def _seed_graph(conn):
+    conn.execute(text("""
+        INSERT INTO group_entities
+        (parent_corp_code,effective_year,entity_key,original_name,normalized_name,
+         resolution_status,resolution_reason,listed_state,source_rcept_no,
+         source_table,source_ordinal,fetched_at)
+        VALUES
+        ('00000001',2025,'p','Parent','parent','resolved','corp_code','Y','r1','SUB',0,CURRENT_TIMESTAMP),
+        ('00000001',2025,'c','Child','child','resolved','corp_code','Y','r1','SUB',1,CURRENT_TIMESTAMP)
+    """))
+    conn.execute(text("""
+        INSERT INTO group_relationships
+        (parent_corp_code,effective_year,relationship_key,parent_entity_key,
+         child_entity_key,relation_type,ownership_pct,source_rcept_no,
+         source_table,source_ordinal,fetched_at)
+        VALUES ('00000001',2025,'rel','p','c','subsidiary',80,'r1','SUB',1,CURRENT_TIMESTAMP)
+    """))
+    conn.execute(text("""
+        INSERT INTO group_component_metrics
+        (parent_corp_code,effective_year,metric_identity,entity_key,metric_key,
+         amount,unit,numerator_source_rcept_no,numerator_source_table,
+         denominator_amount,denominator_unit,denominator_source_rcept_no,
+         denominator_source_table,fs_div,period,elimination_basis,share_pct,
+         qsc_status,qsc_basis,qsc_threshold_pct,quality_status,fetched_at)
+        VALUES ('00000001',2025,'m1','c','assets',10,'KRW','r1','SUB',
+        100,'KRW','r2','financials','CFS','2025','before_elimination',10,
+        'qsc','asset_share_pct>=10.0',10,'usable',CURRENT_TIMESTAMP)
+    """))
+
+
+def test_build_group_graph_exact_year_is_bulk_and_read_only(temp_engine):
+    with temp_engine.begin() as conn:
+        _seed_graph(conn)
+    count = 0
+
+    def before(*_args):
+        nonlocal count
+        count += 1
+
+    event.listen(temp_engine, "before_cursor_execute", before)
+    graph = build_group_graph("00000001", 2025)
+    event.remove(temp_engine, "before_cursor_execute", before)
+    assert graph.year == 2025
+    assert graph.path_to("Child") == ("Parent", "Child")
+    assert graph.metrics[0].qsc_status == "qsc"
+    assert count <= 8
+
+
+def test_missing_partial_and_nonempty_wal_fail_closed_without_file_creation(monkeypatch, tmp_path):
+    import kreports.db.engine as engine_module
+
+    missing = tmp_path / "missing.db"
+    missing_engine = create_engine(f"sqlite:///{missing}")
+    monkeypatch.setattr(engine_module, "engine", missing_engine)
+    with pytest.raises(GroupGraphUnavailable, match="runtime_db_unavailable"):
+        build_group_graph("00000001", 2025)
+    assert not missing.exists()
+
+    partial = tmp_path / "partial.db"
+    partial_engine = create_engine(f"sqlite:///{partial}")
+    with partial_engine.begin() as conn:
+        conn.execute(text("CREATE TABLE group_entities (entity_key TEXT)"))
+    monkeypatch.setattr(engine_module, "engine", partial_engine)
+    with pytest.raises(GroupGraphUnavailable, match="missing_schema"):
+        build_group_graph("00000001", 2025)
+
+    wal = Path(f"{partial}-wal")
+    wal.write_bytes(b"pending")
+    with pytest.raises(GroupGraphUnavailable, match="uncheckpointed_wal"):
+        build_group_graph("00000001", 2025)
+
+
+def test_authorized_persistence_is_receipt_idempotent_and_auditor_exact_year(
+    temp_engine,
+):
+    from kreports.collector.report_document_collector import (
+        _persist_group_audit_graph,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        Auditor,
+        Company,
+        FinancialFactCompact,
+        GroupEntityRecord,
+    )
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00000001", stock_code="000001",
+                corp_name="Parent", market="KOSPI",
+            ),
+            Company(
+                corp_code="00000002", stock_code="000002",
+                corp_name="Child Co., Ltd.", market="KOSPI",
+            ),
+            Auditor(
+                corp_code="00000002", bsns_year=2024, fs_div="CFS",
+                auditor_nm="prior auditor", rcept_no="old",
+            ),
+            FinancialFactCompact(
+                corp_code="00000001", bsns_year=2025, fs_div="CFS",
+                metric_key="assets", metric_name="assets", amount=1_000_000_000,
+            ),
+            FinancialFactCompact(
+                corp_code="00000001", bsns_year=2025, fs_div="CFS",
+                metric_key="revenue", metric_name="revenue", amount=500_000_000,
+            ),
+        ])
+    meta = {
+        "corp_code": "00000001", "bsns_year": 2025,
+        "rcept_no": "20260301000001",
+    }
+    affiliates = [{
+        "name": "Child", "original_name": "Child Co., Ltd.",
+        "ownership_pct": 80.0, "listed_yn": "Y", "assets": "100",
+        "revenue": "50", "relation": "subsidiary", "source": "SUB_CMPN",
+        "elimination_basis": "before_elimination",
+        "denominator_elimination_basis": "before_elimination",
+    }]
+    first = _persist_group_audit_graph(meta, affiliates=affiliates)
+    second = _persist_group_audit_graph(meta, affiliates=affiliates)
+    assert first == second == 5
+    graph = build_group_graph("00000001", 2025)
+    child = next(item for item in graph.entities if item.original_name.startswith("Child"))
+    assert child.component_auditor_name is None
+    assert child.auditor_gap_reason == "exact_year_component_auditor_missing"
+    assert {metric.qsc_status for metric in graph.metrics} == {"qsc"}
+
+    other_meta = dict(meta, rcept_no="20260302000001")
+    _persist_group_audit_graph(other_meta, affiliates=affiliates)
+    with get_session() as session:
+        assert session.query(GroupEntityRecord).count() == 4
+
+
+def test_ambiguous_exact_name_and_unlisted_entities_stay_unresolved(temp_engine):
+    from kreports.collector.report_document_collector import (
+        _persist_group_audit_graph,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Parent"),
+            Company(corp_code="00000002", corp_name="Same Ltd."),
+            Company(corp_code="00000003", corp_name="Same Inc."),
+        ])
+    _persist_group_audit_graph(
+        {"corp_code": "00000001", "bsns_year": 2025, "rcept_no": "r1"},
+        affiliates=[
+            {
+                "name": "Same", "original_name": "Same Ltd.",
+                "listed_yn": "N", "relation": "subsidiary", "source": "SUB",
+            },
+            {
+                "name": "Unknown", "original_name": "Unknown",
+                "listed_yn": "Y", "relation": "subsidiary", "source": "SUB",
+            },
+        ],
+    )
+    graph = build_group_graph("00000001", 2025)
+    reasons = {
+        item.original_name: item.resolution_reason
+        for item in graph.entities
+    }
+    assert reasons["Same Ltd."] == "unlisted"
+    assert reasons["Unknown"] == "unmatched_exact_normalized_name"
+
+
+def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
+    from kreports.collector.report_document_collector import (
+        _persist_group_audit_graph,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, FinancialFactCompact
+    from kreports.quality.company_year import _group_audit_status_and_grade
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", corp_name="Parent"))
+        session.add_all([
+            FinancialFactCompact(
+                corp_code="00000001", bsns_year=2025, fs_div="CFS",
+                metric_key=key, metric_name=key, amount=amount,
+            )
+            for key, amount in (("assets", 1_000_000_000), ("revenue", 500_000_000))
+        ])
+    _persist_group_audit_graph(
+        {"corp_code": "00000001", "bsns_year": 2025, "rcept_no": "r1"},
+        affiliates=[{
+            "name": "Unlisted Child", "original_name": "Unlisted Child",
+            "ownership_pct": 80.0, "listed_yn": "N", "assets": "100",
+            "revenue": "50", "relation": "subsidiary", "source": "SUB",
+            "elimination_basis": "before_elimination",
+            "denominator_elimination_basis": "before_elimination",
+        }],
+    )
+    assert _group_audit_status_and_grade("00000001", 2025) == ("available", "A")
+
+
+def test_answer_pack_keeps_all_graph_rows_but_limits_mermaid_nodes():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.renderers import render_answer
+
+    rows = [
+        {
+            "entity_key": f"e{i}", "parent_entity_key": "p",
+            "name": f'Child | {i} "quoted"', "relation": "subsidiary",
+            "ownership_pct": 80, "qsc_status": "undetermined",
+            "source_rcept_no": f"r{i}",
+        }
+        for i in range(12)
+    ]
+    result = {
+        "corp_code": "00000001", "bsns_year": 2025,
+        "subsidiaries": [], "count": 12, "total": 12,
+        "group_graph": {
+            "parent_name": "Parent", "year": 2025,
+            "entities": rows, "limitations": [], "truncated": False,
+        },
+        "data_quality": {"status": "usable"},
+    }
+    pack = build_answer_pack("get_subsidiary_auditors", result)
+    assert len(pack["tables"][0]["rows"]) == 12
+    assert "graph_nodes_omitted:4" in pack["warnings"]
+    assert "4개 노드는 가독성을 위해 생략" in pack["diagrams"][0]["definition"]
+    rendered = render_answer("get_subsidiary_auditors", result)
+    assert "Child \\| 11" in rendered
+    assert "표에는 반환 행 전체" in rendered

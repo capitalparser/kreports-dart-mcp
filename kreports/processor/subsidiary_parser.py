@@ -104,16 +104,21 @@ def extract_subsidiaries(content: str) -> list[dict]:
     for m in _RE_SUB_GROUP.finditer(content):
         for row in _tbody_rows(m.group(2)):
             f = _row_fields(row)
-            name = _clean_name(f.get('CRP_NM') or f.get('CORP_NM') or '')
+            original_name = f.get('CRP_NM') or f.get('CORP_NM') or ''
+            name = _clean_name(original_name)
             if _skip(name) or name in seen:
                 continue
             seen.add(name)
             items.append({
                 'name': name,
+                'original_name': original_name.strip(),
+                'parent_name': (f.get('PARENT_NM') or f.get('PRNT_NM') or '').strip(),
+                'corp_code': (f.get('CORP_CODE') or f.get('CRP_CD') or '').strip(),
                 'ownership_pct': None,
                 'listed_yn': '',
                 'business': f.get('M_IND', ''),
                 'assets': f.get('KEY_IND', ''),
+                'revenue': f.get('REV_AMT', '') or f.get('REVENUE', ''),
                 'relation': '종속',
                 'source': m.group(1),
             })
@@ -127,17 +132,22 @@ def extract_equity_investments(content: str) -> list[dict]:
     for m in _RE_INV_GROUP.finditer(content):
         for row in _tbody_rows(m.group(1)):
             f = _row_fields(row)
-            name = _clean_name(f.get('INV_PRM') or f.get('CRP_NM') or '')
+            original_name = f.get('INV_PRM') or f.get('CRP_NM') or ''
+            name = _clean_name(original_name)
             if _skip(name) or name in seen:
                 continue
             seen.add(name)
             p = _pct(f.get('INV_LPR', ''))
             items.append({
                 'name': name,
+                'original_name': original_name.strip(),
+                'parent_name': (f.get('PARENT_NM') or f.get('PRNT_NM') or '').strip(),
+                'corp_code': (f.get('CORP_CODE') or f.get('CRP_CD') or '').strip(),
                 'ownership_pct': p,
                 'listed_yn': f.get('@INV_YN', ''),
                 'business': f.get('INV_OBJ', ''),
                 'assets': f.get('INV_NTM', ''),
+                'revenue': f.get('REV_AMT', '') or f.get('REVENUE', ''),
                 'relation': _relation(p),
                 'source': 'INV_PRT',
             })

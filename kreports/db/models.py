@@ -623,6 +623,110 @@ class BusinessAffiliateAuditor(Base):
     )
 
 
+class GroupEntityRecord(Base):
+    """Receipt-bound entity identity used by the group-audit graph."""
+    __tablename__ = "group_entities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_corp_code = Column(String(8), nullable=False)
+    effective_year = Column(SmallInteger, nullable=False)
+    entity_key = Column(String(120), nullable=False)
+    original_name = Column(String(300), nullable=False)
+    normalized_name = Column(String(300), nullable=False)
+    resolved_corp_code = Column(String(8), nullable=True)
+    stock_code = Column(String(6), nullable=True)
+    market = Column(String(10), nullable=True)
+    resolution_status = Column(String(24), nullable=False)
+    resolution_reason = Column(String(80), nullable=False)
+    listed_state = Column(String(20), nullable=True)
+    component_auditor_name = Column(String(100), nullable=True)
+    component_auditor_year = Column(SmallInteger, nullable=True)
+    component_auditor_rcept_no = Column(String(80), nullable=True)
+    auditor_gap_reason = Column(String(80), nullable=True)
+    source_rcept_no = Column(String(80), nullable=False)
+    source_table = Column(String(80), nullable=False)
+    source_ordinal = Column(SmallInteger, nullable=False)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_corp_code", "effective_year", "source_rcept_no",
+            "source_table", "source_ordinal", "entity_key",
+            name="uq_group_entity_source",
+        ),
+        Index("idx_group_entity_parent_year", "parent_corp_code", "effective_year"),
+        Index("idx_group_entity_resolved_year", "resolved_corp_code", "effective_year"),
+    )
+
+
+class GroupRelationshipRecord(Base):
+    """Direct, disclosed group relationship with source identity."""
+    __tablename__ = "group_relationships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_corp_code = Column(String(8), nullable=False)
+    effective_year = Column(SmallInteger, nullable=False)
+    relationship_key = Column(String(160), nullable=False)
+    parent_entity_key = Column(String(120), nullable=False)
+    child_entity_key = Column(String(120), nullable=False)
+    relation_type = Column(String(40), nullable=False)
+    ownership_pct = Column(Float, nullable=True)
+    source_rcept_no = Column(String(80), nullable=False)
+    source_table = Column(String(80), nullable=False)
+    source_ordinal = Column(SmallInteger, nullable=False)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_corp_code", "effective_year", "source_rcept_no",
+            "source_table", "source_ordinal", "relationship_key",
+            name="uq_group_relationship_source",
+        ),
+        Index("idx_group_relationship_parent_year", "parent_corp_code", "effective_year"),
+        Index("idx_group_relationship_nodes", "parent_entity_key", "child_entity_key"),
+    )
+
+
+class GroupComponentMetricRecord(Base):
+    """Component amount, denominator and QSC decision provenance."""
+    __tablename__ = "group_component_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parent_corp_code = Column(String(8), nullable=False)
+    effective_year = Column(SmallInteger, nullable=False)
+    metric_identity = Column(String(180), nullable=False)
+    entity_key = Column(String(120), nullable=False)
+    metric_key = Column(String(40), nullable=False)
+    amount = Column(Float, nullable=True)
+    unit = Column(String(30), nullable=True)
+    numerator_source_rcept_no = Column(String(80), nullable=True)
+    numerator_source_table = Column(String(80), nullable=True)
+    denominator_amount = Column(Float, nullable=True)
+    denominator_unit = Column(String(30), nullable=True)
+    denominator_source_rcept_no = Column(String(80), nullable=True)
+    denominator_source_table = Column(String(80), nullable=True)
+    fs_div = Column(String(3), nullable=True)
+    period = Column(String(40), nullable=True)
+    elimination_basis = Column(String(40), nullable=True)
+    share_pct = Column(Float, nullable=True)
+    qsc_status = Column(String(20), nullable=False)
+    qsc_basis = Column(String(200), nullable=False, default="")
+    qsc_threshold_pct = Column(Float, nullable=False, default=10.0)
+    quality_status = Column(String(24), nullable=False)
+    gap_reason = Column(String(80), nullable=True)
+    fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_corp_code", "effective_year", "metric_identity",
+            name="uq_group_metric_source",
+        ),
+        Index("idx_group_metric_parent_year", "parent_corp_code", "effective_year"),
+        Index("idx_group_metric_entity_kind", "entity_key", "metric_key"),
+        Index("idx_group_metric_qsc_year", "effective_year", "qsc_status"),
+    )
+
+
 class FetchLog(Base):
     __tablename__ = "fetch_log"
 
