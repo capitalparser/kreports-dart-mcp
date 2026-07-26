@@ -78,6 +78,11 @@ _KOREAN_TITLE_CONTINUATIONS = (
     "평가",
     "회계처리",
 )
+_INITIAL_MARKER_IDENTITIES = {
+    "arabic": "1",
+    "roman": "I",
+    "korean": "가",
+}
 
 
 @dataclass(frozen=True)
@@ -106,9 +111,7 @@ class _TitleBoundary:
 class _MatterFrame:
     title_start: int
     title: str
-    reason_heading: int
-    reason_separators: tuple[int, ...]
-    response_heading: int
+    heading_frames: tuple[_HeadingFrame, ...]
     marker: tuple[str, str] | None
 
 
@@ -117,6 +120,8 @@ class _HeadingFrame:
     reason_heading: int
     reason_separators: tuple[int, ...]
     response_heading: int
+    response_separators: tuple[int, ...]
+    end: int
 
 
 def _compact(value: str) -> str:
@@ -228,6 +233,18 @@ def _unnumbered_suffix_start(lines: list[str], lower: int, upper: int) -> int:
     return start
 
 
+def _is_distinct_marker_transition(
+    candidate: tuple[str, str] | None,
+    current: tuple[str, str] | None,
+) -> bool:
+    if candidate is None:
+        return False
+    family, identity = candidate
+    if current is not None and family == current[0]:
+        return identity != current[1]
+    return identity != _INITIAL_MARKER_IDENTITIES[family]
+
+
 def _discover_title_boundary(
     lines: list[str],
     *,
@@ -272,12 +289,10 @@ def _discover_title_boundary(
         family, identity, marked_title = marker
         suffix_start = marker_index + 1
         has_suffix = suffix_start < reason_index
-        is_distinct_matter_marker = (
-            not response_owned
-            or (
-                current_marker is not None
-                and family == current_marker[0]
-                and identity != current_marker[1]
+        is_distinct_matter_marker = not response_owned or (
+            _is_distinct_marker_transition(
+                (family, identity),
+                current_marker,
             )
         )
         marked_wrap = (
@@ -312,30 +327,64 @@ def _discover_heading_frames(lines: list[str]) -> list[_HeadingFrame]:
     frames: list[_HeadingFrame] = []
     reason_heading: int | None = None
     reason_separators: list[int] = []
+    response_heading: int | None = None
+    response_separators: list[int] = []
     state = "seeking_reason"
+
+    def close_frame(end: int) -> None:
+        if reason_heading is None or response_heading is None:
+            return
+        frames.append(
+            _HeadingFrame(
+                reason_heading=reason_heading,
+                reason_separators=tuple(reason_separators),
+                response_heading=response_heading,
+                response_separators=tuple(response_separators),
+                end=end,
+            )
+        )
+
     for index, line in enumerate(lines):
         if _matches_heading(line, _REASON_HEADINGS):
             if state == "reading_reason":
                 reason_separators.append(index)
             else:
+                if state == "reading_response":
+                    close_frame(index)
                 reason_heading = index
                 reason_separators = []
+                response_heading = None
+                response_separators = []
                 state = "reading_reason"
             continue
-        if (
-            state == "reading_reason"
-            and reason_heading is not None
-            and _matches_heading(line, _RESPONSE_HEADINGS)
-        ):
-            frames.append(
-                _HeadingFrame(
-                    reason_heading=reason_heading,
-                    reason_separators=tuple(reason_separators),
-                    response_heading=index,
-                )
-            )
-            state = "reading_response"
+        if _matches_heading(line, _RESPONSE_HEADINGS):
+            if state == "reading_reason" and reason_heading is not None:
+                response_heading = index
+                state = "reading_response"
+            elif state == "reading_response":
+                response_separators.append(index)
+    if state == "reading_response":
+        close_frame(len(lines))
     return frames
+
+
+def _last_response_heading(frame: _HeadingFrame) -> int:
+    if frame.response_separators:
+        return frame.response_separators[-1]
+    return frame.response_heading
+
+
+def _is_repeated_heading_pair(
+    lines: list[str],
+    previous: _HeadingFrame,
+    current: _HeadingFrame,
+) -> bool:
+    return (
+        _compact(lines[previous.reason_heading])
+        == _compact(lines[current.reason_heading])
+        and _compact(lines[previous.response_heading])
+        == _compact(lines[current.response_heading])
+    )
 
 
 def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
@@ -354,17 +403,36 @@ def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
         )
         if title is None:
             continue
+        if (
+            frames
+            and _is_repeated_heading_pair(
+                lines,
+                frames[-1].heading_frames[-1],
+                heading_frame,
+            )
+            and not _is_distinct_marker_transition(
+                title.marker,
+                frames[-1].marker,
+            )
+        ):
+            current = frames[-1]
+            frames[-1] = _MatterFrame(
+                title_start=current.title_start,
+                title=current.title,
+                heading_frames=(*current.heading_frames, heading_frame),
+                marker=current.marker,
+            )
+            previous_response = _last_response_heading(heading_frame)
+            continue
         frames.append(
             _MatterFrame(
                 title_start=title.start,
                 title=title.title,
-                reason_heading=heading_frame.reason_heading,
-                reason_separators=heading_frame.reason_separators,
-                response_heading=heading_frame.response_heading,
+                heading_frames=(heading_frame,),
                 marker=title.marker,
             )
         )
-        previous_response = heading_frame.response_heading
+        previous_response = _last_response_heading(heading_frame)
     return frames
 
 
@@ -424,15 +492,31 @@ def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
             else len(lines)
         )
         matter_lines = lines[frame.title_start:end]
-        reason = "\n".join(
-            line
-            for index, line in enumerate(
-                lines[frame.reason_heading + 1:frame.response_heading],
-                start=frame.reason_heading + 1,
+        reason_lines: list[str] = []
+        response_lines: list[str] = []
+        for heading_frame in frame.heading_frames:
+            reason_lines.extend(
+                line
+                for index, line in enumerate(
+                    lines[
+                        heading_frame.reason_heading + 1:
+                        heading_frame.response_heading
+                    ],
+                    start=heading_frame.reason_heading + 1,
+                )
+                if index not in heading_frame.reason_separators
             )
-            if index not in frame.reason_separators
-        ).strip()
-        response = "\n".join(lines[frame.response_heading + 1:end]).strip()
+            response_end = min(heading_frame.end, end)
+            response_lines.extend(
+                line
+                for index, line in enumerate(
+                    lines[heading_frame.response_heading + 1:response_end],
+                    start=heading_frame.response_heading + 1,
+                )
+                if index not in heading_frame.response_separators
+            )
+        reason = "\n".join(reason_lines).strip()
+        response = "\n".join(response_lines).strip()
         if not reason or not response:
             continue
         body = "\n".join(matter_lines).strip()
