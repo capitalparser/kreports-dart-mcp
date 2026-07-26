@@ -165,6 +165,7 @@ def _parse_candidate(
                 corp_code=corp_code,
                 bsns_year=bsns_year,
                 source_class="cached_business_report",
+                source_eligibility="eligible",
                 source_rcept_no=rcept_no,
                 availability_status="parse_error",
                 quality_status="error",
@@ -211,6 +212,7 @@ def _parse_candidate(
                 corp_code=corp_code,
                 bsns_year=bsns_year,
                 source_class="cached_business_report",
+                source_eligibility="eligible",
                 source_rcept_no=rcept_no,
                 availability_status="parse_error",
                 quality_status="error",
@@ -225,6 +227,7 @@ def _parse_candidate(
                 corp_code=corp_code,
                 bsns_year=bsns_year,
                 source_class="cached_business_report",
+                source_eligibility="eligible",
                 source_rcept_no=rcept_no,
                 availability_status="parse_error",
                 quality_status="error",
@@ -268,6 +271,7 @@ def _parse_candidate(
                 corp_code=corp_code,
                 bsns_year=year,
                 source_class="cached_business_report",
+                source_eligibility="eligible",
                 contract_fee_m=contract_fee,
                 contract_hours=contract_hours,
                 actual_fee_m=actual_fee,
@@ -323,6 +327,7 @@ def parse_audit_fee_table(
                 corp_code=corp_code,
                 bsns_year=bsns_year,
                 source_class="cached_business_report",
+                source_eligibility="eligible",
                 source_rcept_no=rcept_no,
                 availability_status="parse_error",
                 quality_status="error",
@@ -339,7 +344,12 @@ def parse_audit_fee_table(
         if not _has_audit_fee_semantics(table_text):
             continue
         preceding = table.xpath("./preceding::*[self::p or self::div][1]")
-        local_unit = _unit_for_text(table_text)
+        captions = table.xpath("./caption")
+        local_unit = (
+            _unit_for_text(captions[0].text_content())
+            if captions
+            else None
+        )
         if (
             local_unit is None
             and preceding

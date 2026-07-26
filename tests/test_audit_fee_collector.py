@@ -40,10 +40,11 @@ def test_ds002_normalizes_contract_and_actual_fields_independently():
 
 def test_unsupported_historical_period_is_not_transport_error():
     observation = normalize_endpoint_result(
-        year=2021,
+        year=2014,
         status="013",
         rows=[],
         corp_code=CORP_CODE,
+        source_supported=False,
     )
 
     assert observation.availability_status == "not_available_from_endpoint"
@@ -61,6 +62,7 @@ def test_supported_period_013_is_missing_not_unsupported_or_transport_error():
 
     assert observation.availability_status == "partial"
     assert observation.quality_status == "missing"
+    assert observation.source_eligibility == "eligible"
 
 
 def test_unsupported_empty_success_rows_are_endpoint_gap():
@@ -74,6 +76,20 @@ def test_unsupported_empty_success_rows_are_endpoint_gap():
 
     assert observation.availability_status == "not_available_from_endpoint"
     assert observation.quality_status == "missing"
+    assert observation.source_eligibility == "not_eligible"
+
+
+def test_unknown_endpoint_support_remains_unknown_missing():
+    observation = normalize_endpoint_result(
+        year=2021,
+        status="013",
+        rows=[],
+        corp_code=CORP_CODE,
+    )
+
+    assert observation.availability_status == "missing"
+    assert observation.quality_status == "missing"
+    assert observation.source_eligibility == "unknown"
 
 
 @pytest.fixture
@@ -308,7 +324,11 @@ def test_endpoint_gap_and_error_are_persisted_as_typed_observations(
         "fetch_audit_fee",
         side_effect=lambda _corp, year: responses[year],
     ), patch("kreports.config.settings.request_delay", 0):
-        result = collector.collect_audit_fees_for(CORP_CODE, [2021, 2025])
+        result = collector.collect_audit_fees_for(
+            CORP_CODE,
+            [2021, 2025],
+            source_supported_by_year={2021: False, 2025: True},
+        )
 
     assert result == {"saved": 0, "no_data": 1, "error": 1}
     with eng.get_session() as session:
@@ -319,6 +339,54 @@ def test_endpoint_gap_and_error_are_persisted_as_typed_observations(
         assert rows[2021].availability_status == "not_available_from_endpoint"
         assert rows[2025].availability_status == "transport_error"
         assert all(json.loads(row.source_observations_json) for row in rows.values())
+
+
+def test_collector_uses_documented_2015_endpoint_boundary(
+    fresh_audit_fee_db,
+):
+    eng, collector = fresh_audit_fee_db
+    with patch.object(
+        collector,
+        "fetch_audit_fee",
+        return_value={"status": "013", "message": "조회된 데이터가 없습니다."},
+    ), patch("kreports.config.settings.request_delay", 0):
+        collector.collect_audit_fees_for(CORP_CODE, [2014, 2015])
+
+    with eng.get_session() as session:
+        rows = {
+            row.bsns_year: row
+            for row in session.query(AuditFee).order_by(AuditFee.bsns_year)
+        }
+        assert rows[2014].availability_status == "not_available_from_endpoint"
+        assert rows[2015].availability_status == "partial"
+        assert json.loads(rows[2014].source_observations_json)[0][
+            "source_eligibility"
+        ] == "not_eligible"
+        assert json.loads(rows[2015].source_observations_json)[0][
+            "source_eligibility"
+        ] == "eligible"
+
+
+def test_ds002_legacy_official_fields_are_normalized():
+    observation = normalize_endpoint_result(
+        year=2019,
+        status="000",
+        rows=[
+            {
+                "bsns_year": "2019",
+                "adtor": "삼일회계법인",
+                "mendng": "1,200",
+                "tot_reqre_time": "10,500",
+            }
+        ],
+        corp_code=CORP_CODE,
+        source_supported=True,
+    )
+
+    assert observation.contract_fee_m == 1200
+    assert observation.contract_hours == 10500
+    assert observation.actual_fee_m is None
+    assert observation.source_eligibility == "eligible"
 
 
 def test_supported_empty_endpoint_rows_are_typed_partial(

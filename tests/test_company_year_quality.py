@@ -123,7 +123,7 @@ def test_investor_grade_does_not_require_five_year_audit_fee(temp_engine):
 
     assert result["rows_written"] == 5
     assert latest["feature_grades"]["investor_core"] == "A"
-    assert latest["feature_grades"]["audit_fee_peer"] == "D"
+    assert latest["feature_grades"]["audit_fee_peer"] == "not_applicable"
 
 
 def test_summary_only_kam_is_not_procedure_ready(temp_engine):
@@ -366,8 +366,8 @@ def test_explicit_no_kam_and_source_no_data_support_auditor_a(temp_engine):
 
     assert quality["statuses"]["kam"] == "explicit_no_kam"
     assert quality["statuses"]["audit_procedure"] == "not_applicable"
-    assert quality["statuses"]["audit_fee"] == "not_available"
-    assert quality["feature_grades"]["auditor_full"] == "A"
+    assert quality["statuses"]["audit_fee"] == "missing"
+    assert quality["feature_grades"]["auditor_full"] == "D"
 
 
 def test_rebuild_is_idempotent_and_scoped_by_year_and_market(temp_engine):
@@ -722,7 +722,7 @@ def test_audit_fee_quality_consumes_real_per_company_outcomes(temp_engine):
 
     assert company_year_quality("00126380", 2025)["statuses"][
         "audit_fee"
-    ] == "not_available"
+    ] == "missing"
     assert company_year_quality("00999998", 2025)["statuses"][
         "audit_fee"
     ] == "error"
@@ -790,7 +790,7 @@ def test_audit_fee_later_success_timestamp_recovers_older_error(
     [
         (("error", "success"), "available"),
         (("success", "error"), "error"),
-        (("error", "no_data"), "not_available"),
+        (("error", "no_data"), "missing"),
     ],
 )
 def test_audit_fee_equal_timestamp_uses_later_fetch_log_id(

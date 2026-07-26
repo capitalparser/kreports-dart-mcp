@@ -25,7 +25,13 @@ logger = logging.getLogger(__name__)
 # NAS ratio 임계값: 비감사보수가 감사보수를 초과하면 독립성 위험
 _NAS_RISK_THRESHOLD = 1.0
 _DART_NO_DATA_STATUS = "013"
-_DS002_SOURCE_AVAILABLE_FROM_YEAR = 2023
+# OpenDART ``adtServcCnclsSttus`` guide documents endpoint coverage from 2015.
+_DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
+
+
+def ds002_source_supported(year: int) -> bool:
+    """Return the documented DS002 year eligibility policy."""
+    return year >= _DS002_OFFICIAL_AVAILABLE_FROM_YEAR
 
 
 def _parse_fee(value: str | None) -> int | None:
@@ -62,7 +68,12 @@ def _sum_non_audit_fee(items: list[dict]) -> int | None:
     return total if found else None
 
 
-def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
+def collect_audit_fees_for(
+    corp_code: str,
+    years: list[int],
+    *,
+    source_supported_by_year: dict[int, bool | None] | None = None,
+) -> dict:
     """
     단일 기업의 특정 연도 목록에 대해 DS002 감사보수를 수집한다.
 
@@ -74,10 +85,15 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
     error = 0
 
     for year in years:
+        source_supported = (
+            source_supported_by_year.get(year)
+            if source_supported_by_year is not None
+            and year in source_supported_by_year
+            else ds002_source_supported(year)
+        )
         try:
             data = fetch_audit_fee(corp_code, year)
             status = data.get("status")
-            source_supported = year >= _DS002_SOURCE_AVAILABLE_FROM_YEAR
             observation = normalize_endpoint_result(
                 corp_code=corp_code,
                 year=year,
@@ -179,6 +195,13 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                         bsns_year=year,
                         source_class="opendart_ds002",
                         source_period=str(year),
+                        source_eligibility=(
+                            "eligible"
+                            if source_supported is True
+                            else "not_eligible"
+                            if source_supported is False
+                            else "unknown"
+                        ),
                         availability_status="transport_error",
                         quality_status="error",
                         source_status="exception",
@@ -359,6 +382,7 @@ def ingest_cached_audit_fee_table(
             source_class="cached_business_report",
             source_rcept_no=rcept_no,
             source_period=str(bsns_year),
+            source_eligibility="eligible",
             availability_status="not_found_in_cached_report",
             quality_status="missing",
             limitations=("No audit-fee table was found in the cached report",),
@@ -392,13 +416,23 @@ def ingest_cached_audit_fee_table(
     }
 
 
-def collect_audit_fees(corp_code: str, year_from: int | None = None, year_to: int | None = None) -> dict:
+def collect_audit_fees(
+    corp_code: str,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    *,
+    source_supported_by_year: dict[int, bool | None] | None = None,
+) -> dict:
     """단일 기업 감사보수 수집 (연도 범위)."""
     current_year = date.today().year
     y_to = year_to or current_year
     y_from = year_from or (y_to - settings.collect_years + 1)
     years = list(range(y_from, y_to + 1))
-    return collect_audit_fees_for(corp_code, years)
+    return collect_audit_fees_for(
+        corp_code,
+        years,
+        source_supported_by_year=source_supported_by_year,
+    )
 
 
 def collect_all_audit_fees(
@@ -406,6 +440,7 @@ def collect_all_audit_fees(
     year_to: int | None = None,
     market: str | None = None,
     progress_callback=None,
+    source_supported_by_year: dict[int, bool | None] | None = None,
 ) -> dict:
     """전체 상장사 감사보수 배치 수집."""
     with get_session() as session:
@@ -423,7 +458,12 @@ def collect_all_audit_fees(
     for idx, (corp_code, corp_name) in enumerate(companies, 1):
         if progress_callback:
             progress_callback(idx, total, corp_name)
-        result = collect_audit_fees(corp_code, year_from, year_to)
+        result = collect_audit_fees(
+            corp_code,
+            year_from,
+            year_to,
+            source_supported_by_year=source_supported_by_year,
+        )
         for k in totals:
             totals[k] += result[k]
 

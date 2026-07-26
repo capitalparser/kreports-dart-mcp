@@ -45,6 +45,50 @@ _AUDIT_FEE_TYPED_COLUMNS = (
 )
 
 
+def _valid_audit_fee_observation(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if not isinstance(value.get("corp_code"), str):
+        return False
+    if not isinstance(value.get("bsns_year"), int):
+        return False
+    if not isinstance(value.get("source_class"), str) or not value["source_class"]:
+        return False
+    for field_name in (
+        "contract_fee_m",
+        "contract_hours",
+        "actual_fee_m",
+        "actual_hours",
+    ):
+        field_value = value.get(field_name)
+        if field_value is not None and (
+            not isinstance(field_value, int) or isinstance(field_value, bool)
+        ):
+            return False
+    for field_name in ("availability_status", "quality_status"):
+        field_value = value.get(field_name)
+        if field_value is not None and not isinstance(field_value, str):
+            return False
+    eligibility = value.get("source_eligibility")
+    if eligibility is not None and eligibility not in {
+        "eligible",
+        "not_eligible",
+        "unknown",
+    }:
+        return False
+    if value.get("raw_values") is not None and not isinstance(
+        value["raw_values"],
+        dict,
+    ):
+        return False
+    if value.get("limitations") is not None and not isinstance(
+        value["limitations"],
+        list,
+    ):
+        return False
+    return True
+
+
 def _audit_fee_observation_conflicts(observations: list[dict]) -> list[dict]:
     conflicts: list[dict] = []
     for metric in ("actual_fee_m", "actual_hours"):
@@ -103,6 +147,7 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
                     "corp_code": corp_code,
                     "year": year,
                     "availability_status": "schema_unavailable",
+                    "source_eligibility": "unknown",
                     "quality_status": "missing",
                     "selected": {
                         "audit_fee_m": None,
@@ -159,6 +204,7 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
             "corp_code": corp_code,
             "year": year,
             "availability_status": "schema_unavailable",
+            "source_eligibility": "unknown",
             "quality_status": "error",
             "selected": {
                 "audit_fee_m": None,
@@ -175,7 +221,7 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
         availability = (
             "transport_error"
             if fetch_status == "error"
-            else "not_available_from_endpoint"
+            else "missing"
             if fetch_status == "no_data"
             else "missing"
         )
@@ -183,6 +229,7 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
             "corp_code": corp_code,
             "year": year,
             "availability_status": availability,
+            "source_eligibility": "unknown",
             "quality_status": "error" if fetch_status == "error" else "missing",
             "selected": {
                 "audit_fee_m": None,
@@ -213,11 +260,32 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
     except (TypeError, ValueError):
         provenance_error = bool(provenance_raw)
         observations = []
-    observations = [item for item in observations if isinstance(item, dict)][:20]
+    raw_observations = observations
+    observations = [
+        item
+        for item in raw_observations
+        if _valid_audit_fee_observation(item)
+    ][:20]
+    if len(observations) != len(raw_observations):
+        provenance_error = True
     conflicts = _audit_fee_observation_conflicts(observations)
     basis = record.get("compatibility_basis") or "legacy_inferred"
     audit_fee = record.get("audit_fee_m")
     audit_hours = record.get("audit_hours")
+    eligibility_values = {
+        str(item.get("source_eligibility"))
+        for item in observations
+        if item.get("source_eligibility")
+        in {"eligible", "not_eligible", "unknown"}
+    }
+    if "eligible" in eligibility_values:
+        source_eligibility = "eligible"
+    elif eligibility_values == {"not_eligible"}:
+        source_eligibility = "not_eligible"
+    elif audit_fee is not None or audit_hours is not None:
+        source_eligibility = "eligible"
+    else:
+        source_eligibility = "unknown"
     availability = record.get("availability_status")
     if not availability:
         availability = (
@@ -273,6 +341,7 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
         "corp_code": corp_code,
         "year": year,
         "availability_status": availability,
+        "source_eligibility": source_eligibility,
         "quality_status": quality,
         "selected": {
             "audit_fee_m": audit_fee,
@@ -321,6 +390,7 @@ def audit_fee_availability(corp_code: str, year: int) -> dict:
             "corp_code": corp_code,
             "year": year,
             "availability_status": "schema_unavailable",
+            "source_eligibility": "unknown",
             "quality_status": "missing",
             "selected": {
                 "audit_fee_m": None,
@@ -356,6 +426,10 @@ def audit_fee_availability_trend(
             {
                 "year": row["year"],
                 "availability_status": row["availability_status"],
+                "source_eligibility": row.get(
+                    "source_eligibility",
+                    "unknown",
+                ),
                 "quality_status": row["quality_status"],
                 "selected_fee_m": row.get("selected", {}).get("audit_fee_m"),
                 "selected_hours": row.get("selected", {}).get("audit_hours"),

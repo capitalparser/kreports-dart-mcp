@@ -201,7 +201,6 @@ def _audit_fee_peer_grade(corp_code: str, year: int) -> str:
     blocking_statuses = {
         "transport_error",
         "parse_error",
-        "schema_unavailable",
         "conflict",
     }
     if any(
@@ -212,7 +211,7 @@ def _audit_fee_peer_grade(corp_code: str, year: int) -> str:
     eligible = [
         item
         for item in statuses
-        if item.get("availability_status") != "not_available_from_endpoint"
+        if item.get("source_eligibility") == "eligible"
     ]
     if not eligible:
         return "not_applicable"

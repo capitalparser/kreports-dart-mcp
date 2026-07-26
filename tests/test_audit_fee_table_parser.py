@@ -132,3 +132,18 @@ def test_unit_is_not_inferred_from_generic_won_substring_or_unrelated_table():
         rows = parse_audit_fee_table(body, corp_code="001", bsns_year=2024)
         assert rows[0].availability_status == "parse_error"
         assert rows[0].actual_fee_m is None
+
+
+def test_unit_is_not_inferred_from_unrelated_trailing_row_in_same_table():
+    body = """
+    <table>
+      <tr><th>감사인</th><th>실제수행보수</th><th>실제수행시간</th></tr>
+      <tr><td>삼일회계법인</td><td>1,200,000</td><td>10,500</td></tr>
+      <tr><td colspan="3">임원 보수 단위: 원</td></tr>
+    </table>
+    """
+
+    rows = parse_audit_fee_table(body, corp_code="001", bsns_year=2024)
+
+    assert rows[0].availability_status == "parse_error"
+    assert rows[0].actual_fee_m is None

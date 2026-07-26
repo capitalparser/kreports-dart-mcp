@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from sqlalchemy import create_engine, text
 
 import kreports.db.engine as engine_module
@@ -197,7 +198,8 @@ def test_five_year_trend_keeps_unavailable_periods_as_null_gaps(temp_engine):
     by_year = {row["year"]: row for row in out["periods"]}
 
     assert len(out["periods"]) == 5
-    assert by_year[2022]["availability_status"] == "not_available_from_endpoint"
+    assert by_year[2022]["availability_status"] == "missing"
+    assert by_year[2022]["source_eligibility"] == "unknown"
     assert by_year[2022]["selected_fee_m"] is None
     assert by_year[2024]["selected_fee_m"] == 900
     assert all(row["selected_fee_m"] != 0 for row in out["periods"])
@@ -210,10 +212,12 @@ def test_feature_grade_excludes_endpoint_unsupported_years(monkeypatch):
         if year < 2024:
             return {
                 "availability_status": "not_available_from_endpoint",
+                "source_eligibility": "not_eligible",
                 "selected": {"audit_fee_m": None, "audit_hours": None},
             }
         return {
             "availability_status": "available",
+            "source_eligibility": "eligible",
             "selected": {"audit_fee_m": 100, "audit_hours": 1000},
         }
 
@@ -263,16 +267,105 @@ def test_feature_grade_fails_when_any_eligible_period_has_source_blocker(
         if year == 2025:
             return {
                 "availability_status": "transport_error",
+                "source_eligibility": "eligible",
                 "selected": {"audit_fee_m": 100, "audit_hours": 1000},
             }
         return {
             "availability_status": "available",
+            "source_eligibility": "eligible",
             "selected": {"audit_fee_m": 100, "audit_hours": 1000},
         }
 
     monkeypatch.setattr(quality_module, "audit_fee_availability", availability)
 
     assert quality_module._audit_fee_peer_grade("001", 2025) == "D"
+
+
+def test_feature_grade_excludes_unknown_periods_from_denominator(monkeypatch):
+    import kreports.quality.company_year as quality_module
+
+    def availability(_corp_code, year):
+        if year == 2025:
+            return {
+                "availability_status": "available",
+                "source_eligibility": "eligible",
+                "selected": {"audit_fee_m": 100, "audit_hours": 1000},
+            }
+        return {
+            "availability_status": "missing",
+            "source_eligibility": "unknown",
+            "selected": {"audit_fee_m": None, "audit_hours": None},
+        }
+
+    monkeypatch.setattr(quality_module, "audit_fee_availability", availability)
+
+    assert quality_module._audit_fee_peer_grade("001", 2025) == "A"
+
+
+def test_feature_grade_excludes_schema_unknown_periods(monkeypatch):
+    import kreports.quality.company_year as quality_module
+
+    def availability(_corp_code, year):
+        if year == 2025:
+            return {
+                "availability_status": "available",
+                "source_eligibility": "eligible",
+                "selected": {"audit_fee_m": 100, "audit_hours": 1000},
+            }
+        return {
+            "availability_status": "schema_unavailable",
+            "source_eligibility": "unknown",
+            "selected": {"audit_fee_m": None, "audit_hours": None},
+        }
+
+    monkeypatch.setattr(quality_module, "audit_fee_availability", availability)
+
+    assert quality_module._audit_fee_peer_grade("001", 2025) == "A"
+
+
+def test_feature_grade_counts_explicit_eligible_partial_period(monkeypatch):
+    import kreports.quality.company_year as quality_module
+
+    def availability(_corp_code, year):
+        if year == 2025:
+            return {
+                "availability_status": "available",
+                "source_eligibility": "eligible",
+                "selected": {"audit_fee_m": 100, "audit_hours": 1000},
+            }
+        if year == 2024:
+            return {
+                "availability_status": "partial",
+                "source_eligibility": "eligible",
+                "selected": {"audit_fee_m": None, "audit_hours": None},
+            }
+        return {
+            "availability_status": "missing",
+            "source_eligibility": "unknown",
+            "selected": {"audit_fee_m": None, "audit_hours": None},
+        }
+
+    monkeypatch.setattr(quality_module, "audit_fee_availability", availability)
+
+    assert quality_module._audit_fee_peer_grade("001", 2025) == "C"
+
+
+def test_feature_grade_with_zero_explicit_eligible_periods_is_not_applicable(
+    monkeypatch,
+):
+    import kreports.quality.company_year as quality_module
+
+    monkeypatch.setattr(
+        quality_module,
+        "audit_fee_availability",
+        lambda _corp_code, _year: {
+            "availability_status": "missing",
+            "source_eligibility": "unknown",
+            "selected": {"audit_fee_m": None, "audit_hours": None},
+        },
+    )
+
+    assert quality_module._audit_fee_peer_grade("001", 2025) == "not_applicable"
 
 
 def test_malformed_provenance_fails_closed_with_limitation(temp_engine):
@@ -298,6 +391,43 @@ def test_malformed_provenance_fails_closed_with_limitation(temp_engine):
     assert out["availability_status"] == "parse_error"
     assert out["quality_status"] == "error"
     assert out["selected"]["audit_fee_m"] == 900
+    assert any("provenance" in item.lower() for item in out["limitations"])
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        "[123]",
+        '[{"foo":"bar"}]',
+    ],
+)
+def test_structurally_invalid_provenance_fails_closed(
+    temp_engine,
+    provenance,
+):
+    with temp_engine.begin() as conn:
+        conn.execute(
+            AuditFee.__table__.insert(),
+            {
+                "corp_code": f"invalid-{len(provenance)}",
+                "bsns_year": 2024,
+                "audit_fee_m": 900,
+                "audit_hours": 9000,
+                "actual_fee_m": 900,
+                "actual_hours": 9000,
+                "availability_status": "available",
+                "quality_status": "verified",
+                "compatibility_basis": "actual",
+                "source_observations_json": provenance,
+            },
+        )
+
+    out = audit_fee_availability(f"invalid-{len(provenance)}", 2024)
+
+    assert out["availability_status"] == "parse_error"
+    assert out["quality_status"] == "error"
+    assert out["selected"]["audit_fee_m"] == 900
+    assert out["source_observations"] == []
     assert any("provenance" in item.lower() for item in out["limitations"])
 
 

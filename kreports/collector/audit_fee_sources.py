@@ -35,6 +35,7 @@ class AuditFeeObservation:
     raw_values: dict[str, str | None] = field(default_factory=dict)
     source_status: str | None = None
     source_message: str | None = None
+    source_eligibility: str = "unknown"
     limitations: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,12 +129,13 @@ def normalize_endpoint_result(
     """Adapt one OpenDART DS002 response without collapsing source fields."""
     status_value = str(status or "")
     row = _current_row(rows or ())
-    if status_value == "013" and source_supported is not True:
+    if status_value == "013" and source_supported is False:
         return AuditFeeObservation(
             corp_code=corp_code,
             bsns_year=year,
             source_class="opendart_ds002",
             source_period=str(year),
+            source_eligibility="not_eligible",
             availability_status="not_available_from_endpoint",
             quality_status="missing",
             source_status=status_value,
@@ -141,12 +143,18 @@ def normalize_endpoint_result(
             limitations=("DS002 endpoint does not provide this source period",),
         )
     if status_value == "013":
+        explicitly_supported = source_supported is True
         return AuditFeeObservation(
             corp_code=corp_code,
             bsns_year=year,
             source_class="opendart_ds002",
             source_period=str(year),
-            availability_status="partial",
+            source_eligibility=(
+                "eligible" if explicitly_supported else "unknown"
+            ),
+            availability_status=(
+                "partial" if explicitly_supported else "missing"
+            ),
             quality_status="missing",
             source_status=status_value,
             source_message=message,
@@ -160,6 +168,13 @@ def normalize_endpoint_result(
             bsns_year=year,
             source_class="opendart_ds002",
             source_period=str(year),
+            source_eligibility=(
+                "eligible"
+                if source_supported is True
+                else "not_eligible"
+                if source_supported is False
+                else "unknown"
+            ),
             availability_status="transport_error",
             quality_status="error",
             source_status=status_value,
@@ -173,8 +188,19 @@ def normalize_endpoint_result(
             bsns_year=year,
             source_class="opendart_ds002",
             source_period=str(year),
+            source_eligibility=(
+                "not_eligible"
+                if unsupported
+                else "eligible"
+                if source_supported is True
+                else "unknown"
+            ),
             availability_status=(
-                "not_available_from_endpoint" if unsupported else "partial"
+                "not_available_from_endpoint"
+                if unsupported
+                else "partial"
+                if source_supported is True
+                else "missing"
             ),
             quality_status="missing",
             source_status=status_value,
@@ -195,6 +221,8 @@ def normalize_endpoint_result(
         "actual_hours": row.get("real_exc_dtls_time"),
         "legacy_fee": row.get("adt_fee"),
         "legacy_hours": row.get("adt_time"),
+        "legacy_official_fee": row.get("mendng"),
+        "legacy_official_hours": row.get("tot_reqre_time"),
     }
     contract_fee = normalize_fee_m(raw["contract_fee"], "백만원")
     contract_hours = normalize_hours(raw["contract_hours"])
@@ -202,9 +230,22 @@ def normalize_endpoint_result(
     actual_hours = normalize_hours(raw["actual_hours"])
     # The historical DS002 shape exposed only one unlabeled compatibility pair.
     if contract_fee is None and actual_fee is None:
-        contract_fee = normalize_fee_m(raw["legacy_fee"], "백만원")
+        contract_fee = normalize_fee_m(
+            (
+                raw["legacy_official_fee"]
+                if raw["legacy_official_fee"] is not None
+                else raw["legacy_fee"]
+            ),
+            "백만원",
+        )
     if contract_hours is None and actual_hours is None:
-        contract_hours = normalize_hours(raw["legacy_hours"])
+        contract_hours = normalize_hours(
+            (
+                raw["legacy_official_hours"]
+                if raw["legacy_official_hours"] is not None
+                else raw["legacy_hours"]
+            )
+        )
 
     populated = (contract_fee, contract_hours, actual_fee, actual_hours)
     available_count = sum(value is not None for value in populated)
@@ -223,6 +264,7 @@ def normalize_endpoint_result(
             row.get("adtor") or row.get("nm") or row.get("auditor_nm") or None
         ),
         source_period=str(row.get("bsns_year") or row.get("se") or year),
+        source_eligibility="eligible",
         availability_status=availability,
         quality_status=quality,
         displayed_unit="백만원",
