@@ -17,6 +17,7 @@ _TITLE_MARKER_RE = re.compile(
     r"(?P<roman>[IVX]{1,5})[.)])\s*(?P<title>.+?)\s*$",
     flags=re.IGNORECASE,
 )
+_CDATA_START_RE = re.compile(r"<!\[CDATA\[", re.IGNORECASE)
 _NOTE_RE = re.compile(
     r"(?:관련\s*(?:재무제표\s*)?)?(?:주석|note)\s*[제]?\s*(\d+(?:[.-]\d+)?)",
     flags=re.IGNORECASE,
@@ -220,6 +221,27 @@ def _compact(value: str) -> str:
     return re.sub(r"\s+", "", value or "").lower()
 
 
+def _input_structure_limitations(full_text: str) -> list[str]:
+    value = full_text or ""
+    bounded = value[:MAX_INPUT_CHARS]
+    limitations: list[str] = []
+    if len(value) > MAX_INPUT_CHARS:
+        limitations.append("input_truncated")
+
+    position = 0
+    while True:
+        match = _CDATA_START_RE.search(bounded, position)
+        if match is None:
+            break
+        start = match.start()
+        end = bounded.find("]]>", start + len("<![CDATA["))
+        if end < 0:
+            limitations.append("malformed_cdata")
+            break
+        position = end + len("]]>")
+    return limitations
+
+
 def _structured_lines(full_text: str) -> list[StructuredLine]:
     bounded = (full_text or "")[:MAX_INPUT_CHARS]
     lines: list[StructuredLine] = []
@@ -373,7 +395,8 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         if tag == "table":
             clear_strong_ancestry()
 
-    block_tags = {"title", "p", "td", "th", "tr", "table", "br"}
+    structural_tags = {"title", "p", "td", "th", "tr", "table"}
+    block_tags = structural_tags | {"br"}
 
     def append_text(value: str) -> None:
         value = unescape(value)
@@ -391,11 +414,13 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         @staticmethod
         def handle_self_closing(tag: str) -> None:
             tag = tag.lower()
-            flush()
             if tag == "br":
+                flush()
                 return
-            if tag in block_tags:
-                prepare_opening(tag)
+            if tag not in structural_tags:
+                return
+            flush()
+            prepare_opening(tag)
             # A no-content event cannot own heading evidence. It terminates
             # any prior strong scope instead of silently carrying that scope
             # into the next text block.
@@ -462,6 +487,10 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
 
         def handle_charref(self, name: str) -> None:
             append_text(f"&#{name};")
+
+        def unknown_decl(self, data: str) -> None:
+            if data.startswith("CDATA["):
+                append_text(data[len("CDATA["):])
 
     parser = StructureParser()
     parser.feed(bounded)
@@ -782,6 +811,59 @@ def _is_semantically_equivalent_heading_pair(
     )
 
 
+def _has_incomplete_explicit_matter(
+    lines: list[str],
+    structured_lines: list[StructuredLine],
+) -> bool:
+    heading_frames = _discover_heading_frames(lines)
+    owned_reason_headings = {
+        index
+        for frame in heading_frames
+        for index in (frame.reason_heading, *frame.reason_separators)
+    }
+    response_boundaries = sorted(
+        _last_response_heading(frame)
+        for frame in heading_frames
+    )
+    for reason_index, line in enumerate(lines):
+        if (
+            reason_index in owned_reason_headings
+            or not _matches_heading(line, _REASON_HEADINGS)
+        ):
+            continue
+        prior_response = max(
+            (
+                index
+                for index in response_boundaries
+                if index < reason_index
+            ),
+            default=-1,
+        )
+        candidate = _discover_title_boundary(
+            lines,
+            lower=prior_response + 1,
+            reason_index=reason_index,
+            response_owned=prior_response >= 0,
+            current_marker=None,
+            structured_lines=structured_lines,
+        )
+        if candidate is not None and candidate.has_explicit_structure:
+            return True
+
+    if not response_boundaries:
+        return False
+    for index in range(response_boundaries[-1] + 1, len(lines)):
+        line = structured_lines[index]
+        if not line.is_explicit_heading:
+            continue
+        if (
+            _title_marker(line.text) is not None
+            or _has_clear_title_evidence(line.text)
+        ):
+            return True
+    return False
+
+
 def _discover_matter_frames(
     lines: list[str],
     structured_lines: list[StructuredLine] | None = None,
@@ -995,6 +1077,13 @@ def _items_from_frames(
 def parse_kam_items(full_text: str) -> KamParseOutcome:
     """Return KAM items with an explicit completeness/ambiguity outcome."""
     try:
+        input_limitations = _input_structure_limitations(full_text)
+        if input_limitations:
+            return KamParseOutcome(
+                items=[],
+                status="error",
+                limitations=input_limitations,
+            )
         structured_lines = _trim_structured_to_kam(
             _structured_lines(full_text)
         )
@@ -1010,6 +1099,12 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
                 items=[],
                 status="ambiguous",
                 limitations=["ambiguous_boundary"],
+            )
+        if _has_incomplete_explicit_matter(lines, structured_lines):
+            return KamParseOutcome(
+                items=[],
+                status="error",
+                limitations=["incomplete_kam_structure"],
             )
         frames = _discover_matter_frames(lines, structured_lines)
         items = _items_from_frames(lines, frames)

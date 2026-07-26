@@ -689,6 +689,187 @@ def test_parse_outcome_preserves_br_as_a_line_boundary():
     )
 
 
+@pytest.mark.parametrize(
+    "container",
+    [
+        pytest.param("TITLE", id="title"),
+        pytest.param("TH", id="table-header"),
+        pytest.param('TD role="heading"', id="explicit-heading-cell"),
+    ],
+)
+@pytest.mark.parametrize(
+    "inline_markup",
+    [
+        pytest.param("<SPAN/>{value}", id="before"),
+        pytest.param("{first} <IMG/>{rest}", id="middle"),
+        pytest.param(
+            "<sPaN/><WBR/><x-kam-inline/>{value}",
+            id="multiple-mixed-case",
+        ),
+    ],
+)
+def test_parse_outcome_preserves_inline_self_closing_tags_in_strong_heading(
+    container,
+    inline_markup,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    def heading(value):
+        first, rest = value.split(" ", 1)
+        content = inline_markup.format(
+            value=value,
+            first=first,
+            rest=rest,
+        )
+        tag = container.split()[0]
+        return f"<{container}>{content}</{tag}>"
+
+    body = f"""
+    <TITLE>Key Audit Matters</TITLE>
+    {heading("Revenue recognition")}
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    {heading("Classification of leases")}
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Lease classification requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We reviewed management's classification.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "Revenue recognition",
+        "Classification of leases",
+    ]
+
+
+def test_parse_outcome_reads_cdata_inside_title_ancestry():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE><![CDATA[Revenue recognition]]></TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert len(outcome.items) == 1
+    assert outcome.items[0].title == "Revenue recognition"
+
+
+def test_parse_outcome_reads_full_plain_audit_body_from_cdata():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <![CDATA[
+    Key Audit Matters
+    1. Revenue recognition
+    Why the matter was determined to be a key audit matter
+    Contract cut-off requires significant judgment.
+    How the matter was addressed in the audit
+    We inspected contract samples.
+    ]]>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["Revenue recognition"]
+
+
+def test_parse_outcome_rejects_silent_partial_from_unterminated_cdata():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <TITLE><![CDATA[Inventory valuation
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Inventory estimates require significant judgment.</P>
+    """
+
+    first = parse_kam_items(body)
+    second = parse_kam_items(body)
+
+    assert first == second
+    assert first.status == "error"
+    assert first.items == []
+    assert "malformed_cdata" in first.limitations
+
+
+def test_parse_outcome_rejects_silent_partial_explicit_second_matter():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <TITLE>Inventory valuation</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Inventory estimates require significant judgment.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+    assert "incomplete_kam_structure" in outcome.limitations
+
+
+def test_parse_outcome_ignores_metadata_and_preserves_entities():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <!DOCTYPE audit-report>
+    <?xml version="1.0"?>
+    <TITLE>Key Audit Matters</TITLE>
+    <!-- page metadata -->
+    <TITLE>Revenue <!-- inline comment --><?page 2?> recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract &amp; cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples &amp; recalculated cut-off.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert len(outcome.items) == 1
+    assert outcome.items[0].title == "Revenue recognition"
+    assert outcome.items[0].reason_text == (
+        "Contract & cut-off requires significant judgment."
+    )
+    assert outcome.items[0].audit_response_text == (
+        "We inspected contract samples & recalculated cut-off."
+    )
+
+
+def test_parse_outcome_reports_bounded_input_truncation():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    outcome = parse_kam_items("x" * 2_000_001)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+    assert "input_truncated" in outcome.limitations
+
+
 def test_parser_collapses_only_adjacent_exact_full_matter_duplicates():
     from kreports.processor.kam_parser import extract_kam_items
 
