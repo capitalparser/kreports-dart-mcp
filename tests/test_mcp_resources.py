@@ -95,6 +95,23 @@ def test_resource_uri_parser_requires_exact_canonical_path(uri):
         read_resource(uri)
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        " kreports://company/00126380/2025",
+        "kreports://company/00126380/2025 ",
+        "kreports://company/00126380/20\n25",
+        "kreports://company/00126380/20\t25",
+        "kreports://evidence/20250312\x000001",
+        "kreports://evidence/20250312\x1f0001",
+        "kreports://evidence/20250312\x7f0001",
+    ],
+)
+def test_resource_uri_rejects_whitespace_and_ascii_controls_before_parse(uri):
+    with pytest.raises(ResourceRequestError, match="invalid_resource_uri"):
+        read_resource(uri)
+
+
 def test_missing_sqlite_resource_reads_do_not_create_database_or_sidecars(
     tmp_path, monkeypatch
 ):

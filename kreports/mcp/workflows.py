@@ -57,7 +57,8 @@ WORKFLOW_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-MAX_WORKFLOW_OUTPUT_CHARACTERS = 100_000
+MAX_WORKFLOW_OUTPUT_BYTES = 100_000
+MAX_WORKFLOW_OUTPUT_CHARACTERS = MAX_WORKFLOW_OUTPUT_BYTES
 _MAX_ANSWER_CHARACTERS = 8_000
 _MAX_ITEMS = 20
 _MAX_NESTED_TEXT = 1_000
@@ -146,71 +147,123 @@ def _bounded_child(
     return child, was_bounded
 
 
-def _compact_child(child: dict[str, Any]) -> dict[str, Any]:
-    quality = child.get("data_quality") or {}
-    compact_quality = {
-        "status": str(quality.get("status") or "error")[:20],
-        "grade": quality.get("grade"),
-        "dataset_version": str(
-            quality.get("dataset_version") or "unknown"
-        )[:120],
-        "schema_version": str(
-            quality.get("schema_version") or "unknown"
-        )[:120],
-        "covered_years": list(quality.get("covered_years") or [])[:10],
-        "missing_fields": [
-            str(item)[:200]
-            for item in list(quality.get("missing_fields") or [])[:10]
-        ],
-        "limitations": [
-            str(item)[:300]
-            for item in list(quality.get("limitations") or [])[:10]
-        ],
-    }
-    compact_evidence = []
-    for item in list(child.get("evidence") or [])[:5]:
-        if not isinstance(item, dict):
-            continue
-        compact_evidence.append(
-            {
-                "source_label": str(item.get("source_label") or "")[:200],
-                "source_url": str(item.get("source_url") or "")[:1_000],
-                "rcept_no": (
-                    str(item["rcept_no"])[:80]
-                    if item.get("rcept_no") is not None
-                    else None
-                ),
-                "section_title": (
-                    str(item["section_title"])[:300]
-                    if item.get("section_title") is not None
-                    else None
-                ),
-                "excerpt": (
-                    str(item["excerpt"])[:500]
-                    if item.get("excerpt") is not None
-                    else None
-                ),
-            }
-        )
+def _serialized_bytes(value: dict[str, Any]) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+
+def _quality_status(child: dict[str, Any]) -> str:
+    status = str(
+        (child.get("data_quality") or {}).get("status") or "error"
+    )
+    return (
+        status
+        if status in {"usable", "limited", "missing", "error"}
+        else "error"
+    )
+
+
+def _minimal_child(child: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": str(child.get("schema_version") or "1.0")[:20],
         "tool_name": str(child.get("tool_name") or "unknown")[:120],
-        "verdict": str(child.get("verdict") or "")[:500],
-        "answer": str(child.get("answer") or "")[:1_000],
-        "confirmed_facts": _bound_value(
-            list(child.get("confirmed_facts") or [])[:2]
+        "answer": "",
+        "data_quality": {"status": _quality_status(child)},
+        "evidence": [],
+    }
+
+
+def _essential_evidence(item: object) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    return {
+        "source_label": str(item.get("source_label") or "")[:200],
+        "source_url": str(item.get("source_url") or "")[:1_000],
+        "rcept_no": (
+            str(item["rcept_no"])[:80]
+            if item.get("rcept_no") is not None
+            else None
         ),
-        "analysis": _bound_value(list(child.get("analysis") or [])[:2]),
-        "evidence": compact_evidence,
-        "data_quality": compact_quality,
-        "warnings": [
-            str(item)[:300]
-            for item in list(child.get("warnings") or [])[:5]
+        "section_title": (
+            str(item["section_title"])[:300]
+            if item.get("section_title") is not None
+            else None
+        ),
+        "excerpt": (
+            str(item["excerpt"])[:500]
+            if item.get("excerpt") is not None
+            else None
+        ),
+    }
+
+
+def _budgeted_workflow_result(
+    result: dict[str, Any],
+    children: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original_status = str(result.get("status") or "error")
+    truncated_status = (
+        "error" if original_status == "error" else "limited"
+    )
+    limitations = [
+        str(item)[:300]
+        for item in list(result.get("limitations") or [])[:20]
+        if str(item)
+    ]
+    if "workflow_output_truncated" not in limitations:
+        limitations.append("workflow_output_truncated")
+    budgeted = {
+        "workflow_version": "1.0",
+        "workflow_name": str(result.get("workflow_name") or "")[:120],
+        "categories": [
+            str(item)[:120]
+            for item in list(result.get("categories") or [])[:10]
         ],
-        "next_checks": [
-            str(item)[:300]
-            for item in list(child.get("next_checks") or [])[:5]
+        "company": str(result.get("company") or "")[:120],
+        "year": result.get("year"),
+        "status": truncated_status,
+        "children": [_minimal_child(child) for child in children],
+        "limitations": limitations,
+    }
+
+    # Evidence is the first optional payload to consume the remaining budget.
+    # Each candidate is measured using the same UTF-8 JSON representation that
+    # defines the public cap.
+    for index, child in enumerate(children):
+        for item in list(child.get("evidence") or [])[:5]:
+            evidence = _essential_evidence(item)
+            if evidence is None:
+                continue
+            budgeted["children"][index]["evidence"].append(evidence)
+            if _serialized_bytes(budgeted) > MAX_WORKFLOW_OUTPUT_BYTES:
+                budgeted["children"][index]["evidence"].pop()
+                break
+
+    if _serialized_bytes(budgeted) <= MAX_WORKFLOW_OUTPUT_BYTES:
+        return budgeted
+
+    # Emergency fallback is deliberately tiny and deterministic. It preserves
+    # every child identity and exact quality status, and cannot fail because of
+    # valid user/domain payload size.
+    return {
+        "workflow_version": "1.0",
+        "workflow_name": str(result.get("workflow_name") or "")[:120],
+        "status": truncated_status,
+        "children": [
+            {
+                "tool_name": str(
+                    child.get("tool_name") or "unknown"
+                )[:120],
+                "data_quality": {"status": _quality_status(child)},
+                "evidence": [],
+            }
+            for child in children
         ],
+        "limitations": ["workflow_output_truncated"],
     }
 
 
@@ -347,23 +400,9 @@ def run_workflow(
     }
     if (
         output_was_bounded
-        or len(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        > MAX_WORKFLOW_OUTPUT_CHARACTERS
+        or _serialized_bytes(result) > MAX_WORKFLOW_OUTPUT_BYTES
     ):
-        result["children"] = [
-            _compact_child(child) for child in children
-        ]
-        result["limitations"] = [
-            *limitations,
-            "workflow_output_truncated",
-        ]
-        if status != "error":
-            result["status"] = "limited"
-    if (
-        len(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        > MAX_WORKFLOW_OUTPUT_CHARACTERS
-    ):
-        raise RuntimeError("workflow_output_budget_exceeded")
+        result = _budgeted_workflow_result(result, children)
     return result
 
 

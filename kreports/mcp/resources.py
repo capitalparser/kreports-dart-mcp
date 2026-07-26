@@ -166,7 +166,18 @@ def mcp_resource_templates() -> list[ResourceTemplate]:
 
 def _parse_uri(uri: object) -> tuple[str, dict[str, Any]]:
     raw = str(uri)
-    parsed = urlsplit(raw)
+    if (
+        raw != raw.strip()
+        or any(
+            ord(character) <= 0x1F or ord(character) == 0x7F
+            for character in raw
+        )
+    ):
+        raise ResourceRequestError("invalid_resource_uri")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        raise ResourceRequestError("invalid_resource_uri") from None
     if (
         parsed.scheme != "kreports"
         or parsed.query

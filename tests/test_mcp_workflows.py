@@ -4,6 +4,7 @@ import json
 
 from kreports.mcp.contracts import build_answer_envelope
 from kreports.mcp.workflows import (
+    MAX_WORKFLOW_OUTPUT_BYTES,
     MAX_WORKFLOW_OUTPUT_CHARACTERS,
     WORKFLOW_SPECS,
     accounting_policy_peer_review,
@@ -235,3 +236,108 @@ def test_workflow_global_budget_handles_twelve_megabyte_plain_dict():
     assert len(encoded) <= MAX_WORKFLOW_OUTPUT_CHARACTERS
     assert result["status"] == "limited"
     assert "workflow_output_truncated" in result["limitations"]
+
+
+def test_workflow_budget_never_raises_for_reviewer_nested_shape():
+    nested_facts = [
+        {f"field_{field}": "x" * 1_000 for field in range(50)}
+        for _ in range(20)
+    ]
+
+    def dispatch(name, _arguments):
+        return {
+            "tool_name": name,
+            "answer": "answer",
+            "verdict": "usable",
+            "confirmed_facts": nested_facts,
+            "analysis": [],
+            "evidence": [
+                {
+                    "source_label": "DART",
+                    "source_url": "https://dart.fss.or.kr/reviewer",
+                    "rcept_no": "20250312000001",
+                }
+            ],
+            "data_quality": {
+                "status": "usable",
+                "grade": "A",
+                "dataset_version": "v1",
+                "schema_version": "v1",
+                "covered_years": [2025],
+                "missing_fields": [],
+                "limitations": [],
+            },
+            "warnings": [],
+            "next_checks": [],
+        }
+
+    first = investor_first_pass("00126380", 2025, dispatch=dispatch)
+    second = investor_first_pass("00126380", 2025, dispatch=dispatch)
+    encoded = json.dumps(first, ensure_ascii=False, sort_keys=True)
+
+    assert first == second
+    assert len(encoded) <= MAX_WORKFLOW_OUTPUT_CHARACTERS
+    assert len(encoded.encode("utf-8")) <= MAX_WORKFLOW_OUTPUT_BYTES
+    assert first["status"] == "limited"
+    assert "workflow_output_truncated" in first["limitations"]
+    assert all(child["tool_name"] for child in first["children"])
+    assert all(child["data_quality"]["status"] == "usable"
+               for child in first["children"])
+    assert all(child["evidence"] for child in first["children"])
+
+
+def test_workflow_budget_is_deterministic_for_adversarial_unicode_children():
+    statuses = ["error", "missing", "limited", "usable"]
+    call_index = 0
+
+    def dispatch(name, _arguments):
+        nonlocal call_index
+        status = statuses[call_index]
+        call_index += 1
+        return {
+            "tool_name": name,
+            "answer": "가🙂" * 2_000_000,
+            "verdict": "검토🙂" * 500_000,
+            "confirmed_facts": [
+                {f"필드_{idx}": "값🙂" * 500 for idx in range(50)}
+                for _ in range(20)
+            ],
+            "analysis": [],
+            "evidence": [
+                {
+                    "source_label": "다트🙂" * 200,
+                    "source_url": "https://dart.fss.or.kr/" + "근거🙂" * 500,
+                    "rcept_no": "20250312000001",
+                    "excerpt": "증거🙂" * 500_000,
+                }
+            ],
+            "data_quality": {
+                "status": status,
+                "grade": None,
+                "dataset_version": "자료🙂" * 100,
+                "schema_version": "스키마🙂" * 100,
+                "covered_years": [2025],
+                "missing_fields": [],
+                "limitations": [],
+            },
+            "warnings": [],
+            "next_checks": [],
+        }
+
+    first = accounting_policy_peer_review(
+        "00126380", 2025, dispatch=dispatch
+    )
+    call_index = 0
+    second = accounting_policy_peer_review(
+        "00126380", 2025, dispatch=dispatch
+    )
+    encoded = json.dumps(first, ensure_ascii=False, sort_keys=True)
+
+    assert first == second
+    assert len(encoded.encode("utf-8")) <= MAX_WORKFLOW_OUTPUT_BYTES
+    assert first["status"] == "error"
+    assert "workflow_output_truncated" in first["limitations"]
+    assert [
+        child["data_quality"]["status"] for child in first["children"]
+    ] == statuses
+    assert all(child["evidence"] for child in first["children"])
