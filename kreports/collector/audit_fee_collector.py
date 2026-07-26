@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # NAS ratio 임계값: 비감사보수가 감사보수를 초과하면 독립성 위험
 _NAS_RISK_THRESHOLD = 1.0
 _DART_NO_DATA_STATUS = "013"
+_DS002_SOURCE_AVAILABLE_FROM_YEAR = 2023
 
 
 def _parse_fee(value: str | None) -> int | None:
@@ -76,9 +77,19 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
         try:
             data = fetch_audit_fee(corp_code, year)
             status = data.get("status")
+            source_supported = year >= _DS002_SOURCE_AVAILABLE_FROM_YEAR
+            observation = normalize_endpoint_result(
+                corp_code=corp_code,
+                year=year,
+                status=status,
+                rows=data.get("list") or [],
+                message=data.get("message"),
+                source_supported=source_supported,
+            )
             if status != "000":
                 if status == _DART_NO_DATA_STATUS:
                     no_data += 1
+                    upsert_audit_fee_observations([observation])
                     _record_audit_fee_outcome(
                         corp_code,
                         year,
@@ -90,6 +101,7 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                         corp_code, year, status, data.get("message"),
                     )
                     error += 1
+                    upsert_audit_fee_observations([observation])
                     _record_audit_fee_outcome(
                         corp_code,
                         year,
@@ -102,6 +114,7 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                 continue
             if not data.get("list"):
                 no_data += 1
+                upsert_audit_fee_observations([observation])
                 _record_audit_fee_outcome(
                     corp_code,
                     year,
@@ -112,6 +125,7 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
             item = _extract_current_period(data["list"])
             if item is None:
                 no_data += 1
+                upsert_audit_fee_observations([observation])
                 _record_audit_fee_outcome(
                     corp_code,
                     year,
@@ -119,13 +133,6 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
                 )
                 continue
 
-            observation = normalize_endpoint_result(
-                corp_code=corp_code,
-                year=year,
-                status=status,
-                rows=data.get("list") or [],
-                message=data.get("message"),
-            )
             auditor_nm = observation.auditor_nm
             audit_fee_m = (
                 observation.actual_fee_m
@@ -165,6 +172,21 @@ def collect_audit_fees_for(corp_code: str, years: list[int]) -> dict:
         except Exception as e:
             logger.warning("감사보수 수집 실패 [%s %d]: %s", corp_code, year, e)
             error += 1
+            upsert_audit_fee_observations(
+                [
+                    AuditFeeObservation(
+                        corp_code=corp_code,
+                        bsns_year=year,
+                        source_class="opendart_ds002",
+                        source_period=str(year),
+                        availability_status="transport_error",
+                        quality_status="error",
+                        source_status="exception",
+                        source_message=str(e),
+                        limitations=(str(e),),
+                    )
+                ]
+            )
             _record_audit_fee_outcome(
                 corp_code,
                 year,
@@ -279,6 +301,18 @@ def upsert_audit_fee_observations(
             previous=previous,
         )
         values = merged.to_record()
+        blocking = next(
+            (
+                item
+                for item in sorted(observations, key=lambda item: item.source_class)
+                if item.availability_status in {"transport_error", "parse_error"}
+                or item.quality_status == "error"
+            ),
+            None,
+        )
+        if blocking is not None:
+            values["availability_status"] = blocking.availability_status
+            values["quality_status"] = "error"
         values.update(compatibility_fields)
         if existing:
             for key, value in values.items():
@@ -319,6 +353,17 @@ def ingest_cached_audit_fee_table(
         rcept_no=rcept_no,
     )
     if not observations:
+        observation = AuditFeeObservation(
+            corp_code=corp_code,
+            bsns_year=bsns_year,
+            source_class="cached_business_report",
+            source_rcept_no=rcept_no,
+            source_period=str(bsns_year),
+            availability_status="not_found_in_cached_report",
+            quality_status="missing",
+            limitations=("No audit-fee table was found in the cached report",),
+        )
+        upsert_audit_fee_observations([observation])
         return {
             "saved": 0,
             "not_found": 1,

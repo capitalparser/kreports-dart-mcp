@@ -17,7 +17,6 @@ _AUDIT_MARKERS = (
     "감사시간",
     "감사 시간",
     "회계감사",
-    "감사인",
 )
 _ACTUAL_MARKERS = ("실제", "수행", "집행")
 _CONTRACT_MARKERS = ("계약", "예정")
@@ -32,13 +31,49 @@ def _clean(value: object) -> str:
 
 
 def _unit_for_text(text_value: str) -> str | None:
-    compact = text_value.replace(" ", "").lower()
-    for unit in ("백만원", "천원", "억원", "원"):
-        if unit in compact:
-            return unit
-    if "millionkrw" in compact or "krwmillion" in compact:
+    cleaned = _clean(text_value).lower()
+    labeled = re.search(
+        r"(?:단위|unit)\s*[:：]\s*(백만원|천원|억원|원|million\s*krw|krw\s*million)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if labeled:
+        unit = labeled.group(1).replace(" ", "")
+        return "백만원" if unit in {"millionkrw", "krwmillion"} else unit
+    parenthetical = re.search(
+        r"[\(\[]\s*(백만원|천원|억원|원|million\s*krw|krw\s*million)\s*[\)\]]",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if parenthetical:
+        unit = parenthetical.group(1).replace(" ", "")
+        return "백만원" if unit in {"millionkrw", "krwmillion"} else unit
+    if cleaned.strip() in {"million krw", "krw million"}:
         return "백만원"
     return None
+
+
+def _is_standalone_unit_label(text_value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"\s*\(?\s*(?:단위|unit)\s*[:：]\s*"
+            r"(?:백만원|천원|억원|원|million\s*krw|krw\s*million)"
+            r"(?:\s*,?\s*시간)?\s*\)?\s*",
+            _clean(text_value),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _has_audit_fee_semantics(text_value: str) -> bool:
+    compact = text_value.lower().replace(" ", "")
+    explicit = any(marker.replace(" ", "") in compact for marker in _AUDIT_MARKERS)
+    structured = (
+        any(marker in compact for marker in _AUDITOR_MARKERS)
+        and any(marker in compact for marker in (*_ACTUAL_MARKERS, *_CONTRACT_MARKERS))
+        and any(marker in compact for marker in _FEE_MARKERS)
+    )
+    return explicit or structured
 
 
 def _table_grid(table, max_rows: int) -> list[list[str]]:
@@ -278,7 +313,7 @@ def parse_audit_fee_table(
         bounded = source_text[:max_input_chars].decode("utf-8", errors="replace")
     else:
         bounded = str(source_text or "")[:max_input_chars]
-    if not bounded or not any(marker in bounded for marker in _AUDIT_MARKERS):
+    if not bounded or not _has_audit_fee_semantics(bounded):
         return []
     try:
         root = html.fromstring(bounded)
@@ -296,14 +331,21 @@ def parse_audit_fee_table(
         ]
 
     output: list[AuditFeeObservation] = []
-    for table in root.xpath(".//table")[:max_tables]:
+    tables = ([root] if str(root.tag).lower() == "table" else []) + root.xpath(
+        ".//table"
+    )
+    for table in tables[:max_tables]:
         table_text = _candidate_table_text(table)
-        if not any(marker in table_text for marker in _AUDIT_MARKERS):
+        if not _has_audit_fee_semantics(table_text):
             continue
         preceding = table.xpath("./preceding::*[self::p or self::div][1]")
         local_unit = _unit_for_text(table_text)
-        if local_unit is None and preceding:
-            local_unit = _unit_for_text(_clean(preceding[-1].text_content()))
+        if (
+            local_unit is None
+            and preceding
+            and _is_standalone_unit_label(preceding[-1].text_content())
+        ):
+            local_unit = _unit_for_text(preceding[-1].text_content())
         output.extend(
             _parse_candidate(
                 table,

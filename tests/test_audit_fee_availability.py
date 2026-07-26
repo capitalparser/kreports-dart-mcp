@@ -10,6 +10,7 @@ from kreports.analysis.audit_reporting import (
 from kreports.collector.audit_fee_sources import (
     AuditFeeObservation,
     merge_audit_fee_observations,
+    observations_json,
 )
 from kreports.db.models import AuditFee
 
@@ -91,7 +92,8 @@ def test_missing_observation_does_not_erase_previous_verified_values():
 
     assert result.audit_fee_m == 1200
     assert result.audit_hours == 10500
-    assert result.availability_status == "available"
+    assert result.availability_status == "transport_error"
+    assert result.quality_status == "error"
 
 
 def test_read_only_availability_exposes_typed_values_and_conflict(temp_engine):
@@ -218,6 +220,121 @@ def test_feature_grade_excludes_endpoint_unsupported_years(monkeypatch):
     monkeypatch.setattr(quality_module, "audit_fee_availability", availability)
 
     assert quality_module._audit_fee_peer_grade("001", 2025) == "A"
+
+
+def test_newer_same_source_observation_supersedes_older_selection():
+    older = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="cached_business_report",
+        actual_fee_m=100,
+        actual_hours=1000,
+        source_period="2023",
+        source_rcept_no="20240318000001",
+        availability_status="available",
+        quality_status="verified",
+    )
+    newer = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="cached_business_report",
+        actual_fee_m=104,
+        actual_hours=1040,
+        source_period="2024",
+        source_rcept_no="20250318000001",
+        availability_status="available",
+        quality_status="verified",
+    )
+
+    result = merge_audit_fee_observations([older, newer])
+
+    assert result.actual_fee_m == 104
+    assert result.actual_hours == 1040
+    assert result.source_period == "2024"
+    assert len(json.loads(result.source_observations_json)) == 2
+
+
+def test_feature_grade_fails_when_any_eligible_period_has_source_blocker(
+    monkeypatch,
+):
+    import kreports.quality.company_year as quality_module
+
+    def availability(_corp_code, year):
+        if year == 2025:
+            return {
+                "availability_status": "transport_error",
+                "selected": {"audit_fee_m": 100, "audit_hours": 1000},
+            }
+        return {
+            "availability_status": "available",
+            "selected": {"audit_fee_m": 100, "audit_hours": 1000},
+        }
+
+    monkeypatch.setattr(quality_module, "audit_fee_availability", availability)
+
+    assert quality_module._audit_fee_peer_grade("001", 2025) == "D"
+
+
+def test_malformed_provenance_fails_closed_with_limitation(temp_engine):
+    with temp_engine.begin() as conn:
+        conn.execute(
+            AuditFee.__table__.insert(),
+            {
+                "corp_code": "malformed",
+                "bsns_year": 2024,
+                "audit_fee_m": 900,
+                "audit_hours": 9000,
+                "actual_fee_m": 900,
+                "actual_hours": 9000,
+                "availability_status": "available",
+                "quality_status": "verified",
+                "compatibility_basis": "actual",
+                "source_observations_json": "{not-json",
+            },
+        )
+
+    out = audit_fee_availability("malformed", 2024)
+
+    assert out["availability_status"] == "parse_error"
+    assert out["quality_status"] == "error"
+    assert out["selected"]["audit_fee_m"] == 900
+    assert any("provenance" in item.lower() for item in out["limitations"])
+
+
+def test_bounded_provenance_keeps_newest_observation_from_each_source():
+    values = [
+        AuditFeeObservation(
+            corp_code="001",
+            bsns_year=2024,
+            source_class="cached_business_report",
+            actual_fee_m=100 + index,
+            source_period=str(2000 + index),
+            source_rcept_no=f"{2000 + index}0318000001",
+            availability_status="available",
+            quality_status="verified",
+        )
+        for index in range(25)
+    ]
+    values.append(
+        AuditFeeObservation(
+            corp_code="001",
+            bsns_year=2024,
+            source_class="opendart_ds002",
+            source_period="2024",
+            availability_status="transport_error",
+            quality_status="error",
+        )
+    )
+
+    bounded = json.loads(observations_json(values, limit=20))
+
+    assert len(bounded) == 20
+    assert any(item["source_class"] == "opendart_ds002" for item in bounded)
+    assert any(
+        item["source_class"] == "cached_business_report"
+        and item["source_period"] == "2024"
+        for item in bounded
+    )
 
 
 def test_read_only_availability_does_not_create_missing_sqlite_or_sidecars(

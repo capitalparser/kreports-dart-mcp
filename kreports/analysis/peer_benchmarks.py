@@ -983,7 +983,19 @@ def compare_peer_audit_fees(
                CASE WHEN f.total_assets > 0 AND af.audit_fee_m IS NOT NULL
                     THEN 10000.0 * af.audit_fee_m * 1000000.0 / f.total_assets END AS fee_assets_bps,
                CASE WHEN af.audit_hours > 0 AND af.audit_fee_m IS NOT NULL
-                    THEN 1.0 * af.audit_fee_m / af.audit_hours END AS fee_per_hour_m
+                    THEN 1.0 * af.audit_fee_m / af.audit_hours END AS fee_per_hour_m,
+               CASE WHEN f.total_assets > 0 AND {actual_fee_expr} IS NOT NULL
+                    THEN 10000.0 * {actual_fee_expr} * 1000000.0 / f.total_assets
+                    END AS actual_fee_assets_bps,
+               CASE WHEN {actual_hours_expr} > 0 AND {actual_fee_expr} IS NOT NULL
+                    THEN 1.0 * {actual_fee_expr} / {actual_hours_expr}
+                    END AS actual_fee_per_hour_m,
+               CASE WHEN f.total_assets > 0 AND {contract_fee_expr} IS NOT NULL
+                    THEN 10000.0 * {contract_fee_expr} * 1000000.0 / f.total_assets
+                    END AS contract_fee_assets_bps,
+               CASE WHEN {contract_hours_expr} > 0 AND {contract_fee_expr} IS NOT NULL
+                    THEN 1.0 * {contract_fee_expr} / {contract_hours_expr}
+                    END AS contract_fee_per_hour_m
         FROM companies c
         LEFT JOIN financials f
           ON f.corp_code=c.corp_code AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs
@@ -1013,17 +1025,57 @@ def compare_peer_audit_fees(
                 "contract_hours",
                 "metric_basis",
                 "availability_status",
+                "actual_fee_assets_bps",
+                "actual_fee_per_hour_m",
+                "contract_fee_assets_bps",
+                "contract_fee_per_hour_m",
             ):
                 row.pop(key, None)
     subject_row = by_cc.get(corp_code, {})
     peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
-    metrics = {
-        "audit_fee_m": [r["audit_fee_m"] for r in peer_rows if r["audit_fee_m"] is not None],
-        "audit_hours": [r["audit_hours"] for r in peer_rows if r["audit_hours"] is not None],
-        "nas_ratio": [r["nas_ratio"] for r in peer_rows if r["nas_ratio"] is not None],
-        "audit_fee_to_assets_bps": [r["fee_assets_bps"] for r in peer_rows if r["fee_assets_bps"] is not None],
-        "audit_fee_per_hour_m": [r["fee_per_hour_m"] for r in peer_rows if r["fee_per_hour_m"] is not None],
-    }
+    if typed_evidence:
+        metrics = {
+            key: [row[key] for row in peer_rows if row.get(key) is not None]
+            for key in (
+                "actual_fee_m",
+                "actual_hours",
+                "actual_fee_assets_bps",
+                "actual_fee_per_hour_m",
+                "contract_fee_m",
+                "contract_hours",
+                "contract_fee_assets_bps",
+                "contract_fee_per_hour_m",
+                "nas_ratio",
+            )
+        }
+    else:
+        metrics = {
+            "audit_fee_m": [
+                r["audit_fee_m"]
+                for r in peer_rows
+                if r["audit_fee_m"] is not None
+            ],
+            "audit_hours": [
+                r["audit_hours"]
+                for r in peer_rows
+                if r["audit_hours"] is not None
+            ],
+            "nas_ratio": [
+                r["nas_ratio"]
+                for r in peer_rows
+                if r["nas_ratio"] is not None
+            ],
+            "audit_fee_to_assets_bps": [
+                r["fee_assets_bps"]
+                for r in peer_rows
+                if r["fee_assets_bps"] is not None
+            ],
+            "audit_fee_per_hour_m": [
+                r["fee_per_hour_m"]
+                for r in peer_rows
+                if r["fee_per_hour_m"] is not None
+            ],
+        }
     benchmarks = {k: _metric_quantiles([float(v) for v in vals]) for k, vals in metrics.items()}
     metric_coverage = {
         key: {

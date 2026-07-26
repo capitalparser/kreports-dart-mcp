@@ -84,3 +84,51 @@ def test_cached_report_parser_preserves_multirow_contract_actual_headers():
     assert rows[0].contract_hours == 8000
     assert rows[0].actual_fee_m == 900
     assert rows[0].actual_hours == 8500
+
+
+def test_standalone_root_table_is_parsed():
+    body = """
+    <table>
+      <tr><th>감사인</th><th>실제수행보수(백만원)</th><th>실제수행시간</th></tr>
+      <tr><td>삼일회계법인</td><td>1,200</td><td>10,500</td></tr>
+    </table>
+    """
+
+    rows = parse_audit_fee_table(body, corp_code="001", bsns_year=2024)
+
+    assert len(rows) == 1
+    assert rows[0].actual_fee_m == 1200
+
+
+def test_generic_auditor_compensation_table_is_not_audit_fee_evidence():
+    body = """
+    <p>단위: 백만원</p>
+    <table>
+      <tr><th>감사인</th><th>보수</th></tr>
+      <tr><td>상근감사</td><td>12</td></tr>
+    </table>
+    """
+
+    assert parse_audit_fee_table(body, corp_code="001", bsns_year=2024) == []
+
+
+def test_unit_is_not_inferred_from_generic_won_substring_or_unrelated_table():
+    generic_substring = """
+    <p>원자료 기준</p>
+    <table>
+      <tr><th>감사인</th><th>실제수행보수</th><th>실제수행시간</th></tr>
+      <tr><td>삼일회계법인</td><td>1200000000</td><td>10500</td></tr>
+    </table>
+    """
+    unrelated_nearby = """
+    <p>임원보수 (단위: 천원)</p>
+    <table>
+      <tr><th>감사인</th><th>실제수행보수</th><th>실제수행시간</th></tr>
+      <tr><td>삼일회계법인</td><td>1200000</td><td>10500</td></tr>
+    </table>
+    """
+
+    for body in (generic_substring, unrelated_nearby):
+        rows = parse_audit_fee_table(body, corp_code="001", bsns_year=2024)
+        assert rows[0].availability_status == "parse_error"
+        assert rows[0].actual_fee_m is None

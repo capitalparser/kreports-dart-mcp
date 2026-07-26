@@ -19,6 +19,7 @@ from kreports.analysis.api import (
 )
 from kreports.db.models import (
     AccountingNoteChapter,
+    AuditFee,
     AuditProcedureItem,
     Company,
     EvidenceDocument,
@@ -42,6 +43,86 @@ def test_compare_peer_audit_fees_mcp_dispatch():
     out = json.loads(call_tool("compare_peer_audit_fees", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "compare_peer_audit_fees"
     assert out["peer_count"] > 0
+
+
+def test_compare_peer_audit_fees_never_mixes_typed_actual_and_contract(
+    temp_engine,
+):
+    from kreports.db.engine import get_session
+
+    codes = ("subject", "actual", "contract")
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(corp_code=code, corp_name=code, market="KOSPI")
+                for code in codes
+            ]
+        )
+        session.add_all(
+            [
+                Financial(
+                    corp_code=code,
+                    year=2024,
+                    quarter=4,
+                    fs_div="CFS",
+                    total_assets=1_000_000_000,
+                )
+                for code in codes
+            ]
+        )
+        session.add_all(
+            [
+                AuditFee(
+                    corp_code="subject",
+                    bsns_year=2024,
+                    audit_fee_m=200,
+                    audit_hours=2000,
+                    actual_fee_m=200,
+                    actual_hours=2000,
+                    compatibility_basis="actual",
+                    availability_status="available",
+                ),
+                AuditFee(
+                    corp_code="actual",
+                    bsns_year=2024,
+                    audit_fee_m=100,
+                    audit_hours=1000,
+                    actual_fee_m=100,
+                    actual_hours=1000,
+                    compatibility_basis="actual",
+                    availability_status="available",
+                ),
+                AuditFee(
+                    corp_code="contract",
+                    bsns_year=2024,
+                    audit_fee_m=1000,
+                    audit_hours=10000,
+                    contract_fee_m=1000,
+                    contract_hours=10000,
+                    compatibility_basis="contract",
+                    availability_status="available",
+                ),
+            ]
+        )
+
+    out = compare_peer_audit_fees(
+        "subject",
+        year=2024,
+        _peer_group={
+            "subject": {"corp_code": "subject", "corp_name": "subject"},
+            "selection_policy": {"fs_div_used": "CFS"},
+            "peers": [
+                {"corp_code": "actual"},
+                {"corp_code": "contract"},
+            ],
+        },
+    )
+
+    assert "audit_fee_m" not in out["benchmarks"]
+    assert out["benchmarks"]["actual_fee_m"]["p50"] == 100
+    assert out["benchmarks"]["contract_fee_m"]["p50"] == 1000
+    assert out["data_quality"]["basis_populations"]["actual"]["valid_fee_n"] == 1
+    assert out["data_quality"]["basis_populations"]["contract"]["valid_fee_n"] == 1
 
 
 def test_compare_peer_risk_profile_shape():

@@ -1,4 +1,5 @@
 from importlib import reload
+import json
 import os
 from unittest.mock import patch
 
@@ -182,7 +183,9 @@ def test_collect_audit_fee_distinguishes_no_data(fresh_audit_fee_db):
 
     assert result == {"saved": 0, "no_data": 1, "error": 0}
     with eng.get_session() as session:
-        assert session.query(AuditFee).count() == 0
+        row = session.query(AuditFee).one()
+        assert row.availability_status == "partial"
+        assert row.quality_status == "missing"
         outcome = (
             session.query(FetchLog)
             .filter_by(
@@ -208,7 +211,9 @@ def test_collect_audit_fee_counts_transport_failure_as_error(fresh_audit_fee_db)
 
     assert result == {"saved": 0, "no_data": 0, "error": 1}
     with eng.get_session() as session:
-        assert session.query(AuditFee).count() == 0
+        row = session.query(AuditFee).one()
+        assert row.availability_status == "transport_error"
+        assert row.quality_status == "error"
         outcome = (
             session.query(FetchLog)
             .filter_by(
@@ -252,7 +257,8 @@ def test_typed_observation_upsert_is_idempotent_and_missing_does_not_erase(
         row = session.query(AuditFee).one()
         assert row.audit_fee_m == 1200
         assert row.audit_hours == 10500
-        assert row.availability_status == "available"
+        assert row.availability_status == "transport_error"
+        assert row.quality_status == "error"
         assert len(__import__("json").loads(row.source_observations_json)) == 2
 
 
@@ -286,3 +292,102 @@ def test_cached_business_report_adapter_merges_historical_actuals(
         assert row.audit_fee_m == 1200
         assert row.compatibility_basis == "actual"
         assert row.source_class == "cached_business_report"
+
+
+def test_endpoint_gap_and_error_are_persisted_as_typed_observations(
+    fresh_audit_fee_db,
+):
+    eng, collector = fresh_audit_fee_db
+    responses = {
+        2021: {"status": "013", "message": "조회된 데이터가 없습니다."},
+        2025: {"status": "ERR", "message": "Server disconnected"},
+    }
+
+    with patch.object(
+        collector,
+        "fetch_audit_fee",
+        side_effect=lambda _corp, year: responses[year],
+    ), patch("kreports.config.settings.request_delay", 0):
+        result = collector.collect_audit_fees_for(CORP_CODE, [2021, 2025])
+
+    assert result == {"saved": 0, "no_data": 1, "error": 1}
+    with eng.get_session() as session:
+        rows = {
+            row.bsns_year: row
+            for row in session.query(AuditFee).order_by(AuditFee.bsns_year)
+        }
+        assert rows[2021].availability_status == "not_available_from_endpoint"
+        assert rows[2025].availability_status == "transport_error"
+        assert all(json.loads(row.source_observations_json) for row in rows.values())
+
+
+def test_supported_empty_endpoint_rows_are_typed_partial(
+    fresh_audit_fee_db,
+):
+    eng, collector = fresh_audit_fee_db
+    with patch.object(
+        collector,
+        "fetch_audit_fee",
+        return_value={"status": "000", "list": []},
+    ), patch("kreports.config.settings.request_delay", 0):
+        result = collector.collect_audit_fees_for(CORP_CODE, [2025])
+
+    assert result == {"saved": 0, "no_data": 1, "error": 0}
+    with eng.get_session() as session:
+        row = session.query(AuditFee).one()
+        assert row.availability_status == "partial"
+        assert row.quality_status == "missing"
+
+
+def test_cached_parse_error_surfaces_without_erasing_verified_values(
+    fresh_audit_fee_db,
+):
+    eng, collector = fresh_audit_fee_db
+    verified = AuditFeeObservation(
+        corp_code=CORP_CODE,
+        bsns_year=2024,
+        source_class="cached_business_report",
+        actual_fee_m=1200,
+        actual_hours=10500,
+        source_period="2024",
+        source_rcept_no="20250318000001",
+        availability_status="available",
+        quality_status="verified",
+    )
+    collector.upsert_audit_fee_observations([verified])
+
+    result = collector.ingest_cached_audit_fee_table(
+        "<table><tr><th>감사보수</th></tr></table>",
+        corp_code=CORP_CODE,
+        bsns_year=2024,
+        rcept_no="20250318000002",
+    )
+
+    assert result["parse_error"] == 1
+    with eng.get_session() as session:
+        row = session.query(AuditFee).one()
+        assert row.audit_fee_m == 1200
+        assert row.audit_hours == 10500
+        assert row.availability_status == "parse_error"
+        assert row.quality_status == "error"
+        assert len(json.loads(row.source_observations_json)) == 2
+
+
+def test_cached_not_found_is_persisted_as_typed_gap(fresh_audit_fee_db):
+    eng, collector = fresh_audit_fee_db
+
+    result = collector.ingest_cached_audit_fee_table(
+        "<table><tr><th>임원보수</th></tr><tr><td>10</td></tr></table>",
+        corp_code=CORP_CODE,
+        bsns_year=2024,
+        rcept_no="20250318000003",
+    )
+
+    assert result["not_found"] == 1
+    with eng.get_session() as session:
+        row = session.query(AuditFee).one()
+        assert row.availability_status == "not_found_in_cached_report"
+        assert row.quality_status == "missing"
+        assert json.loads(row.source_observations_json)[0][
+            "source_rcept_no"
+        ] == "20250318000003"

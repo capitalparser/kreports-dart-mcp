@@ -198,6 +198,17 @@ def _audit_fee_peer_grade(corp_code: str, year: int) -> str:
         audit_fee_availability(corp_code, candidate)
         for candidate in range(year - 4, year + 1)
     ]
+    blocking_statuses = {
+        "transport_error",
+        "parse_error",
+        "schema_unavailable",
+        "conflict",
+    }
+    if any(
+        item.get("availability_status") in blocking_statuses
+        for item in statuses
+    ):
+        return "D"
     eligible = [
         item
         for item in statuses

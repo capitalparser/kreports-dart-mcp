@@ -203,11 +203,15 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
 
     record = dict(row)
     typed_schema = all(name in table_columns for name in _AUDIT_FEE_TYPED_COLUMNS)
+    provenance_raw = record.get("source_observations_json")
+    provenance_error = False
     try:
-        observations = json.loads(record.get("source_observations_json") or "[]")
+        observations = json.loads(provenance_raw or "[]")
         if not isinstance(observations, list):
+            provenance_error = bool(provenance_raw)
             observations = []
     except (TypeError, ValueError):
+        provenance_error = bool(provenance_raw)
         observations = []
     observations = [item for item in observations if isinstance(item, dict)][:20]
     conflicts = _audit_fee_observation_conflicts(observations)
@@ -227,6 +231,15 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
         "verified" if availability == "available" else "partial"
     )
     limitations: list[str] = []
+    for observation in observations:
+        for limitation in observation.get("limitations") or []:
+            text_value = str(limitation).strip()
+            if text_value and text_value not in limitations:
+                limitations.append(text_value)
+            if len(limitations) >= 10:
+                break
+        if len(limitations) >= 10:
+            break
     if not typed_schema:
         limitations.append(
             "Pre-20260711_07 row: compatibility basis inferred from legacy columns"
@@ -241,6 +254,12 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
     }:
         limitations.append(
             "NAS ratio omitted from interpretation because fee bases may be incompatible"
+        )
+    if provenance_error:
+        availability = "parse_error"
+        quality = "error"
+        limitations.append(
+            "Stored audit fee source provenance is malformed and could not be verified"
         )
     if fetch_row and str(fetch_row["status"]) == "error":
         availability = "transport_error"

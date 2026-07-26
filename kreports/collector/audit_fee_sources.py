@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
+import re
 from typing import Any, Iterable
 
 
@@ -132,6 +133,7 @@ def normalize_endpoint_result(
             corp_code=corp_code,
             bsns_year=year,
             source_class="opendart_ds002",
+            source_period=str(year),
             availability_status="not_available_from_endpoint",
             quality_status="missing",
             source_status=status_value,
@@ -143,6 +145,7 @@ def normalize_endpoint_result(
             corp_code=corp_code,
             bsns_year=year,
             source_class="opendart_ds002",
+            source_period=str(year),
             availability_status="partial",
             quality_status="missing",
             source_status=status_value,
@@ -156,6 +159,7 @@ def normalize_endpoint_result(
             corp_code=corp_code,
             bsns_year=year,
             source_class="opendart_ds002",
+            source_period=str(year),
             availability_status="transport_error",
             quality_status="error",
             source_status=status_value,
@@ -168,6 +172,7 @@ def normalize_endpoint_result(
             corp_code=corp_code,
             bsns_year=year,
             source_class="opendart_ds002",
+            source_period=str(year),
             availability_status=(
                 "not_available_from_endpoint" if unsupported else "partial"
             ),
@@ -230,30 +235,37 @@ def normalize_endpoint_result(
 
 def observations_json(observations: Iterable[AuditFeeObservation], limit: int = 20) -> str:
     """Serialize a bounded, deterministic provenance set."""
-    ordered = sorted(
-        observations,
-        key=lambda item: (
-            item.source_class,
-            item.source_rcept_no or "",
-            item.source_period or "",
-            json.dumps(item.raw_values, ensure_ascii=False, sort_keys=True),
-        ),
-    )
-    deduped: list[AuditFeeObservation] = []
-    seen: set[str] = set()
-    for item in ordered:
+    deduped_by_fingerprint: dict[str, AuditFeeObservation] = {}
+    for item in observations:
         fingerprint = json.dumps(
             item.to_dict(),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
-        deduped.append(item)
+        deduped_by_fingerprint[fingerprint] = item
+    deduped = sorted(
+        deduped_by_fingerprint.values(),
+        key=_provenance_priority,
+    )
+    anchors = sorted(
+        (
+            min(
+                (
+                    item
+                    for item in deduped
+                    if item.source_class == source_class
+                ),
+                key=_provenance_priority,
+            )
+            for source_class in {item.source_class for item in deduped}
+        ),
+        key=_provenance_priority,
+    )
+    anchor_ids = {id(item) for item in anchors}
+    bounded = [*anchors, *(item for item in deduped if id(item) not in anchor_ids)]
     return json.dumps(
-        [item.to_dict() for item in deduped[: max(1, limit)]],
+        [item.to_dict() for item in bounded[: max(1, limit)]],
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -274,12 +286,51 @@ def observation_from_dict(value: dict[str, Any]) -> AuditFeeObservation | None:
         return None
 
 
+def _temporal_number(value: str | None, digits: int) -> int:
+    matches = re.findall(r"\d+", str(value or ""))
+    if not matches:
+        return 0
+    joined = "".join(matches)
+    return int(joined[:digits] or 0)
+
+
 def _source_priority(observation: AuditFeeObservation) -> tuple[object, ...]:
+    """Lower tuple wins; verified newer same-source observations win."""
     return (
         0 if observation.source_class == "cached_business_report" else 1,
         0 if observation.quality_status == "verified" else 1,
+        -_temporal_number(observation.source_period, 8),
+        -_temporal_number(observation.source_rcept_no, 20),
         observation.source_period or "",
         observation.source_rcept_no or "",
+        observation.availability_status,
+        json.dumps(observation.raw_values, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _source_recency(observation: AuditFeeObservation) -> tuple[object, ...]:
+    return (
+        _temporal_number(observation.source_period, 8),
+        _temporal_number(observation.source_rcept_no, 20),
+        observation.source_period or "",
+        observation.source_rcept_no or "",
+        observation.availability_status,
+        json.dumps(observation.raw_values, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _provenance_priority(
+    observation: AuditFeeObservation,
+) -> tuple[object, ...]:
+    return (
+        -_temporal_number(observation.source_period, 8),
+        -_temporal_number(observation.source_rcept_no, 20),
+        observation.source_class,
+        0 if observation.quality_status == "verified" else 1,
+        observation.source_period or "",
+        observation.source_rcept_no or "",
+        observation.availability_status,
+        json.dumps(observation.raw_values, ensure_ascii=False, sort_keys=True),
     )
 
 
@@ -387,7 +438,30 @@ def merge_audit_fee_observations(
     )
     conflicts = _actual_conflicts(materialized)
     statuses = {item.availability_status for item in materialized}
-    if conflicts:
+    latest_by_source = {
+        source_class: max(
+            (
+                item
+                for item in materialized
+                if item.source_class == source_class
+            ),
+            key=_source_recency,
+        )
+        for source_class in {item.source_class for item in materialized}
+    }
+    blockers = sorted(
+        (
+            item
+            for item in latest_by_source.values()
+            if item.availability_status in {"transport_error", "parse_error"}
+            or item.quality_status == "error"
+        ),
+        key=_source_priority,
+    )
+    if blockers:
+        availability = blockers[0].availability_status
+        quality = "error"
+    elif conflicts:
         availability = "conflict"
         quality = "conflict"
     elif compatibility_fee is not None and compatibility_hours is not None:
