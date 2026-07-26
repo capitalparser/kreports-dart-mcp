@@ -21,6 +21,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
         "20260711_03_backfill_run_lifecycle",
+        "20260711_04_backfill_owner_identity",
     ]
     assert second == []
 
@@ -168,6 +169,27 @@ def test_schema_migrations_apply_in_declared_order(temp_engine, monkeypatch):
 
     assert applied == [first.revision, second.revision]
     assert positions == [1, 2]
+
+
+def test_backfill_owner_migration_is_append_only_and_enforces_active_lease(
+    temp_engine,
+):
+    from kreports.db.migrations import MIGRATIONS, _checksum
+
+    assert _checksum(MIGRATIONS[2]) == (
+        "b5a958e21c751e72e4243b5f4a35b03ff41f313a87e5e058e7a9623bfaf4f324"
+    )
+    indexes = {
+        item["name"]: item
+        for item in inspect(temp_engine).get_indexes("backfill_runs")
+    }
+    assert indexes["uq_backfill_runs_active_lease"]["unique"] == 1
+    assert (
+        indexes["uq_backfill_runs_active_lease"]["dialect_options"][
+            "sqlite_where"
+        ].text
+        == "status = 'running'"
+    )
 
 
 def test_init_db_stops_on_schema_drift(tmp_path, monkeypatch):

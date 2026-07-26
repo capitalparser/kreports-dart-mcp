@@ -583,7 +583,10 @@ class BackfillRun(Base):
     market = Column(String(10), nullable=True)
     status = Column(String(20), nullable=False)  # running / success / error
     pid = Column(Integer, nullable=True)
+    lease_key = Column(String(160), nullable=True)
     owner_token = Column(String(64), nullable=True)
+    owner_host = Column(String(255), nullable=True)
+    owner_process_start = Column(String(100), nullable=True)
     heartbeat_at = Column(DateTime(timezone=True), nullable=True)
     checkpoint_json = Column(Text, nullable=False, default="{}")
     attempted_count = Column(Integer, nullable=False, default=0)
@@ -599,6 +602,12 @@ class BackfillRun(Base):
     __table_args__ = (
         Index("idx_backfill_runs_key_status", "task_type", "year", "market", "status"),
         Index("idx_backfill_runs_started", "started_at"),
+        Index(
+            "uq_backfill_runs_active_lease",
+            "lease_key",
+            unique=True,
+            sqlite_where=(status == "running"),
+        ),
     )
 
 

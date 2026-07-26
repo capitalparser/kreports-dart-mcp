@@ -39,8 +39,13 @@ def run_resumable_financial_backfill(
         collect_financial_range,
     )
     from kreports.db.engine import get_session
-    from kreports.db.models import BackfillRun, Company
-    from kreports.maintenance.backfill_runs import BackfillLease
+    from kreports.db.models import BackfillRun, Company, FetchLog
+    from kreports.maintenance.backfill_runs import (
+        FAILURE_OUTCOMES,
+        BackfillLease,
+        BackfillRunError,
+        classify_backfill_error,
+    )
 
     state = BackfillLease.resume_point(lease.id)
     last_corp_code = state.get("last_corp_code")
@@ -75,6 +80,42 @@ def run_resumable_financial_backfill(
             year_to,
             force=force,
         )
+        for failure_outcome in sorted(FAILURE_OUTCOMES):
+            if _non_negative_int(result.get(failure_outcome), default=0):
+                raise BackfillRunError(
+                    failure_outcome,
+                    f"financial backfill failed for {corp_code}: "
+                    f"{failure_outcome}",
+                )
+        company_errors = _non_negative_int(result.get("error"), default=0)
+        if company_errors:
+            with get_session() as session:
+                error_query = session.query(FetchLog.error_msg).filter(
+                    FetchLog.task_type == "financial",
+                    FetchLog.corp_code == corp_code,
+                    FetchLog.status == "error",
+                    FetchLog.error_msg.isnot(None),
+                    FetchLog.error_msg != "",
+                )
+                if year_from is not None:
+                    error_query = error_query.filter(FetchLog.year >= year_from)
+                if year_to is not None:
+                    error_query = error_query.filter(FetchLog.year <= year_to)
+                latest_message = (
+                    error_query.order_by(
+                        FetchLog.fetched_at.desc(),
+                        FetchLog.id.desc(),
+                    )
+                    .limit(1)
+                    .scalar()
+                )
+            detail = latest_message or (
+                f"{company_errors} unclassified financial collection errors"
+            )
+            raise BackfillRunError(
+                classify_backfill_error(RuntimeError(detail)),
+                f"financial backfill failed for {corp_code}: {detail}",
+            )
         attempted += 1
         saved += _non_negative_int(result.get("success"), default=0)
         no_data += _non_negative_int(result.get("no_data"), default=0)
@@ -164,9 +205,17 @@ def orchestrate_complete_backfill(
             )
 
     if os.getenv("KREPORTS_ENABLE_RAW_BACKFILL", "0") == "1":
-        from kreports.runtime import require_raw_backfill_mode
+        from kreports.runtime import (
+            raw_storage_policy,
+            require_raw_backfill_mode,
+        )
 
-        require_raw_backfill_mode("complete dataset raw report backfill")
+        raw_backend, raw_keep_inline, _raw_bucket = raw_storage_policy()
+        require_raw_backfill_mode(
+            "complete dataset raw report backfill",
+            raw_storage_backend=raw_backend,
+            raw_storage_keep_inline=raw_keep_inline,
+        )
         for year, market in _raw_gap_targets(year_from, year_to):
             steps.extend(
                 [
@@ -380,7 +429,9 @@ def orchestrate_complete_backfill(
         ]
     )
 
-    api_failure: subprocess.CalledProcessError | None = None
+    from kreports.maintenance.backfill_runs import BackfillRunError
+
+    api_failure: BackfillRunError | None = None
     for step_index, (name, args, uses_api) in enumerate(steps):
         if name in completed_steps:
             continue
@@ -390,9 +441,9 @@ def orchestrate_complete_backfill(
         else:
             try:
                 _run_cli_with_heartbeat(lease, args)
-            except subprocess.CalledProcessError as exc:
+            except BackfillRunError as exc:
                 errors += 1
-                outcome = f"failed:{exc.returncode}"
+                outcome = f"failed:{exc.outcome}"
                 if uses_api and api_failure is None:
                     api_failure = exc
                 elif not uses_api:
@@ -420,7 +471,8 @@ def orchestrate_complete_backfill(
         "attempted": attempted,
         "saved": saved,
         "no_data": 0,
-        "errors": errors,
+        "errors": 0,
+        "error_attempts": errors,
     }
 
 
@@ -440,8 +492,63 @@ def _run_cli_with_heartbeat(
             lease.heartbeat()
             continue
         if return_code != 0:
-            raise subprocess.CalledProcessError(return_code, args)
+            raise _child_process_failure(
+                pid=process.pid,
+                return_code=return_code,
+                args=args,
+            )
         return
+
+
+def _child_process_failure(
+    *,
+    pid: int,
+    return_code: int,
+    args: list[str],
+):
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
+    from kreports.maintenance.backfill_runs import (
+        FAILURE_OUTCOMES,
+        BackfillRunError,
+        classify_backfill_error,
+    )
+
+    with get_session() as session:
+        child_run = (
+            session.query(BackfillRun.status, BackfillRun.error_msg)
+            .filter(
+                BackfillRun.pid == pid,
+                BackfillRun.status != "running",
+            )
+            .order_by(BackfillRun.id.desc())
+            .first()
+        )
+    if child_run is not None:
+        status, error_message = child_run
+        if status in FAILURE_OUTCOMES:
+            return BackfillRunError(
+                status,
+                error_message or f"child command failed with exit {return_code}",
+            )
+        if error_message:
+            return BackfillRunError(
+                classify_backfill_error(RuntimeError(error_message)),
+                error_message,
+            )
+    command_name = args[1] if args and args[0] == "__python_script__" else args[0]
+    if return_code == 75:
+        outcome = "quota_exceeded"
+    elif "extract" in command_name or "section" in command_name:
+        outcome = "parse_error"
+    elif command_name.startswith(("collect-", "orchestrate-")):
+        outcome = "transport_error"
+    else:
+        outcome = "storage_error"
+    return BackfillRunError(
+        outcome,
+        f"child command {command_name} failed with exit {return_code}",
+    )
 
 
 def _raw_gap_targets(

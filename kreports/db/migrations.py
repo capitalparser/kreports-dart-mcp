@@ -97,6 +97,30 @@ MIGRATIONS = (
             "ALTER TABLE backfill_runs ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0",
         ),
     ),
+    Migration(
+        revision="20260711_04_backfill_owner_identity",
+        description="Enforce one active backfill owner and process identity",
+        statements=(
+            "ALTER TABLE backfill_runs ADD COLUMN lease_key VARCHAR(160)",
+            "ALTER TABLE backfill_runs ADD COLUMN owner_host VARCHAR(255)",
+            "ALTER TABLE backfill_runs ADD COLUMN owner_process_start VARCHAR(100)",
+            """
+            UPDATE backfill_runs
+            SET lease_key = printf(
+              '%s|%s|%s',
+              task_type,
+              COALESCE(CAST(year AS TEXT), ''),
+              COALESCE(market, '')
+            )
+            WHERE lease_key IS NULL
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_backfill_runs_active_lease
+            ON backfill_runs (lease_key)
+            WHERE status = 'running'
+            """,
+        ),
+    ),
 )
 
 

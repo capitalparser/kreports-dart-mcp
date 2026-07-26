@@ -165,6 +165,7 @@ def _try_summary_fallback(
             time.sleep(settings.request_delay)
         except Exception as e:
             logger.warning("acnt 폴백 실패 [%s %s %s]: %s", corp_code, year, fs_div, e)
+            _log_fetch(corp_code, year, quarter, "error", str(e))
             saw_error = True
             continue
 
@@ -179,6 +180,13 @@ def _try_summary_fallback(
             logger.warning(
                 "acnt 폴백 오류 [%s %s %s]: status=%s message=%s",
                 corp_code, year, fs_div, response.get("status"), response.get("message"),
+            )
+            _log_fetch(
+                corp_code,
+                year,
+                quarter,
+                "error",
+                response.get("message") or f"DART status {response.get('status')}",
             )
             saw_error = True
             continue
@@ -389,18 +397,20 @@ def _financial_quarter_cached(corp_code: str, year: int, quarter: int) -> bool:
         if has_summary:
             return True
 
-        return (
-            session.query(FetchLog.id)
+        latest_outcome = (
+            session.query(FetchLog.status)
             .filter(
                 FetchLog.task_type == "financial",
                 FetchLog.corp_code == corp_code,
                 FetchLog.year == year,
                 FetchLog.quarter == quarter,
-                FetchLog.status == "no_data",
             )
+            .order_by(FetchLog.fetched_at.desc(), FetchLog.id.desc())
             .first()
-            is not None
         )
+        if latest_outcome is None:
+            return False
+        return latest_outcome[0] == "no_data"
 
 
 def _upsert_financial_facts(facts: list[dict]) -> None:

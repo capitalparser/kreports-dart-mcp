@@ -27,6 +27,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
         "20260711_03_backfill_run_lifecycle",
+        "20260711_04_backfill_owner_identity",
     ]
     assert CompanyYearQuality.__tablename__ == "company_year_quality"
 
@@ -37,6 +38,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
         "20260711_03_backfill_run_lifecycle",
+        "20260711_04_backfill_owner_identity",
     ]
     columns = {
         column["name"]

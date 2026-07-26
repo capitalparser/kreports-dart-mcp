@@ -113,7 +113,9 @@ def repair_stale_backfills_cmd(
 ):
     """Mark timed-out runs stale only when their owner process is dead."""
     from kreports.maintenance import backfill_runs
+    from kreports.runtime import require_collector_mode
 
+    require_collector_mode("repair-stale-backfills")
     init_db()
     result = backfill_runs.repair_stale_backfills(
         datetime.now(timezone.utc),
@@ -143,7 +145,6 @@ def backfill_status_cmd(
     """Show bounded, newest-first durable backfill state."""
     from kreports.maintenance.backfill_runs import list_backfill_status
 
-    init_db()
     result = list_backfill_status(limit)
     if json_output:
         typer.echo(

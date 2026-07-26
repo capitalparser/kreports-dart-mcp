@@ -283,3 +283,65 @@ def test_collect_financial_range_force_refetches_existing_quarters(temp_engine, 
         ("000001", 2024, 3),
         ("000001", 2024, 4),
     ]
+
+
+def test_financial_quarter_cache_uses_latest_fetch_outcome(temp_engine):
+    from kreports.collector.fin_collector import _financial_quarter_cached
+    from kreports.db.engine import get_session
+    from kreports.db.models import FetchLog
+
+    with get_session() as session:
+        session.add_all(
+            [
+                FetchLog(
+                    task_type="financial",
+                    corp_code="00000001",
+                    year=2024,
+                    quarter=4,
+                    status="no_data",
+                    fetched_at=datetime(2026, 1, 1),
+                ),
+                FetchLog(
+                    task_type="financial",
+                    corp_code="00000001",
+                    year=2024,
+                    quarter=4,
+                    status="error",
+                    error_msg="network timeout",
+                    fetched_at=datetime(2026, 1, 2),
+                ),
+            ]
+        )
+
+    assert _financial_quarter_cached("00000001", 2024, 4) is False
+
+
+def test_financial_quarter_cache_breaks_equal_time_by_latest_id(temp_engine):
+    from kreports.collector.fin_collector import _financial_quarter_cached
+    from kreports.db.engine import get_session
+    from kreports.db.models import FetchLog
+
+    tied = datetime(2026, 1, 1)
+    with get_session() as session:
+        session.add_all(
+            [
+                FetchLog(
+                    task_type="financial",
+                    corp_code="00000001",
+                    year=2024,
+                    quarter=4,
+                    status="no_data",
+                    fetched_at=tied,
+                ),
+                FetchLog(
+                    task_type="financial",
+                    corp_code="00000001",
+                    year=2024,
+                    quarter=4,
+                    status="error",
+                    fetched_at=tied,
+                ),
+            ]
+        )
+
+    assert _financial_quarter_cached("00000001", 2024, 4) is False
