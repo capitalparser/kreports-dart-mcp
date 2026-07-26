@@ -1,9 +1,13 @@
 """Strict typed arguments for the 32 public MCP tools."""
 from __future__ import annotations
 
-import math
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
+from kreports.analysis.dcf_model import (
+    MIN_DECIMAL_ADJUSTED,
+    dcf_decimal_fits_serialization,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -347,14 +351,25 @@ class BuildDcfModelPackInput(ToolInput):
         if isinstance(value, bool):
             raise ValueError(f"{info.field_name} 값은 boolean일 수 없습니다.")
         try:
-            if not math.isfinite(float(value)):
-                raise ValueError(
-                    f"{info.field_name} 값은 유한한 숫자여야 합니다."
-                )
-        except (TypeError, ValueError) as exc:
+            converted = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
             raise ValueError(
                 f"{info.field_name} 값은 유한한 숫자여야 합니다."
             ) from exc
+        if not converted.is_finite():
+            raise ValueError(
+                f"{info.field_name} 값은 유한한 숫자여야 합니다."
+            )
+        if (
+            not dcf_decimal_fits_serialization(converted)
+            or (
+                converted != 0
+                and converted.adjusted() < MIN_DECIMAL_ADJUSTED
+            )
+        ):
+            raise ValueError(
+                f"{info.field_name} 값은 지원 정밀도 범위여야 합니다."
+            )
         return value
 
     @model_validator(mode="after")

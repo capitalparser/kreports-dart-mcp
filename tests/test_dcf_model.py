@@ -132,6 +132,115 @@ def test_dcf_normalization_defaults_to_actual_and_requires_a_reason():
     assert overridden.normalization.revenue.normalized_amount == Decimal("1000")
 
 
+@pytest.mark.parametrize(
+    ("metric_key", "amount"),
+    [
+        ("revenue", Decimal("0")),
+        ("revenue", Decimal("-1")),
+        ("revenue", Decimal("1000000000000000000000001")),
+        (
+            "operating_profit",
+            Decimal("1000000000000000000000001"),
+        ),
+        (
+            "operating_profit",
+            Decimal("-1000000000000000000000001"),
+        ),
+    ],
+)
+def test_normalized_metric_enforces_metric_specific_amount_domains(
+    metric_key,
+    amount,
+):
+    from kreports.analysis.dcf_model import DcfNormalizedMetric
+
+    with pytest.raises(ValueError, match=metric_key):
+        DcfNormalizedMetric(
+            metric_key=metric_key,
+            original_actual=amount,
+            normalized_amount=amount,
+            basis="actual_unchanged",
+            reason=None,
+        )
+
+    signed_operating_profit = DcfNormalizedMetric(
+        metric_key="operating_profit",
+        original_actual=Decimal("-100"),
+        normalized_amount=Decimal("-120"),
+        basis="analyst_override",
+        reason="영업손실 정상화",
+    )
+    assert signed_operating_profit.normalized_amount == Decimal("-120")
+
+
+def test_normalized_metric_basis_and_reason_must_reconcile():
+    from kreports.analysis.dcf_model import DcfNormalizedMetric
+
+    with pytest.raises(ValueError, match="reason"):
+        DcfNormalizedMetric(
+            metric_key="revenue",
+            original_actual=Decimal("1000"),
+            normalized_amount=Decimal("1000"),
+            basis="actual_unchanged",
+            reason="사유가 있으면 안 됨",
+        )
+    with pytest.raises(ValueError, match="reason"):
+        DcfNormalizedMetric(
+            metric_key="revenue",
+            original_actual=Decimal("1000"),
+            normalized_amount=Decimal("1100"),
+            basis="analyst_override",
+            reason=" ",
+        )
+
+
+@pytest.mark.parametrize("status", ["complete", "partial", "invalid"])
+def test_result_revalidates_normalization_for_every_status(status):
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    if status == "complete":
+        result = build_dcf_valuation(_scenario(), _facts())
+    elif status == "partial":
+        result = build_dcf_valuation(_scenario(wacc=None), _facts())
+    else:
+        facts = tuple(
+            replace(fact, amount=Decimal("0.001"))
+            if fact.metric_key == "revenue"
+            else fact
+            for fact in _facts()
+        )
+        result = build_dcf_valuation(_scenario(), facts)
+    object.__setattr__(
+        result.normalization.revenue,
+        "reason",
+        "변조된 actual_unchanged 사유",
+    )
+
+    with pytest.raises(ValueError, match="reason"):
+        replace(result)
+
+
+def test_result_revalidates_shared_normalization_override_reason():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    result = build_dcf_valuation(
+        _scenario(
+            normalized_revenue=Decimal("1100"),
+            normalized_operating_profit=Decimal("120"),
+            normalization_reason="동일한 검토 사유",
+        ),
+        _facts(),
+    )
+    object.__setattr__(
+        result.normalization.operating_profit,
+        "reason",
+        "서로 다른 검토 사유",
+    )
+
+    with pytest.raises(ValueError, match="normalization"):
+        replace(result)
+
+
 def test_dcf_arithmetic_reconciles_ufcf_terminal_ev_and_equity_with_decimal():
     """Changing any forecast formula component or bridge sign must break this fixture."""
     from kreports.analysis.dcf_model import build_dcf_valuation
@@ -551,6 +660,42 @@ def test_one_e_minus_31_wacc_fails_typed_when_sensitivity_is_unsafe():
     )
 
 
+def test_decimal_negative_exponent_and_fixed_json_width_are_bounded():
+    from kreports.analysis.dcf_model import (
+        build_dcf_valuation,
+        dcf_result_to_dict,
+    )
+
+    accepted = build_dcf_valuation(
+        _scenario(
+            wacc=Decimal("1E-31"),
+            terminal_growth=Decimal("-0.01"),
+        ),
+        _facts(),
+    )
+    payload = dcf_result_to_dict(accepted)
+    assert payload["assumptions"][6]["value"] == (
+        "0.0000000000000000000000000000001"
+    )
+    assert len(payload["assumptions"][6]["value"]) < 128
+
+    with pytest.raises(ValueError, match="precision bounds"):
+        _scenario(
+            wacc=Decimal("1E-10000"),
+            terminal_growth=Decimal("-0.01"),
+        )
+    with pytest.raises(ValueError, match="precision bounds"):
+        _scenario(operating_margin=Decimal("0E-10000"))
+
+    object.__setattr__(
+        accepted.assumptions[6],
+        "value",
+        Decimal("1E-10000"),
+    )
+    with pytest.raises(ValueError, match="serialization bounds"):
+        dcf_result_to_dict(accepted)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -796,6 +941,76 @@ def test_invalid_result_missing_inputs_include_exact_bridge_and_reason_gaps():
         )
 
 
+def test_arithmetic_invalid_requires_complete_projection_inputs():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    partial = build_dcf_valuation(_scenario(wacc=None), _facts())
+    assert partial.status == "partial_model"
+    assert partial.missing_inputs == ("wacc",)
+
+    with pytest.raises(ValueError, match="status semantics"):
+        replace(
+            partial,
+            status="invalid_model",
+            confidence="invalid",
+            missing_inputs=("wacc", "arithmetic_invalid"),
+        )
+
+    overflow = build_dcf_valuation(
+        _scenario(forecast_years=10, revenue_growth=Decimal("10")),
+        tuple(
+            replace(fact, amount=Decimal("1E+24"))
+            if fact.metric_key == "revenue"
+            else fact
+            for fact in _facts()
+        ),
+    )
+    without_da = tuple(
+        fact
+        for fact in overflow.actuals
+        if fact.metric_key != "depreciation_amortization"
+    )
+    with pytest.raises(ValueError, match="status semantics"):
+        replace(
+            overflow,
+            actuals=without_da,
+            missing_inputs=(
+                "depreciation_amortization",
+                "arithmetic_invalid",
+            ),
+        )
+
+
+def test_base_revenue_invalid_coexists_with_exact_projection_and_bridge_gaps():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = tuple(
+        replace(fact, amount=Decimal("0.001"))
+        if fact.metric_key == "revenue"
+        else fact
+        for fact in _facts(include_cash=False)
+    )
+
+    invalid = build_dcf_valuation(
+        _scenario(wacc=None),
+        facts,
+    )
+
+    assert invalid.status == "invalid_model"
+    assert invalid.missing_inputs == (
+        "wacc",
+        "cash_and_equivalents",
+        "base_revenue_nonpositive",
+    )
+    with pytest.raises(ValueError, match="status semantics"):
+        replace(
+            invalid,
+            status="partial_model",
+            confidence="partial",
+            missing_inputs=("wacc", "cash_and_equivalents"),
+        )
+
+
 def test_projection_direct_contract_rejects_impossible_domains():
     from kreports.analysis.dcf_model import build_dcf_valuation
 
@@ -952,3 +1167,51 @@ def test_dcf_discloses_nwc_definition_capex_sign_and_bridge_exclusions():
     assert "minority interest" in text
     capex = [fact for fact in result.actuals if fact.metric_key.startswith("purchase_")]
     assert all(fact.amount < 0 for fact in capex)
+
+
+@pytest.mark.parametrize("status", ["complete", "partial", "invalid"])
+def test_result_requires_exact_ordered_model_limitation_prefix(status):
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    if status == "complete":
+        result = build_dcf_valuation(_scenario(), _facts())
+    elif status == "partial":
+        result = build_dcf_valuation(_scenario(wacc=None), _facts())
+    else:
+        facts = tuple(
+            replace(fact, amount=Decimal("0.001"))
+            if fact.metric_key == "revenue"
+            else fact
+            for fact in _facts()
+        )
+        result = build_dcf_valuation(_scenario(), facts)
+    required = result.limitations
+    assert len(required) == 4
+
+    for contradictory in (
+        (),
+        ("arbitrary", *required),
+        (required[1], required[0], *required[2:]),
+    ):
+        with pytest.raises(ValueError, match="limitations"):
+            replace(result, limitations=contradictory)
+
+
+def test_result_allows_only_deduped_source_limitations_after_required_prefix():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    result = build_dcf_valuation(
+        _scenario(wacc=None),
+        _facts(),
+        source_limitations=("source_partial", "source_partial"),
+    )
+
+    assert len(result.limitations) == 5
+    assert result.limitations[-1] == "source_partial"
+    copied = replace(result, limitations=result.limitations)
+    assert copied.limitations == result.limitations
+    with pytest.raises(ValueError, match="limitations"):
+        replace(
+            result,
+            limitations=(*result.limitations, "source_partial"),
+        )

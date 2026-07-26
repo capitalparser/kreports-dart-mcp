@@ -28,9 +28,11 @@ MAX_TERMINAL_GROWTH = Decimal("1")
 MAX_ABS_BASE_AMOUNT = Decimal("1E+24")
 MAX_COMPANY_LENGTH = 200
 MAX_NORMALIZATION_REASON_LENGTH = 1_000
+MIN_DECIMAL_ADJUSTED = -100
 _MAX_DECIMAL_TEXT = 128
 _MAX_DECIMAL_DIGITS = 38
 _MAX_DECIMAL_ADJUSTED = 30
+_MAX_JSON_DECIMAL_CHARS = 128
 _MAX_PUBLIC_TEXT = 1_000
 _ASSUMPTION_KEYS = (
     "revenue_growth",
@@ -57,6 +59,27 @@ class _DcfConstructionError(ValueError):
     """A bounded internal domain-construction failure."""
 
 
+def dcf_decimal_fits_serialization(value: Decimal) -> bool:
+    """Return whether fixed-point JSON rendering stays within its hard cap."""
+    if not value.is_finite():
+        return False
+    decimal_tuple = value.as_tuple()
+    digit_count = len(decimal_tuple.digits)
+    exponent = decimal_tuple.exponent
+    if not isinstance(exponent, int):
+        return False
+    sign_length = 1 if decimal_tuple.sign else 0
+    if exponent >= 0:
+        rendered_length = sign_length + digit_count + exponent + 3
+    elif -exponent < digit_count:
+        rendered_length = sign_length + digit_count + 1
+        rendered_length += max(0, 2 + exponent)
+    else:
+        rendered_length = sign_length + 2 - exponent
+        rendered_length += max(0, 2 + exponent)
+    return rendered_length <= _MAX_JSON_DECIMAL_CHARS
+
+
 def _decimal(value: Any, field_name: str) -> Decimal | None:
     if value is None:
         return None
@@ -77,9 +100,14 @@ def _decimal(value: Any, field_name: str) -> Decimal | None:
         significant_digits.pop()
     if (
         len(significant_digits) > _MAX_DECIMAL_DIGITS
+        or not dcf_decimal_fits_serialization(converted)
         or (
             converted != 0
-            and converted.adjusted() > _MAX_DECIMAL_ADJUSTED
+            and not (
+                MIN_DECIMAL_ADJUSTED
+                <= converted.adjusted()
+                <= _MAX_DECIMAL_ADJUSTED
+            )
         )
     ):
         raise ValueError(f"{field_name} exceeds decimal precision bounds")
@@ -382,6 +410,25 @@ class DcfNormalizedMetric:
             raise ValueError("normalization override amount is required")
         if self.basis == "actual_unchanged" and original != normalized:
             raise ValueError("actual_unchanged normalization must preserve actual")
+        for field_name, amount in (
+            ("original_actual", original),
+            ("normalized_amount", normalized),
+        ):
+            if amount is None:
+                continue
+            if abs(amount) > MAX_ABS_BASE_AMOUNT:
+                raise ValueError(
+                    f"normalization.{metric_key}.{field_name} "
+                    "exceeds the supported bound"
+                )
+            if metric_key == "revenue" and amount <= 0:
+                raise ValueError(
+                    f"normalization.revenue.{field_name} must be positive"
+                )
+        if self.basis == "actual_unchanged" and reason is not None:
+            raise ValueError(
+                "actual_unchanged normalization reason must be None"
+            )
         object.__setattr__(self, "metric_key", metric_key)
         object.__setattr__(self, "original_actual", original)
         object.__setattr__(self, "normalized_amount", normalized)
@@ -611,17 +658,59 @@ class DcfValuationResult:
             object.__setattr__(self, field_name, values)
         if not isinstance(self.normalization, DcfNormalization):
             raise TypeError("result.normalization is invalid")
+        normalization = DcfNormalization(
+            revenue=DcfNormalizedMetric(**{
+                field.name: getattr(
+                    self.normalization.revenue,
+                    field.name,
+                )
+                for field in fields(DcfNormalizedMetric)
+            }),
+            operating_profit=DcfNormalizedMetric(**{
+                field.name: getattr(
+                    self.normalization.operating_profit,
+                    field.name,
+                )
+                for field in fields(DcfNormalizedMetric)
+            }),
+        )
+        object.__setattr__(self, "normalization", normalization)
         if tuple(item.key for item in self.assumptions) != _ASSUMPTION_KEYS:
             raise ValueError("result assumptions do not match the DCF contract")
         assumption_values = {
             assumption.key: assumption.value
             for assumption in self.assumptions
         }
+        override_reasons = {
+            metric.reason
+            for metric in (
+                normalization.revenue,
+                normalization.operating_profit,
+            )
+            if metric.basis == "analyst_override"
+        }
+        if len(override_reasons) > 1:
+            raise ValueError(
+                "normalization override reasons do not reconcile"
+            )
+        normalization_reason = next(iter(override_reasons), None)
         DcfScenarioInput(
             company=company,
             base_year=base_year,
             fs_div=self.fs_div,
             forecast_years=self.forecast_years,
+            normalized_revenue=(
+                normalization.revenue.normalized_amount
+                if normalization.revenue.basis == "analyst_override"
+                else None
+            ),
+            normalized_operating_profit=(
+                normalization.operating_profit.normalized_amount
+                if normalization.operating_profit.basis
+                == "analyst_override"
+                else None
+            ),
+            normalization_reason=normalization_reason,
             **assumption_values,
         )
         actuals_by_metric: dict[str, list[DcfActualFact]] = {}
@@ -630,8 +719,8 @@ class DcfValuationResult:
                 raise ValueError("result actual basis does not reconcile")
             actuals_by_metric.setdefault(fact.metric_key, []).append(fact)
         for normalized_metric in (
-            self.normalization.revenue,
-            self.normalization.operating_profit,
+            normalization.revenue,
+            normalization.operating_profit,
         ):
             source_facts = actuals_by_metric.get(
                 normalized_metric.metric_key,
@@ -669,6 +758,14 @@ class DcfValuationResult:
             if len(values) > 32:
                 raise ValueError(f"result.{field_name} exceeds item limit")
             object.__setattr__(self, field_name, values)
+        if (
+            self.limitations[:len(_LIMITATIONS)] != _LIMITATIONS
+            or len(set(self.limitations)) != len(self.limitations)
+        ):
+            raise ValueError(
+                "result.limitations must preserve the required "
+                "ordered disclosures with deduped source additions"
+            )
         object.__setattr__(self, "company", company)
         object.__setattr__(self, "base_year", base_year)
 
@@ -899,20 +996,27 @@ class DcfValuationResult:
                 self.equity_value is not None,
             )):
                 raise ValueError("partial or invalid result does not reconcile")
+            normalized_revenue = (
+                self.normalization.revenue.normalized_amount
+            )
+            base_revenue_invalid = False
+            if normalized_revenue is not None:
+                try:
+                    rounded_revenue = _money(normalized_revenue)
+                except DecimalException:
+                    pass
+                else:
+                    base_revenue_invalid = (
+                        normalized_revenue <= 0
+                        or rounded_revenue <= 0
+                    )
             invalid_reason = None
             if self.status == "invalid_model":
-                normalized_revenue = (
-                    self.normalization.revenue.normalized_amount
+                invalid_reason = (
+                    "base_revenue_nonpositive"
+                    if base_revenue_invalid
+                    else "arithmetic_invalid"
                 )
-                invalid_reason = "arithmetic_invalid"
-                if normalized_revenue is not None:
-                    try:
-                        rounded_revenue = _money(normalized_revenue)
-                    except DecimalException:
-                        pass
-                    else:
-                        if normalized_revenue <= 0 or rounded_revenue <= 0:
-                            invalid_reason = "base_revenue_nonpositive"
             expected_missing = _expected_missing_inputs(
                 assumption_values,
                 actuals_by_metric,
@@ -929,7 +1033,15 @@ class DcfValuationResult:
                 tuple(self.missing_inputs) != expected_missing
                 or (
                     self.status == "partial_model"
-                    and not has_enterprise_gap
+                    and (
+                        not has_enterprise_gap
+                        or base_revenue_invalid
+                    )
+                )
+                or (
+                    self.status == "invalid_model"
+                    and invalid_reason == "arithmetic_invalid"
+                    and has_enterprise_gap
                 )
             ):
                 raise ValueError(
@@ -1425,11 +1537,24 @@ def build_dcf_valuation(
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, Decimal):
+        if not dcf_decimal_fits_serialization(value) or (
+            value != 0
+            and value.adjusted() < MIN_DECIMAL_ADJUSTED
+        ):
+            raise ValueError(
+                "decimal exceeds fixed serialization bounds"
+            )
         rendered = format(value, "f")
         if "." not in rendered:
-            return f"{rendered}.00"
-        whole, fractional = rendered.split(".", 1)
-        return f"{whole}.{fractional.ljust(2, '0')}"
+            rendered = f"{rendered}.00"
+        else:
+            whole, fractional = rendered.split(".", 1)
+            rendered = f"{whole}.{fractional.ljust(2, '0')}"
+        if len(rendered) > _MAX_JSON_DECIMAL_CHARS:
+            raise ValueError(
+                "decimal exceeds fixed serialization bounds"
+            )
+        return rendered
     if is_dataclass(value):
         return {
             field.name: _json_value(getattr(value, field.name))

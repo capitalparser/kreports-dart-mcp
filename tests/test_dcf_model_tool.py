@@ -135,6 +135,59 @@ def test_dcf_tool_input_is_explicit_strict_and_defaults_to_five_years():
     assert schema["normalization_reason"]["anyOf"][0]["maxLength"] == 1000
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "revenue_growth",
+        "operating_margin",
+        "tax_rate",
+        "da_to_revenue",
+        "capex_to_revenue",
+        "nwc_to_revenue",
+        "wacc",
+        "terminal_growth",
+        "normalized_revenue",
+        "normalized_operating_profit",
+    ],
+)
+def test_dcf_mcp_decimal_exponent_bound_matches_domain(field):
+    from kreports.mcp.input_models import BuildDcfModelPackInput
+
+    accepted = {field: "1e-31"}
+    rejected = {field: "1e-10000"}
+    if field == "wacc":
+        accepted["terminal_growth"] = "-0.01"
+        rejected["terminal_growth"] = "-0.01"
+    if field in {"normalized_revenue", "normalized_operating_profit"}:
+        accepted["normalization_reason"] = "정밀도 경계"
+        rejected["normalization_reason"] = "정밀도 경계"
+
+    model = BuildDcfModelPackInput(
+        company="00126380",
+        base_year=2024,
+        **accepted,
+    )
+    assert Decimal(str(getattr(model, field))) == Decimal("1E-31")
+
+    with pytest.raises(ValidationError, match=field):
+        BuildDcfModelPackInput(
+            company="00126380",
+            base_year=2024,
+            **rejected,
+        )
+
+
+def test_dcf_mcp_rejects_extreme_zero_quantum_before_float_coercion():
+    from kreports.mcp.input_models import BuildDcfModelPackInput
+
+    with pytest.raises(ValidationError, match="operating_margin"):
+        BuildDcfModelPackInput(
+            company="00126380",
+            base_year=2024,
+            operating_margin="0e-10000",
+        )
+
+
 def test_dcf_handler_forwards_all_explicit_layers(monkeypatch):
     import kreports.mcp.handlers.investor as investor_handler
     from kreports.mcp.input_models import BuildDcfModelPackInput
