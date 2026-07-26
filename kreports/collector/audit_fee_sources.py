@@ -459,10 +459,31 @@ def merge_audit_fee_observations(
 ) -> AuditFeeMergeResult:
     """Select compatibility values while retaining bounded source provenance."""
     materialized = list(observations)
-    contract_fee, contract_fee_source = _pick_value(materialized, "contract_fee_m")
-    contract_hours, contract_hours_source = _pick_value(materialized, "contract_hours")
-    actual_fee, actual_fee_source = _pick_value(materialized, "actual_fee_m")
-    actual_hours, actual_hours_source = _pick_value(materialized, "actual_hours")
+    latest_by_source = latest_audit_fee_observations_by_source(materialized)
+    current_observations = list(latest_by_source.values())
+    active_observations = [
+        item
+        for item in current_observations
+        if item.source_eligibility != "not_eligible"
+    ]
+    all_ineligible = bool(current_observations) and not active_observations
+    state_observations = active_observations or current_observations
+    contract_fee, contract_fee_source = _pick_value(
+        active_observations,
+        "contract_fee_m",
+    )
+    contract_hours, contract_hours_source = _pick_value(
+        active_observations,
+        "contract_hours",
+    )
+    actual_fee, actual_fee_source = _pick_value(
+        active_observations,
+        "actual_fee_m",
+    )
+    actual_hours, actual_hours_source = _pick_value(
+        active_observations,
+        "actual_hours",
+    )
 
     previous = previous or {}
     contract_fee = contract_fee if contract_fee is not None else previous.get("contract_fee_m")
@@ -493,13 +514,14 @@ def merge_audit_fee_observations(
         or contract_fee_source
         or contract_hours_source
     )
-    conflicts = _actual_conflicts(materialized)
-    statuses = {item.availability_status for item in materialized}
-    latest_by_source = latest_audit_fee_observations_by_source(materialized)
+    conflicts = _actual_conflicts(active_observations)
+    statuses = {
+        item.availability_status for item in state_observations
+    }
     blockers = sorted(
         (
             item
-            for item in latest_by_source.values()
+            for item in state_observations
             if item.availability_status in {"transport_error", "parse_error"}
             or item.quality_status == "error"
         ),
@@ -511,6 +533,12 @@ def merge_audit_fee_observations(
     elif conflicts:
         availability = "conflict"
         quality = "conflict"
+    elif (
+        all_ineligible
+        and "not_available_from_endpoint" in statuses
+    ):
+        availability = "not_available_from_endpoint"
+        quality = "missing"
     elif compatibility_fee is not None and compatibility_hours is not None:
         availability = "available"
         quality = "verified"

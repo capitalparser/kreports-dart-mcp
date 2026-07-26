@@ -172,6 +172,46 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
     assert len(out["source_observations"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("first_value", "corrected_value"),
+    [
+        (100, 120),
+        (120, 100),
+    ],
+)
+def test_sequential_same_identity_correction_controls_canonical_values_after_reload(
+    temp_engine,
+    first_value,
+    corrected_value,
+):
+    corp_code = f"correction-{first_value}"
+    for value in (first_value, corrected_value):
+        upsert_audit_fee_observations(
+            [
+                AuditFeeObservation(
+                    corp_code=corp_code,
+                    bsns_year=2024,
+                    source_class="opendart_ds002",
+                    source_period="2024",
+                    source_rcept_no="same-receipt",
+                    actual_fee_m=value,
+                    actual_hours=value * 10,
+                    source_eligibility="eligible",
+                    availability_status="partial",
+                    quality_status="verified",
+                )
+            ]
+        )
+
+    out = audit_fee_availability(corp_code, 2024)
+
+    assert out["actual"]["fee_m"] == corrected_value
+    assert out["actual"]["hours"] == corrected_value * 10
+    assert out["selected"]["audit_fee_m"] == corrected_value
+    assert out["selected"]["audit_hours"] == corrected_value * 10
+    assert len(out["source_observations"]) == 2
+
+
 def test_legacy_row_is_inferred_without_rewrite(monkeypatch):
     legacy = create_engine("sqlite:///:memory:")
     with legacy.begin() as conn:
@@ -395,15 +435,27 @@ def test_feature_grade_excludes_endpoint_unsupported_years(monkeypatch):
     assert quality_module._audit_fee_peer_grade("001", 2025) == "A"
 
 
-def test_newer_same_source_observation_supersedes_older_selection():
+@pytest.mark.parametrize(
+    ("older_period", "older_receipt", "newer_period", "newer_receipt"),
+    [
+        ("2023", "20240318000001", "2024", "20230318000001"),
+        ("2024", "20240318000001", "2024", "20250318000001"),
+    ],
+)
+def test_newer_same_source_observation_supersedes_older_selection(
+    older_period,
+    older_receipt,
+    newer_period,
+    newer_receipt,
+):
     older = AuditFeeObservation(
         corp_code="001",
         bsns_year=2024,
         source_class="cached_business_report",
         actual_fee_m=100,
         actual_hours=1000,
-        source_period="2023",
-        source_rcept_no="20240318000001",
+        source_period=older_period,
+        source_rcept_no=older_receipt,
         availability_status="available",
         quality_status="verified",
     )
@@ -413,18 +465,135 @@ def test_newer_same_source_observation_supersedes_older_selection():
         source_class="cached_business_report",
         actual_fee_m=104,
         actual_hours=1040,
-        source_period="2024",
-        source_rcept_no="20250318000001",
+        source_period=newer_period,
+        source_rcept_no=newer_receipt,
         availability_status="available",
         quality_status="verified",
     )
 
-    result = merge_audit_fee_observations([older, newer])
+    result = merge_audit_fee_observations([newer, older])
 
     assert result.actual_fee_m == 104
     assert result.actual_hours == 1040
-    assert result.source_period == "2024"
+    assert result.source_period == newer_period
     assert len(json.loads(result.source_observations_json)) == 2
+
+
+def test_cross_source_conflict_excludes_superseded_same_source_claim():
+    superseded = _observation("opendart_ds002", 100, 1000)
+    current = _observation("opendart_ds002", 120, 1200)
+    cross_source = _observation("cached_business_report", 140, 1400)
+
+    result = merge_audit_fee_observations(
+        [superseded, current, cross_source]
+    )
+
+    assert result.actual_fee_m == 140
+    assert result.actual_hours == 1400
+    assert result.conflict_status == "conflict"
+    assert len(result.conflicts) == 2
+    assert {
+        (item["left_value"], item["right_value"])
+        for item in result.conflicts
+    } == {(120, 140), (1200, 1400)}
+
+
+def test_ineligible_endpoint_gap_does_not_override_eligible_cached_gap():
+    endpoint = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="opendart_ds002",
+        source_eligibility="not_eligible",
+        availability_status="not_available_from_endpoint",
+        quality_status="missing",
+    )
+    cached = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="cached_business_report",
+        source_eligibility="eligible",
+        availability_status="not_found_in_cached_report",
+        quality_status="missing",
+    )
+
+    result = merge_audit_fee_observations([endpoint, cached])
+
+    assert result.availability_status == "not_found_in_cached_report"
+    assert result.quality_status == "missing"
+
+
+def test_ineligible_transport_error_does_not_block_eligible_available_source():
+    endpoint = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="opendart_ds002",
+        source_eligibility="not_eligible",
+        availability_status="transport_error",
+        quality_status="error",
+    )
+    cached = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="cached_business_report",
+        actual_fee_m=140,
+        actual_hours=1400,
+        source_eligibility="eligible",
+        availability_status="available",
+        quality_status="verified",
+    )
+
+    result = merge_audit_fee_observations([endpoint, cached])
+
+    assert result.audit_fee_m == 140
+    assert result.audit_hours == 1400
+    assert result.availability_status == "available"
+    assert result.quality_status == "verified"
+
+
+def test_eligible_transport_error_remains_blocking():
+    endpoint = AuditFeeObservation(
+        corp_code="001",
+        bsns_year=2024,
+        source_class="opendart_ds002",
+        source_eligibility="eligible",
+        availability_status="transport_error",
+        quality_status="error",
+    )
+    cached = _observation("cached_business_report", 140, 1400)
+
+    result = merge_audit_fee_observations([endpoint, cached])
+
+    assert result.availability_status == "transport_error"
+    assert result.quality_status == "error"
+
+
+def test_all_ineligible_sources_retain_endpoint_unavailable_state():
+    result = merge_audit_fee_observations(
+        [
+            AuditFeeObservation(
+                corp_code="001",
+                bsns_year=2014,
+                source_class="opendart_ds002",
+                source_eligibility="not_eligible",
+                availability_status="not_available_from_endpoint",
+                quality_status="missing",
+            )
+        ],
+        previous={
+            "actual_fee_m": 100,
+            "actual_hours": 1000,
+            "audit_fee_m": 100,
+            "audit_hours": 1000,
+            "compatibility_basis": "actual",
+            "availability_status": "available",
+            "quality_status": "verified",
+        },
+    )
+
+    assert result.audit_fee_m == 100
+    assert result.audit_hours == 1000
+    assert result.availability_status == "not_available_from_endpoint"
+    assert result.quality_status == "missing"
 
 
 def test_feature_grade_fails_when_any_eligible_period_has_source_blocker(
