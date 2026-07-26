@@ -135,6 +135,7 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
             "auditor": {
                 "auditor_nm": entity.component_auditor_name,
                 "bsns_year": entity.component_auditor_year,
+                "audit_opinion": None,
                 "rcept_no": entity.component_auditor_rcept_no,
                 "fs_div": entity.component_auditor_fs_div,
             } if entity.component_auditor_name else None,
@@ -149,6 +150,7 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
     return {
         "parent_name": graph.parent_name,
         "year": graph.year,
+        "source_rcept_no": graph.entities[0].source_rcept_no,
         "entities": rows,
         "limitations": list(graph.limitations),
         "truncated": graph.truncated,
@@ -177,7 +179,7 @@ def _canonical_result(
             {key: item.get(key) for key in _SUBSIDIARY_SLIM_FIELDS}
             for item in items
         ]
-    first_receipt = next(
+    selected_receipt = graph.get("source_rcept_no") or next(
         (
             item.get("source_rcept_no")
             for item in all_items
@@ -187,7 +189,7 @@ def _canonical_result(
     )
     return _clean_dict({
         "corp_code": corp_code,
-        "parent_rcept_no": first_receipt,
+        "parent_rcept_no": selected_receipt,
         "bsns_year": year,
         "qsc_criterion": _QSC_CRITERION,
         "subsidiaries": items,
@@ -431,10 +433,27 @@ def get_subsidiary_auditors(
     except GroupGraphUnavailable:
         canonical_year = None
     canonical_graph = _canonical_graph_payload(corp_code, canonical_year)
+    canonical_receipt = (
+        canonical_graph.get("source_rcept_no")
+        if canonical_graph is not None
+        else None
+    )
+    legacy_receipt = (
+        cached_rows[0]["parent_rcept_no"] if cached_rows else None
+    )
     if (
         canonical_year is not None
         and canonical_graph is not None
-        and (latest_year is None or canonical_year > latest_year)
+        and (
+            latest_year is None
+            or canonical_year > latest_year
+            or (
+                canonical_year == latest_year
+                and canonical_receipt is not None
+                and legacy_receipt is not None
+                and canonical_receipt > legacy_receipt
+            )
+        )
     ):
         return _canonical_result(
             corp_code,
@@ -628,12 +647,24 @@ def get_subsidiary_auditors(
                 "coverage_note": coverage_note,
             },
         })
-        same_year_graph = (
-            canonical_graph if canonical_year == latest_year else None
+        same_snapshot_graph = (
+            canonical_graph
+            if (
+                canonical_year == latest_year
+                and canonical_graph is not None
+                and canonical_graph.get("source_rcept_no")
+                == cached_rows[0]["parent_rcept_no"]
+            )
+            else None
         )
-        if same_year_graph is not None:
-            result["group_graph"] = same_year_graph
+        if same_snapshot_graph is not None:
+            result["group_graph"] = same_snapshot_graph
             result["data_quality"]["canonical_graph"] = "available"
+        elif canonical_year == latest_year and canonical_graph is not None:
+            result["data_quality"]["canonical_graph"] = "receipt_mismatch"
+            result["limitations"] = [
+                "canonical_graph_receipt_mismatch",
+            ]
         return result
     if canonical_year is not None and canonical_graph is not None:
         return _canonical_result(

@@ -739,6 +739,9 @@ def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
             GroupEntityRecord(
                 parent_corp_code="00000001", effective_year=2025,
                 entity_key=key, original_name=name, normalized_name=name.lower(),
+                resolved_corp_code=(
+                    "00000001" if key == "p" else "00000002"
+                ),
                 resolution_status="resolved", resolution_reason="corp_code",
                 source_rcept_no="r1", source_table="SUB", source_ordinal=ordinal,
             )
@@ -769,6 +772,21 @@ def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
                 qsc_threshold_pct=10, quality_status="usable",
             ))
     assert _group_audit_status_and_grade("00000001", 2025) == ("available", "A")
+    with get_session() as session:
+        child = session.query(GroupEntityRecord).filter_by(
+            parent_corp_code="00000001",
+            effective_year=2025,
+            entity_key="c",
+        ).one()
+        child.resolved_corp_code = "invalid"
+    assert _group_audit_status_and_grade("00000001", 2025) == ("partial", "D")
+    with get_session() as session:
+        child = session.query(GroupEntityRecord).filter_by(
+            parent_corp_code="00000001",
+            effective_year=2025,
+            entity_key="c",
+        ).one()
+        child.resolved_corp_code = "00000002"
     with get_session() as session:
         session.add(GroupEntityRecord(
             parent_corp_code="00000001", effective_year=2025,
@@ -811,6 +829,9 @@ def test_quality_a_never_combines_relationships_and_metrics_across_receipts(
             GroupEntityRecord(
                 parent_corp_code="00000001", effective_year=2025,
                 entity_key=key, original_name=key, normalized_name=key,
+                resolved_corp_code=(
+                    "00000001" if key == "p" else "00000002"
+                ),
                 resolution_status="resolved", resolution_reason="corp_code",
                 source_rcept_no="new", source_table="SUB", source_ordinal=i,
             )
@@ -856,6 +877,9 @@ def test_quality_a_accepts_qsc_from_one_complete_crossing_share(temp_engine):
             session.add(GroupEntityRecord(
                 parent_corp_code="00000001", effective_year=2025,
                 entity_key=key, original_name=key, normalized_name=key,
+                resolved_corp_code=(
+                    "00000001" if key == "p" else "00000002"
+                ),
                 resolution_status="resolved", resolution_reason="corp_code",
                 source_rcept_no="r1", source_table="SUB",
                 source_ordinal=ordinal,
@@ -902,6 +926,9 @@ def test_quality_a_rejects_missing_or_inconsistent_metric_numerator(
             session.add(GroupEntityRecord(
                 parent_corp_code="00000001", effective_year=2025,
                 entity_key=key, original_name=key, normalized_name=key,
+                resolved_corp_code=(
+                    "00000001" if key == "p" else "00000002"
+                ),
                 resolution_status="resolved", resolution_reason="corp_code",
                 source_rcept_no="r1", source_table="SUB",
                 source_ordinal=ordinal,
@@ -1080,6 +1107,70 @@ def test_legacy_adapter_selects_one_latest_year_receipt_snapshot(temp_engine):
     ]
 
 
+def test_legacy_response_does_not_attach_same_year_canonical_other_receipt(
+    temp_engine,
+):
+    from kreports.analysis.group_audit import get_subsidiary_auditors
+    from kreports.db.engine import get_session
+    from kreports.db.models import BusinessAffiliateAuditor, Company
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    with temp_engine.begin() as conn:
+        _seed_graph(conn)
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Parent"),
+            BusinessAffiliateAuditor(
+                parent_corp_code="00000001",
+                parent_rcept_no="r2",
+                bsns_year=2025,
+                name="Legacy Child",
+                source="SUB",
+                ordinal=0,
+            ),
+        ])
+
+    result = get_subsidiary_auditors("00000001", slim=False)
+
+    assert result["parent_rcept_no"] == "r2"
+    assert [item["name"] for item in result["subsidiaries"]] == [
+        "Legacy Child",
+    ]
+    assert "group_graph" not in result
+    assert result["data_quality"]["canonical_graph"] == "receipt_mismatch"
+    assert result["limitations"] == ["canonical_graph_receipt_mismatch"]
+    pack = build_answer_pack("get_subsidiary_auditors", result)
+    assert "canonical_graph_receipt_mismatch" in pack["warnings"]
+
+
+def test_newer_same_year_canonical_receipt_replaces_legacy_snapshot(temp_engine):
+    from kreports.analysis.group_audit import get_subsidiary_auditors
+    from kreports.db.engine import get_session
+    from kreports.db.models import BusinessAffiliateAuditor, Company
+
+    with temp_engine.begin() as conn:
+        _seed_graph(conn)
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Parent"),
+            BusinessAffiliateAuditor(
+                parent_corp_code="00000001",
+                parent_rcept_no="r0",
+                bsns_year=2025,
+                name="Legacy Child",
+                source="SUB",
+                ordinal=0,
+            ),
+        ])
+
+    result = get_subsidiary_auditors("00000001", slim=False)
+
+    assert result["parent_rcept_no"] == "r1"
+    assert [item["name"] for item in result["subsidiaries"]] == ["Child"]
+    assert result["group_graph"]["source_rcept_no"] == "r1"
+    assert result["data_quality"]["source"] == "canonical_group_audit_graph"
+
+
 def test_canonical_adapter_preserves_slim_and_full_legacy_fields(temp_engine):
     from kreports.analysis.group_audit import get_subsidiary_auditors
     from kreports.db.engine import get_session
@@ -1087,6 +1178,14 @@ def test_canonical_adapter_preserves_slim_and_full_legacy_fields(temp_engine):
 
     with temp_engine.begin() as conn:
         _seed_graph(conn)
+        conn.execute(text("""
+            UPDATE group_entities
+            SET component_auditor_name='Canonical Auditor',
+                component_auditor_year=2025,
+                component_auditor_rcept_no='a1',
+                component_auditor_fs_div='CFS'
+            WHERE entity_key='c'
+        """))
     with get_session() as session:
         session.add(Company(
             corp_code="00000001", stock_code="000001", corp_name="Parent",
@@ -1102,6 +1201,13 @@ def test_canonical_adapter_preserves_slim_and_full_legacy_fields(temp_engine):
     assert slim["subsidiaries"][0]["asset_amount_m"] == 0.00001
     assert slim["subsidiaries"][0]["is_qsc"] is True
     assert slim["subsidiaries"][0]["qsc_status"] == "qsc"
+    assert slim["subsidiaries"][0]["auditor"] == {
+        "auditor_nm": "Canonical Auditor",
+        "bsns_year": 2025,
+        "audit_opinion": None,
+        "rcept_no": "a1",
+        "fs_div": "CFS",
+    }
     full = get_subsidiary_auditors("000001", slim=False)
     assert {
         "business", "assets", "asset_amount", "asset_amount_m",
@@ -1363,3 +1469,69 @@ def test_graph_rendering_escapes_hostile_html_and_diagram_metacharacters():
     assert "<br/>next" in definition
     assert "&lt;br/&gt;" not in definition
     assert "\\|" in rendered
+
+
+def test_graph_rendering_normalizes_carriage_returns_and_c0_controls():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.renderers import render_answer
+
+    hostile = "safe\r\nCRLF\rlone\x00nul\x1funit"
+    row = {
+        "entity_key": "child",
+        "parent_entity_key": "root",
+        "parent_is_root": True,
+        "name": hostile,
+        "relation": hostile,
+        "ownership_pct": hostile,
+        "source_rcept_no": "r",
+    }
+    result = {
+        "subject": {"corp_name": hostile},
+        "bsns_year": 2025,
+        "subsidiaries": [],
+        "group_graph": {"entities": [row], "truncated": False},
+        "data_quality": {"status": "usable"},
+    }
+
+    definition = build_answer_pack(
+        "get_subsidiary_auditors", result,
+    )["diagrams"][0]["definition"]
+    rendered = render_answer("get_subsidiary_auditors", result)
+
+    for output in (definition, rendered):
+        assert "\r" not in output
+        assert "\x00" not in output
+        assert "\x1f" not in output
+        assert "<br/>CRLF<br/>lone" in output
+
+
+def test_group_narrative_escapes_all_hostile_top_level_dynamics():
+    from kreports.mcp.renderers import _render_subsidiary_auditors
+
+    hostile = '"><img src=x onerror=alert(1)>\rnext'
+    result = {
+        "subject": {"corp_name": hostile},
+        "bsns_year": hostile,
+        "parent_rcept_no": None,
+        "consolidated_totals": {
+            "assets_amount_m": hostile,
+            "revenue_amount_m": hostile,
+        },
+        "qsc_criterion": {"threshold_pct": hostile},
+        "subsidiaries": [],
+        "count": hostile,
+        "total": hostile,
+        "limitations": [hostile],
+        "data_quality": {
+            "status": hostile,
+            "source": hostile,
+            "coverage_note": hostile,
+        },
+    }
+
+    rendered = _render_subsidiary_auditors(result)
+
+    assert "<img" not in rendered
+    assert "\r" not in rendered
+    assert rendered.count("&lt;img") >= 8
+    assert "<br/>next" in rendered

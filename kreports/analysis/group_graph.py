@@ -726,7 +726,12 @@ def _validate_schema(read_engine) -> None:
         ) from exc
 
 
-def _entity_from_row(row: dict[str, Any], *, requested_year: int) -> GroupEntity:
+def group_entity_from_record(
+    row: dict[str, Any],
+    *,
+    requested_year: int,
+) -> GroupEntity:
+    """Build one entity using the canonical graph's shared row invariants."""
     auditor_year = row.get("component_auditor_year")
     auditor_name = row.get("component_auditor_name")
     auditor_receipt = row.get("component_auditor_rcept_no")
@@ -869,7 +874,7 @@ def _build_group_graph_unchecked(
         limitations.add("multiple_receipts_available")
     entity_by_key: dict[str, GroupEntity] = {}
     for row in entity_rows:
-        entity = _entity_from_row(dict(row), requested_year=year)
+        entity = group_entity_from_record(dict(row), requested_year=year)
         existing = entity_by_key.get(entity.entity_key)
         if existing is not None:
             if (

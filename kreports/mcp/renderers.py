@@ -151,9 +151,17 @@ def _fmt_ownership(value: Any) -> str:
     return _fmt_pct(value) if value is not None else "미기재"
 
 
+_UNSAFE_C0 = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _normalized_markup_text(value: Any) -> str:
+    normalized = str(value or "-").replace("\r\n", "\n").replace("\r", "\n")
+    return _UNSAFE_C0.sub("\ufffd", normalized)
+
+
 def _mermaid_label(value: Any) -> str:
     return (
-        html.escape(str(value or "-"), quote=True)
+        html.escape(_normalized_markup_text(value), quote=True)
         .replace("\\", "&#92;")
         .replace("|", "&#124;")
         .replace("[", "&#91;")
@@ -179,11 +187,16 @@ def _render_subsidiary_auditors(result: dict) -> str:
     asset_total = _fmt_amount_m(totals.get("assets_amount_m"))
     revenue_total = _fmt_amount_m(totals.get("revenue_amount_m"))
     qsc_threshold = qsc_criterion.get("threshold_pct", 10.0)
+    safe_status = _markdown_cell(_status(result))
+    safe_year = _markdown_cell(year or "")
+    safe_asset_total = _markdown_cell(asset_total)
+    safe_revenue_total = _markdown_cell(revenue_total)
+    safe_qsc_threshold = _markdown_cell(qsc_threshold)
     lines = [
-        f"판정: {_status(result)}",
+        f"판정: {safe_status}",
         "",
-        f"{safe_subject} {year or ''}년 연결·투자 실체 조회 결과입니다. 연결 총자산은 {asset_total}백만원, 연결 매출은 {revenue_total}백만원 기준으로 각 실체의 기여도를 표시합니다.",
-        f"QSC 기준은 연결 총자산 또는 연결 총매출 대비 {qsc_threshold}% 이상입니다.",
+        f"{safe_subject} {safe_year}년 연결·투자 실체 조회 결과입니다. 연결 총자산은 {safe_asset_total}백만원, 연결 매출은 {safe_revenue_total}백만원 기준으로 각 실체의 기여도를 표시합니다.",
+        f"QSC 기준은 연결 총자산 또는 연결 총매출 대비 {safe_qsc_threshold}% 이상입니다.",
         "",
         "구조도:",
         "```mermaid",
@@ -272,7 +285,10 @@ def _render_subsidiary_auditors(result: dict) -> str:
     if rcept_no:
         lines.append(f"- 접수번호: {rcept_no}")
         lines.append(f"- 공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}")
-    lines.append(f"- 반환 {result.get('count', len(subsidiaries))}건 / 전체 {result.get('total', len(subsidiaries))}건")
+    lines.append(
+        f"- 반환 {_markdown_cell(result.get('count', len(subsidiaries)))}건 "
+        f"/ 전체 {_markdown_cell(result.get('total', len(subsidiaries)))}건"
+    )
     if result.get("truncated"):
         lines.append("- 결과가 잘렸습니다. 전체 구조 확인이 필요하면 limit을 늘려 재조회해야 합니다.")
     if graph.get("truncated"):
@@ -285,14 +301,21 @@ def _render_subsidiary_auditors(result: dict) -> str:
     coverage_note = data_quality.get("coverage_note")
     lines.append("")
     lines.append("데이터 한계:")
-    lines.append(f"- 출처: {_public_source_label(data_quality.get('source') or 'local_subsidiary_auditor_matrix')}")
-    lines.append(f"- {coverage_note or '현재 결과는 로컬 사업보고서 파생 캐시 기준입니다.'}")
+    lines.append(
+        "- 출처: "
+        f"{_markdown_cell(_public_source_label(data_quality.get('source') or 'local_subsidiary_auditor_matrix'))}"
+    )
+    lines.append(
+        f"- {_markdown_cell(coverage_note or '현재 결과는 로컬 사업보고서 파생 캐시 기준입니다.')}"
+    )
+    for limitation in result.get("limitations") or []:
+        lines.append(f"- 제한: {_markdown_cell(limitation)}")
     return "\n".join(lines)
 
 
 def _markdown_cell(value: Any) -> str:
     return (
-        html.escape(str(value or "-"), quote=True)
+        html.escape(_normalized_markup_text(value), quote=True)
         .replace("\\", "\\\\")
         .replace("|", "\\|")
         .replace("[", "&#91;")

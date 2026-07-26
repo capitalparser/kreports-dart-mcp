@@ -34,7 +34,7 @@ from kreports.db.models import (
     SourceDocument,
 )
 from kreports.runtime import require_runtime_write
-from kreports.analysis.group_graph import classify_qsc
+from kreports.analysis.group_graph import classify_qsc, group_entity_from_record
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 from kreports.db.quality_snapshot import QUALITY_VERSION
 from kreports.analysis.audit_reporting import audit_fee_availability
@@ -549,6 +549,9 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
                     GroupEntityRecord.component_auditor_rcept_no,
                     GroupEntityRecord.component_auditor_fs_div,
                     GroupEntityRecord.auditor_gap_reason,
+                    GroupEntityRecord.source_rcept_no,
+                    GroupEntityRecord.source_table,
+                    GroupEntityRecord.source_ordinal,
                 )
                 .filter(
                     GroupEntityRecord.parent_corp_code == corp_code,
@@ -629,6 +632,14 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             or relationship.child_entity_key not in entity_keys
             for relationship in canonical_relationships
         )
+        for entity in canonical_entities:
+            try:
+                group_entity_from_record(
+                    entity._asdict(),
+                    requested_year=year,
+                )
+            except (TypeError, ValueError):
+                graph_conflict = True
         entity_claims: dict[str, set[tuple]] = defaultdict(set)
         for entity in canonical_entities:
             entity_claims[entity.entity_key].add((

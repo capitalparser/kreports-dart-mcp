@@ -7,6 +7,7 @@ charts/diagrams can use it, and plain MCP clients can ignore it.
 from __future__ import annotations
 
 import html
+import re
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no
@@ -379,6 +380,12 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
         )
     if result.get("truncated") or graph.get("truncated"):
         warnings.append("upstream_result_truncated")
+    for limitation in (
+        *(result.get("limitations") or []),
+        *(graph.get("limitations") or []),
+    ):
+        if limitation not in warnings:
+            warnings.append(str(limitation))
     if warnings:
         pack["warnings"] = warnings
     return pack
@@ -472,9 +479,17 @@ def _hierarchy_closed_rows(
     return visible
 
 
+_UNSAFE_C0 = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _normalized_markup_text(value: Any) -> str:
+    normalized = str(value or "-").replace("\r\n", "\n").replace("\r", "\n")
+    return _UNSAFE_C0.sub("\ufffd", normalized)
+
+
 def _mermaid_label(value: Any) -> str:
     return (
-        html.escape(str(value or "-"), quote=True)
+        html.escape(_normalized_markup_text(value), quote=True)
         .replace("\\", "&#92;")
         .replace("|", "&#124;")
         .replace("[", "&#91;")
