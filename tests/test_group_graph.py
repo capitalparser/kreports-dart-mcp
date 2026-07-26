@@ -77,6 +77,15 @@ def test_names_normalize_only_identity_noise_and_keep_original():
     assert entity.original_name == "(주) 에이비씨[주1]"
     with pytest.raises(FrozenInstanceError):
         entity.original_name = "changed"  # type: ignore[misc]
+    for resolved_corp_code in (None, "BAD"):
+        with pytest.raises(ValueError, match="resolved"):
+            GroupEntity(
+                entity_key="e", original_name="Entity",
+                normalized_name="entity", resolution_status="resolved",
+                resolution_reason="corp_code", listed_state="Y",
+                source_rcept_no="r", source_table="SUB", source_ordinal=0,
+                resolved_corp_code=resolved_corp_code,
+            )
 
 
 def test_typed_contracts_reject_invalid_values_and_references():
@@ -220,11 +229,11 @@ def _seed_graph(conn):
     conn.execute(text("""
         INSERT INTO group_entities
         (parent_corp_code,effective_year,entity_key,original_name,normalized_name,
-         resolution_status,resolution_reason,listed_state,source_rcept_no,
-         source_table,source_ordinal,fetched_at)
+         resolved_corp_code,resolution_status,resolution_reason,listed_state,
+         source_rcept_no,source_table,source_ordinal,fetched_at)
         VALUES
-        ('00000001',2025,'p','Parent','parent','resolved','corp_code','Y','r1','SUB',0,CURRENT_TIMESTAMP),
-        ('00000001',2025,'c','Child','child','resolved','corp_code','Y','r1','SUB',1,CURRENT_TIMESTAMP)
+        ('00000001',2025,'p','Parent','parent','00000001','resolved','corp_code','Y','r1','SUB',0,CURRENT_TIMESTAMP),
+        ('00000001',2025,'c','Child','child','00000002','resolved','corp_code','Y','r1','SUB',1,CURRENT_TIMESTAMP)
     """))
     conn.execute(text("""
         INSERT INTO group_relationships
@@ -343,6 +352,27 @@ def test_duplicate_metric_claims_fail_closed_deterministically(temp_engine):
     graph = build_group_graph("00000001", 2025)
     assert "contradictory_metric_claim" in graph.limitations
     assert not graph.metrics
+
+
+def test_contradictory_duplicate_entity_claim_fails_closed(temp_engine):
+    with temp_engine.begin() as conn:
+        _seed_graph(conn)
+        conn.execute(text("""
+            INSERT INTO group_entities
+            (parent_corp_code,effective_year,entity_key,original_name,
+             normalized_name,resolved_corp_code,resolution_status,
+             resolution_reason,source_rcept_no,source_table,source_ordinal,
+             fetched_at)
+            VALUES
+            ('00000001',2025,'c','Different Child','differentchild',
+             '00000003','resolved','corp_code','r1','OTHER',9,
+             CURRENT_TIMESTAMP)
+        """))
+    with pytest.raises(
+        GroupGraphUnavailable,
+        match="invalid_canonical_graph",
+    ):
+        build_group_graph("00000001", 2025)
 
 
 def test_entity_metric_snapshot_rejects_cross_metric_qsc_disagreement(
@@ -742,6 +772,21 @@ def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
     with get_session() as session:
         session.add(GroupEntityRecord(
             parent_corp_code="00000001", effective_year=2025,
+            entity_key="c", original_name="Contradictory Child",
+            normalized_name="contradictorychild",
+            resolved_corp_code="00000003",
+            resolution_status="resolved", resolution_reason="corp_code",
+            source_rcept_no="r1", source_table="OTHER", source_ordinal=8,
+        ))
+    assert _group_audit_status_and_grade("00000001", 2025) == ("partial", "D")
+    with get_session() as session:
+        session.query(GroupEntityRecord).filter_by(
+            parent_corp_code="00000001", effective_year=2025,
+            source_rcept_no="r1", source_table="OTHER", source_ordinal=8,
+        ).delete()
+    with get_session() as session:
+        session.add(GroupEntityRecord(
+            parent_corp_code="00000001", effective_year=2025,
             entity_key="isolated", original_name="Isolated",
             normalized_name="isolated", resolution_status="unresolved",
             resolution_reason="unresolved", source_rcept_no="r1",
@@ -1007,6 +1052,66 @@ def test_newer_canonical_year_is_not_suppressed_by_stale_legacy_matrix(
     assert result["data_quality"]["source"] == "canonical_group_audit_graph"
 
 
+def test_legacy_adapter_selects_one_latest_year_receipt_snapshot(temp_engine):
+    from kreports.analysis.group_audit import get_subsidiary_auditors
+    from kreports.db.engine import get_session
+    from kreports.db.models import BusinessAffiliateAuditor, Company
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", corp_name="Parent"))
+        session.add_all([
+            BusinessAffiliateAuditor(
+                parent_corp_code="00000001",
+                parent_rcept_no="20250301000001",
+                bsns_year=2024, name="Old Snapshot",
+                source="SUB", ordinal=0,
+            ),
+            BusinessAffiliateAuditor(
+                parent_corp_code="00000001",
+                parent_rcept_no="20250401000001",
+                bsns_year=2024, name="Current Snapshot",
+                source="SUB", ordinal=0,
+            ),
+        ])
+    result = get_subsidiary_auditors("00000001", slim=False)
+    assert result["parent_rcept_no"] == "20250401000001"
+    assert [item["name"] for item in result["subsidiaries"]] == [
+        "Current Snapshot",
+    ]
+
+
+def test_canonical_adapter_preserves_slim_and_full_legacy_fields(temp_engine):
+    from kreports.analysis.group_audit import get_subsidiary_auditors
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    with temp_engine.begin() as conn:
+        _seed_graph(conn)
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001", stock_code="000001", corp_name="Parent",
+        ))
+    slim = get_subsidiary_auditors("000001", slim=True)
+    assert set(slim["subsidiaries"][0]) == {
+        "name", "relation", "ownership_pct", "listed_yn",
+        "asset_amount_m", "asset_share_pct",
+        "revenue_amount_m", "revenue_share_pct",
+        "is_qsc", "qsc_status", "qsc_basis",
+        "corp_code", "stock_code", "market", "auditor",
+    }
+    assert slim["subsidiaries"][0]["asset_amount_m"] == 0.00001
+    assert slim["subsidiaries"][0]["is_qsc"] is True
+    assert slim["subsidiaries"][0]["qsc_status"] == "qsc"
+    full = get_subsidiary_auditors("000001", slim=False)
+    assert {
+        "business", "assets", "asset_amount", "asset_amount_m",
+        "asset_amount_source", "revenue_amount", "revenue_amount_m",
+        "revenue_amount_source", "revenue_gap_reason",
+        "auditor_gap_reason", "matched_corp_name", "source",
+        "entity_key", "parent_entity_key", "source_rcept_no",
+    }.issubset(full["subsidiaries"][0])
+
+
 def test_legacy_auditor_is_exact_year_and_conflicts_fail_closed(temp_engine):
     from kreports.analysis.group_audit import get_subsidiary_auditors
     from kreports.db.engine import get_session
@@ -1052,6 +1157,17 @@ def test_legacy_auditor_is_exact_year_and_conflicts_fail_closed(temp_engine):
     assert conflicted["subsidiaries"][0]["auditor"] is None
     assert conflicted["subsidiaries"][0]["auditor_gap_reason"] == (
         "component_auditor_conflict"
+    )
+    with get_session() as session:
+        matrix = session.query(BusinessAffiliateAuditor).one()
+        matrix.auditor_nm = "Stale Auditor"
+        cfs = session.query(Auditor).filter_by(fs_div="CFS").one()
+        cfs.auditor_nm = "Current Auditor"
+        session.query(Auditor).filter_by(fs_div="OFS").delete()
+    corrected = get_subsidiary_auditors("00000001", slim=False)
+    assert corrected["subsidiaries"][0]["auditor"] is None
+    assert corrected["subsidiaries"][0]["auditor_gap_reason"] == (
+        "component_auditor_correction_mismatch"
     )
 
 
@@ -1224,6 +1340,9 @@ def test_graph_rendering_escapes_hostile_html_and_diagram_metacharacters():
     row = {
         "entity_key": "child", "parent_entity_key": "root",
         "parent_is_root": True, "name": hostile, "relation": hostile,
+        "ownership_pct": hostile, "asset_share_pct": hostile,
+        "revenue_share_pct": hostile, "asset_amount": hostile,
+        "revenue_amount": hostile,
         "source_rcept_no": "r",
     }
     result = {
@@ -1242,4 +1361,5 @@ def test_graph_rendering_escapes_hostile_html_and_diagram_metacharacters():
         assert "&amp;" in output
     assert "&#91;X&#93;" in definition
     assert "<br/>next" in definition
+    assert "&lt;br/&gt;" not in definition
     assert "\\|" in rendered

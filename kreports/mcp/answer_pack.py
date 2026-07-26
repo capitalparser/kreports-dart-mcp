@@ -317,9 +317,19 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
             } if graph_rows else {}),
         })
         if item.get("asset_amount_m") is None and item.get("asset_amount") is not None:
-            rows[-1]["asset_amount_m"] = float(item["asset_amount"]) / 1_000_000
+            try:
+                rows[-1]["asset_amount_m"] = (
+                    float(item["asset_amount"]) / 1_000_000
+                )
+            except (TypeError, ValueError):
+                rows[-1]["asset_amount_m"] = item["asset_amount"]
         if item.get("revenue_amount_m") is None and item.get("revenue_amount") is not None:
-            rows[-1]["revenue_amount_m"] = float(item["revenue_amount"]) / 1_000_000
+            try:
+                rows[-1]["revenue_amount_m"] = (
+                    float(item["revenue_amount"]) / 1_000_000
+                )
+            except (TypeError, ValueError):
+                rows[-1]["revenue_amount_m"] = item["revenue_amount"]
     if rows:
         pack["tables"].append(_table(
             "subsidiary_contribution",
@@ -381,7 +391,13 @@ def _subsidiary_mermaid(
     *,
     canonical: bool = False,
 ) -> str:
-    lines = ["flowchart TD", f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]']
+    lines = [
+        "flowchart TD",
+        (
+            f'  P["{_mermaid_label(subject)}<br/>'
+            f'{_mermaid_label(year or "")}년 연결실체"]'
+        ),
+    ]
     visible = _hierarchy_closed_rows(subsidiaries, limit=8)
     node_ids = {
         str(item.get("entity_key") or f"row:{idx}"): f"N{idx}"
@@ -389,14 +405,20 @@ def _subsidiary_mermaid(
     }
     for idx, item in enumerate(visible, start=1):
         label = (
-            f"{item.get('relation') or '-'} / 지분율 {_fmt_pct(item.get('ownership_pct'))}<br/>"
-            f"자산 {_fmt_pct(item.get('asset_share_pct'))} / 매출 {_fmt_pct(item.get('revenue_share_pct'))}"
+            f"{_mermaid_label(item.get('relation') or '-')} / 지분율 "
+            f"{_mermaid_label(_fmt_pct(item.get('ownership_pct')))}"
+            "<br/>"
+            f"자산 {_mermaid_label(_fmt_pct(item.get('asset_share_pct')))}"
+            " / 매출 "
+            f"{_mermaid_label(_fmt_pct(item.get('revenue_share_pct')))}"
         )
         qsc = _qsc_label(item.get("qsc_status"))
         parent_key = str(item.get("parent_entity_key") or "")
         parent_node = node_ids.get(parent_key, "P") if canonical else "P"
         lines.append(
-            f'  {parent_node} -->|"{_mermaid_label(label)}"| N{idx}["{_mermaid_label(item.get("name"))}<br/>{_mermaid_label(qsc)}"]'
+            f'  {parent_node} -->|"{label}"| '
+            f'N{idx}["{_mermaid_label(item.get("name"))}<br/>'
+            f'{_mermaid_label(qsc)}"]'
         )
     if len(subsidiaries) > len(visible):
         lines.append(

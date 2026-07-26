@@ -27,6 +27,13 @@ _RESOLUTION_REASONS = frozenset({
     "invalid_explicit_corp_code", "explicit_corp_code_name_conflict",
     "self_entity_claim",
 })
+_RESOLVED_REASONS = frozenset({
+    "corp_code",
+    "explicit_corp_code",
+    "explicit_corp_code_name_conflict",
+    "unique_exact_normalized_name",
+    "parent_corp_code",
+})
 _METRIC_KEYS = frozenset({"assets", "revenue"})
 _METRIC_QUALITY_STATUSES = frozenset({"usable", "partial"})
 _QSC_BASES = frozenset({
@@ -186,8 +193,22 @@ class GroupEntity:
             raise TypeError("component_auditor_year must be an integer or None")
         if self.component_auditor_fs_div not in {None, "CFS", "OFS"}:
             raise ValueError("component_auditor_fs_div must be CFS, OFS, or None")
-        if self.resolution_status != "resolved" and self.resolved_corp_code:
-            raise ValueError("unresolved entities cannot carry a corp code")
+        if self.resolution_status == "resolved":
+            if not is_valid_corp_code(self.resolved_corp_code):
+                raise ValueError(
+                    "resolved entities require a valid 8-digit corp code"
+                )
+            if self.resolution_reason not in _RESOLVED_REASONS:
+                raise ValueError(
+                    "resolved entity has an incoherent resolution reason"
+                )
+        else:
+            if self.resolved_corp_code:
+                raise ValueError("unresolved entities cannot carry a corp code")
+            if self.resolution_reason in _RESOLVED_REASONS:
+                raise ValueError(
+                    "unresolved entity has a resolved-only reason"
+                )
 
 
 @dataclass(frozen=True)
@@ -738,6 +759,24 @@ def _entity_from_row(row: dict[str, Any], *, requested_year: int) -> GroupEntity
     )
 
 
+def _entity_identity_signature(entity: GroupEntity) -> tuple[Any, ...]:
+    return (
+        entity.original_name,
+        entity.normalized_name,
+        entity.resolution_status,
+        entity.resolution_reason,
+        entity.listed_state,
+        entity.resolved_corp_code,
+        entity.stock_code,
+        entity.market,
+        entity.component_auditor_name,
+        entity.component_auditor_year,
+        entity.component_auditor_rcept_no,
+        entity.component_auditor_fs_div,
+        entity.auditor_gap_reason,
+    )
+
+
 def _evidence_refs_from_json(value: Any) -> tuple[str, ...]:
     decoded = json.loads(str(value or "[]"))
     if not isinstance(decoded, list):
@@ -832,7 +871,12 @@ def _build_group_graph_unchecked(
     for row in entity_rows:
         entity = _entity_from_row(dict(row), requested_year=year)
         existing = entity_by_key.get(entity.entity_key)
-        if existing is not None and existing != entity:
+        if existing is not None:
+            if (
+                _entity_identity_signature(existing)
+                != _entity_identity_signature(entity)
+            ):
+                raise ValueError("contradictory duplicate entity claim")
             limitations.add("duplicate_entity_claim")
             continue
         entity_by_key[entity.entity_key] = entity

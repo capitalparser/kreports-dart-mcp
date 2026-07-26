@@ -85,6 +85,12 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
             else revenue.qsc_status if revenue is not None
             else "undetermined"
         )
+        qsc_basis = list(
+            asset.qsc_basis
+            if asset else revenue.qsc_basis if revenue else ()
+        )
+        asset_amount = asset.amount if asset else None
+        revenue_amount = revenue.amount if revenue else None
         rows.append({
             "entity_key": entity.entity_key,
             "parent_entity_key": edge.parent_entity_key,
@@ -92,16 +98,40 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
             "name": entity.original_name,
             "relation": edge.relation_type,
             "ownership_pct": edge.ownership_pct,
-            "asset_amount": asset.amount if asset else None,
+            "listed_yn": entity.listed_state,
+            "business": None,
+            "assets": asset_amount,
+            "asset_amount": asset_amount,
+            "asset_amount_m": (
+                float(asset_amount) / 1_000_000
+                if asset_amount is not None else None
+            ),
             "asset_share_pct": asset.share_pct if asset else None,
-            "revenue_amount": revenue.amount if revenue else None,
+            "asset_amount_source": (
+                "canonical_group_component_metrics"
+                if asset_amount is not None else None
+            ),
+            "revenue_amount": revenue_amount,
+            "revenue_amount_m": (
+                float(revenue_amount) / 1_000_000
+                if revenue_amount is not None else None
+            ),
             "revenue_share_pct": revenue.share_pct if revenue else None,
+            "revenue_amount_source": (
+                "canonical_group_component_metrics"
+                if revenue_amount is not None else None
+            ),
+            "revenue_gap_reason": revenue.gap_reason if revenue else None,
+            "is_qsc": (
+                True if qsc_status == "qsc"
+                else False if qsc_status == "not_qsc"
+                else None
+            ),
             "qsc_status": qsc_status,
-            "qsc_basis": list(asset.qsc_basis if asset else revenue.qsc_basis if revenue else ()),
+            "qsc_basis": qsc_basis,
             "corp_code": entity.resolved_corp_code,
             "stock_code": entity.stock_code,
             "market": entity.market,
-            "listed_yn": entity.listed_state,
             "auditor": {
                 "auditor_nm": entity.component_auditor_name,
                 "bsns_year": entity.component_auditor_year,
@@ -109,6 +139,10 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
                 "fs_div": entity.component_auditor_fs_div,
             } if entity.component_auditor_name else None,
             "auditor_gap_reason": entity.auditor_gap_reason,
+            "matched_corp_name": (
+                entity.original_name if entity.resolved_corp_code else None
+            ),
+            "source": edge.source_table,
             "source_rcept_no": edge.source_rcept_no,
             "source_table": edge.source_table,
         })
@@ -351,12 +385,26 @@ def get_subsidiary_auditors(
             cached_orm_rows = (
                 session.query(BusinessAffiliateAuditor)
                 .filter_by(parent_corp_code=corp_code)
-                .order_by(BusinessAffiliateAuditor.bsns_year.desc(), BusinessAffiliateAuditor.ordinal.asc())
+                .order_by(
+                    BusinessAffiliateAuditor.bsns_year.desc(),
+                    BusinessAffiliateAuditor.parent_rcept_no.desc(),
+                    BusinessAffiliateAuditor.ordinal.asc(),
+                )
                 .all()
             )
             latest_year = cached_orm_rows[0].bsns_year if cached_orm_rows else None
-            if latest_year is not None:
-                cached_orm_rows = [row for row in cached_orm_rows if row.bsns_year == latest_year]
+            latest_receipt = (
+                cached_orm_rows[0].parent_rcept_no
+                if cached_orm_rows else None
+            )
+            if latest_year is not None and latest_receipt is not None:
+                cached_orm_rows = [
+                    row for row in cached_orm_rows
+                    if (
+                        row.bsns_year == latest_year
+                        and row.parent_rcept_no == latest_receipt
+                    )
+                ]
             cached_rows = [
                 {
                     "parent_rcept_no": row.parent_rcept_no,
@@ -397,6 +445,7 @@ def get_subsidiary_auditors(
             slim=slim,
         )
     legacy_auditor_conflicts: set[str] = set()
+    legacy_current_auditor_names: dict[str, str] = {}
     if cached_rows and latest_year is not None:
         affiliate_codes = {
             str(item.get("corp_code") or "")
@@ -423,6 +472,11 @@ def get_subsidiary_auditors(
                 claim_code for claim_code, names in names_by_code.items()
                 if len(names) > 1
             }
+            legacy_current_auditor_names = {
+                claim_code: next(iter(names))
+                for claim_code, names in names_by_code.items()
+                if len(names) == 1
+            }
     with get_session() as session:
         row = (
             session.query(Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm)
@@ -447,6 +501,13 @@ def get_subsidiary_auditors(
             auditor_gap_reason = None
             if cached.get("corp_code") in legacy_auditor_conflicts:
                 auditor_gap_reason = "component_auditor_conflict"
+            elif (
+                cached["auditor_nm"]
+                and cached.get("corp_code") in legacy_current_auditor_names
+                and str(cached["auditor_nm"]).strip()
+                != legacy_current_auditor_names[cached["corp_code"]]
+            ):
+                auditor_gap_reason = "component_auditor_correction_mismatch"
             elif (
                 cached["auditor_nm"]
                 and cached["auditor_year"] != latest_year

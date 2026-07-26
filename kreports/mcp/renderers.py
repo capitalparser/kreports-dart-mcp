@@ -188,7 +188,10 @@ def _render_subsidiary_auditors(result: dict) -> str:
         "구조도:",
         "```mermaid",
         "flowchart TD",
-        f'  P["{_mermaid_label(subject)}<br/>{year or ""}년 연결실체"]',
+        (
+            f'  P["{_mermaid_label(subject)}<br/>'
+            f'{_mermaid_label(year or "")}년 연결실체"]'
+        ),
     ]
     visible = _hierarchy_closed_group_rows(subsidiaries, limit=8)
     node_ids = {
@@ -202,9 +205,17 @@ def _render_subsidiary_auditors(result: dict) -> str:
         revenue_share = _fmt_pct(item.get("revenue_share_pct"))
         qsc_status = _fmt_qsc_status(item.get("qsc_status"))
         parent_node = node_ids.get(str(item.get("parent_entity_key") or ""), "P")
+        edge_label = (
+            f"{_mermaid_label(relation)} / 지분율 "
+            f"{_mermaid_label(ownership)}"
+            "<br/>"
+            f"자산 {_mermaid_label(asset_share)} / 매출 "
+            f"{_mermaid_label(revenue_share)}"
+        )
         lines.append(
-            f'  {parent_node} -->|"{_mermaid_label(relation)} / 지분율 {ownership}<br/>자산 {asset_share} / 매출 {revenue_share}"| '
-            f'N{idx}["{_mermaid_label(item.get("name"))}<br/>{qsc_status}"]'
+            f'  {parent_node} -->|"{edge_label}"| '
+            f'N{idx}["{_mermaid_label(item.get("name"))}<br/>'
+            f'{_mermaid_label(qsc_status)}"]'
         )
     if len(subsidiaries) > len(visible):
         lines.append(
@@ -224,19 +235,25 @@ def _render_subsidiary_auditors(result: dict) -> str:
         auditor_name = auditor.get("auditor_nm") if isinstance(auditor, dict) else None
         asset_amount_m = item.get("asset_amount_m")
         if asset_amount_m is None and item.get("asset_amount") is not None:
-            asset_amount_m = float(item["asset_amount"]) / 1_000_000
+            try:
+                asset_amount_m = float(item["asset_amount"]) / 1_000_000
+            except (TypeError, ValueError):
+                asset_amount_m = item["asset_amount"]
         revenue_amount_m = item.get("revenue_amount_m")
         if revenue_amount_m is None and item.get("revenue_amount") is not None:
-            revenue_amount_m = float(item["revenue_amount"]) / 1_000_000
+            try:
+                revenue_amount_m = float(item["revenue_amount"]) / 1_000_000
+            except (TypeError, ValueError):
+                revenue_amount_m = item["revenue_amount"]
         lines.append(
             f"| {_markdown_cell(item.get('name'))} "
             f"| {_markdown_cell(item.get('relation'))} "
-            f"| {_fmt_ownership(item.get('ownership_pct'))} "
-            f"| {_fmt_amount_m(asset_amount_m)} "
-            f"| {_fmt_pct(item.get('asset_share_pct'))} "
-            f"| {_fmt_amount_m(revenue_amount_m)} "
-            f"| {_fmt_pct(item.get('revenue_share_pct'))} "
-            f"| {_fmt_qsc_status(item.get('qsc_status'))} "
+            f"| {_markdown_cell(_fmt_ownership(item.get('ownership_pct')))} "
+            f"| {_markdown_cell(_fmt_amount_m(asset_amount_m))} "
+            f"| {_markdown_cell(_fmt_pct(item.get('asset_share_pct')))} "
+            f"| {_markdown_cell(_fmt_amount_m(revenue_amount_m))} "
+            f"| {_markdown_cell(_fmt_pct(item.get('revenue_share_pct')))} "
+            f"| {_markdown_cell(_fmt_qsc_status(item.get('qsc_status')))} "
             f"| {_markdown_cell(auditor_name)} "
             + (
                 f"| {_markdown_cell(item.get('source_rcept_no'))} |"

@@ -536,7 +536,19 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             canonical_entities = (
                 session.query(
                     GroupEntityRecord.entity_key,
+                    GroupEntityRecord.original_name,
+                    GroupEntityRecord.normalized_name,
+                    GroupEntityRecord.resolved_corp_code,
+                    GroupEntityRecord.stock_code,
+                    GroupEntityRecord.market,
+                    GroupEntityRecord.resolution_status,
                     GroupEntityRecord.resolution_reason,
+                    GroupEntityRecord.listed_state,
+                    GroupEntityRecord.component_auditor_name,
+                    GroupEntityRecord.component_auditor_year,
+                    GroupEntityRecord.component_auditor_rcept_no,
+                    GroupEntityRecord.component_auditor_fs_div,
+                    GroupEntityRecord.auditor_gap_reason,
                 )
                 .filter(
                     GroupEntityRecord.parent_corp_code == corp_code,
@@ -616,6 +628,26 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             relationship.parent_entity_key not in entity_keys
             or relationship.child_entity_key not in entity_keys
             for relationship in canonical_relationships
+        )
+        entity_claims: dict[str, set[tuple]] = defaultdict(set)
+        for entity in canonical_entities:
+            entity_claims[entity.entity_key].add((
+                entity.original_name,
+                entity.normalized_name,
+                entity.resolved_corp_code,
+                entity.stock_code,
+                entity.market,
+                entity.resolution_status,
+                entity.resolution_reason,
+                entity.listed_state,
+                entity.component_auditor_name,
+                entity.component_auditor_year,
+                entity.component_auditor_rcept_no,
+                entity.component_auditor_fs_div,
+                entity.auditor_gap_reason,
+            ))
+        graph_conflict = graph_conflict or any(
+            len(claims) > 1 for claims in entity_claims.values()
         )
         edge_claims: dict[tuple[str, str], set[tuple[str, float | None]]] = (
             defaultdict(set)
