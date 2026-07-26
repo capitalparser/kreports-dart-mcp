@@ -36,8 +36,13 @@ COMPANY_URI_TEMPLATE = "kreports://company/{corp_code}/{year}"
 EVIDENCE_URI_TEMPLATE = "kreports://evidence/{rcept_no}"
 MAX_EVIDENCE_CHARACTERS = 20_000
 
-_CORP_CODE = re.compile(r"^\d{8}$")
-_RCEPT_NO = re.compile(r"^\d{14}$")
+_CORP_CODE = re.compile(r"[0-9]{8}", re.ASCII)
+_RCEPT_NO = re.compile(r"[0-9]{14}", re.ASCII)
+_COMPANY_RESOURCE_PATH = re.compile(
+    r"/([0-9]{8})/([0-9]{4})",
+    re.ASCII,
+)
+_EVIDENCE_RESOURCE_PATH = re.compile(r"/([0-9]{14})", re.ASCII)
 _DART_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
 
@@ -168,6 +173,7 @@ def _parse_uri(uri: object) -> tuple[str, dict[str, Any]]:
     raw = str(uri)
     if (
         raw != raw.strip()
+        or not raw.isascii()
         or any(
             ord(character) <= 0x1F or ord(character) == 0x7F
             for character in raw
@@ -187,19 +193,30 @@ def _parse_uri(uri: object) -> tuple[str, dict[str, Any]]:
     ):
         raise ResourceRequestError("invalid_resource_uri")
     if parsed.netloc == "dataset" and parsed.path == "/readiness":
+        if raw != DATASET_READINESS_URI:
+            raise ResourceRequestError("invalid_resource_uri")
         return "dataset_readiness", {}
-    company_match = re.fullmatch(r"/(\d{8})/(\d{4})", parsed.path)
+    company_match = _COMPANY_RESOURCE_PATH.fullmatch(parsed.path)
     if parsed.netloc == "company" and company_match:
         corp_code, raw_year = company_match.groups()
         if not _CORP_CODE.fullmatch(corp_code):
             raise ResourceRequestError("invalid_corp_code")
+        canonical = COMPANY_URI_TEMPLATE.format(
+            corp_code=corp_code,
+            year=raw_year,
+        )
+        if raw != canonical:
+            raise ResourceRequestError("invalid_resource_uri")
         year = int(raw_year)
         if not 2000 <= year <= 2100:
             raise ResourceRequestError("invalid_year")
         return "company_year", {"corp_code": corp_code, "year": year}
-    evidence_match = re.fullmatch(r"/(\d{14})", parsed.path)
+    evidence_match = _EVIDENCE_RESOURCE_PATH.fullmatch(parsed.path)
     if parsed.netloc == "evidence" and evidence_match:
         rcept_no = evidence_match.group(1)
+        canonical = EVIDENCE_URI_TEMPLATE.format(rcept_no=rcept_no)
+        if raw != canonical:
+            raise ResourceRequestError("invalid_resource_uri")
         return "filing_evidence", {"rcept_no": rcept_no}
     if parsed.netloc == "company":
         raise ResourceRequestError("invalid_company_resource")
