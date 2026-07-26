@@ -514,6 +514,19 @@ def _child_process_failure(
         classify_backfill_error,
     )
 
+    exit_outcomes = {
+        75: "quota_exceeded",
+        76: "transport_error",
+        77: "parse_error",
+        78: "storage_error",
+    }
+    if args and args[0] == "__python_script__" and return_code in exit_outcomes:
+        command_name = args[1]
+        return BackfillRunError(
+            exit_outcomes[return_code],
+            f"child command {command_name} failed with exit {return_code}",
+        )
+
     with get_session() as session:
         child_run = (
             session.query(BackfillRun.status, BackfillRun.error_msg)
@@ -537,12 +550,6 @@ def _child_process_failure(
                 error_message,
             )
     command_name = args[1] if args and args[0] == "__python_script__" else args[0]
-    exit_outcomes = {
-        75: "quota_exceeded",
-        76: "transport_error",
-        77: "parse_error",
-        78: "storage_error",
-    }
     if return_code in exit_outcomes:
         outcome = exit_outcomes[return_code]
     elif "extract" in command_name or "section" in command_name:

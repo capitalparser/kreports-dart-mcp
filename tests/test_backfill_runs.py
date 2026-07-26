@@ -644,7 +644,7 @@ def test_child_process_failure_preserves_recorded_outcome(
 
     failure = _child_process_failure(
         pid=64001,
-        return_code=1,
+        return_code=75,
         args=["collect-all"],
     )
 
@@ -653,20 +653,36 @@ def test_child_process_failure_preserves_recorded_outcome(
 
 
 @pytest.mark.parametrize(
-    ("return_code", "outcome"),
+    ("return_code", "outcome", "historical_outcome"),
     [
-        (75, "quota_exceeded"),
-        (76, "transport_error"),
-        (77, "parse_error"),
-        (78, "storage_error"),
+        (75, "quota_exceeded", "transport_error"),
+        (76, "transport_error", "quota_exceeded"),
+        (77, "parse_error", "storage_error"),
+        (78, "storage_error", "parse_error"),
     ],
 )
 def test_raw_script_exit_code_preserves_exact_taxonomy_without_child_lease(
     temp_engine,
     return_code,
     outcome,
+    historical_outcome,
 ):
     from kreports.collector.scheduler import _child_process_failure
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
+
+    # A reused PID may have a completed row from an unrelated old process.
+    with get_session() as session:
+        session.add(
+            BackfillRun(
+                task_type="historical-child",
+                status=historical_outcome,
+                pid=64999,
+                error_msg=f"old {historical_outcome}",
+                started_at=datetime(2026, 7, 25),
+                finished_at=datetime(2026, 7, 25),
+            )
+        )
 
     failure = _child_process_failure(
         pid=64999,
