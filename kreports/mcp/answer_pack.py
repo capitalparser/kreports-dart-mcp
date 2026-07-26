@@ -30,6 +30,13 @@ _DCF_CANDIDATE_METRICS = {
 }
 
 
+def _is_numeric_measure(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    )
+
+
 def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] | None:
     """Return a visual answer pack for known tool outputs."""
     if not isinstance(result, dict) or "error" in result:
@@ -263,19 +270,18 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
         "analyst_input": "분석가 입력",
     }
     assumption_rows = []
+    unknown_candidate_count = 0
     for key, raw_value in (result.get("candidate_assumptions") or {}).items():
         value = raw_value if isinstance(raw_value, dict) else {"value": raw_value}
         normalized_key = str(key)
         registered = _DCF_CANDIDATE_METRICS.get(normalized_key)
-        label = registered[0] if registered else normalized_key
+        label = registered[0] if registered else "사용자 정의 입력 후보"
+        if registered is None:
+            unknown_candidate_count += 1
         unit = (
-            str(value.get("unit"))
-            if value.get("unit") not in {None, ""}
-            else (
-                registered[1]
-                if registered
-                else _dcf_assumption_unit(normalized_key, None)
-            )
+            registered[1]
+            if registered
+            else None
         )
         assumption_rows.append({
             "metric": label,
@@ -287,6 +293,14 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
                 else "산정 근거 미확보"
             ),
         })
+    if unknown_candidate_count:
+        pack["limitations"] = [
+            *pack.get("limitations", []),
+            (
+                "dcf_candidate_unknown_metrics_redacted:"
+                f"{unknown_candidate_count}"
+            ),
+        ]
     if assumption_rows:
         candidate_units = {
             str(row.get("unit"))
@@ -574,7 +588,7 @@ def _build_investor_signals_pack(result: dict[str, Any]) -> dict[str, Any]:
         pack["tables"].append(_table(
             "event_counts",
             "최근 공시 이벤트 분포",
-            [("event_type", "이벤트"), ("count", "건수")],
+            [("event_type", "이벤트"), ("count", "건수", "건")],
             event_rows,
         ))
         pack["charts"].append(_chart(
@@ -765,20 +779,44 @@ def _build_subsidiary_pack(result: dict[str, Any]) -> dict[str, Any]:
             ],
             rows,
         ))
-        pack["charts"].append(_chart(
-            "entity_asset_contribution",
-            "bar",
-            "실체별 자산비중",
-            data_ref="subsidiary_contribution",
-            encodings={"x": {"field": "name"}, "y": {"field": "asset_share_pct"}},
-        ))
-        pack["charts"].append(_chart(
-            "entity_revenue_contribution",
-            "bar",
-            "실체별 매출비중",
-            data_ref="subsidiary_contribution",
-            encodings={"x": {"field": "name"}, "y": {"field": "revenue_share_pct"}},
-        ))
+        if any(
+            _is_numeric_measure(row.get("asset_share_pct"))
+            for row in rows
+        ):
+            pack["charts"].append(_chart(
+                "entity_asset_contribution",
+                "bar",
+                "실체별 자산비중",
+                data_ref="subsidiary_contribution",
+                encodings={
+                    "x": {"field": "name"},
+                    "y": {"field": "asset_share_pct"},
+                },
+            ))
+        else:
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                "group_chart_suppressed:no_asset_share_facts",
+            ]
+        if any(
+            _is_numeric_measure(row.get("revenue_share_pct"))
+            for row in rows
+        ):
+            pack["charts"].append(_chart(
+                "entity_revenue_contribution",
+                "bar",
+                "실체별 매출비중",
+                data_ref="subsidiary_contribution",
+                encodings={
+                    "x": {"field": "name"},
+                    "y": {"field": "revenue_share_pct"},
+                },
+            ))
+        else:
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                "group_chart_suppressed:no_revenue_share_facts",
+            ]
         visible_row_ids = {
             str(row.get("entity_key")): str(index)
             for index, row in enumerate(visible_diagram_rows, start=1)
@@ -1022,12 +1060,20 @@ def _build_disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:
     counts = result.get("event_type_counts") or {}
     if counts:
         rows = [{"event_type": key, "count": value} for key, value in counts.items()]
+        pack["tables"].append(_table(
+            "event_type_counts",
+            "공시 이벤트 유형별 건수",
+            [
+                ("event_type", "이벤트 유형"),
+                ("count", "공시 건수", "건"),
+            ],
+            rows,
+        ))
         pack["charts"].append(_chart(
             "event_type_distribution",
             "bar",
             "공시 이벤트 유형 분포",
             data_ref="event_type_counts",
-            rows=rows,
             encodings={"x": {"field": "event_type"}, "y": {"field": "count"}},
         ))
     return pack
@@ -1071,13 +1117,26 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             ],
             rows,
         ))
-        pack["charts"].append(_chart(
-            "peer_percentile_matrix",
-            "heatmap",
-            "Peer 백분위 매트릭스",
-            data_ref="peer_metric_matrix",
-            encodings={"x": {"field": "year"}, "y": {"field": "metric"}, "color": {"field": "percentile"}},
-        ))
+        has_percentile_facts = any(
+            _is_numeric_measure(row.get("percentile"))
+            for row in rows
+        )
+        if has_percentile_facts:
+            pack["charts"].append(_chart(
+                "peer_percentile_matrix",
+                "heatmap",
+                "Peer 백분위 매트릭스",
+                data_ref="peer_metric_matrix",
+                encodings={
+                    "x": {"field": "year"},
+                    "y": {"field": "metric"},
+                    "color": {"field": "percentile"},
+                },
+            ))
+        has_band_facts = all(
+            any(_is_numeric_measure(row.get(field)) for row in rows)
+            for field in ("subject_value", "p25", "p50", "p75")
+        )
         peer_units = {
             str(row.get("unit"))
             for row in rows
@@ -1087,7 +1146,7 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             row.get("unit") in {None, ""}
             for row in rows
         )
-        if len(peer_units) == 1 and not missing_units:
+        if has_band_facts and len(peer_units) == 1 and not missing_units:
             unit = next(iter(peer_units))
             pack["charts"].append(_chart(
                 "peer_band",
@@ -1102,7 +1161,7 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                     "color": {"field": "unit"},
                 },
             ))
-        else:
+        elif has_band_facts:
             limitation = (
                 "peer_band_suppressed:missing_units"
                 if missing_units
@@ -1112,6 +1171,11 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             pack["limitations"] = [
                 *pack.get("limitations", []),
                 limitation,
+            ]
+        if not has_percentile_facts and not has_band_facts:
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                "peer_chart_suppressed:no_numeric_facts",
             ]
     cohort_metadata = result.get("cohort_metadata")
     if isinstance(cohort_metadata, dict):

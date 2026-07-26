@@ -201,6 +201,102 @@ def test_chart_contract_requires_homogeneous_row_unit_to_be_visible():
 
 
 @pytest.mark.parametrize(
+    "columns,rows,fields",
+    [
+        (
+            [
+                {"field": "metric", "label": "지표"},
+                {"field": "value", "label": "값", "unit": "KRW"},
+                {"field": "unit", "label": "행 단위"},
+            ],
+            [
+                {"metric": "매출", "value": 100, "unit": "KRW"},
+                {"metric": "마진", "value": 0.1, "unit": "ratio"},
+            ],
+            ["value"],
+        ),
+        (
+            [
+                {"field": "metric", "label": "지표"},
+                {"field": "revenue", "label": "매출", "unit": "KRW"},
+                {"field": "margin", "label": "마진", "unit": "KRW"},
+                {"field": "unit", "label": "행 단위"},
+            ],
+            [{"metric": "혼합", "revenue": 100, "margin": 0.1, "unit": "ratio"}],
+            ["revenue", "margin"],
+        ),
+    ],
+)
+def test_chart_contract_rejects_row_units_that_contradict_static_units(
+    columns,
+    rows,
+    fields,
+):
+    with pytest.raises(ValidationError, match="unit"):
+        VisualizationPackV1.model_validate(_pack(
+            tables=[_table(columns=columns, rows=rows)],
+            charts=[{
+                "id": "contradictory_units",
+                "type": "bar",
+                "title": "단위 모순",
+                "data_ref": "facts",
+                "encodings": {
+                    "x": {"field": "metric"},
+                    "y": {"fields": fields},
+                },
+            }],
+        ))
+
+
+def test_chart_contract_rejects_unitless_or_empty_quantitative_axes():
+    unitless = _table(
+        columns=[
+            {"field": "metric", "label": "지표"},
+            {"field": "value", "label": "값"},
+        ],
+        rows=[{"metric": "ROE", "value": 0.1}],
+    )
+    with pytest.raises(ValidationError, match="unit"):
+        VisualizationPackV1.model_validate(_pack(
+            tables=[unitless],
+            charts=[{
+                "id": "unitless",
+                "type": "bar",
+                "title": "무단위 축",
+                "data_ref": "facts",
+                "encodings": {
+                    "x": {"field": "metric"},
+                    "y": {"field": "value"},
+                },
+            }],
+        ))
+
+    empty = _table(
+        columns=[
+            {"field": "metric", "label": "지표"},
+            {"field": "value", "label": "값"},
+            {"field": "unit", "label": "단위"},
+        ],
+        rows=[{"metric": "ROE", "value": None, "unit": "ratio"}],
+    )
+    with pytest.raises(ValidationError, match="numeric"):
+        VisualizationPackV1.model_validate(_pack(
+            tables=[empty],
+            charts=[{
+                "id": "empty_axis",
+                "type": "bar",
+                "title": "빈 축",
+                "data_ref": "facts",
+                "encodings": {
+                    "x": {"field": "metric"},
+                    "y": {"field": "value"},
+                    "color": {"field": "unit"},
+                },
+            }],
+        ))
+
+
+@pytest.mark.parametrize(
     "bad_value",
     [
         math.nan,
@@ -738,6 +834,29 @@ def test_direct_peer_missing_units_suppress_quantitative_chart():
     })
     assert not pack.charts
     assert "peer_chart_suppressed:missing_units" in pack.limitations
+
+
+def test_direct_peer_suppresses_chart_without_numeric_encoded_facts():
+    pack = build_visualization_pack({
+        "_visual_family": "peer_distribution",
+        "_visual_status": "usable",
+        "results": {
+            2025: {
+                "ROE": {
+                    "subject_value": None,
+                    "p25": None,
+                    "p50": None,
+                    "p75": None,
+                    "percentile": None,
+                    "n": 30,
+                    "unit": "ratio",
+                },
+            },
+        },
+    })
+
+    assert not pack.charts
+    assert "peer_chart_suppressed:no_numeric_facts" in pack.limitations
 
 
 def test_all_direct_visual_families_keep_numeric_units_and_chart_channels_safe():

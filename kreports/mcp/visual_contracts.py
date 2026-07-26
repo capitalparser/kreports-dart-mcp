@@ -109,6 +109,25 @@ def _contains_fact(value: Any) -> bool:
     return False
 
 
+def _is_quantitative_value(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float, Decimal)):
+        return not isinstance(value, float) or math.isfinite(value)
+    if not isinstance(value, str) or len(value) > 128:
+        return False
+    if not re.fullmatch(
+        r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?",
+        value,
+        re.ASCII,
+    ):
+        return False
+    try:
+        return Decimal(value).is_finite()
+    except Exception:
+        return False
+
+
 class ColumnSpecV1(BaseModel):
     model_config = _strict_model_config()
 
@@ -421,19 +440,56 @@ class VisualizationPackV1(BaseModel):
                 fields = [channel["field"]] if channel.get("field") else channel["fields"]
                 if not set(fields).issubset(declared):
                     raise ValueError("chart encoding references undeclared column")
-                if channel_name not in {"y", "color", "band"}:
+                is_quantitative = (
+                    channel_name in {"y", "band"}
+                    or (
+                        channel_name == "color"
+                        and chart.type == "heatmap"
+                    )
+                )
+                if not is_quantitative:
                     continue
-                numeric_fields = [
-                    field
-                    for field in fields
-                    if any(
-                        isinstance(row.get(field), (int, float, Decimal))
-                        and not isinstance(row.get(field), bool)
+                field_has_numeric = {
+                    field: any(
+                        _is_quantitative_value(row.get(field))
                         for row in table.rows
                     )
-                ]
-                if not numeric_fields:
+                    for field in fields
+                }
+                field_has_categorical = {
+                    field: any(
+                        _contains_fact(row.get(field))
+                        and not _is_quantitative_value(row.get(field))
+                        for row in table.rows
+                    )
+                    for field in fields
+                }
+                has_declared_unit = any(
+                    columns[field].unit is not None
+                    for field in fields
+                )
+                has_row_unit = (
+                    "unit" in declared
+                    and any(
+                        row.get("unit") not in {None, ""}
+                        for row in table.rows
+                    )
+                )
+                intended_quantitative = (
+                    any(field_has_numeric.values())
+                    or has_declared_unit
+                    or (
+                        has_row_unit
+                        and not any(field_has_categorical.values())
+                    )
+                )
+                if not intended_quantitative:
                     continue
+                if not all(field_has_numeric.values()):
+                    raise ValueError(
+                        "chart quantitative channel has no numeric facts"
+                    )
+                numeric_fields = list(fields)
                 static_units = {
                     columns[field].unit
                     for field in numeric_fields
@@ -442,19 +498,39 @@ class VisualizationPackV1(BaseModel):
                     raise ValueError(
                         "chart quantitative channel has mixed units"
                     )
-                if static_units != {None} or "unit" not in declared:
-                    continue
+                applicable_rows = [
+                    row
+                    for row in table.rows
+                    if any(
+                        _is_quantitative_value(row.get(field))
+                        for field in numeric_fields
+                    )
+                ]
                 row_units = {
                     str(row.get("unit"))
-                    for row in table.rows
-                    if any(row.get(field) is not None for field in numeric_fields)
-                    and row.get("unit") not in {None, ""}
+                    for row in applicable_rows
+                    if row.get("unit") not in {None, ""}
                 }
                 missing_row_unit = any(
-                    any(row.get(field) is not None for field in numeric_fields)
-                    and row.get("unit") in {None, ""}
-                    for row in table.rows
+                    row.get("unit") in {None, ""}
+                    for row in applicable_rows
                 )
+                static_unit = next(iter(static_units))
+                if static_unit is not None:
+                    if (
+                        "unit" in declared
+                        and channel_name != "color"
+                        and row_units
+                        and row_units != {static_unit}
+                    ):
+                        raise ValueError(
+                            "chart row units contradict static units"
+                        )
+                    continue
+                if "unit" not in declared:
+                    raise ValueError(
+                        "chart quantitative channel requires a unit"
+                    )
                 if len(row_units) != 1 or missing_row_unit:
                     raise ValueError(
                         "chart quantitative channel has mixed row units"
@@ -1067,11 +1143,20 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
             for row in rows
             if row.get("unit") not in {None, ""}
         }
+        has_numeric_subject = any(
+            _is_quantitative_value(row.get("subject_value"))
+            for row in rows
+        )
         missing_units = any(
             row.get("unit") in {None, ""}
             for row in rows
         )
-        if rows and len(peer_units) == 1 and not missing_units:
+        if (
+            rows
+            and has_numeric_subject
+            and len(peer_units) == 1
+            and not missing_units
+        ):
             unit = next(iter(peer_units))
             pack["charts"].append({
                 "id": "peer_distribution",
@@ -1086,7 +1171,9 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
             })
         elif rows:
             limitation = (
-                "peer_chart_suppressed:missing_units"
+                "peer_chart_suppressed:no_numeric_facts"
+                if not has_numeric_subject
+                else "peer_chart_suppressed:missing_units"
                 if missing_units
                 else "peer_chart_suppressed:mixed_units:"
                 + ",".join(sorted(peer_units))

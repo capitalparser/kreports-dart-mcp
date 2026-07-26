@@ -154,7 +154,34 @@ def test_homogeneous_dcf_candidates_use_static_and_visible_ratio_unit():
     assert chart["encodings"]["color"]["field"] == "unit"
 
 
-def test_unknown_dcf_candidate_preserves_key_and_suppresses_unitless_chart():
+def test_registered_dcf_candidate_unit_cannot_be_overridden_by_caller():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_dcf_input_candidates", {
+        "candidate_assumptions": {
+            "revenue_growth": {"value": 0.1, "unit": "KRW"},
+            "tax_rate": {"value": 0.2, "unit": "KRW"},
+        },
+        "data_quality": {"status": "usable"},
+    })
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "candidate_assumptions"
+    )
+
+    assert {row["unit"] for row in table["rows"]} == {"ratio"}
+    value_column = next(
+        column for column in table["columns"]
+        if column["field"] == "value"
+    )
+    assert value_column["unit"] == "ratio"
+    assert next(
+        chart for chart in pack["charts"]
+        if chart["id"] == "dcf_input_bridge"
+    )["title"].endswith("(ratio)")
+
+
+def test_unknown_dcf_candidate_uses_public_fallback_without_key_leak():
     from kreports.mcp.answer_pack import build_answer_pack
 
     pack = build_answer_pack("get_dcf_input_candidates", {
@@ -168,17 +195,46 @@ def test_unknown_dcf_candidate_preserves_key_and_suppresses_unitless_chart():
         if table["id"] == "candidate_assumptions"
     )
     assert table["rows"][0] == {
-        "metric": "custom_review_metric",
+        "metric": "사용자 정의 입력 후보",
         "value": 123,
         "unit": None,
         "basis": "산정 근거 미확보",
     }
+    assert "custom_review_metric" not in str(pack)
     assert not any(
         chart["id"] == "dcf_input_bridge"
         for chart in pack["charts"]
     )
     assert "dcf_candidate_chart_suppressed:missing_units" in (
         pack["limitations"]
+    )
+
+
+def test_peer_pack_suppresses_charts_without_numeric_encoded_facts():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_to_industry_multi", {
+        "subject": {"corp_name": "A"},
+        "results": {
+            2024: {
+                "ROE": {
+                    "subject_value": None,
+                    "percentile": None,
+                    "p25": None,
+                    "p50": None,
+                    "p75": None,
+                    "n": 30,
+                    "unit": "ratio",
+                },
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+
+    assert not pack["charts"]
+    assert any(
+        limitation.startswith("peer_chart_suppressed:no_numeric_facts")
+        for limitation in pack["limitations"]
     )
 
 
