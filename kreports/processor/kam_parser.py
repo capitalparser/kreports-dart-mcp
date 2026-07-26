@@ -17,7 +17,7 @@ _TITLE_MARKER_RE = re.compile(
     r"(?P<roman>[IVX]{1,5})[.)])\s*(?P<title>.+?)\s*$",
     flags=re.IGNORECASE,
 )
-_CDATA_START_RE = re.compile(r"<!\[CDATA\[", re.IGNORECASE)
+_CDATA_DECL_RE = re.compile(r"<!\[CDATA", re.IGNORECASE)
 _NOTE_RE = re.compile(
     r"(?:관련\s*(?:재무제표\s*)?)?(?:주석|note)\s*[제]?\s*(\d+(?:[.-]\d+)?)",
     flags=re.IGNORECASE,
@@ -230,11 +230,17 @@ def _input_structure_limitations(full_text: str) -> list[str]:
 
     position = 0
     while True:
-        match = _CDATA_START_RE.search(bounded, position)
+        match = _CDATA_DECL_RE.search(bounded, position)
         if match is None:
             break
-        start = match.start()
-        end = bounded.find("]]>", start + len("<![CDATA["))
+        payload_start = match.end()
+        if (
+            payload_start >= len(bounded)
+            or bounded[payload_start] != "["
+        ):
+            limitations.append("malformed_cdata")
+            break
+        end = bounded.find("]]>", payload_start + 1)
         if end < 0:
             limitations.append("malformed_cdata")
             break
@@ -489,7 +495,7 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
             append_text(f"&#{name};")
 
         def unknown_decl(self, data: str) -> None:
-            if data.startswith("CDATA["):
+            if data[:len("CDATA[")].lower() == "cdata[":
                 append_text(data[len("CDATA["):])
 
     parser = StructureParser()
@@ -1002,11 +1008,11 @@ def kam_detail_heading_status(full_text: str) -> tuple[bool, bool]:
     )
 
 
-def _items_from_frames(
+def _candidate_items_from_frames(
     lines: list[str],
     frames: list[_MatterFrame],
-) -> list[ParsedKamItem]:
-    items: list[ParsedKamItem] = []
+) -> list[ParsedKamItem | None]:
+    items: list[ParsedKamItem | None] = []
     for item_index, frame in enumerate(frames):
         end = (
             frames[item_index + 1].title_start
@@ -1040,11 +1046,12 @@ def _items_from_frames(
         reason = "\n".join(reason_lines).strip()
         response = "\n".join(response_lines).strip()
         if not reason or not response:
+            items.append(None)
             continue
         body = "\n".join(matter_lines).strip()
         items.append(
             ParsedKamItem(
-                ordinal=len(items) + 1,
+                ordinal=item_index + 1,
                 title=frame.title,
                 normalized_topic=_topic(frame.title),
                 reason_text=reason,
@@ -1055,6 +1062,12 @@ def _items_from_frames(
                 full_body_length=len(body),
             )
         )
+    return items
+
+
+def _deduplicate_items(
+    items: list[ParsedKamItem],
+) -> list[ParsedKamItem]:
     deduplicated: list[ParsedKamItem] = []
     previous_signature: tuple[object, ...] | None = None
     for item in items:
@@ -1107,7 +1120,24 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
                 limitations=["incomplete_kam_structure"],
             )
         frames = _discover_matter_frames(lines, structured_lines)
-        items = _items_from_frames(lines, frames)
+        candidate_items = _candidate_items_from_frames(lines, frames)
+        explicit_frame_count = sum(
+            frame.has_explicit_title_structure
+            for frame in frames
+        )
+        valid_explicit_frame_count = sum(
+            frame.has_explicit_title_structure and item is not None
+            for frame, item in zip(frames, candidate_items, strict=True)
+        )
+        if valid_explicit_frame_count != explicit_frame_count:
+            return KamParseOutcome(
+                items=[],
+                status="error",
+                limitations=["incomplete_kam_structure"],
+            )
+        items = _deduplicate_items(
+            [item for item in candidate_items if item is not None]
+        )
         if items:
             return KamParseOutcome(
                 items=items,
