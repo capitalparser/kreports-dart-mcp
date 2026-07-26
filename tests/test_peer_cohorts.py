@@ -420,6 +420,366 @@ def test_basis_dependent_generic_metric_fails_closed_without_subject_basis(
     assert contract.confidence == "subject_unavailable"
 
 
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_duplicate_audit_fee_rows_merge_complementary_claims_without_order_bias(
+    temp_engine,
+    reverse_order,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort, compare_metric
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE audit_fees"))
+        connection.execute(text(
+            "CREATE TABLE audit_fees ("
+            "corp_code TEXT, bsns_year INTEGER, "
+            "actual_fee_m INTEGER, actual_hours INTEGER, "
+            "contract_fee_m INTEGER, contract_hours INTEGER, "
+            "audit_fee_m INTEGER, audit_hours INTEGER, nas_ratio REAL)"
+        ))
+        claims = [
+            ("00000001", 2024, 100, None, None, None, None, None, None),
+            ("00000001", 2024, None, None, 90, 900, None, None, None),
+            ("00000002", 2024, 110, None, None, None, None, None, None),
+            ("00000002", 2024, None, None, 95, 950, None, None, None),
+        ]
+        if reverse_order:
+            claims.reverse()
+        connection.execute(
+            text(
+                "INSERT INTO audit_fees VALUES "
+                "(:cc, :year, :actual_fee, :actual_hours, :contract_fee, "
+                ":contract_hours, :legacy_fee, :legacy_hours, :nas)"
+            ),
+            [
+                {
+                    "cc": row[0],
+                    "year": row[1],
+                    "actual_fee": row[2],
+                    "actual_hours": row[3],
+                    "contract_fee": row[4],
+                    "contract_hours": row[5],
+                    "legacy_fee": row[6],
+                    "legacy_hours": row[7],
+                    "nas": row[8],
+                }
+                for row in claims
+            ],
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 5)
+
+    assert compare_metric(cohort, "audit_fee_actual").peer_values == (
+        110_000_000.0,
+    )
+    assert compare_metric(cohort, "audit_fee_contract").peer_values == (
+        95_000_000.0,
+    )
+    bases = dict(cohort.members[0].metric_bases)
+    assert {
+        key: bases[key]
+        for key in (
+            "audit_fee",
+            "audit_fee_actual",
+            "audit_fee_contract",
+            "audit_hours",
+            "audit_hours_contract",
+        )
+    } == {
+        "audit_fee": "actual",
+        "audit_fee_actual": "actual",
+        "audit_fee_contract": "contract",
+        "audit_hours": "contract",
+        "audit_hours_contract": "contract",
+    }
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_duplicate_audit_fee_conflict_without_recency_fails_closed_per_metric(
+    temp_engine,
+    reverse_order,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort, compare_metric
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE audit_fees"))
+        connection.execute(text(
+            "CREATE TABLE audit_fees ("
+            "corp_code TEXT, bsns_year INTEGER, "
+            "actual_fee_m INTEGER, contract_fee_m INTEGER)"
+        ))
+        claims = [
+            {"cc": "00000001", "actual": 100, "contract": 90},
+            {"cc": "00000001", "actual": 120, "contract": None},
+            {"cc": "00000002", "actual": 110, "contract": 95},
+            {"cc": "00000002", "actual": 130, "contract": None},
+        ]
+        if reverse_order:
+            claims.reverse()
+        connection.execute(
+            text(
+                "INSERT INTO audit_fees VALUES "
+                "(:cc, 2024, :actual, :contract)"
+            ),
+            claims,
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 5)
+    actual = compare_metric(cohort, "audit_fee_actual")
+    contract = compare_metric(cohort, "audit_fee_contract")
+
+    assert actual.subject_value is None
+    assert actual.peer_values == ()
+    assert actual.confidence == "subject_unavailable"
+    assert "duplicate_audit_fee_conflict:actual_fee_m" in cohort.limitations
+    assert "duplicate_audit_fee_conflict:actual_fee_m" in cohort.members[0].limitations
+    assert contract.subject_value == 90_000_000
+    assert contract.peer_values == (95_000_000.0,)
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_duplicate_audit_fee_uses_newest_claim_and_preserves_older_complements(
+    temp_engine,
+    reverse_order,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort, compare_metric
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE audit_fees"))
+        connection.execute(text(
+            "CREATE TABLE audit_fees ("
+            "id INTEGER, fetched_at TEXT, corp_code TEXT, bsns_year INTEGER, "
+            "actual_fee_m INTEGER, contract_fee_m INTEGER)"
+        ))
+        claims = [
+            (3, "2025-02-01", "00000001", 120, None),
+            (1, "2025-01-01", "00000001", 100, 90),
+            (4, "2025-02-01", "00000002", 130, None),
+            (2, "2025-01-01", "00000002", 110, 95),
+        ]
+        if reverse_order:
+            claims.reverse()
+        connection.execute(
+            text(
+                "INSERT INTO audit_fees VALUES "
+                "(:id, :fetched_at, :cc, 2024, :actual, :contract)"
+            ),
+            [
+                {
+                    "id": row[0],
+                    "fetched_at": row[1],
+                    "cc": row[2],
+                    "actual": row[3],
+                    "contract": row[4],
+                }
+                for row in claims
+            ],
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "audit_fee", 5)
+
+    assert compare_metric(cohort, "audit_fee_actual").subject_value == 120_000_000
+    assert compare_metric(cohort, "audit_fee_actual").peer_values == (
+        130_000_000.0,
+    )
+    assert compare_metric(cohort, "audit_fee_contract").subject_value == 90_000_000
+    assert compare_metric(cohort, "audit_fee_contract").peer_values == (
+        95_000_000.0,
+    )
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_duplicate_financial_without_discriminator_excludes_ambiguous_peer(
+    temp_engine,
+    reverse_order,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=2)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE financials"))
+        connection.execute(text(
+            "CREATE TABLE financials ("
+            "corp_code TEXT, year INTEGER, quarter INTEGER, fs_div TEXT, "
+            "revenue INTEGER, operating_profit INTEGER, net_income INTEGER, "
+            "total_assets INTEGER, total_debt INTEGER, total_equity INTEGER)"
+        ))
+        peer_two_rows = [
+            ("00000002", 2024, 4, "CFS", 900, 90, 70, 1800, 700, 1100),
+            ("00000002", 2024, 4, "CFS", 800, 90, 70, 1800, 700, 1100),
+        ]
+        if reverse_order:
+            peer_two_rows.reverse()
+        rows = [
+            ("00000001", 2024, 4, "CFS", 1000, 100, 80, 2000, 800, 1200),
+            *peer_two_rows,
+            ("00000003", 2024, 4, "CFS", 950, 95, 75, 1900, 750, 1150),
+            ("00000003", 2024, 4, "OFS", 500, 50, 40, 1000, 400, 600),
+        ]
+        connection.execute(
+            text(
+                "INSERT INTO financials VALUES "
+                "(:cc, :year, :quarter, :fs, :revenue, :op, :net, "
+                ":assets, :debt, :equity)"
+            ),
+            [
+                {
+                    "cc": row[0],
+                    "year": row[1],
+                    "quarter": row[2],
+                    "fs": row[3],
+                    "revenue": row[4],
+                    "op": row[5],
+                    "net": row[6],
+                    "assets": row[7],
+                    "debt": row[8],
+                    "equity": row[9],
+                }
+                for row in rows
+            ],
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "investor", 5)
+
+    assert [member.corp_code for member in cohort.members] == ["00000003"]
+    assert dict(cohort.exclusion_counts)["duplicate_financial_ambiguous"] == 1
+    exclusion = next(
+        item for item in cohort.exclusions if item.corp_code == "00000002"
+    )
+    assert exclusion.reason_code == "duplicate_financial_ambiguous"
+
+
+def test_duplicate_subject_financial_without_discriminator_fails_closed(
+    temp_engine,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE financials"))
+        connection.execute(text(
+            "CREATE TABLE financials ("
+            "corp_code TEXT, year INTEGER, quarter INTEGER, fs_div TEXT, "
+            "revenue INTEGER, operating_profit INTEGER, net_income INTEGER, "
+            "total_assets INTEGER, total_debt INTEGER, total_equity INTEGER)"
+        ))
+        connection.execute(text(
+            "INSERT INTO financials VALUES "
+            "('00000001', 2024, 4, 'CFS', 1000, 100, 80, 2000, 800, 1200), "
+            "('00000001', 2024, 4, 'CFS', 900, 100, 80, 2000, 800, 1200), "
+            "('00000002', 2024, 4, 'CFS', 950, 95, 75, 1900, 750, 1150)"
+        ))
+
+    cohort = build_peer_cohort("00000001", 2024, "investor", 5)
+
+    assert cohort.fs_div is None
+    assert cohort.members == ()
+    assert "duplicate_financial_ambiguous" in cohort.limitations
+
+
+@pytest.mark.parametrize("discriminator", ["id", "fetched_at"])
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_duplicate_financial_uses_available_recency_discriminator(
+    temp_engine,
+    discriminator,
+    reverse_order,
+):
+    from sqlalchemy import text
+
+    from kreports.analysis.peer import build_peer_cohort
+
+    _seed_financial_cohort(temp_engine, peer_count=1)
+    optional_column = (
+        "id INTEGER, " if discriminator == "id" else "fetched_at TEXT, "
+    )
+    with temp_engine.begin() as connection:
+        connection.execute(text("DROP TABLE financials"))
+        connection.execute(text(
+            f"CREATE TABLE financials ({optional_column}"
+            "corp_code TEXT, year INTEGER, quarter INTEGER, fs_div TEXT, "
+            "revenue INTEGER, operating_profit INTEGER, net_income INTEGER, "
+            "total_assets INTEGER, total_debt INTEGER, total_equity INTEGER)"
+        ))
+        if discriminator == "id":
+            rows = [
+                (2, "00000001", 1200, 120, 90, 2200, 900, 1300),
+                (1, "00000001", 1000, 100, 80, 2000, 800, 1200),
+                (3, "00000002", 1100, 110, 85, 2100, 850, 1250),
+            ]
+        else:
+            rows = [
+                (
+                    "2025-02-01",
+                    "00000001",
+                    1200,
+                    120,
+                    90,
+                    2200,
+                    900,
+                    1300,
+                ),
+                (
+                    "2025-01-01",
+                    "00000001",
+                    1000,
+                    100,
+                    80,
+                    2000,
+                    800,
+                    1200,
+                ),
+                (
+                    "2025-02-01",
+                    "00000002",
+                    1100,
+                    110,
+                    85,
+                    2100,
+                    850,
+                    1250,
+                ),
+            ]
+        if reverse_order:
+            rows.reverse()
+        connection.execute(
+            text(
+                "INSERT INTO financials VALUES "
+                "(:discriminator, :cc, 2024, 4, 'CFS', :revenue, :op, "
+                ":net, :assets, :debt, :equity)"
+            ),
+            [
+                {
+                    "discriminator": row[0],
+                    "cc": row[1],
+                    "revenue": row[2],
+                    "op": row[3],
+                    "net": row[4],
+                    "assets": row[5],
+                    "debt": row[6],
+                    "equity": row[7],
+                }
+                for row in rows
+            ],
+        )
+
+    cohort = build_peer_cohort("00000001", 2024, "investor", 5)
+
+    assert dict(cohort.subject_metrics)["revenue"] == 1200
+    assert [member.corp_code for member in cohort.members] == ["00000002"]
+
+
 def test_cohort_constructor_enforces_deep_and_denominator_invariants(temp_engine):
     from kreports.analysis.peer import PeerExclusion, build_peer_cohort
 
@@ -946,10 +1306,47 @@ def test_auditor_profile_statement_count_is_bounded_independent_of_candidates(
         statements.clear()
         cohort = build_peer_cohort("00000001", 2024, profile, 5)
         large_count = len(statements)
+
+        thousand_peer_codes = [
+            f"{index:08d}" for index in range(102, 1002)
+        ]
+        with get_session() as session:
+            for index, corp_code in enumerate(
+                thousand_peer_codes,
+                start=102,
+            ):
+                session.add(
+                    Company(
+                        corp_code=corp_code,
+                        stock_code=f"{index:06d}",
+                        corp_name=f"Peer {index}",
+                        market="KOSPI",
+                        induty_code="26410",
+                    )
+                )
+                session.add(
+                    Financial(
+                        corp_code=corp_code,
+                        year=2024,
+                        quarter=4,
+                        fs_div="CFS",
+                        revenue=1_000,
+                        operating_profit=100,
+                        net_income=80,
+                        total_assets=2_000,
+                        total_debt=800,
+                        total_equity=1_200,
+                    )
+                )
+            add_profile_evidence(session, thousand_peer_codes)
+
+        statements.clear()
+        cohort = build_peer_cohort("00000001", 2024, profile, 5)
+        thousand_count = len(statements)
     finally:
         event.remove(temp_engine, "before_cursor_execute", before_cursor_execute)
 
-    assert cohort.eligible_count == 100
+    assert cohort.eligible_count == 1_000
     expected_query_counts = {
         "audit_fee": 9,
         "audit_risk": 15,
@@ -958,6 +1355,8 @@ def test_auditor_profile_statement_count_is_bounded_independent_of_candidates(
     }
     assert small_count == expected_query_counts[profile]
     assert large_count == expected_query_counts[profile]
+    assert thousand_count == expected_query_counts[profile]
     assert small_count <= 30
     assert large_count <= 30
-    assert abs(large_count - small_count) <= 2
+    assert thousand_count <= 30
+    assert small_count == large_count == thousand_count

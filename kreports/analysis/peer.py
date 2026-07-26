@@ -819,6 +819,54 @@ def _financial_metrics(row) -> dict[str, float | None]:
     }
 
 
+_FINANCIAL_RESOLUTION_FIELDS = (
+    "revenue",
+    "operating_profit",
+    "net_income",
+    "total_assets",
+    "total_debt",
+    "total_equity",
+    "operating_cf",
+)
+
+
+def _resolve_financial_group(
+    rows: list,
+    columns: set[str],
+):
+    if len(rows) == 1:
+        return rows[0], False
+
+    top_rows = rows
+    if "fetched_at" in columns:
+        dated = [row for row in rows if row.get("fetched_at") is not None]
+        if dated:
+            newest = max(str(row["fetched_at"]) for row in dated)
+            top_rows = [
+                row for row in dated
+                if str(row["fetched_at"]) == newest
+            ]
+    if len(top_rows) > 1 and "id" in columns:
+        identified = [row for row in top_rows if row.get("id") is not None]
+        if identified:
+            newest_id = max(int(row["id"]) for row in identified)
+            top_rows = [
+                row for row in identified
+                if int(row["id"]) == newest_id
+            ]
+
+    signatures = {
+        tuple(
+            row.get(field) if field in columns else None
+            for field in _FINANCIAL_RESOLUTION_FIELDS
+        )
+        for row in top_rows
+    }
+    if len(signatures) == 1:
+        return top_rows[0], False
+    return None, True
+
+
 def _audit_fee_metrics(row, columns: set[str]) -> tuple[dict[str, float | None], dict[str, str]]:
     if row is None:
         return {}, {}
@@ -887,6 +935,69 @@ def _audit_fee_metrics(row, columns: set[str]) -> tuple[dict[str, float | None],
         if metric_value is not None
     }
     return metrics, bases
+
+
+def _resolve_duplicate_claim(
+    rows: list,
+    claim_field: str,
+    columns: set[str],
+) -> tuple[object | None, bool]:
+    claims = [
+        row for row in rows
+        if row.get(claim_field) is not None
+    ]
+    if not claims:
+        return None, False
+    if len(claims) == 1:
+        return claims[0][claim_field], False
+
+    top_claims = claims
+    if "fetched_at" in columns:
+        dated = [row for row in claims if row.get("fetched_at") is not None]
+        if dated:
+            newest = max(str(row["fetched_at"]) for row in dated)
+            top_claims = [
+                row for row in dated
+                if str(row["fetched_at"]) == newest
+            ]
+    if len(top_claims) > 1 and "id" in columns:
+        identified = [row for row in top_claims if row.get("id") is not None]
+        if identified:
+            newest_id = max(int(row["id"]) for row in identified)
+            top_claims = [
+                row for row in identified
+                if int(row["id"]) == newest_id
+            ]
+    values = {row[claim_field] for row in top_claims}
+    if len(values) == 1:
+        return next(iter(values)), False
+    return None, True
+
+
+def _merge_audit_fee_rows(
+    rows: list,
+    value_fields: tuple[str, ...],
+    columns: set[str],
+) -> tuple[
+    dict[str, float | None],
+    dict[str, str],
+    tuple[str, ...],
+]:
+    merged: dict[str, object | None] = {}
+    limitations: list[str] = []
+    for claim_field in value_fields:
+        value, conflict = _resolve_duplicate_claim(
+            rows,
+            claim_field,
+            columns,
+        )
+        merged[claim_field] = value
+        if conflict:
+            limitations.append(
+                f"duplicate_audit_fee_conflict:{claim_field}"
+            )
+    metrics, bases = _audit_fee_metrics(merged, columns)
+    return metrics, bases, tuple(limitations)
 
 
 def _similarity(left: float | None, right: float | None) -> float | None:
@@ -1042,26 +1153,44 @@ def _prefetch_profile_snapshot(
                 corp_codes,
                 ("audit_fee_columns_unavailable",),
             )
+        selected_columns = tuple(dict.fromkeys((
+            "corp_code",
+            *selected,
+            *(
+                name
+                for name in ("fetched_at", "id")
+                if name in columns
+            ),
+        )))
         rows = conn.execute(
             text(
-                f"SELECT corp_code, {', '.join(selected)} FROM audit_fees "
+                f"SELECT {', '.join(selected_columns)} FROM audit_fees "
                 "WHERE bsns_year=:year ORDER BY corp_code"
             ),
             {"year": year},
         ).mappings().all()
         metrics_by_code: dict[str, dict[str, float | None]] = {}
         bases_by_code: dict[str, dict[str, str]] = {}
+        limitations_by_code: dict[str, tuple[str, ...]] = {}
+        rows_by_code: dict[str, list] = {}
         for row in rows:
-            corp_code = str(row["corp_code"])
-            metrics, bases = _audit_fee_metrics(row, columns)
+            rows_by_code.setdefault(str(row["corp_code"]), []).append(row)
+        for corp_code, corp_rows in rows_by_code.items():
+            metrics, bases, row_limitations = _merge_audit_fee_rows(
+                corp_rows,
+                tuple(selected),
+                columns,
+            )
             if metrics:
                 metrics_by_code[corp_code] = metrics
                 bases_by_code[corp_code] = bases
+            if row_limitations:
+                limitations_by_code[corp_code] = row_limitations
         return _ProfileSnapshot(
             available_codes=frozenset(metrics_by_code),
             metrics_by_code=metrics_by_code,
             bases_by_code=bases_by_code,
-            limitations_by_code={},
+            limitations_by_code=limitations_by_code,
             overlap_keys_by_code={},
         )
     if profile == "audit_risk":
@@ -1288,15 +1417,42 @@ def build_peer_cohort(
             ),
             {"year": year},
         ).mappings().all()
-        financial_rows_by_code: dict[str, list] = {}
+        financial_rows_by_key: dict[tuple[str, str], list] = {}
+        financial_codes: set[str] = set()
+        financial_columns: set[str] = set()
         for row in financial_rows:
-            financial_rows_by_code.setdefault(
-                str(row["corp_code"]),
+            corp_code = str(row["corp_code"])
+            row_fs_div = str(row["fs_div"])
+            financial_codes.add(corp_code)
+            financial_columns.update(row.keys())
+            financial_rows_by_key.setdefault(
+                (corp_code, row_fs_div),
                 [],
             ).append(row)
-        subject_financial_rows = financial_rows_by_code.get(subject_code, [])
-        subject_financial = subject_financial_rows[0] if subject_financial_rows else None
-        fs_div = str(subject_financial["fs_div"]) if subject_financial else None
+        resolved_financials: dict[tuple[str, str], object] = {}
+        ambiguous_financials: set[tuple[str, str]] = set()
+        for key, rows in financial_rows_by_key.items():
+            resolved, ambiguous = _resolve_financial_group(
+                rows,
+                financial_columns,
+            )
+            if ambiguous:
+                ambiguous_financials.add(key)
+            elif resolved is not None:
+                resolved_financials[key] = resolved
+        subject_financial = None
+        fs_div = None
+        subject_financial_ambiguous = False
+        for preferred_fs_div in ("CFS", "OFS"):
+            subject_key = (subject_code, preferred_fs_div)
+            if subject_key not in financial_rows_by_key:
+                continue
+            if subject_key in ambiguous_financials:
+                subject_financial_ambiguous = True
+            else:
+                subject_financial = resolved_financials.get(subject_key)
+                fs_div = preferred_fs_div
+            break
         profile_snapshot = _prefetch_profile_snapshot(
             conn,
             read_engine,
@@ -1312,7 +1468,9 @@ def build_peer_cohort(
             if value is not None and fs_div is not None
         }
         limitations: list[str] = []
-        if fs_div is None:
+        if subject_financial_ambiguous:
+            limitations.append("duplicate_financial_ambiguous")
+        elif fs_div is None:
             limitations.append("subject_year_unavailable")
         subject_profile_available = False
         if fs_div is not None:
@@ -1381,13 +1539,15 @@ def build_peer_cohort(
             ):
                 exclude(candidate, "sector_mismatch")
                 continue
-            exact_rows = financial_rows_by_code.get(candidate_code, [])
-            if not exact_rows:
+            if candidate_code not in financial_codes:
                 exclude(candidate, "year_unavailable")
                 continue
-            candidate_financial = next(
-                (row for row in exact_rows if row["fs_div"] == fs_div),
-                None,
+            candidate_financial_key = (candidate_code, str(fs_div))
+            if candidate_financial_key in ambiguous_financials:
+                exclude(candidate, "duplicate_financial_ambiguous")
+                continue
+            candidate_financial = resolved_financials.get(
+                candidate_financial_key
             )
             if candidate_financial is None:
                 exclude(candidate, "fs_basis_mismatch")
