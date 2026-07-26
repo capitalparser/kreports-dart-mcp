@@ -51,8 +51,7 @@ from kreports.processor.audit_report_parser import (
 from kreports.processor.kam_parser import (
     PARSER_VERSION,
     ParsedKamItem,
-    extract_kam_items,
-    kam_detail_heading_status,
+    parse_kam_items,
 )
 from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
@@ -1610,14 +1609,21 @@ def _kam_rebuild_targets(
     return [targets[key] for key in sorted(targets)]
 
 
-def _kam_no_item_limitation(source_basis: str, body: str) -> str:
-    has_reason_heading, has_response_heading = kam_detail_heading_status(body)
-    outcome = (
-        "parse_error"
-        if has_reason_heading or has_response_heading
-        else "no_kam_items"
-    )
-    return f"{source_basis}:{outcome}"
+def _parse_kam_candidate(
+    body: str,
+    source_basis: str,
+    limitations: list[str],
+) -> list[ParsedKamItem]:
+    outcome = parse_kam_items(body)
+    if outcome.status == "complete":
+        return outcome.items
+    if outcome.status == "ambiguous":
+        limitations.append(f"{source_basis}:ambiguous_boundary")
+    elif outcome.status == "error":
+        limitations.append(f"{source_basis}:parse_error")
+    else:
+        limitations.append(f"{source_basis}:no_kam_items")
+    return []
 
 
 def _recover_kam_items(
@@ -1646,7 +1652,11 @@ def _recover_kam_items(
         except Exception as exc:
             limitations.append(f"source_documents.raw_body:read_error:{type(exc).__name__}")
             continue
-        items = extract_kam_items(body)
+        items = _parse_kam_candidate(
+            body,
+            "source_documents.raw_body",
+            limitations,
+        )
         if items:
             return (
                 items,
@@ -1654,9 +1664,6 @@ def _recover_kam_items(
                 limitations,
                 source.fetched_at,
             )
-        limitations.append(
-            _kam_no_item_limitation("source_documents.raw_body", body)
-        )
     for evidence in target["evidence_documents"]:
         if evidence.full_text_uri:
             try:
@@ -1669,7 +1676,11 @@ def _recover_kam_items(
                     f"evidence_documents.full_text_uri:read_error:{type(exc).__name__}"
                 )
             else:
-                items = extract_kam_items(body)
+                items = _parse_kam_candidate(
+                    body,
+                    "evidence_documents.full_text_uri",
+                    limitations,
+                )
                 if items:
                     return (
                         items,
@@ -1677,15 +1688,13 @@ def _recover_kam_items(
                         limitations,
                         evidence.generated_at,
                     )
-                limitations.append(
-                    _kam_no_item_limitation(
-                        "evidence_documents.full_text_uri",
-                        body,
-                    )
-                )
         normalized = (evidence.normalized_text or "").strip()
         if normalized:
-            items = extract_kam_items(normalized)
+            items = _parse_kam_candidate(
+                normalized,
+                "evidence_documents.normalized_text",
+                limitations,
+            )
             if items:
                 return (
                     items,
@@ -1693,19 +1702,18 @@ def _recover_kam_items(
                     limitations,
                     evidence.generated_at,
                 )
-            limitations.append(
-                _kam_no_item_limitation(
-                    "evidence_documents.normalized_text",
-                    normalized,
-                )
-            )
     derived_summaries: list[tuple[object, str]] = []
     structured_failure_at: datetime | None = None
     for section in target["report_sections"]:
         body = (section.body_text or "").strip()
         if not body:
             continue
-        items = extract_kam_items(body)
+        before_limitations = len(limitations)
+        items = _parse_kam_candidate(
+            body,
+            "report_sections.structured_body",
+            limitations,
+        )
         if items:
             return (
                 items,
@@ -1713,17 +1721,19 @@ def _recover_kam_items(
                 limitations,
                 section.fetched_at,
             )
-        has_reason_heading, has_response_heading = (
-            kam_detail_heading_status(body)
-        )
-        if has_reason_heading or has_response_heading:
+        new_limitations = limitations[before_limitations:]
+        if any(
+            limitation.endswith((":parse_error", ":ambiguous_boundary"))
+            for limitation in new_limitations
+        ):
             structured_failure_at = (
                 structured_failure_at or section.fetched_at
             )
             continue
+        if new_limitations:
+            limitations.pop()
         derived_summaries.append((section, body))
     if structured_failure_at is not None:
-        limitations.append("report_sections.structured_body:parse_error")
         return [], "none", limitations, structured_failure_at
     if derived_summaries:
         section, body = derived_summaries[0]
@@ -1935,6 +1945,7 @@ def rebuild_kam_items(
         elif any(
             ":read_error:" in limitation
             or limitation.endswith(":parse_error")
+            or limitation.endswith(":ambiguous_boundary")
             or limitation.startswith("receipt_consistency_error:")
             for limitation in limitations
         ):

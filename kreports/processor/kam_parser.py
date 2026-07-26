@@ -10,11 +10,7 @@ import re
 PARSER_VERSION = "v1"
 MAX_INPUT_CHARS = 2_000_000
 
-_BLOCK_TAG_RE = re.compile(
-    r"</?(?:TITLE|P|TD|TH|TR|TABLE|BR)\b[^>]*>",
-    flags=re.IGNORECASE,
-)
-_TAG_RE = re.compile(r"<[^>]{0,1000}>")
+_HTML_TOKEN_RE = re.compile(r"<[^>]{0,1000}>|[^<]+")
 _TITLE_MARKER_RE = re.compile(
     r"^\s*(?:(?P<arabic>\(?\d{1,2}\)?)[.)]|"
     r"(?P<korean>[가-하])[.)]|"
@@ -96,6 +92,11 @@ _TITLE_TOPIC_TERMS = (
     "파생상품",
     "법인세",
     "계속기업",
+    "연결범위",
+    "종속기업",
+    "매출채권",
+    "회수가능",
+    "리스",
     "revenue",
     "inventory",
     "goodwill",
@@ -107,6 +108,9 @@ _TITLE_TOPIC_TERMS = (
     "derivative",
     "incometax",
     "goingconcern",
+    "performanceobligation",
+    "lease",
+    "classification",
 )
 _TITLE_RISK_TERMS = (
     "손상",
@@ -160,6 +164,21 @@ class ParsedKamItem:
 
 
 @dataclass(frozen=True)
+class StructuredLine:
+    text: str
+    origin: str
+    block_id: int
+    blank_before: bool = False
+
+
+@dataclass(frozen=True)
+class KamParseOutcome:
+    items: list[ParsedKamItem]
+    status: str
+    limitations: list[str]
+
+
+@dataclass(frozen=True)
 class _TitleBoundary:
     start: int
     title: str
@@ -187,18 +206,70 @@ def _compact(value: str) -> str:
     return re.sub(r"\s+", "", value or "").lower()
 
 
-def _plain_lines(full_text: str) -> list[str]:
+def _structured_lines(full_text: str) -> list[StructuredLine]:
     bounded = (full_text or "")[:MAX_INPUT_CHARS]
-    text = _BLOCK_TAG_RE.sub("\n", bounded)
-    text = _TAG_RE.sub(" ", text)
-    text = unescape(text)
-    text = re.sub(r"&cr;|&#13;", "\n", text, flags=re.IGNORECASE)
-    lines: list[str] = []
-    for raw_line in text.splitlines():
-        line = re.sub(r"[ \t\r\f\v]+", " ", raw_line).strip()
-        if line and (not lines or line != lines[-1]):
-            lines.append(line)
+    lines: list[StructuredLine] = []
+    origin_stack: list[str] = []
+    origin = "plain"
+    buffer: list[str] = []
+    block_id = 0
+    blank_before = False
+
+    def flush() -> None:
+        nonlocal block_id, blank_before
+        value = re.sub(r"[ \t\r\f\v]+", " ", "".join(buffer)).strip()
+        buffer.clear()
+        if not value:
+            blank_before = True
+            return
+        lines.append(
+            StructuredLine(
+                text=value,
+                origin=origin,
+                block_id=block_id,
+                blank_before=blank_before,
+            )
+        )
+        block_id += 1
+        blank_before = False
+
+    origin_tags = {
+        "title": "title",
+        "td": "table_cell",
+        "th": "table_cell",
+        "p": "paragraph",
+    }
+    block_tags = {*origin_tags, "tr", "table", "br"}
+    for token in _HTML_TOKEN_RE.findall(bounded):
+        if token.startswith("<"):
+            match = re.match(r"<\s*(/?)\s*([A-Za-z0-9]+)", token)
+            if not match:
+                continue
+            closing = bool(match.group(1))
+            tag = match.group(2).lower()
+            if tag not in block_tags:
+                continue
+            flush()
+            if tag in origin_tags:
+                if closing:
+                    origin = origin_stack.pop() if origin_stack else "plain"
+                else:
+                    origin_stack.append(origin)
+                    origin = origin_tags[tag]
+            continue
+        text = unescape(token)
+        text = re.sub(r"&cr;|&#13;", "\n", text, flags=re.IGNORECASE)
+        pieces = text.splitlines(keepends=True)
+        for piece in pieces:
+            buffer.append(piece.rstrip("\r\n"))
+            if piece.endswith(("\n", "\r")):
+                flush()
+    flush()
     return lines
+
+
+def _plain_lines(full_text: str) -> list[str]:
+    return [line.text for line in _structured_lines(full_text)]
 
 
 def _matches_heading(line: str, headings: tuple[str, ...]) -> bool:
@@ -215,6 +286,22 @@ def _trim_to_kam(lines: list[str]) -> list[str]:
     end = len(lines)
     for index in range(start, len(lines)):
         if _matches_heading(lines[index], _TRAILING_HEADINGS):
+            end = index
+            break
+    return lines[start:end]
+
+
+def _trim_structured_to_kam(
+    lines: list[StructuredLine],
+) -> list[StructuredLine]:
+    start = 0
+    for index, line in enumerate(lines):
+        if _matches_heading(line.text, _KAM_HEADINGS):
+            start = index + 1
+            break
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if _matches_heading(lines[index].text, _TRAILING_HEADINGS):
             end = index
             break
     return lines[start:end]
@@ -485,7 +572,23 @@ def _is_semantically_equivalent_heading_pair(
     )
 
 
-def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
+def _has_explicit_title_structure(
+    structured_lines: list[StructuredLine] | None,
+    title: _TitleBoundary,
+    reason_heading: int,
+) -> bool:
+    if structured_lines is None:
+        return False
+    return any(
+        line.origin in {"title", "table_cell"}
+        for line in structured_lines[title.start:reason_heading]
+    )
+
+
+def _discover_matter_frames(
+    lines: list[str],
+    structured_lines: list[StructuredLine] | None = None,
+) -> list[_MatterFrame]:
     """Phase 1: discover matter boundaries with a bounded heading state machine."""
     heading_frames = _discover_heading_frames(lines)
     frames: list[_MatterFrame] = []
@@ -508,6 +611,11 @@ def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
                 frames[-1].heading_frames[-1],
                 heading_frame,
             )
+            and not _has_explicit_title_structure(
+                structured_lines,
+                title,
+                heading_frame.reason_heading,
+            )
             and not _has_clear_title_evidence(title.title)
         ):
             frames[-1].heading_frames.append(heading_frame)
@@ -523,6 +631,49 @@ def _discover_matter_frames(lines: list[str]) -> list[_MatterFrame]:
         )
         previous_response = _last_response_heading(heading_frame)
     return frames
+
+
+def _has_ambiguous_plain_boundary(
+    lines: list[str],
+    structured_lines: list[StructuredLine],
+) -> bool:
+    heading_frames = _discover_heading_frames(lines)
+    for position in range(1, len(heading_frames)):
+        previous = heading_frames[position - 1]
+        current = heading_frames[position]
+        lower = _last_response_heading(previous) + 1
+        if current.reason_heading <= lower:
+            continue
+        candidate_lines = structured_lines[lower:current.reason_heading]
+        if any(
+            line.origin in {"title", "table_cell"}
+            for line in candidate_lines
+        ):
+            continue
+        marker_positions = [
+            index
+            for index in range(lower, current.reason_heading)
+            if _title_marker(lines[index]) is not None
+        ]
+        if marker_positions and current.reason_heading - marker_positions[-1] > 1:
+            continue
+        candidate = lines[current.reason_heading - 1]
+        title_score = _title_evidence_score(candidate)
+        procedure_score = _procedure_evidence_score(candidate)
+        same_literal_pair = (
+            _compact(lines[previous.reason_heading])
+            == _compact(lines[current.reason_heading])
+            and _compact(lines[previous.response_heading])
+            == _compact(lines[current.response_heading])
+        )
+        if not same_literal_pair and not (
+            title_score > 0 and procedure_score > 0
+        ):
+            continue
+        if procedure_score > 0 and title_score == 0:
+            continue
+        return True
+    return False
 
 
 def _topic(title: str) -> str | None:
@@ -564,15 +715,10 @@ def kam_detail_heading_status(full_text: str) -> tuple[bool, bool]:
     )
 
 
-def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
-    """Extract complete, matter-level KAMs from a cached filing body.
-
-    The parser only returns matters that contain both a selection-reason and an
-    audit-response heading. Short summaries are classified by the rebuild
-    layer and never expanded here.
-    """
-    lines = _trim_to_kam(_plain_lines(full_text))
-    frames = _discover_matter_frames(lines)
+def _items_from_frames(
+    lines: list[str],
+    frames: list[_MatterFrame],
+) -> list[ParsedKamItem]:
     items: list[ParsedKamItem] = []
     for item_index, frame in enumerate(frames):
         end = (
@@ -623,3 +769,64 @@ def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
             )
         )
     return items
+
+
+def parse_kam_items(full_text: str) -> KamParseOutcome:
+    """Return KAM items with an explicit completeness/ambiguity outcome."""
+    try:
+        structured_lines = _trim_structured_to_kam(
+            _structured_lines(full_text)
+        )
+        lines = [line.text for line in structured_lines]
+        if not lines:
+            return KamParseOutcome(
+                items=[],
+                status="no_kam",
+                limitations=[],
+            )
+        if _has_ambiguous_plain_boundary(lines, structured_lines):
+            return KamParseOutcome(
+                items=[],
+                status="ambiguous",
+                limitations=["ambiguous_boundary"],
+            )
+        frames = _discover_matter_frames(lines, structured_lines)
+        items = _items_from_frames(lines, frames)
+        if items:
+            return KamParseOutcome(
+                items=items,
+                status="complete",
+                limitations=[],
+            )
+        has_reason = any(
+            _matches_heading(line, _REASON_HEADINGS)
+            for line in lines
+        )
+        has_response = any(
+            _matches_heading(line, _RESPONSE_HEADINGS)
+            for line in lines
+        )
+        return KamParseOutcome(
+            items=[],
+            status="error" if has_reason or has_response else "no_kam",
+            limitations=(
+                ["incomplete_kam_structure"]
+                if has_reason or has_response
+                else []
+            ),
+        )
+    except Exception as exc:
+        return KamParseOutcome(
+            items=[],
+            status="error",
+            limitations=[f"parser_error:{type(exc).__name__}"],
+        )
+
+
+def extract_kam_items(full_text: str) -> list[ParsedKamItem]:
+    """Extract complete, matter-level KAMs from a cached filing body.
+
+    Ambiguous or incomplete bodies fail closed as an empty list. Call
+    :func:`parse_kam_items` when the parse status and limitations are needed.
+    """
+    return parse_kam_items(full_text).items

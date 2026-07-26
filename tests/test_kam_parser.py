@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -16,6 +17,153 @@ from kreports.db.models import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "audit_report_multi_kam.xml"
+
+
+def test_parse_outcome_distinguishes_structured_title_from_plain_ambiguity():
+    from kreports.processor.kam_parser import (
+        extract_kam_items,
+        parse_kam_items,
+    )
+
+    structured = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <TITLE>Classification of leases</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Lease classification requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We reviewed management's classification.</P>
+    """
+    plain = re.sub(r"</?(?:TITLE|P)>", "", structured)
+
+    structured_outcome = parse_kam_items(structured)
+    plain_outcome = parse_kam_items(plain)
+
+    assert structured_outcome.status == "complete"
+    assert [item.title for item in structured_outcome.items] == [
+        "Revenue recognition",
+        "Classification of leases",
+    ]
+    assert structured_outcome.limitations == []
+    assert plain_outcome.status == "ambiguous"
+    assert plain_outcome.items == []
+    assert "ambiguous_boundary" in plain_outcome.limitations
+    assert extract_kam_items(plain) == []
+
+
+def test_parse_outcome_reports_no_kam_and_incomplete_structure():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    no_kam = parse_kam_items("일반 감사보고서 본문")
+    incomplete = parse_kam_items(
+        "핵심감사사항\n수익인식\n핵심감사사항으로 선정한 이유\n위험 본문"
+    )
+
+    assert no_kam.status == "no_kam"
+    assert no_kam.items == []
+    assert no_kam.limitations == []
+    assert incomplete.status == "error"
+    assert incomplete.items == []
+    assert "incomplete_kam_structure" in incomplete.limitations
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "연결범위의 적정성",
+        "종속기업투자주식의 회수가능성",
+        "매출채권 회수가능성 검토",
+        "Revenue recognition and performance obligations",
+        "Goodwill impairment testing",
+        "Classification of leases",
+    ],
+)
+def test_parse_outcome_requires_structure_for_ambiguous_title_grammar(title):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    structured = f"""
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <TITLE>{title}</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>The matter requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected relevant evidence.</P>
+    """
+    plain = re.sub(r"</?(?:TITLE|P)>", "", structured)
+
+    structured_outcome = parse_kam_items(structured)
+    plain_outcome = parse_kam_items(plain)
+
+    assert structured_outcome.status == "complete"
+    assert structured_outcome.items[1].title == title
+    assert plain_outcome.status == "ambiguous"
+    assert plain_outcome.items == []
+
+
+@pytest.mark.parametrize(
+    "procedure",
+    [
+        "2. 재고자산 평가",
+        "2. 매출채권 표본 추출",
+        "II. Goodwill impairment assessment",
+    ],
+)
+def test_parse_outcome_rejects_plain_nominal_procedure_as_fake_title(procedure):
+    from kreports.processor.kam_parser import extract_kam_items, parse_kam_items
+
+    body = f"""
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    {procedure}
+    핵심감사사항으로 선정한 이유
+    페이지 반복 위험 본문
+    감사에서 다루어진 방법
+    추가 감사절차
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+    assert extract_kam_items(body) == []
+
+
+def test_parse_outcome_rejects_three_page_mixed_nominal_procedures():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    위험 본문 1
+    감사에서 다루어진 방법
+    1. 계약 검사
+    핵심감사사항으로 선정한 이유
+    위험 본문 2
+    감사에서 다루어진 방법
+    2. 재고자산 평가
+    핵심감사사항으로 선정한 이유
+    위험 본문 3
+    감사에서 다루어진 방법
+    II. Goodwill impairment assessment
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
 
 
 def test_multi_kam_parser_separates_reason_response_and_notes():
@@ -683,8 +831,8 @@ def test_parser_merges_repeated_reason_response_pair_across_page(first_response)
     assert "감사에서 다루어진 방법" not in items[0].audit_response_text
 
 
-def test_parser_splits_unnumbered_next_matter_with_same_headings():
-    from kreports.processor.kam_parser import extract_kam_items
+def test_parser_reports_ambiguous_unnumbered_matter_with_same_headings():
+    from kreports.processor.kam_parser import extract_kam_items, parse_kam_items
 
     body = """
     핵심감사사항
@@ -700,12 +848,12 @@ def test_parser_splits_unnumbered_next_matter_with_same_headings():
     예상판매가격 검사
     """
 
-    items = extract_kam_items(body)
+    outcome = parse_kam_items(body)
 
-    assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
-    assert items[0].audit_response_text == "계약 표본 검사"
-    assert items[1].reason_text == "순실현가능가치 추정 위험"
-    assert items[1].audit_response_text == "예상판매가격 검사"
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+    assert "ambiguous_boundary" in outcome.limitations
+    assert extract_kam_items(body) == []
 
 
 @pytest.mark.parametrize(
@@ -932,6 +1080,128 @@ def test_rebuild_continues_from_failed_raw_read_to_normalized_evidence(
         limitation.startswith("source_documents.raw_body:read_error:")
         for limitation in receipt["limitations"]
     )
+
+
+def test_rebuild_falls_back_from_ambiguous_raw_to_clear_normalized_evidence(
+    temp_engine,
+):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    ambiguous = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    2. 재고자산 평가
+    핵심감사사항으로 선정한 이유
+    페이지 반복 위험
+    감사에서 다루어진 방법
+    추가 절차
+    """
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000091",
+                    stock_code="000091",
+                    corp_name="모호성폴백회사",
+                    market="KOSPI",
+                ),
+                SourceDocument(
+                    rcept_no="20250318000091",
+                    dcm_no="910",
+                    corp_code="00000091",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    report_nm="감사보고서",
+                    content_type="xml",
+                    raw_content=ambiguous,
+                    doc_hash="9" * 40,
+                    storage_status="inline",
+                ),
+                EvidenceDocument(
+                    corp_code="00000091",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    rcept_no="20250318000091",
+                    dcm_no="910",
+                    evidence_scope="auditor_view",
+                    title="명확한 정규화 증거",
+                    normalized_text=FIXTURE.read_text(encoding="utf-8"),
+                    source_count=1,
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "evidence_documents.normalized_text"
+    assert (
+        "source_documents.raw_body:ambiguous_boundary"
+        in receipt["limitations"]
+    )
+    with get_session() as session:
+        assert session.query(KamItem).count() == 0
+
+
+def test_rebuild_reports_all_ambiguous_sources_as_error_without_writes(
+    temp_engine,
+):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    ambiguous = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    II. Goodwill impairment assessment
+    핵심감사사항으로 선정한 이유
+    페이지 반복 위험
+    감사에서 다루어진 방법
+    추가 절차
+    """
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000092",
+                    stock_code="000092",
+                    corp_name="전부모호회사",
+                    market="KOSPI",
+                ),
+                SourceDocument(
+                    rcept_no="20250318000092",
+                    corp_code="00000092",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    report_nm="감사보고서",
+                    content_type="xml",
+                    raw_content=ambiguous,
+                    doc_hash="8" * 40,
+                    storage_status="inline",
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "error"
+    assert receipt["source_basis"] == "none"
+    assert receipt["item_count"] == 0
+    assert (
+        "source_documents.raw_body:ambiguous_boundary"
+        in receipt["limitations"]
+    )
+    assert result["rows_written"] == 0
+    with get_session() as session:
+        assert session.query(KamItem).count() == 0
 
 
 def test_rebuild_falls_back_after_structured_raw_body_parse_error(temp_engine):
