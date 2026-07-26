@@ -604,7 +604,13 @@ def _infer_unit(label: str, key: str) -> str | None:
     match = re.search(r"\(([^()]{1,30})\)", label)
     if match:
         return match.group(1)
-    if key in {"wacc", "terminal_growth"}:
+    if key in {
+        "wacc",
+        "terminal_growth",
+        "tax_rate",
+        "discount_factor",
+        "final_year_discount_factor",
+    }:
         return "ratio"
     if key.endswith("_pct") or key == "percentile":
         return "%"
@@ -998,12 +1004,17 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
             "columns": [
                 {"field": "year", "label": "연도"},
                 {"field": "metric", "label": "지표"},
-                {"field": "subject_value", "label": "대상회사"},
-                {"field": "p25", "label": "P25"},
-                {"field": "p50", "label": "P50"},
-                {"field": "p75", "label": "P75"},
-                {"field": "percentile", "label": "백분위", "unit": "%"},
-                {"field": "n", "label": "Peer 수"},
+                {"field": "subject_value", "label": "대상회사 값"},
+                {"field": "p25", "label": "Peer P25 값"},
+                {"field": "p50", "label": "Peer 중앙값 P50"},
+                {"field": "p75", "label": "Peer P75 값"},
+                {
+                    "field": "percentile",
+                    "label": "대상회사 백분위",
+                    "unit": "%",
+                },
+                {"field": "n", "label": "Peer 표본 수", "unit": "개"},
+                {"field": "unit", "label": "값 단위"},
             ], "rows": rows,
         })
         pack["charts"].append({
@@ -1023,15 +1034,26 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
                 )
             )
         ][: MAX_ROWS - 1]
-        visible_entities = _hierarchy_closed_group_rows(entities, limit=8)
-        omitted_count = len(entities) - len(visible_entities)
+        (
+            visible_entities,
+            unresolved_count,
+            omitted_count,
+        ) = _hierarchy_closed_group_rows(entities, limit=8)
+        if unresolved_count:
+            if status == "usable":
+                status = "limited"
+                pack["summary"]["status"] = status
+                pack["data_quality"]["status"] = status
+            limitation = f"unresolved_parent_entities:{unresolved_count}"
+            if limitation not in pack["limitations"]:
+                pack["limitations"].append(limitation)
         entity_row_ids = {
             str(row.get("entity_key")): str(row.get("entity_key"))
             for row in visible_entities
             if row.get("entity_key") not in {None, ""}
         }
         rows = []
-        if visible_entities:
+        if entities:
             rows.append({
                 "row_id": "root",
                 "parent_row_id": None,
@@ -1132,42 +1154,33 @@ def _hierarchy_closed_group_rows(
     rows: list[dict[str, Any]],
     *,
     limit: int,
-) -> list[dict[str, Any]]:
-    entity_keys = {
-        str(row.get("entity_key"))
-        for row in rows
-        if row.get("entity_key") not in {None, ""}
-    }
-    visible: list[dict[str, Any]] = []
-    visible_keys: set[str] = set()
+) -> tuple[list[dict[str, Any]], int, int]:
+    resolved: list[dict[str, Any]] = []
+    resolved_keys: set[str] = set()
     pending = list(rows)
-    while pending and len(visible) < limit:
+    while pending:
         progressed = False
         for row in list(pending):
             parent_key = str(row.get("parent_entity_key") or "")
             parent_is_root = (
                 row.get("parent_is_root") is True
-                or (
-                    "parent_is_root" not in row
-                    and parent_key not in entity_keys
-                )
+                or not parent_key
             )
             if (
                 parent_key
                 and not parent_is_root
-                and parent_key not in visible_keys
+                and parent_key not in resolved_keys
             ):
                 continue
             pending.remove(row)
-            visible.append(row)
+            resolved.append(row)
             if row.get("entity_key") not in {None, ""}:
-                visible_keys.add(str(row["entity_key"]))
+                resolved_keys.add(str(row["entity_key"]))
             progressed = True
-            if len(visible) == limit:
-                break
         if not progressed:
             break
-    return visible
+    visible = resolved[:limit]
+    return visible, len(pending), len(resolved) - len(visible)
 
 
 def build_visualization_pack(result: dict[str, Any]) -> VisualizationPackV1:
@@ -1274,6 +1287,15 @@ def _presentation_cell(column_key: str, value: Any) -> Any:
     return value
 
 
+def _column_heading(column: ColumnSpecV1) -> str:
+    if not column.unit:
+        return column.label
+    suffix = f"({column.unit})"
+    if column.label.rstrip().endswith(suffix):
+        return column.label
+    return f"{column.label} ({column.unit})"
+
+
 def render_visualization_markdown(
     pack: VisualizationPackV1,
     *,
@@ -1292,10 +1314,7 @@ def render_visualization_markdown(
     lines.append("")
     for table in validated.tables:
         lines.extend([f"### {_markdown_cell(table.title)}", ""])
-        headers = [
-            f"{column.label}{f' ({column.unit})' if column.unit else ''}"
-            for column in table.columns
-        ]
+        headers = [_column_heading(column) for column in table.columns]
         lines.append("| " + " | ".join(_markdown_cell(item) for item in headers) + " |")
         lines.append("| " + " | ".join("---" for _ in headers) + " |")
         for row in table.rows:
@@ -1369,7 +1388,7 @@ def render_visualization_html(pack: VisualizationPackV1) -> str:
     for table in validated.tables:
         pieces.append(f"<section><h2>{html.escape(table.title)}</h2><table><thead><tr>")
         for column in table.columns:
-            label = column.label + (f" ({column.unit})" if column.unit else "")
+            label = _column_heading(column)
             pieces.append(f"<th>{html.escape(label)}</th>")
         pieces.append("</tr></thead><tbody>")
         rows = table.rows or [{table.columns[0].key: table.note or "데이터 미확보"}]

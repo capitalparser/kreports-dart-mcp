@@ -297,6 +297,26 @@ def _safe_dcf_value(value: Any, *, depth: int) -> Any:
     return html.escape(str(value)[:1000], quote=True)
 
 
+def _dcf_assumption_unit(key: Any, current: Any) -> str | None:
+    if current not in {None, ""}:
+        return str(current)
+    normalized = str(key or "")
+    if normalized in {
+        "revenue_growth",
+        "operating_margin",
+        "tax_rate",
+        "da_to_revenue",
+        "capex_to_revenue",
+        "nwc_to_revenue",
+        "wacc",
+        "terminal_growth",
+    }:
+        return "ratio"
+    if normalized.startswith("normalized_") or normalized.endswith("_amount"):
+        return "KRW"
+    return None
+
+
 def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
     subject = html.escape(_subject_label(result), quote=True)
     pack = _base_pack(
@@ -314,6 +334,11 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
     actuals = _safe_dcf_rows(result.get("actuals"), limit=20)
     normalization = _safe_dcf_rows(result.get("normalization"), limit=2)
     assumptions = _safe_dcf_rows(result.get("assumptions"), limit=8)
+    for assumption in assumptions:
+        assumption["unit"] = _dcf_assumption_unit(
+            assumption.get("key"),
+            assumption.get("unit"),
+        )
     projections = _safe_dcf_rows(result.get("projections"), limit=10)
     sensitivity = _safe_dcf_rows(result.get("sensitivity"), limit=25)
     bridge = result.get("valuation_bridge")
@@ -354,7 +379,12 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         _table(
             "dcf_assumptions",
             "명시적 분석가 가정",
-            [("key", "가정"), ("value", "값"), ("basis", "근거 구분")],
+            [
+                ("key", "가정"),
+                ("value", "값"),
+                ("unit", "값 단위"),
+                ("basis", "근거 구분"),
+            ],
             assumptions,
         ),
         _table(
@@ -364,6 +394,7 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("year", "연도"),
                 ("revenue", "매출(KRW)"),
                 ("ebit", "EBIT(KRW)"),
+                ("tax_rate", "세율"),
                 ("after_tax_ebit", "세후 EBIT(KRW)"),
                 ("depreciation_amortization", "D&A(KRW)"),
                 ("capex", "CAPEX(KRW)"),
@@ -384,7 +415,7 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("terminal_value", "할인 전 터미널가치(KRW)"),
                 ("terminal_value_present_value", "터미널가치 PV(KRW)"),
                 ("gordon_growth_formula", "Gordon 성장 공식"),
-                ("final_year_discount_factor", "최종연도 할인계수(ratio)"),
+                ("final_year_discount_factor", "최종연도 할인계수"),
                 ("enterprise_value", "기업가치(KRW)"),
                 ("enterprise_value_formula", "기업가치 조정 공식"),
                 ("debt", "이자부부채(KRW)"),
@@ -399,8 +430,8 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
             "dcf_sensitivity",
             "WACC·영구성장률 5x5 민감도",
             [
-                ("wacc", "WACC(ratio)"),
-                ("terminal_growth", "영구성장률(ratio)"),
+                ("wacc", "WACC"),
+                ("terminal_growth", "영구성장률"),
                 ("status", "상태"),
                 ("enterprise_value", "기업가치(KRW)"),
             ],
@@ -955,13 +986,13 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             [
                 ("year", "연도"),
                 ("metric", "지표"),
-                ("subject_value", "대상회사"),
-                ("percentile", "백분위"),
-                ("p25", "P25"),
-                ("p50", "P50"),
-                ("p75", "P75"),
-                ("n", "Peer 수"),
-                ("unit", "단위"),
+                ("subject_value", "대상회사 값"),
+                ("percentile", "대상회사 백분위"),
+                ("p25", "Peer P25 값"),
+                ("p50", "Peer 중앙값 P50"),
+                ("p75", "Peer P75 값"),
+                ("n", "Peer 표본 수(개)"),
+                ("unit", "값 단위"),
             ],
             rows,
         ))

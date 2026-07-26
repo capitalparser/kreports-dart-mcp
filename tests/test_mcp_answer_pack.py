@@ -158,6 +158,7 @@ def test_attach_meta_adds_peer_benchmark_pack():
             2025: {
                 "ROE": {"p25": 0.05, "p50": 0.1, "p75": 0.15, "subject_value": 0.12, "percentile": 70, "n": 30, "unit": "ratio"},
                 "영업이익률": {"p25": 0.03, "p50": 0.08, "p75": 0.11, "subject_value": 0.2, "percentile": 90, "n": 30, "unit": "ratio"},
+                "감사보수": {"p25": 900_000, "p50": 1_100_000, "p75": 1_400_000, "subject_value": 1_200_000, "percentile": 60, "n": 30, "unit": "KRW"},
             }
         },
     }
@@ -166,7 +167,26 @@ def test_attach_meta_adds_peer_benchmark_pack():
 
     pack = out["answer_pack"]
     assert pack["summary"]["title"] == "A Peer 벤치마크"
-    assert any(table["id"] == "peer_metric_matrix" for table in pack["tables"])
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "peer_metric_matrix"
+    )
+    assert [
+        (row["metric"], row["unit"]) for row in table["rows"]
+    ] == [
+        ("ROE", "ratio"),
+        ("영업이익률", "ratio"),
+        ("감사보수", "KRW"),
+    ]
+    columns = {
+        column["field"]: column for column in table["columns"]
+    }
+    assert columns["subject_value"]["label"] == "대상회사 값"
+    assert columns["p25"]["label"] == "Peer P25 값"
+    assert columns["p50"]["label"] == "Peer 중앙값 P50"
+    assert columns["p75"]["label"] == "Peer P75 값"
+    assert columns["percentile"]["unit"] == "%"
+    assert columns["n"]["unit"] == "개"
     assert any(chart["id"] == "peer_percentile_matrix" and chart["type"] == "heatmap" for chart in pack["charts"])
 
 

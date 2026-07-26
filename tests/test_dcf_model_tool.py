@@ -342,6 +342,67 @@ def test_dcf_answer_pack_declares_ratio_and_krw_units_for_valuation_facts():
         assert bridge_units[field] == "KRW"
 
 
+def test_dcf_assumptions_and_projection_factors_have_semantic_units_in_all_views():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.visual_contracts import (
+        VisualizationPackV1,
+        render_visualization_html,
+        render_visualization_markdown,
+    )
+
+    pack_dict = build_answer_pack("build_dcf_model_pack", _model_result())
+    pack = VisualizationPackV1.model_validate(pack_dict)
+    tables = {table.id: table for table in pack.tables}
+
+    assumptions = tables["dcf_assumptions"]
+    assumption_columns = {
+        column.key: column.unit for column in assumptions.columns
+    }
+    assert assumption_columns["value"] is None
+    assert "unit" in assumption_columns
+    assert {
+        row["key"]: row["unit"] for row in assumptions.rows
+    } == {
+        "revenue_growth": "ratio",
+        "operating_margin": "ratio",
+        "tax_rate": "ratio",
+        "da_to_revenue": "ratio",
+        "capex_to_revenue": "ratio",
+        "nwc_to_revenue": "ratio",
+        "wacc": "ratio",
+        "terminal_growth": "ratio",
+    }
+
+    projection_units = {
+        column.key: column.unit
+        for column in tables["dcf_projections"].columns
+    }
+    assert projection_units["tax_rate"] == "ratio"
+    assert projection_units["discount_factor"] == "ratio"
+    for field in (
+        "revenue",
+        "ebit",
+        "after_tax_ebit",
+        "depreciation_amortization",
+        "capex",
+        "nwc_balance",
+        "nwc_change",
+        "ufcf",
+        "present_value",
+    ):
+        assert projection_units[field] == "KRW"
+
+    for rendered in (
+        render_visualization_markdown(pack, mermaid=False),
+        render_visualization_html(pack),
+    ):
+        assert "할인계수 (ratio)" in rendered
+        assert "세율 (ratio)" in rendered
+        assert "값 단위" in rendered
+        assert "revenue_growth" in rendered
+        assert "0.10" in rendered
+
+
 def test_dcf_narrative_is_bounded_reviewable_and_not_a_conclusion():
     from kreports.mcp.renderers import render_answer
 

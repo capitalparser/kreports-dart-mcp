@@ -360,7 +360,10 @@ def test_direct_group_family_keeps_root_parent_and_ownership_as_canonical_facts(
         assert fact in markdown
 
 
-def test_direct_group_family_keeps_omission_as_a_bound_canonical_sentinel():
+@pytest.mark.parametrize("entity_count", [9, 10])
+def test_direct_group_family_keeps_omission_as_a_bound_canonical_sentinel(
+    entity_count,
+):
     pack = build_visualization_pack({
         "_visual_family": "group_graph",
         "_visual_status": "usable",
@@ -373,7 +376,7 @@ def test_direct_group_family_keeps_omission_as_a_bound_canonical_sentinel():
                 "relation": "종속기업",
                 "ownership_pct": 80,
             }
-            for index in range(10)
+            for index in range(entity_count)
         ],
     })
     table = next(item for item in pack.tables if item.id == "group_entities")
@@ -381,15 +384,84 @@ def test_direct_group_family_keeps_omission_as_a_bound_canonical_sentinel():
     assert table.rows[-1] == {
         "row_id": "omitted",
         "parent_row_id": "root",
-        "name": "2개 노드는 가독성을 위해 생략",
+        "name": f"{entity_count - 8}개 노드는 가독성을 위해 생략",
         "relation": "omitted",
         "ownership_pct": None,
     }
     diagram = pack.diagrams[0]
-    assert "2개 노드는 가독성을 위해 생략" in diagram.definition
+    assert f"{entity_count - 8}개 노드는 가독성을 위해 생략" in (
+        diagram.definition
+    )
     assert set(diagram.row_refs) == {
         str(row["row_id"]) for row in table.rows
     }
+
+
+def test_direct_group_all_orphan_preserves_requested_root_and_never_promotes_sentinel():
+    pack = build_visualization_pack({
+        "_visual_family": "group_graph",
+        "_visual_status": "usable",
+        "entity_name": "A",
+        "entities": [{
+            "entity_key": "orphan",
+            "parent_entity_key": "missing-parent",
+            "name": "고아 실체",
+            "relation": "종속기업",
+            "ownership_pct": 80,
+        }],
+    })
+
+    table = next(item for item in pack.tables if item.id == "group_entities")
+    assert table.rows == [{
+        "row_id": "root",
+        "parent_row_id": None,
+        "name": "A",
+        "relation": "root",
+        "ownership_pct": None,
+    }]
+    assert pack.status == "limited"
+    assert "unresolved_parent_entities:1" in pack.limitations
+    diagram = pack.diagrams[0]
+    assert diagram.row_refs == ["root"]
+    assert 'P["A"]' in diagram.definition
+    assert "고아 실체" not in diagram.definition
+    assert "missing-parent" not in diagram.definition
+    assert "-->" not in diagram.definition
+    assert "생략" not in diagram.definition
+
+
+def test_direct_group_mixed_valid_and_orphan_keeps_only_bound_edges():
+    pack = build_visualization_pack({
+        "_visual_family": "group_graph",
+        "_visual_status": "usable",
+        "entity_name": "A",
+        "entities": [
+            {
+                "entity_key": "b",
+                "parent_is_root": True,
+                "name": "B",
+                "relation": "종속기업",
+                "ownership_pct": 80,
+            },
+            {
+                "entity_key": "orphan",
+                "parent_entity_key": "missing-parent",
+                "name": "고아 실체",
+                "relation": "종속기업",
+                "ownership_pct": 70,
+            },
+        ],
+    })
+
+    table = next(item for item in pack.tables if item.id == "group_entities")
+    assert [row["name"] for row in table.rows] == ["A", "B"]
+    assert pack.status == "limited"
+    assert "unresolved_parent_entities:1" in pack.limitations
+    definition = pack.diagrams[0].definition
+    assert 'P["A"]' in definition and 'N1["B"]' in definition
+    assert 'P -->|"종속기업 / 지분율 80%"| N1' in definition
+    assert "고아 실체" not in definition
+    assert "생략" not in definition
 
 
 def test_raw_dcf_family_uses_ratio_inputs_and_krw_valuation_units():
@@ -418,6 +490,157 @@ def test_raw_dcf_family_uses_ratio_inputs_and_krw_valuation_units():
     assert "기업가치 (KRW)" in markdown
     assert "0.1" in markdown and "0.03" in markdown
     assert "10%" not in markdown and "3%" not in markdown
+
+
+def test_direct_peer_distribution_preserves_mixed_metric_units_per_row():
+    pack = build_visualization_pack({
+        "_visual_family": "peer_distribution",
+        "_visual_status": "usable",
+        "results": {
+            2025: {
+                "ROE": {
+                    "subject_value": 0.12,
+                    "p25": 0.05,
+                    "p50": 0.10,
+                    "p75": 0.15,
+                    "percentile": 70,
+                    "n": 30,
+                    "unit": "ratio",
+                },
+                "감사보수": {
+                    "subject_value": 1_200_000,
+                    "p25": 900_000,
+                    "p50": 1_100_000,
+                    "p75": 1_400_000,
+                    "percentile": 60,
+                    "n": 30,
+                    "unit": "KRW",
+                },
+            },
+        },
+    })
+    table = next(item for item in pack.tables if item.id == "peer_metric_matrix")
+    assert [
+        (row["metric"], row["unit"])
+        for row in table.rows
+    ] == [("ROE", "ratio"), ("감사보수", "KRW")]
+    columns = {column.key: column for column in table.columns}
+    assert columns["subject_value"].label == "대상회사 값"
+    assert columns["p25"].label == "Peer P25 값"
+    assert columns["p50"].label == "Peer 중앙값 P50"
+    assert columns["p75"].label == "Peer P75 값"
+    for field in ("subject_value", "p25", "p50", "p75"):
+        assert columns[field].unit is None
+    assert columns["percentile"].unit == "%"
+    assert columns["n"].unit == "개"
+
+    for rendered in (
+        render_visualization_markdown(pack, mermaid=False),
+        render_visualization_html(pack),
+    ):
+        for value in ("0.12", "0.05", "1200000", "900000", "ratio", "KRW"):
+            assert value in rendered
+
+
+def test_all_direct_visual_families_declare_units_for_every_numeric_measure():
+    payloads = [
+        {
+            "_visual_family": "financial_trend",
+            "_visual_status": "usable",
+            "historical_actuals": [{"year": 2024, "revenue": 100}],
+        },
+        {
+            "_visual_family": "dcf",
+            "_visual_status": "usable",
+            "projections": [{"year": 2025, "revenue": 100, "ufcf": 10}],
+            "sensitivity": [{
+                "wacc": 0.10,
+                "terminal_growth": 0.03,
+                "enterprise_value": 1_000,
+                "status": "valid",
+            }],
+        },
+        {
+            "_visual_family": "peer_distribution",
+            "_visual_status": "usable",
+            "results": {
+                2025: {
+                    "ROE": {
+                        "subject_value": 0.12,
+                        "p25": 0.05,
+                        "p50": 0.10,
+                        "p75": 0.15,
+                        "percentile": 70,
+                        "n": 30,
+                        "unit": "ratio",
+                    },
+                },
+            },
+        },
+        {
+            "_visual_family": "group_graph",
+            "_visual_status": "usable",
+            "entity_name": "A",
+            "entities": [{
+                "name": "B",
+                "relation": "종속기업",
+                "ownership_pct": 80,
+            }],
+        },
+        {
+            "_visual_family": "audit_fee",
+            "_visual_status": "usable",
+            "history": [{
+                "year": 2024,
+                "audit_fee_m": 100,
+                "audit_hours": 500,
+            }],
+        },
+        {
+            "_visual_family": "kam_lifecycle",
+            "_visual_status": "usable",
+            "events": [{"year": 2024, "topic": "수익인식", "status": "new"}],
+        },
+        {
+            "_visual_family": "disclosure_timeline",
+            "_visual_status": "usable",
+            "events": [{
+                "event_date": "2025-01-01",
+                "corp_name": "A",
+                "event_type": "capital_raise",
+                "event_title": "유상증자",
+                "rcept_no": "20250101000001",
+            }],
+        },
+    ]
+    per_row_unit_fields = {"subject_value", "p25", "p50", "p75"}
+    dimension_fields = {"year"}
+
+    for payload in payloads:
+        pack = build_visualization_pack(payload)
+        assert pack.status == "usable"
+        for table in pack.tables:
+            columns = {column.key: column for column in table.columns}
+            for row in table.rows:
+                for field, value in row.items():
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or field in dimension_fields
+                    ):
+                        continue
+                    if field in per_row_unit_fields:
+                        assert row.get("unit"), (
+                            payload["_visual_family"],
+                            table.id,
+                            field,
+                        )
+                    else:
+                        assert columns[field].unit, (
+                            payload["_visual_family"],
+                            table.id,
+                            field,
+                        )
 
 
 def test_diagram_may_only_summarize_rows_in_referenced_table():
