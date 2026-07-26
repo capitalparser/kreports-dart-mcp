@@ -287,6 +287,67 @@ def test_stale_repair_detects_same_pid_from_a_different_process_start(
     ]
 
 
+def test_current_process_identity_is_reset_when_pid_changes_after_fork(
+    monkeypatch,
+):
+    from kreports.maintenance import backfill_runs
+
+    pids = iter((71001, 71002))
+    monkeypatch.setattr(backfill_runs.os, "getpid", lambda: next(pids))
+    monkeypatch.setattr(
+        backfill_runs,
+        "process_start_identity",
+        lambda pid: f"process-start:{pid}",
+    )
+    backfill_runs._reset_process_start_identity_cache()
+
+    assert backfill_runs.current_process_start_identity() == (
+        "process-start:71001"
+    )
+    assert backfill_runs.current_process_start_identity() == (
+        "process-start:71002"
+    )
+
+
+def test_live_fork_child_identity_is_not_repaired_as_stale(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
+    from kreports.maintenance import backfill_runs
+
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    child_pid = 71012
+    monkeypatch.setattr(backfill_runs.os, "getpid", lambda: child_pid)
+    monkeypatch.setattr(
+        backfill_runs,
+        "process_start_identity",
+        lambda pid: f"process-start:{pid}",
+    )
+    backfill_runs._reset_process_start_identity_cache()
+    child_identity = backfill_runs.current_process_start_identity()
+    with get_session() as session:
+        run = BackfillRun(
+            task_type="fork-child",
+            status="running",
+            pid=child_pid,
+            owner_token="child-owner",
+            owner_host=socket.gethostname(),
+            owner_process_start=child_identity,
+            heartbeat_at=now - timedelta(hours=2),
+            started_at=now - timedelta(hours=3),
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    monkeypatch.setattr(backfill_runs, "pid_is_alive", lambda pid: True)
+
+    assert backfill_runs.repair_stale_backfills(now, 3600)["repaired_ids"] == []
+    assert _load_run(run_id).status == "running"
+
+
 def test_stale_repair_fails_safe_for_remote_owner_identity(
     temp_engine,
     monkeypatch,
@@ -521,6 +582,42 @@ def test_structured_child_quota_failure_is_not_succeeded(
         assert run.status != "no_data"
 
 
+def test_collect_auditors_transport_failure_is_durable_and_cli_nonzero(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+    from kreports.collector import audit_collector, corp_sync
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
+
+    monkeypatch.setattr(cli.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(corp_sync, "get_corp_code", lambda stock: "00123456")
+    monkeypatch.setattr(
+        audit_collector,
+        "fetch_disclosure_list",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            TimeoutError("DART transport timeout")
+        ),
+    )
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["collect-auditors", "--stock", "005930"],
+    )
+
+    assert result.exit_code != 0
+    with get_session() as session:
+        run = (
+            session.query(BackfillRun)
+            .filter(BackfillRun.task_type == "auditors")
+            .order_by(BackfillRun.id.desc())
+            .one()
+        )
+        assert run.status == "transport_error"
+        assert "DART transport timeout" in run.error_msg
+
+
 @pytest.mark.parametrize(
     "outcome",
     ["quota_exceeded", "transport_error", "parse_error", "storage_error"],
@@ -553,6 +650,154 @@ def test_child_process_failure_preserves_recorded_outcome(
 
     assert failure.outcome == outcome
     assert str(failure) == f"{outcome} detail"
+
+
+@pytest.mark.parametrize(
+    ("return_code", "outcome"),
+    [
+        (75, "quota_exceeded"),
+        (76, "transport_error"),
+        (77, "parse_error"),
+        (78, "storage_error"),
+    ],
+)
+def test_raw_script_exit_code_preserves_exact_taxonomy_without_child_lease(
+    temp_engine,
+    return_code,
+    outcome,
+):
+    from kreports.collector.scheduler import _child_process_failure
+
+    failure = _child_process_failure(
+        pid=64999,
+        return_code=return_code,
+        args=[
+            "__python_script__",
+            "scripts/backfill_business_report_audit_attachments.py",
+        ],
+    )
+
+    assert failure.outcome == outcome
+
+
+@pytest.mark.parametrize(
+    ("module_name", "collector_name"),
+    [
+        (
+            "scripts.backfill_business_report_audit_attachments",
+            "collect_attached_audit_reports_for_disclosure",
+        ),
+        (
+            "scripts.backfill_audit_submission_sections",
+            "collect_report_sections_for_disclosure",
+        ),
+    ],
+)
+def test_raw_attachment_script_exits_nonzero_with_exact_taxonomy(
+    monkeypatch,
+    module_name,
+    collector_name,
+):
+    import argparse
+    import importlib
+
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr(module, "init_db", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "_parse_args",
+        lambda: argparse.Namespace(
+            start_year=2024,
+            end_year=2024,
+            market="KOSPI",
+            limit=None,
+            include_existing=False,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_targets",
+        lambda *args, **kwargs: [
+            {
+                "rcept_no": "20250318000001",
+                "market": "KOSPI",
+                "corp_name": "Fixture",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        module,
+        collector_name,
+        lambda rcept_no: (_ for _ in ()).throw(
+            TimeoutError("attachment transport timeout")
+        ),
+    )
+
+    assert module.main() == 76
+
+
+def test_failed_raw_step_is_not_completed_and_is_retried_on_resume(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.collector.scheduler as scheduler
+    from kreports.maintenance.backfill_runs import (
+        BackfillLease,
+        BackfillRunError,
+    )
+
+    monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "file")
+    monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
+    monkeypatch.setattr(
+        scheduler,
+        "_raw_gap_targets",
+        lambda year_from, year_to: [(2024, "KOSPI")],
+    )
+    target_script = "scripts/backfill_business_report_audit_attachments.py"
+    target_calls = 0
+
+    def run_step(lease, args):
+        nonlocal target_calls
+        if target_script in args:
+            target_calls += 1
+            if target_calls == 1:
+                raise BackfillRunError(
+                    "transport_error",
+                    "attachment transport timeout",
+                )
+
+    monkeypatch.setattr(scheduler, "_run_cli_with_heartbeat", run_step)
+    lease = BackfillLease.start("complete-dataset", None, None, {})
+
+    with pytest.raises(BackfillRunError, match="attachment transport timeout"):
+        scheduler.orchestrate_complete_backfill(
+            lease,
+            year_from=2024,
+            year_to=2024,
+            disclosure_end_year=2024,
+        )
+    failed_state = BackfillLease.resume_point(lease.id)
+    assert (
+        "business-report attached audit reports 2024 KOSPI"
+        not in failed_state["completed_steps"]
+    )
+    lease.fail("transport_error", "attachment transport timeout")
+
+    resumed = BackfillLease.start("complete-dataset", None, None, {})
+    result = scheduler.orchestrate_complete_backfill(
+        resumed,
+        year_from=2024,
+        year_to=2024,
+        disclosure_end_year=2024,
+    )
+
+    assert result["errors"] == 0
+    assert target_calls == 2
+    assert (
+        "business-report attached audit reports 2024 KOSPI"
+        in BackfillLease.resume_point(resumed.id)["completed_steps"]
+    )
 
 
 def test_raw_enabled_pipeline_accepts_external_non_inline_policy(

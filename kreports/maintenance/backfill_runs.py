@@ -36,8 +36,16 @@ MAX_CHECKPOINT_JSON_BYTES = 16_384
 MAX_PARAMS_JSON_BYTES = 16_384
 MAX_SUMMARY_JSON_BYTES = 32_768
 MAX_ERROR_MESSAGE_CHARS = 4_000
-_CURRENT_PROCESS_START: str | None = None
-_UNVERIFIABLE_PROCESS_START = f"unverifiable:{uuid4().hex}"
+_PROCESS_START_IDENTITIES: dict[int, str] = {}
+
+
+def _reset_process_start_identity_cache() -> None:
+    """Drop inherited process identity state after a fork."""
+    _PROCESS_START_IDENTITIES.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_process_start_identity_cache)
 
 
 class BackfillAlreadyRunning(RuntimeError):
@@ -411,13 +419,15 @@ def current_process_start_identity() -> str:
     If the OS cannot expose a start time, the fallback is deliberately marked
     unverifiable so stale repair preserves a live PID instead of guessing.
     """
-    global _CURRENT_PROCESS_START
-    if _CURRENT_PROCESS_START is None:
-        _CURRENT_PROCESS_START = (
-            process_start_identity(os.getpid())
-            or _UNVERIFIABLE_PROCESS_START
+    pid = os.getpid()
+    identity = _PROCESS_START_IDENTITIES.get(pid)
+    if identity is None:
+        identity = (
+            process_start_identity(pid)
+            or f"unverifiable:{pid}:{uuid4().hex}"
         )
-    return _CURRENT_PROCESS_START
+        _PROCESS_START_IDENTITIES[pid] = identity
+    return identity
 
 
 def repair_stale_backfills(

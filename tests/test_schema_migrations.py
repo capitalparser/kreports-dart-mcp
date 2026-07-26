@@ -179,6 +179,9 @@ def test_backfill_owner_migration_is_append_only_and_enforces_active_lease(
     assert _checksum(MIGRATIONS[2]) == (
         "b5a958e21c751e72e4243b5f4a35b03ff41f313a87e5e058e7a9623bfaf4f324"
     )
+    assert _checksum(MIGRATIONS[3]) == (
+        "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
+    )
     indexes = {
         item["name"]: item
         for item in inspect(temp_engine).get_indexes("backfill_runs")
@@ -190,6 +193,95 @@ def test_backfill_owner_migration_is_append_only_and_enforces_active_lease(
         ].text
         == "status = 'running'"
     )
+
+
+def test_backfill_owner_migration_repairs_duplicate_running_leases_atomically(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.migrations as migrations_module
+    from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'duplicate-leases.db'}")
+    with legacy.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE schema_migrations (
+                  revision VARCHAR(40) PRIMARY KEY,
+                  checksum VARCHAR(64) NOT NULL,
+                  description VARCHAR(300) NOT NULL,
+                  applied_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE backfill_runs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_type VARCHAR(50) NOT NULL,
+                  year SMALLINT,
+                  market VARCHAR(10),
+                  status VARCHAR(20) NOT NULL,
+                  pid INTEGER,
+                  owner_token VARCHAR(64),
+                  heartbeat_at DATETIME,
+                  checkpoint_json TEXT NOT NULL DEFAULT '{}',
+                  attempted_count INTEGER NOT NULL DEFAULT 0,
+                  saved_count INTEGER NOT NULL DEFAULT 0,
+                  no_data_count INTEGER NOT NULL DEFAULT 0,
+                  error_count INTEGER NOT NULL DEFAULT 0,
+                  params_json TEXT,
+                  summary_json TEXT,
+                  error_msg TEXT,
+                  started_at DATETIME NOT NULL,
+                  finished_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO backfill_runs
+                  (id, task_type, year, market, status, heartbeat_at, started_at)
+                VALUES
+                  (1, 'financials', 2024, 'KOSPI', 'running',
+                   '2026-07-26 09:00:00', '2026-07-26 08:00:00'),
+                  (2, 'financials', 2024, 'KOSPI', 'running',
+                   '2026-07-26 10:00:00', '2026-07-26 08:00:00'),
+                  (3, 'financials', 2024, 'KOSPI', 'running',
+                   '2026-07-26 10:00:00', '2026-07-26 08:00:00'),
+                  (4, 'financials', 2024, 'KOSDAQ', 'running',
+                   '2026-07-26 09:00:00', '2026-07-26 08:00:00')
+                """
+            )
+        )
+
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", (MIGRATIONS[3],))
+    with legacy.begin() as conn:
+        assert apply_schema_migrations(conn) == [MIGRATIONS[3].revision]
+        assert apply_schema_migrations(conn) == []
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, lease_key, status, finished_at, error_msg
+                FROM backfill_runs
+                ORDER BY id
+                """
+            )
+        ).mappings().all()
+
+    # Newest heartbeat wins; newest id breaks heartbeat ties.
+    assert [row["id"] for row in rows if row["status"] == "running"] == [3, 4]
+    for row in rows[:2]:
+        assert row["status"] == "stale_failed"
+        assert row["finished_at"] is not None
+        assert "duplicate active lease" in row["error_msg"]
+    assert rows[2]["lease_key"] == "financials|2024|KOSPI"
+    assert rows[3]["lease_key"] == "financials|2024|KOSDAQ"
 
 
 def test_init_db_stops_on_schema_drift(tmp_path, monkeypatch):

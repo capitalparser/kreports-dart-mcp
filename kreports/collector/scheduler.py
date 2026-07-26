@@ -537,8 +537,14 @@ def _child_process_failure(
                 error_message,
             )
     command_name = args[1] if args and args[0] == "__python_script__" else args[0]
-    if return_code == 75:
-        outcome = "quota_exceeded"
+    exit_outcomes = {
+        75: "quota_exceeded",
+        76: "transport_error",
+        77: "parse_error",
+        78: "storage_error",
+    }
+    if return_code in exit_outcomes:
+        outcome = exit_outcomes[return_code]
     elif "extract" in command_name or "section" in command_name:
         outcome = "parse_error"
     elif command_name.startswith(("collect-", "orchestrate-")):

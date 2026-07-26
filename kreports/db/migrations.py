@@ -115,6 +115,37 @@ MIGRATIONS = (
             WHERE lease_key IS NULL
             """,
             """
+            WITH ranked_active_leases AS (
+              SELECT
+                id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY lease_key
+                  ORDER BY
+                    CASE WHEN heartbeat_at IS NULL THEN 1 ELSE 0 END,
+                    heartbeat_at DESC,
+                    id DESC
+                ) AS active_rank
+              FROM backfill_runs
+              WHERE status = 'running'
+            )
+            UPDATE backfill_runs
+            SET
+              status = 'stale_failed',
+              finished_at = COALESCE(
+                heartbeat_at,
+                started_at,
+                CURRENT_TIMESTAMP
+              ),
+              error_msg = (
+                'superseded duplicate active lease during 20260711_04 migration'
+              )
+            WHERE id IN (
+              SELECT id
+              FROM ranked_active_leases
+              WHERE active_rank > 1
+            )
+            """,
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS uq_backfill_runs_active_lease
             ON backfill_runs (lease_key)
             WHERE status = 'running'

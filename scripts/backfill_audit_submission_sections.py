@@ -15,6 +15,27 @@ from sqlalchemy import text
 
 from kreports.collector.report_document_collector import collect_report_sections_for_disclosure
 from kreports.db.engine import get_session, init_db
+from kreports.maintenance.backfill_runs import (
+    classify_backfill_error,
+)
+
+
+_FAILURE_EXIT_CODES = {
+    "quota_exceeded": 75,
+    "transport_error": 76,
+    "parse_error": 77,
+    "storage_error": 78,
+}
+_FAILURE_PRIORITY = tuple(_FAILURE_EXIT_CODES)
+
+
+def _result_failure_outcome(result: dict) -> str:
+    explicit = result.get("outcome")
+    if explicit in _FAILURE_EXIT_CODES:
+        return str(explicit)
+    return classify_backfill_error(
+        RuntimeError(str(result.get("error") or "attachment collection failed"))
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -81,6 +102,7 @@ def main() -> int:
     )
 
     ok = failed = sections = documents = 0
+    failure_outcomes: list[str] = []
     for idx, target in enumerate(targets, 1):
         started = datetime.utcnow()
         try:
@@ -92,9 +114,11 @@ def main() -> int:
                 status = "ok"
             else:
                 failed += 1
+                failure_outcomes.append(_result_failure_outcome(result))
                 status = f"failed:{result.get('error')}"
         except Exception as exc:  # keep long-running backfill alive
             failed += 1
+            failure_outcomes.append(classify_backfill_error(exc))
             status = f"error:{type(exc).__name__}:{exc}"
         elapsed = (datetime.utcnow() - started).total_seconds()
         logging.info(
@@ -118,6 +142,18 @@ def main() -> int:
         documents,
         sections,
     )
+    if failed:
+        outcome = next(
+            item
+            for item in _FAILURE_PRIORITY
+            if item in failure_outcomes
+        )
+        logging.error(
+            "KREPORTS_BACKFILL_OUTCOME=%s failed=%s",
+            outcome,
+            failed,
+        )
+        return _FAILURE_EXIT_CODES[outcome]
     return 0
 
 

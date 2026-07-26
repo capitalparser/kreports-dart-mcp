@@ -5,13 +5,17 @@ from datetime import datetime, date
 from kreports.config import settings
 from kreports.collector.fetcher import fetch_disclosure_list, fetch_document_xml
 from kreports.db.engine import get_session
-from kreports.db.models import Company, Auditor, FetchLog
+from kreports.db.models import Company, Auditor
 from kreports.processor.audit_parser import (
     is_audit_report, is_annual_report,
     is_valid_auditor_name, normalize_auditor_name, parse_bsns_year, parse_fs_div,
     parse_auditor_from_doc_xml,
 )
 from kreports.judge.auditor_flags import compute_auditor_flags
+from kreports.maintenance.backfill_runs import (
+    BackfillRunError,
+    classify_backfill_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +46,10 @@ def collect_auditors(
         items = items_a + items_f
     except Exception as e:
         logger.error("감사인 공시 수집 실패 [%s]: %s", corp_code, e)
-        return {"saved": 0, "skipped": 0}
+        raise BackfillRunError(
+            classify_backfill_error(e),
+            f"auditor disclosure collection failed [{corp_code}]: {e}",
+        ) from e
 
     saved = skipped = 0
     for raw in items:
