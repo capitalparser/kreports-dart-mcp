@@ -62,9 +62,11 @@ from kreports.processor.policy_parser import POLICY_KEYWORDS
 from kreports.processor.report_section_parser import extract_report_sections
 from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 from kreports.analysis.group_graph import (
+    GROUP_GRAPH_REQUIRED_COLUMNS,
     QSC_THRESHOLD_PCT,
     classify_qsc,
     compute_component_share,
+    is_valid_corp_code,
     normalize_entity_name,
 )
 from kreports.runtime import raw_persistence_allowed, raw_storage_policy, require_raw_backfill_mode, require_runtime_write
@@ -1128,14 +1130,22 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
     require_runtime_write("persist canonical group audit graph")
     if not affiliates:
         return 0
-    table_names = set(inspect(_engine_module.engine).get_table_names())
-    required = {
-        "group_entities", "group_relationships", "group_component_metrics",
-    }
-    if not required.issubset(table_names):
+    inspector = inspect(_engine_module.engine)
+    table_names = set(inspector.get_table_names())
+    if not set(GROUP_GRAPH_REQUIRED_COLUMNS).issubset(table_names):
+        return 0
+    if any(
+        required - {
+            str(column["name"])
+            for column in inspector.get_columns(table_name)
+        }
+        for table_name, required in GROUP_GRAPH_REQUIRED_COLUMNS.items()
+    ):
         return 0
 
     parent_code = str(meta["corp_code"])
+    if not is_valid_corp_code(parent_code):
+        return 0
     year = int(meta["bsns_year"])
     receipt = str(meta["rcept_no"])
     now = datetime.utcnow()
@@ -1189,6 +1199,8 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
     by_code = {item["corp_code"]: item for item in companies}
     by_name: dict[str, list[dict]] = {}
     for company in companies:
+        if not is_valid_corp_code(company["corp_code"]):
+            continue
         by_name.setdefault(
             normalize_entity_name(company["corp_name"]), [],
         ).append(company)
@@ -1213,7 +1225,7 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
         "entity_key": parent_key,
         "original_name": parent_name,
         "normalized_name": normalize_entity_name(parent_name),
-        "resolved_corp_code": parent_code,
+        "resolved_corp_code": parent_code if parent_company else None,
         "stock_code": parent_company["stock_code"] if parent_company else None,
         "market": parent_company["market"] if parent_company else None,
         "resolution_status": "resolved" if parent_company else "unresolved",
@@ -1238,22 +1250,28 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
         source_ordinal = int(item.get("source_ordinal", ordinal))
         explicit_code = str(item.get("corp_code") or "").strip()
         listed = str(item.get("listed_yn") or "").strip() or None
-        company = by_code.get(explicit_code) if explicit_code else None
-        reason = "explicit_corp_code" if company else ""
-        status = "resolved" if company else "unresolved"
-        if explicit_code and company is None:
-            reason = "invalid_explicit_corp_code"
-        elif company is not None and (
-            normalize_entity_name(company["corp_name"]) != normalized
-        ):
-            company = None
-            status = "ambiguous"
-            reason = "explicit_corp_code_name_conflict"
-        elif company is None:
+        explicit_code_valid = (
+            bool(explicit_code) and is_valid_corp_code(explicit_code)
+        )
+        explicit_company = (
+            by_code.get(explicit_code) if explicit_code_valid else None
+        )
+        company = None
+        reason = ""
+        status = "unresolved"
+        if listed and listed.upper() in {"N", "비상장"}:
+            reason = "unlisted"
+        elif explicit_company is not None:
+            company = explicit_company
+            status = "resolved"
+            reason = (
+                "explicit_corp_code"
+                if normalize_entity_name(company["corp_name"]) == normalized
+                else "explicit_corp_code_name_conflict"
+            )
+        else:
             candidates = by_name.get(normalized, [])
-            if listed and listed.upper() in {"N", "비상장"}:
-                reason = "unlisted"
-            elif len(candidates) == 1:
+            if len(candidates) == 1:
                 company = candidates[0]
                 status = "resolved"
                 reason = "unique_exact_normalized_name"
@@ -1261,8 +1279,45 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
                 status = "ambiguous"
                 reason = "ambiguous_exact_normalized_name"
             else:
-                reason = "unmatched_exact_normalized_name"
+                reason = (
+                    "invalid_explicit_corp_code"
+                    if explicit_code
+                    else "unmatched_exact_normalized_name"
+                )
         resolved_code = company["corp_code"] if company else None
+        source_table = str(item.get("source") or "affiliate")
+        if (
+            resolved_code == parent_code
+            or (
+                resolved_code is None
+                and normalized == normalize_entity_name(parent_name)
+            )
+        ):
+            entity_rows.append({
+                "parent_corp_code": parent_code,
+                "effective_year": year,
+                "entity_key": (
+                    f"self-claim:{receipt}:{source_table}:{source_ordinal}"
+                ),
+                "original_name": original,
+                "normalized_name": normalized,
+                "resolved_corp_code": None,
+                "stock_code": None,
+                "market": None,
+                "resolution_status": "ambiguous",
+                "resolution_reason": "self_entity_claim",
+                "listed_state": listed,
+                "component_auditor_name": None,
+                "component_auditor_year": None,
+                "component_auditor_rcept_no": None,
+                "component_auditor_fs_div": None,
+                "auditor_gap_reason": "entity_resolution_not_exact",
+                "source_rcept_no": receipt,
+                "source_table": source_table,
+                "source_ordinal": source_ordinal,
+                "fetched_at": now,
+            })
+            continue
         auditor = None
         auditor_gap = None
         claims = auditor_claims_by_code.get(resolved_code or "", [])
@@ -1307,7 +1362,6 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
                 f"{item.get('source') or 'affiliate'}:{source_ordinal}"
             )
         )
-        source_table = str(item.get("source") or "affiliate")
         entity_rows.append({
             "parent_corp_code": parent_code,
             "effective_year": year,
@@ -1477,7 +1531,7 @@ def _persist_group_audit_graph(meta: dict, *, affiliates: list[dict]) -> int:
         session.query(GroupComponentMetricRecord).filter(
             GroupComponentMetricRecord.parent_corp_code == parent_code,
             GroupComponentMetricRecord.effective_year == year,
-            GroupComponentMetricRecord.metric_identity.like(f"{receipt}:%"),
+            GroupComponentMetricRecord.source_rcept_no == receipt,
         ).delete(synchronize_session=False)
         for model in (GroupRelationshipRecord, GroupEntityRecord):
             session.query(model).filter(

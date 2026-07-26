@@ -6,6 +6,7 @@ charts/diagrams can use it, and plain MCP clients can ignore it.
 """
 from __future__ import annotations
 
+import html
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no
@@ -451,11 +452,14 @@ def _hierarchy_closed_rows(
 
 def _mermaid_label(value: Any) -> str:
     return (
-        str(value or "-")
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
+        html.escape(str(value or "-"), quote=True)
+        .replace("\\", "&#92;")
+        .replace("|", "&#124;")
+        .replace("[", "&#91;")
+        .replace("]", "&#93;")
+        .replace("{", "&#123;")
+        .replace("}", "&#125;")
         .replace("\n", "<br/>")
-        .replace("|", "/")
     )
 
 

@@ -8,7 +8,7 @@ from sqlalchemy import bindparam, text
 
 import kreports.db.engine as _engine_module
 from kreports.db.engine import get_session
-from kreports.db.models import BusinessAffiliateAuditor, Disclosure
+from kreports.db.models import Auditor, BusinessAffiliateAuditor, Disclosure
 
 from kreports.analysis._shared import _clean_dict, _has_db_column, _has_db_table, _pct
 from kreports.analysis.company_profile import resolve_company_identifier
@@ -119,6 +119,54 @@ def _canonical_graph_payload(corp_code: str, year: int | None) -> dict | None:
         "limitations": list(graph.limitations),
         "truncated": graph.truncated,
     }
+
+
+def _canonical_result(
+    corp_code: str,
+    year: int,
+    graph: dict,
+    *,
+    limit: int | None,
+    only_with_auditor: bool,
+    slim: bool,
+) -> dict:
+    all_items = list(graph["entities"])
+    items = list(all_items)
+    if only_with_auditor:
+        items = [item for item in items if item.get("auditor")]
+    truncated = False
+    if limit is not None and len(items) > limit:
+        items = items[:limit]
+        truncated = True
+    if slim:
+        items = [
+            {key: item.get(key) for key in _SUBSIDIARY_SLIM_FIELDS}
+            for item in items
+        ]
+    first_receipt = next(
+        (
+            item.get("source_rcept_no")
+            for item in all_items
+            if item.get("source_rcept_no")
+        ),
+        None,
+    )
+    return _clean_dict({
+        "corp_code": corp_code,
+        "parent_rcept_no": first_receipt,
+        "bsns_year": year,
+        "qsc_criterion": _QSC_CRITERION,
+        "subsidiaries": items,
+        "count": len(items),
+        "total": len(all_items),
+        "truncated": truncated,
+        "group_graph": graph,
+        "data_quality": {
+            "status": "usable",
+            "source": "canonical_group_audit_graph",
+            "canonical_graph": "available",
+        },
+    })
 
 
 def _component_importance_sort_key(item: dict) -> tuple:
@@ -330,6 +378,51 @@ def get_subsidiary_auditors(
                 }
                 for row in cached_orm_rows
             ]
+    try:
+        canonical_year = latest_group_graph_year(corp_code)
+    except GroupGraphUnavailable:
+        canonical_year = None
+    canonical_graph = _canonical_graph_payload(corp_code, canonical_year)
+    if (
+        canonical_year is not None
+        and canonical_graph is not None
+        and (latest_year is None or canonical_year > latest_year)
+    ):
+        return _canonical_result(
+            corp_code,
+            canonical_year,
+            canonical_graph,
+            limit=limit,
+            only_with_auditor=only_with_auditor,
+            slim=slim,
+        )
+    legacy_auditor_conflicts: set[str] = set()
+    if cached_rows and latest_year is not None:
+        affiliate_codes = {
+            str(item.get("corp_code") or "")
+            for item in cached_rows
+            if item.get("corp_code")
+        }
+        if affiliate_codes:
+            with get_session() as session:
+                exact_claims = (
+                    session.query(Auditor.corp_code, Auditor.auditor_nm)
+                    .filter(
+                        Auditor.bsns_year == latest_year,
+                        Auditor.corp_code.in_(affiliate_codes),
+                    )
+                    .all()
+                )
+            names_by_code: dict[str, set[str]] = {}
+            for claim_code, auditor_name in exact_claims:
+                if auditor_name:
+                    names_by_code.setdefault(claim_code, set()).add(
+                        str(auditor_name).strip()
+                    )
+            legacy_auditor_conflicts = {
+                claim_code for claim_code, names in names_by_code.items()
+                if len(names) > 1
+            }
     with get_session() as session:
         row = (
             session.query(Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm)
@@ -351,7 +444,15 @@ def get_subsidiary_auditors(
         items = []
         for cached in cached_rows:
             auditor = None
-            if cached["auditor_nm"]:
+            auditor_gap_reason = None
+            if cached.get("corp_code") in legacy_auditor_conflicts:
+                auditor_gap_reason = "component_auditor_conflict"
+            elif (
+                cached["auditor_nm"]
+                and cached["auditor_year"] != latest_year
+            ):
+                auditor_gap_reason = "component_auditor_year_mismatch"
+            elif cached["auditor_nm"]:
                 auditor = {
                     "auditor_nm": cached["auditor_nm"],
                     "bsns_year": cached["auditor_year"],
@@ -364,7 +465,6 @@ def get_subsidiary_auditors(
                 bool(matched_corp_name)
                 and _normalize_entity_name(cached.get("name")) == _normalize_entity_name(matched_corp_name)
             )
-            auditor_gap_reason = None
             if auditor and not exact_name_match:
                 auditor = None
                 auditor_gap_reason = "matched_company_name_mismatch"
@@ -467,54 +567,22 @@ def get_subsidiary_auditors(
                 "coverage_note": coverage_note,
             },
         })
-        canonical_graph = _canonical_graph_payload(corp_code, latest_year)
-        if canonical_graph is not None:
-            result["group_graph"] = canonical_graph
+        same_year_graph = (
+            canonical_graph if canonical_year == latest_year else None
+        )
+        if same_year_graph is not None:
+            result["group_graph"] = same_year_graph
             result["data_quality"]["canonical_graph"] = "available"
         return result
-    try:
-        canonical_year = latest_group_graph_year(corp_code)
-    except GroupGraphUnavailable:
-        canonical_year = None
-    canonical_graph = _canonical_graph_payload(corp_code, canonical_year)
-    if canonical_graph is not None:
-        all_items = list(canonical_graph["entities"])
-        items = list(all_items)
-        if only_with_auditor:
-            items = [item for item in items if item.get("auditor")]
-        truncated = False
-        if limit is not None and len(items) > limit:
-            items = items[:limit]
-            truncated = True
-        if slim:
-            items = [
-                {key: item.get(key) for key in _SUBSIDIARY_SLIM_FIELDS}
-                for item in items
-            ]
-        first_receipt = next(
-            (
-                item.get("source_rcept_no")
-                for item in all_items
-                if item.get("source_rcept_no")
-            ),
-            None,
+    if canonical_year is not None and canonical_graph is not None:
+        return _canonical_result(
+            corp_code,
+            canonical_year,
+            canonical_graph,
+            limit=limit,
+            only_with_auditor=only_with_auditor,
+            slim=slim,
         )
-        return _clean_dict({
-            "corp_code": corp_code,
-            "parent_rcept_no": first_receipt,
-            "bsns_year": canonical_year,
-            "qsc_criterion": _QSC_CRITERION,
-            "subsidiaries": items,
-            "count": len(items),
-            "total": len(all_items),
-            "truncated": truncated,
-            "group_graph": canonical_graph,
-            "data_quality": {
-                "status": "usable",
-                "source": "canonical_group_audit_graph",
-                "canonical_graph": "available",
-            },
-        })
     if row is None:
         return {
             "corp_code": corp_code,

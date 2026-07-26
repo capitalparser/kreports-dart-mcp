@@ -93,6 +93,41 @@ def test_typed_contracts_reject_invalid_values_and_references():
             "KRW", "r2", "financials", "CFS", "2025", "before_elimination",
             None, "undetermined", (), (), 10.0, "invalid_amount",
         )
+    for amount in (None, 999):
+        with pytest.raises(ValueError, match="share"):
+            ComponentMetric(
+                "m", "r1", "e", "assets", amount, "KRW", "r1", "T", 100,
+                "KRW", "r2", "financials", "CFS", "2025",
+                "before_elimination", 12, "qsc",
+                ("asset_share_pct>=10.0",), ("r1", "r2"), 10.0, "usable",
+            )
+    with pytest.raises(ValueError, match="source receipt"):
+        ComponentMetric(
+            "m", "r1", "e", "assets", 12, "KRW", "other", "T", 100,
+            "KRW", "r2", "financials", "CFS", "2025",
+            "before_elimination", 12, "qsc",
+            ("asset_share_pct>=10.0",), ("other", "r2"), 10.0, "usable",
+        )
+    with pytest.raises(ValueError, match="evidence_refs"):
+        ComponentMetric(
+            "m", "r1", "e", "assets", 12, "KRW", "r1", "T", 100,
+            "KRW", "r2", "financials", "CFS", "2025",
+            "before_elimination", 12, "qsc",
+            ("asset_share_pct>=10.0",), (), 10.0, "usable",
+        )
+    with pytest.raises(ValueError, match="quality_status"):
+        ComponentMetric(
+            metric_identity="m", source_rcept_no="r1", entity_key="e",
+            metric_key="assets", amount=None, unit=None,
+            numerator_source_rcept_no=None, numerator_source_table=None,
+            denominator_amount=None, denominator_unit=None,
+            denominator_source_rcept_no=None,
+            denominator_source_table=None, fs_div=None, period=None,
+            elimination_basis=None, share_pct=None,
+            qsc_status="undetermined", qsc_basis=(),
+            qsc_evidence_refs=(), qsc_threshold_pct=10,
+            quality_status="invented",
+        )
 
 
 def test_multilevel_paths_cycles_orphans_and_row_order_are_deterministic():
@@ -164,6 +199,16 @@ def test_migration_08_schema_and_prior_checksums(temp_engine):
     assert {
         "source_rcept_no", "qsc_evidence_refs_json",
     } <= metric_columns
+    metric_uniques = inspect(temp_engine).get_unique_constraints(
+        "group_component_metrics"
+    )
+    assert any(
+        {
+            "parent_corp_code", "effective_year",
+            "source_rcept_no", "metric_identity",
+        } == set(constraint["column_names"])
+        for constraint in metric_uniques
+    )
     entity_columns = {
         column["name"]
         for column in inspect(temp_engine).get_columns("group_entities")
@@ -300,6 +345,31 @@ def test_duplicate_metric_claims_fail_closed_deterministically(temp_engine):
     assert not graph.metrics
 
 
+def test_entity_metric_snapshot_rejects_cross_metric_qsc_disagreement(
+    temp_engine,
+):
+    with temp_engine.begin() as conn:
+        _seed_graph(conn)
+        conn.execute(text("""
+            INSERT INTO group_component_metrics
+            (parent_corp_code,effective_year,metric_identity,source_rcept_no,
+             entity_key,metric_key,amount,unit,numerator_source_rcept_no,
+             numerator_source_table,denominator_amount,denominator_unit,
+             denominator_source_rcept_no,denominator_source_table,fs_div,
+             period,elimination_basis,share_pct,qsc_status,qsc_basis,
+             qsc_evidence_refs_json,qsc_threshold_pct,quality_status,fetched_at)
+            VALUES
+            ('00000001',2025,'revenue','r1','c','revenue',5,'KRW','r1','SUB',
+             100,'KRW','r2','financials','CFS','2025','before_elimination',
+             5,'not_qsc','','["r1","r2"]',10,'usable',CURRENT_TIMESTAMP)
+        """))
+    with pytest.raises(
+        GroupGraphUnavailable,
+        match="invalid_canonical_graph",
+    ):
+        build_group_graph("00000001", 2025)
+
+
 def test_missing_partial_and_nonempty_wal_fail_closed_without_file_creation(monkeypatch, tmp_path):
     import kreports.db.engine as engine_module
 
@@ -374,6 +444,7 @@ def test_authorized_persistence_is_receipt_idempotent_and_auditor_exact_year(
         Auditor,
         Company,
         FinancialFactCompact,
+        GroupComponentMetricRecord,
         GroupEntityRecord,
     )
 
@@ -414,8 +485,21 @@ def test_authorized_persistence_is_receipt_idempotent_and_auditor_exact_year(
         "denominator_elimination_basis": "before_elimination",
     }]
     first = _persist_group_audit_graph(meta, affiliates=affiliates)
+    with get_session() as session:
+        session.add(GroupComponentMetricRecord(
+            parent_corp_code="00000001", effective_year=2025,
+            metric_identity="opaque-identity", source_rcept_no=meta["rcept_no"],
+            entity_key="corp:00000002", metric_key="assets",
+            qsc_status="undetermined", qsc_basis="",
+            qsc_evidence_refs_json="[]", qsc_threshold_pct=10,
+            quality_status="partial",
+        ))
     second = _persist_group_audit_graph(meta, affiliates=affiliates)
     assert first == second == 5
+    with get_session() as session:
+        assert session.query(GroupComponentMetricRecord).filter_by(
+            source_rcept_no=meta["rcept_no"],
+        ).count() == 2
     graph = build_group_graph("00000001", 2025)
     child = next(item for item in graph.entities if item.original_name.startswith("Child"))
     assert child.component_auditor_name is None
@@ -484,6 +568,9 @@ def test_invalid_or_name_conflicting_explicit_corp_code_never_falls_back(
         session.add_all([
             Company(corp_code="00000001", corp_name="Parent"),
             Company(corp_code="00000002", corp_name="Real Child"),
+            Company(corp_code="00000003", corp_name="Canonical Name"),
+            Company(corp_code="00000004", corp_name="Fallback"),
+            Company(corp_code="BAD", corp_name="Malformed"),
         ])
     _persist_group_audit_graph(
         {"corp_code": "00000001", "bsns_year": 2025, "rcept_no": "r1"},
@@ -494,16 +581,118 @@ def test_invalid_or_name_conflicting_explicit_corp_code_never_falls_back(
             },
             {
                 "name": "Different", "original_name": "Different",
-                "corp_code": "00000002", "source": "SUB",
+                "corp_code": "00000003", "source": "SUB",
+            },
+            {
+                "name": "Fallback", "original_name": "Fallback",
+                "corp_code": "BAD", "source": "SUB",
+            },
+            {
+                "name": "Real Child", "original_name": "Real Child",
+                "corp_code": "00000002", "listed_yn": "N", "source": "SUB",
+            },
+        ],
+    )
+    entities = [
+        item for item in build_group_graph("00000001", 2025).entities
+        if not item.entity_key.startswith("parent:")
+    ]
+    by_original_and_ordinal = {
+        (item.original_name, item.source_ordinal): item for item in entities
+    }
+    assert by_original_and_ordinal[("Real Child", 0)].resolved_corp_code == (
+        "00000002"
+    )
+    assert by_original_and_ordinal[("Real Child", 0)].resolution_reason == (
+        "unique_exact_normalized_name"
+    )
+    assert by_original_and_ordinal[("Different", 1)].resolved_corp_code == (
+        "00000003"
+    )
+    assert by_original_and_ordinal[("Different", 1)].resolution_reason == (
+        "explicit_corp_code_name_conflict"
+    )
+    assert by_original_and_ordinal[("Fallback", 2)].resolved_corp_code == (
+        "00000004"
+    )
+    assert by_original_and_ordinal[("Real Child", 3)].resolution_reason == (
+        "unlisted"
+    )
+    assert by_original_and_ordinal[("Real Child", 3)].resolved_corp_code is None
+
+
+def test_group_persistence_rejects_parent_self_component_and_invalid_parent(
+    temp_engine,
+):
+    from kreports.collector.report_document_collector import (
+        _persist_group_audit_graph,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", corp_name="Parent"))
+    assert _persist_group_audit_graph(
+        {"corp_code": "BAD", "bsns_year": 2025, "rcept_no": "bad"},
+        affiliates=[{"original_name": "Child", "source": "SUB"}],
+    ) == 0
+    _persist_group_audit_graph(
+        {"corp_code": "00000001", "bsns_year": 2025, "rcept_no": "r1"},
+        affiliates=[
+            {
+                "original_name": "Parent", "corp_code": "00000001",
+                "parent_name": "Parent", "source": "SUB",
+            },
+            {
+                "original_name": "Parent", "corp_code": "99999999",
+                "parent_name": "Parent", "source": "SUB",
             },
         ],
     )
     graph = build_group_graph("00000001", 2025)
-    reasons = {
-        item.original_name: item.resolution_reason for item in graph.entities
+    assert {entity.resolution_reason for entity in graph.entities} == {
+        "parent_corp_code", "self_entity_claim",
     }
-    assert reasons["Real Child"] == "invalid_explicit_corp_code"
-    assert reasons["Different"] == "explicit_corp_code_name_conflict"
+    assert "self_entity_claim" in graph.limitations
+    assert "isolated_entity" in graph.limitations
+    assert graph.relationships == ()
+    assert graph.metrics == ()
+    for invalid in ("BAD", "１２３４５６７８"):
+        with pytest.raises(ValueError, match="8 ASCII digits"):
+            build_group_graph(invalid, 2025)
+
+
+def test_group_writer_fails_closed_before_writes_on_partial_schema(temp_engine):
+    from kreports.collector.report_document_collector import (
+        _persist_group_audit_graph,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, GroupEntityRecord
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Parent"),
+            GroupEntityRecord(
+                parent_corp_code="00000001", effective_year=2025,
+                entity_key="sentinel", original_name="Sentinel",
+                normalized_name="sentinel", resolution_status="unresolved",
+                resolution_reason="unresolved", source_rcept_no="r1",
+                source_table="SUB", source_ordinal=0,
+            ),
+        ])
+    with temp_engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE group_component_metrics "
+            "DROP COLUMN qsc_evidence_refs_json"
+        ))
+    assert _persist_group_audit_graph(
+        {"corp_code": "00000001", "bsns_year": 2025, "rcept_no": "r1"},
+        affiliates=[{"original_name": "Child", "source": "SUB"}],
+    ) == 0
+    with get_session() as session:
+        assert session.query(GroupEntityRecord.entity_key).all() == [
+            ("sentinel",),
+        ]
 
 
 def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
@@ -550,6 +739,15 @@ def test_quality_a_requires_complete_persisted_qsc_evidence(temp_engine):
                 qsc_threshold_pct=10, quality_status="usable",
             ))
     assert _group_audit_status_and_grade("00000001", 2025) == ("available", "A")
+    with get_session() as session:
+        session.add(GroupEntityRecord(
+            parent_corp_code="00000001", effective_year=2025,
+            entity_key="isolated", original_name="Isolated",
+            normalized_name="isolated", resolution_status="unresolved",
+            resolution_reason="unresolved", source_rcept_no="r1",
+            source_table="SUB", source_ordinal=9,
+        ))
+    assert _group_audit_status_and_grade("00000001", 2025) == ("partial", "D")
 
 
 def test_quality_a_never_combines_relationships_and_metrics_across_receipts(
@@ -641,6 +839,54 @@ def test_quality_a_accepts_qsc_from_one_complete_crossing_share(temp_engine):
     assert _group_audit_status_and_grade("00000001", 2025) == ("available", "A")
 
 
+@pytest.mark.parametrize("amount", [None, 999.0])
+def test_quality_a_rejects_missing_or_inconsistent_metric_numerator(
+    temp_engine,
+    amount,
+):
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        GroupComponentMetricRecord,
+        GroupEntityRecord,
+        GroupRelationshipRecord,
+    )
+    from kreports.quality.company_year import _group_audit_status_and_grade
+
+    with get_session() as session:
+        for ordinal, key in enumerate(("p", "c")):
+            session.add(GroupEntityRecord(
+                parent_corp_code="00000001", effective_year=2025,
+                entity_key=key, original_name=key, normalized_name=key,
+                resolution_status="resolved", resolution_reason="corp_code",
+                source_rcept_no="r1", source_table="SUB",
+                source_ordinal=ordinal,
+            ))
+        session.add(GroupRelationshipRecord(
+            parent_corp_code="00000001", effective_year=2025,
+            relationship_key="rel", parent_entity_key="p",
+            child_entity_key="c", relation_type="subsidiary",
+            ownership_pct=80, source_rcept_no="r1",
+            source_table="SUB", source_ordinal=1,
+        ))
+        session.add(GroupComponentMetricRecord(
+            parent_corp_code="00000001", effective_year=2025,
+            metric_identity="asset", source_rcept_no="r1",
+            entity_key="c", metric_key="assets", amount=amount, unit="KRW",
+            numerator_source_rcept_no="r1", numerator_source_table="SUB",
+            denominator_amount=100, denominator_unit="KRW",
+            denominator_source_rcept_no="fin-r1",
+            denominator_source_table="financials", fs_div="CFS",
+            period="2025", elimination_basis="before_elimination",
+            share_pct=12, qsc_status="qsc",
+            qsc_basis="asset_share_pct>=10.0",
+            qsc_evidence_refs_json='["fin-r1","r1"]',
+            qsc_threshold_pct=10, quality_status="usable",
+        ))
+    assert _group_audit_status_and_grade(
+        "00000001", 2025,
+    ) == ("partial", "D")
+
+
 def test_component_auditor_conflict_is_withheld_order_independently(temp_engine):
     from kreports.collector.report_document_collector import (
         _persist_group_audit_graph,
@@ -722,6 +968,91 @@ def test_canonical_only_graph_is_exposed_without_legacy_matrix(temp_engine):
     assert result["subsidiaries"][0]["name"] == "Child"
     assert result["group_graph"]["entities"][0]["parent_is_root"] is True
     assert result["data_quality"]["source"] == "canonical_group_audit_graph"
+
+
+def test_newer_canonical_year_is_not_suppressed_by_stale_legacy_matrix(
+    temp_engine,
+):
+    from kreports.analysis.group_audit import get_subsidiary_auditors
+    from kreports.collector.report_document_collector import (
+        _persist_group_audit_graph,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import BusinessAffiliateAuditor, Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Parent"),
+            Company(corp_code="00000002", corp_name="Child"),
+            BusinessAffiliateAuditor(
+                parent_corp_code="00000001",
+                parent_rcept_no="20250301000001",
+                bsns_year=2024, name="Stale Child",
+                corp_code="00000002", source="SUB", ordinal=0,
+            ),
+        ])
+    _persist_group_audit_graph(
+        {
+            "corp_code": "00000001", "bsns_year": 2025,
+            "rcept_no": "20260301000001",
+        },
+        affiliates=[{
+            "name": "Child", "original_name": "Child", "source": "SUB",
+        }],
+    )
+    result = get_subsidiary_auditors("00000001", slim=False)
+    assert result["bsns_year"] == 2025
+    assert result["group_graph"]["year"] == 2025
+    assert result["subsidiaries"][0]["name"] == "Child"
+    assert result["data_quality"]["source"] == "canonical_group_audit_graph"
+
+
+def test_legacy_auditor_is_exact_year_and_conflicts_fail_closed(temp_engine):
+    from kreports.analysis.group_audit import get_subsidiary_auditors
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        Auditor,
+        BusinessAffiliateAuditor,
+        Company,
+    )
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Parent"),
+            Company(corp_code="00000002", corp_name="Child"),
+            BusinessAffiliateAuditor(
+                parent_corp_code="00000001",
+                parent_rcept_no="20250301000001",
+                bsns_year=2024, name="Child", corp_code="00000002",
+                auditor_nm="Old Auditor", auditor_year=2023,
+                auditor_fs_div="CFS", source="SUB", ordinal=0,
+            ),
+        ])
+    result = get_subsidiary_auditors("00000001", slim=False)
+    assert result["subsidiaries"][0]["auditor"] is None
+    assert result["subsidiaries"][0]["auditor_gap_reason"] == (
+        "component_auditor_year_mismatch"
+    )
+
+    with get_session() as session:
+        matrix = session.query(BusinessAffiliateAuditor).one()
+        matrix.auditor_nm = "Auditor A"
+        matrix.auditor_year = 2024
+        session.add_all([
+            Auditor(
+                corp_code="00000002", bsns_year=2024, fs_div="CFS",
+                auditor_nm="Auditor A", rcept_no="a",
+            ),
+            Auditor(
+                corp_code="00000002", bsns_year=2024, fs_div="OFS",
+                auditor_nm="Auditor B", rcept_no="b",
+            ),
+        ])
+    conflicted = get_subsidiary_auditors("00000001", slim=False)
+    assert conflicted["subsidiaries"][0]["auditor"] is None
+    assert conflicted["subsidiaries"][0]["auditor_gap_reason"] == (
+        "component_auditor_conflict"
+    )
 
 
 def test_group_persistence_resolves_direct_parents_independent_of_row_order(
@@ -883,3 +1214,32 @@ def test_mermaid_omits_child_whose_explicit_parent_gap_is_not_rendered():
     rendered = render_answer("get_subsidiary_auditors", result)
     assert "P -->" not in rendered
     assert "1개 노드를 생략" in rendered
+
+
+def test_graph_rendering_escapes_hostile_html_and_diagram_metacharacters():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.renderers import render_answer
+
+    hostile = '\"><img src=x onerror=alert(1)> & [X] | {Y}\nnext'
+    row = {
+        "entity_key": "child", "parent_entity_key": "root",
+        "parent_is_root": True, "name": hostile, "relation": hostile,
+        "source_rcept_no": "r",
+    }
+    result = {
+        "subject": {"corp_name": hostile},
+        "bsns_year": 2025, "subsidiaries": [],
+        "group_graph": {"entities": [row], "truncated": False},
+        "data_quality": {"status": "usable"},
+    }
+    definition = build_answer_pack(
+        "get_subsidiary_auditors", result,
+    )["diagrams"][0]["definition"]
+    rendered = render_answer("get_subsidiary_auditors", result)
+    for output in (definition, rendered):
+        assert "<img" not in output
+        assert "&lt;img" in output
+        assert "&amp;" in output
+    assert "&#91;X&#93;" in definition
+    assert "<br/>next" in definition
+    assert "\\|" in rendered

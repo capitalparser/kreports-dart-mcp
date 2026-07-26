@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timezone
 import json
+import math
 from typing import Any
 
 from sqlalchemy import func
@@ -33,6 +34,7 @@ from kreports.db.models import (
     SourceDocument,
 )
 from kreports.runtime import require_runtime_write
+from kreports.analysis.group_graph import classify_qsc
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 from kreports.db.quality_snapshot import QUALITY_VERSION
 from kreports.analysis.audit_reporting import audit_fee_availability
@@ -564,6 +566,7 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
                     GroupComponentMetricRecord.source_rcept_no,
                     GroupComponentMetricRecord.entity_key,
                     GroupComponentMetricRecord.metric_key,
+                    GroupComponentMetricRecord.amount,
                     GroupComponentMetricRecord.unit,
                     GroupComponentMetricRecord.share_pct,
                     GroupComponentMetricRecord.denominator_amount,
@@ -644,7 +647,10 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             for entity in canonical_entities
         )
         graph_nodes = set(adjacency) | set(parents_by_child)
-        if len(graph_nodes - set(parents_by_child)) != 1:
+        graph_root_keys = graph_nodes - set(parents_by_child)
+        if len(graph_root_keys) != 1:
+            graph_conflict = True
+        if entity_keys - graph_root_keys - child_keys:
             graph_conflict = True
 
         def has_cycle(node: str, active: set[str], done: set[str]) -> bool:
@@ -672,14 +678,38 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
         )
         def metric_is_complete(metric) -> bool:
             try:
-                evidence_refs = set(json.loads(
+                raw_evidence_refs = json.loads(
                     metric.qsc_evidence_refs_json or "[]"
-                ))
-            except (TypeError, ValueError):
+                )
+                if (
+                    not isinstance(raw_evidence_refs, list)
+                    or any(
+                        not isinstance(item, str) or not item
+                        for item in raw_evidence_refs
+                    )
+                    or raw_evidence_refs != sorted(set(raw_evidence_refs))
+                    or len(raw_evidence_refs) > 8
+                ):
+                    return False
+                evidence_refs = set(raw_evidence_refs)
+                amount = float(metric.amount)
+                denominator = float(metric.denominator_amount)
+                share = float(metric.share_pct)
+                calculated_share = amount / denominator * 100
+            except (TypeError, ValueError, ZeroDivisionError):
                 return False
             return bool(
                 metric.source_rcept_no == selected_receipt
-                and metric.share_pct is not None
+                and all(math.isfinite(value) for value in (
+                    amount, denominator, share, calculated_share,
+                ))
+                and denominator > 0
+                and 0 <= calculated_share <= 100
+                and math.isclose(
+                    share, calculated_share,
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                )
                 and metric.unit
                 and metric.denominator_amount is not None
                 and metric.denominator_unit == metric.unit
@@ -711,34 +741,41 @@ def _group_audit_status_and_grade(corp_code: str, year: int) -> tuple[str, str]:
             metrics = {
                 key: values[0] for key, values in by_kind.items()
             }
-            statuses = {metric.qsc_status for metric in metrics.values()}
-            if len(statuses) != 1:
+            complete = {
+                key: metric_is_complete(metric)
+                for key, metric in metrics.items()
+            }
+            expected = classify_qsc(
+                (
+                    metrics["assets"].share_pct
+                    if complete.get("assets") else None
+                ),
+                (
+                    metrics["revenue"].share_pct
+                    if complete.get("revenue") else None
+                ),
+            )
+            expected_basis = "|".join(expected.basis)
+            if any(
+                metric.qsc_status != expected.status
+                or (metric.qsc_basis or "") != expected_basis
+                for metric in metrics.values()
+            ):
                 return False
-            status = next(iter(statuses))
-            if status == "qsc":
-                for metric_key, metric in metrics.items():
-                    expected_basis = (
-                        f"{'asset' if metric_key == 'assets' else 'revenue'}"
-                        "_share_pct>=10.0"
-                    )
-                    if (
-                        metric_is_complete(metric)
-                        and metric.share_pct >= 10.0
-                        and expected_basis in {
-                            item for item in (metric.qsc_basis or "").split("|")
-                            if item
-                        }
-                    ):
-                        return True
-                return False
-            if status == "not_qsc":
+            if expected.status == "qsc":
+                return any(
+                    complete.get(metric_key)
+                    and metric.share_pct >= 10.0
+                    for metric_key, metric in metrics.items()
+                )
+            if expected.status == "not_qsc":
                 if set(metrics) != {"assets", "revenue"}:
                     return False
                 return all(
-                    metric_is_complete(metric)
+                    complete[metric_key]
                     and metric.share_pct < 10.0
                     and not metric.qsc_basis
-                    for metric in metrics.values()
+                    for metric_key, metric in metrics.items()
                 )
             return False
 

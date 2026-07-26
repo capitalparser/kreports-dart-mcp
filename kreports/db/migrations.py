@@ -355,7 +355,8 @@ MIGRATIONS = (
               gap_reason VARCHAR(80),
               fetched_at DATETIME NOT NULL,
               CONSTRAINT uq_group_metric_source
-                UNIQUE (parent_corp_code, effective_year, metric_identity)
+                UNIQUE (parent_corp_code, effective_year, source_rcept_no,
+                        metric_identity)
             )
             """,
             """

@@ -1,6 +1,7 @@
 """User-facing narrative renderers for MCP tool responses."""
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
 
@@ -151,17 +152,21 @@ def _fmt_ownership(value: Any) -> str:
 
 
 def _mermaid_label(value: Any) -> str:
-    text = str(value or "-")
     return (
-        text.replace("\\", "\\\\")
-        .replace('"', '\\"')
+        html.escape(str(value or "-"), quote=True)
+        .replace("\\", "&#92;")
+        .replace("|", "&#124;")
+        .replace("[", "&#91;")
+        .replace("]", "&#93;")
+        .replace("{", "&#123;")
+        .replace("}", "&#125;")
         .replace("\n", "<br/>")
-        .replace("|", "/")
     )
 
 
 def _render_subsidiary_auditors(result: dict) -> str:
     subject = _subject_label(result)
+    safe_subject = _markdown_cell(subject)
     year = result.get("bsns_year")
     graph = result.get("group_graph") if isinstance(result.get("group_graph"), dict) else {}
     canonical = bool(graph.get("entities"))
@@ -177,7 +182,7 @@ def _render_subsidiary_auditors(result: dict) -> str:
     lines = [
         f"판정: {_status(result)}",
         "",
-        f"{subject} {year or ''}년 연결·투자 실체 조회 결과입니다. 연결 총자산은 {asset_total}백만원, 연결 매출은 {revenue_total}백만원 기준으로 각 실체의 기여도를 표시합니다.",
+        f"{safe_subject} {year or ''}년 연결·투자 실체 조회 결과입니다. 연결 총자산은 {asset_total}백만원, 연결 매출은 {revenue_total}백만원 기준으로 각 실체의 기여도를 표시합니다.",
         f"QSC 기준은 연결 총자산 또는 연결 총매출 대비 {qsc_threshold}% 이상입니다.",
         "",
         "구조도:",
@@ -270,9 +275,11 @@ def _render_subsidiary_auditors(result: dict) -> str:
 
 def _markdown_cell(value: Any) -> str:
     return (
-        str(value or "-")
+        html.escape(str(value or "-"), quote=True)
         .replace("\\", "\\\\")
         .replace("|", "\\|")
+        .replace("[", "&#91;")
+        .replace("]", "&#93;")
         .replace("\n", "<br/>")
     )
 

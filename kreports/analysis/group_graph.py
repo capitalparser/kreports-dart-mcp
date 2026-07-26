@@ -25,13 +25,16 @@ _RESOLUTION_REASONS = frozenset({
     "parent_not_registered", "synthetic_parent", "orphan_parent",
     "ambiguous_parent_name", "unresolved",
     "invalid_explicit_corp_code", "explicit_corp_code_name_conflict",
+    "self_entity_claim",
 })
 _METRIC_KEYS = frozenset({"assets", "revenue"})
+_METRIC_QUALITY_STATUSES = frozenset({"usable", "partial"})
 _QSC_BASES = frozenset({
     "asset_share_pct>=10.0",
     "revenue_share_pct>=10.0",
 })
 _MAX_EVIDENCE_REFS = 8
+_CORP_CODE_PATTERN = re.compile(r"^[0-9]{8}$")
 _ELIMINATION_BASES = frozenset({
     "before_elimination", "after_elimination", "not_disclosed",
 })
@@ -67,6 +70,11 @@ def _tuple_of_text(name: str, value: Any) -> None:
         raise TypeError(f"{name} must be a tuple")
     if any(not isinstance(item, str) or not item for item in value):
         raise TypeError(f"{name} entries must be non-empty strings")
+
+
+def is_valid_corp_code(value: Any) -> bool:
+    """Return whether value is a canonical eight-ASCII-digit DART corp code."""
+    return isinstance(value, str) and bool(_CORP_CODE_PATTERN.fullmatch(value))
 
 
 @dataclass(frozen=True)
@@ -250,10 +258,14 @@ class ComponentMetric:
             raise ValueError("share_pct must be between 0 and 100")
         if self.qsc_status not in _QSC_STATUSES:
             raise ValueError("invalid qsc_status")
+        if self.quality_status not in _METRIC_QUALITY_STATUSES:
+            raise ValueError("invalid quality_status")
         _tuple_of_text("qsc_basis", self.qsc_basis)
         _tuple_of_text("qsc_evidence_refs", self.qsc_evidence_refs)
         if not set(self.qsc_basis).issubset(_QSC_BASES):
             raise ValueError("invalid QSC basis")
+        if tuple(sorted(set(self.qsc_basis))) != self.qsc_basis:
+            raise ValueError("qsc_basis must be canonical and unique")
         if (
             tuple(sorted(set(self.qsc_evidence_refs)))
             != self.qsc_evidence_refs
@@ -265,6 +277,10 @@ class ComponentMetric:
             )
         if self.qsc_status == "qsc" and not self.qsc_basis:
             raise ValueError("qsc requires a threshold-crossing basis")
+        if self.qsc_status in {"qsc", "not_qsc"} and not (
+            self.qsc_evidence_refs
+        ):
+            raise ValueError("classified QSC requires evidence_refs")
         if self.qsc_status != "qsc" and self.qsc_basis:
             raise ValueError("only qsc may carry a threshold-crossing basis")
         if float(self.qsc_threshold_pct) != QSC_THRESHOLD_PCT:
@@ -279,6 +295,54 @@ class ComponentMetric:
             "denominator_source_table", "period", "gap_reason",
         ):
             _optional_text(name, getattr(self, name))
+        if (
+            self.numerator_source_rcept_no is not None
+            and self.numerator_source_rcept_no != self.source_rcept_no
+        ):
+            raise ValueError(
+                "numerator source receipt must match metric source receipt"
+            )
+        if self.share_pct is not None:
+            if self.amount is None or self.denominator_amount is None:
+                raise ValueError("share requires numerator and denominator")
+            if float(self.denominator_amount) <= 0:
+                raise ValueError("share requires a positive denominator")
+            if not self.unit or self.unit != self.denominator_unit:
+                raise ValueError("share requires comparable units")
+            if not all((
+                self.numerator_source_rcept_no,
+                self.numerator_source_table,
+                self.denominator_source_rcept_no,
+                self.denominator_source_table,
+                self.fs_div,
+                self.period,
+                self.elimination_basis,
+            )):
+                raise ValueError("share requires complete evidence")
+            if self.elimination_basis == "not_disclosed":
+                raise ValueError("share requires a disclosed elimination basis")
+            if not {
+                self.numerator_source_rcept_no,
+                self.denominator_source_rcept_no,
+            }.issubset(set(self.qsc_evidence_refs)):
+                raise ValueError("share evidence_refs omit source receipts")
+            calculated = (
+                float(self.amount) / float(self.denominator_amount) * 100
+            )
+            if (
+                not 0 <= calculated <= 100
+                or not math.isclose(
+                    float(self.share_pct),
+                    calculated,
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                )
+            ):
+                raise ValueError("share is inconsistent with source amounts")
+            if self.quality_status != "usable":
+                raise ValueError("computed share requires usable quality_status")
+        elif self.quality_status == "usable":
+            raise ValueError("usable quality_status requires a computed share")
 
 
 def compute_component_share(
@@ -563,7 +627,7 @@ def _graph_limitations(
         limitations.add("cycle_detected")
 
 
-_REQUIRED_COLUMNS = {
+GROUP_GRAPH_REQUIRED_COLUMNS = {
     "group_entities": {
         "parent_corp_code", "effective_year", "entity_key", "original_name",
         "normalized_name", "resolution_status", "resolution_reason",
@@ -623,10 +687,10 @@ def _validate_schema(read_engine) -> None:
     try:
         inspector = inspect(read_engine)
         tables = set(inspector.get_table_names())
-        missing = sorted(set(_REQUIRED_COLUMNS) - tables)
+        missing = sorted(set(GROUP_GRAPH_REQUIRED_COLUMNS) - tables)
         if missing:
             raise GroupGraphUnavailable(f"missing_schema:{','.join(missing)}")
-        for table_name, required in _REQUIRED_COLUMNS.items():
+        for table_name, required in GROUP_GRAPH_REQUIRED_COLUMNS.items():
             columns = {str(item["name"]) for item in inspector.get_columns(table_name)}
             missing_columns = sorted(required - columns)
             if missing_columns:
@@ -674,9 +738,18 @@ def _entity_from_row(row: dict[str, Any], *, requested_year: int) -> GroupEntity
     )
 
 
+def _evidence_refs_from_json(value: Any) -> tuple[str, ...]:
+    decoded = json.loads(str(value or "[]"))
+    if not isinstance(decoded, list):
+        raise ValueError("qsc_evidence_refs_json must contain a list")
+    return tuple(decoded)
+
+
 def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
     """Read one exact-year canonical graph and normalize corrupt rows closed."""
     _required_text("parent_corp_code", parent_corp_code)
+    if not is_valid_corp_code(parent_corp_code):
+        raise ValueError("parent_corp_code must contain exactly 8 ASCII digits")
     if not isinstance(year, int) or isinstance(year, bool):
         raise TypeError("year must be an integer")
     try:
@@ -692,6 +765,8 @@ def build_group_graph(parent_corp_code: str, year: int) -> GroupGraph:
 def latest_group_graph_year(parent_corp_code: str) -> int | None:
     """Return the newest canonical graph year without creating DB sidecars."""
     _required_text("parent_corp_code", parent_corp_code)
+    if not is_valid_corp_code(parent_corp_code):
+        raise ValueError("parent_corp_code must contain exactly 8 ASCII digits")
     try:
         with _group_read_engine() as read_engine:
             with read_engine.connect() as conn:
@@ -788,9 +863,7 @@ def _build_group_graph_unchecked(
             row["fs_div"], row["period"], row["elimination_basis"],
             row["share_pct"], str(row["qsc_status"]),
             tuple(filter(None, str(row["qsc_basis"] or "").split("|"))),
-            tuple(json.loads(
-                str(row["qsc_evidence_refs_json"] or "[]")
-            )),
+            _evidence_refs_from_json(row["qsc_evidence_refs_json"]),
             float(row["qsc_threshold_pct"]), str(row["quality_status"]),
             row["gap_reason"],
         )
@@ -802,8 +875,7 @@ def _build_group_graph_unchecked(
     for metric in metric_candidates:
         key = (metric.entity_key, metric.metric_key)
         if metric.entity_key not in known_entity_keys:
-            limitations.add("metric_unknown_entity")
-            continue
+            raise ValueError("metric references an unknown entity")
         if key in blocked_metric_keys:
             continue
         existing = metric_by_key.get(key)
@@ -821,6 +893,24 @@ def _build_group_graph_unchecked(
         metric_by_key.pop(key, None)
         blocked_metric_keys.add(key)
     metrics = tuple(metric_by_key.values())
+    metrics_by_entity: dict[str, dict[str, ComponentMetric]] = {}
+    for metric in metrics:
+        metrics_by_entity.setdefault(metric.entity_key, {})[
+            metric.metric_key
+        ] = metric
+    for entity_metrics in metrics_by_entity.values():
+        asset = entity_metrics.get("assets")
+        revenue = entity_metrics.get("revenue")
+        expected = classify_qsc(
+            asset.share_pct if asset else None,
+            revenue.share_pct if revenue else None,
+        )
+        if any(
+            metric.qsc_status != expected.status
+            or metric.qsc_basis != expected.basis
+            for metric in entity_metrics.values()
+        ):
+            raise ValueError("entity metric QSC snapshot is inconsistent")
     relationships_list: list[GroupRelationship] = []
     edge_claims: dict[tuple[str, str], tuple[str, float | None]] = {}
     for relationship in relationship_candidates:
@@ -845,6 +935,24 @@ def _build_group_graph_unchecked(
         relationships_list.append(relationship)
     relationships = tuple(relationships_list)
     _graph_limitations(list(relationships), limitations)
+    child_entity_keys = {
+        relationship.child_entity_key for relationship in relationships
+    }
+    root_entity_keys = {
+        relationship.parent_entity_key for relationship in relationships
+    } - child_entity_keys
+    if not root_entity_keys:
+        root_entity_keys = {
+            entity.entity_key for entity in entities
+            if entity.entity_key == f"parent:{parent_corp_code}"
+        }
+    if known_entity_keys - root_entity_keys - child_entity_keys:
+        limitations.add("isolated_entity")
+    if any(
+        entity.resolution_reason == "self_entity_claim"
+        for entity in entities
+    ):
+        limitations.add("self_entity_claim")
     parent_candidates = [
         entity for entity in entities
         if entity.resolved_corp_code == parent_corp_code

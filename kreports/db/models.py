@@ -721,7 +721,8 @@ class GroupComponentMetricRecord(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "parent_corp_code", "effective_year", "metric_identity",
+            "parent_corp_code", "effective_year", "source_rcept_no",
+            "metric_identity",
             name="uq_group_metric_source",
         ),
         Index("idx_group_metric_parent_year", "parent_corp_code", "effective_year"),
