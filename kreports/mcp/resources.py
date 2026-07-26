@@ -29,6 +29,10 @@ from kreports.quality.release_gate import (
 )
 from kreports.storage.evidence_blobs import EvidenceBlobStore
 from kreports.storage.raw_documents import RawDocumentStore
+from kreports.mcp.visual_contracts import (
+    VisualizationPackV1,
+    render_visualization_html,
+)
 
 
 DATASET_READINESS_URI = "kreports://dataset/readiness"
@@ -675,3 +679,17 @@ def render_resource(uri: object) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def render_visualization_resource(
+    pack: VisualizationPackV1 | dict[str, Any],
+) -> dict[str, str]:
+    """Return a self-contained rich resource without reading or writing the DB."""
+    validated = VisualizationPackV1.model_validate(pack)
+    if validated.resource_uri is None:  # pragma: no cover - model always derives it
+        raise ResourceRequestError("invalid_visualization_resource")
+    return {
+        "uri": validated.resource_uri,
+        "mimeType": "text/html; charset=utf-8",
+        "text": render_visualization_html(validated),
+    }

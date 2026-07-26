@@ -310,3 +310,29 @@ def test_auditor_renderers_print_confirmed_facts_with_source_lines():
         assert "공시에서 확인되는 내용" in text
         assert "공시 링크: https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260311000001" in text
         assert "감사인 관점 해석" in text
+
+
+def test_render_answer_adds_the_same_canonical_visual_table_for_plain_clients():
+    text = render_answer("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "events": [{"year": 2024, "topic": "수익인식", "status": "new"}],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert "| 연도 | 주제 | 상태 |" in text
+    assert "| 2024 | 수익인식 | new |" in text
+
+
+def test_render_answer_escapes_markdown_structure_from_visual_cells():
+    text = render_answer("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "events": [{
+            "year": 2024,
+            "topic": "x|y\n# injected",
+            "status": "new",
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert "x\\|y<br/># injected" in text
+    assert "\n# injected" not in text

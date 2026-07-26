@@ -568,7 +568,12 @@ def _render_kam_lifecycle(result: dict) -> str:
     ]
     if events:
         for event in events[:5]:
-            lines.append(f"- {event.get('year')}년 {event.get('topic')}: {event.get('status')} / {event.get('title') or 'KAM'}")
+            lines.append(
+                f"- {_markdown_cell(event.get('year'))}년 "
+                f"{_markdown_cell(event.get('topic'))}: "
+                f"{_markdown_cell(event.get('status'))} / "
+                f"{_markdown_cell(event.get('title') or 'KAM')}"
+            )
     else:
         lines.append("- 현재 로컬 캐시에서 KAM 본문을 찾지 못했습니다.")
     lines.append("")
@@ -1097,7 +1102,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         legacy_result.pop(field, None)
     detail: str | None = None
     if envelope.data_quality.status in {"missing", "error"}:
-        return _render_professional_envelope(envelope)
+        rendered = _render_professional_envelope(envelope)
+        return _append_visual_table(tool_name, result, rendered)
     if tool_name == "search_company":
         detail = _render_company_search(legacy_result)
     elif tool_name == "score_going_concern":
@@ -1132,7 +1138,44 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         detail = _render_peer_benchmark(legacy_result)
     elif tool_name == "build_audit_acceptance_pack":
         detail = _render_acceptance_pack(legacy_result)
-    return _render_professional_envelope(
+    rendered = _render_professional_envelope(
         envelope,
         detail=_sanitize_legacy_detail(detail) if detail else None,
     )
+    return _append_visual_table(tool_name, result, rendered)
+
+
+def _append_visual_table(
+    tool_name: str,
+    result: dict[str, Any],
+    narrative: str,
+) -> str:
+    """Append the validated canonical table used by every visual capability."""
+    visual_tools = {
+        "get_dcf_input_candidates",
+        "build_dcf_model_pack",
+        "compare_to_industry_multi",
+        "get_subsidiary_auditors",
+        "get_audit_history",
+        "compare_peer_audit_fees",
+        "get_kam_lifecycle",
+        "search_disclosure_events",
+    }
+    if tool_name not in visual_tools:
+        return narrative
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.visual_contracts import (
+        VisualizationPackV1,
+        render_visualization_markdown,
+    )
+
+    raw_pack = result.get("answer_pack")
+    if isinstance(raw_pack, dict):
+        pack = VisualizationPackV1.model_validate(raw_pack)
+    else:
+        built = build_answer_pack(tool_name, result)
+        if built is None:
+            return narrative
+        pack = VisualizationPackV1.model_validate(built)
+    table_markdown = render_visualization_markdown(pack, mermaid=False)
+    return f"{narrative}\n\n시각화 대체 표:\n\n{table_markdown}"

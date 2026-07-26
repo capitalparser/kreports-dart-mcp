@@ -34,14 +34,28 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         "get_quality_of_earnings_pack": _build_quality_pack,
         "get_investor_signals": _build_investor_signals_pack,
         "get_subsidiary_auditors": _build_subsidiary_pack,
+        "get_audit_history": _build_audit_fee_trend_pack,
+        "compare_peer_audit_fees": _build_audit_fee_benchmark_pack,
+        "get_kam_lifecycle": _build_kam_lifecycle_pack,
         "search_disclosure_events": _build_disclosure_events_pack,
         "search_audit_procedures": _build_audit_procedure_pack,
         "compare_to_industry_multi": _build_peer_benchmark_pack,
     }
     builder = builders.get(tool_name)
-    if builder is None:
-        return _build_generic_pack(tool_name, normalized_result)
-    return builder(normalized_result)
+    raw_pack = (
+        _build_generic_pack(tool_name, normalized_result)
+        if builder is None
+        else builder(normalized_result)
+    )
+    if raw_pack is None:
+        return None
+    from kreports.mcp.visual_contracts import build_visualization_pack
+
+    return build_visualization_pack(raw_pack).model_dump(
+        mode="json",
+        by_alias=True,
+        exclude_none=True,
+    )
 
 
 def _base_pack(title: str, result: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:
@@ -212,10 +226,27 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
             },
         ))
 
-    assumption_rows = [
-        {"metric": key, **(value if isinstance(value, dict) else {"value": value})}
-        for key, value in (result.get("candidate_assumptions") or {}).items()
-    ]
+    assumption_labels = {
+        "revenue_growth": "매출 성장률",
+        "operating_margin": "영업이익률",
+        "cash_conversion": "현금전환",
+    }
+    basis_labels = {
+        "historical_median": "과거 중앙값",
+        "operating_cf_to_net_income": "영업현금흐름 대비 순이익",
+    }
+    assumption_rows = []
+    for key, raw_value in (result.get("candidate_assumptions") or {}).items():
+        value = raw_value if isinstance(raw_value, dict) else {"value": raw_value}
+        assumption_rows.append({
+            "metric": assumption_labels.get(str(key), "기타 입력값"),
+            "value": value.get("value"),
+            "basis": (
+                basis_labels.get(str(value.get("basis")), "산정 근거 미확보")
+                if value.get("basis")
+                else "산정 근거 미확보"
+            ),
+        })
     if assumption_rows:
         pack["tables"].append(_table(
             "candidate_assumptions",
@@ -454,6 +485,110 @@ def _build_investor_signals_pack(result: dict[str, Any]) -> dict[str, Any]:
             "관찰 포인트",
             [("takeaway", "관찰 포인트")],
             [{"takeaway": item} for item in takeaways],
+        ))
+    return pack
+
+
+def _build_audit_fee_trend_pack(result: dict[str, Any]) -> dict[str, Any]:
+    pack = _base_pack(f"{_subject_label(result)} 감사보수 추이", result)
+    history = [
+        row for row in (result.get("history") or [])
+        if isinstance(row, dict)
+    ]
+    if history:
+        pack["tables"].append(_table(
+            "audit_fee_trend",
+            "감사보수·감사시간 추이",
+            [
+                ("year", "연도"),
+                ("audit_fee_m", "감사보수(백만원)"),
+                ("audit_hours", "감사시간(시간)"),
+                ("non_audit_fee_m", "비감사보수(백만원)"),
+                ("auditor_nm", "감사인"),
+            ],
+            history,
+        ))
+        pack["charts"].append(_chart(
+            "audit_fee_trend_chart",
+            "line",
+            "감사보수 추이",
+            data_ref="audit_fee_trend",
+            encodings={
+                "x": {"field": "year"},
+                "y": {"fields": ["audit_fee_m", "non_audit_fee_m"]},
+            },
+        ))
+    return pack
+
+
+def _build_audit_fee_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
+    pack = _base_pack(f"{_subject_label(result)} 감사보수 Peer 비교", result)
+    subject = result.get("subject_metrics")
+    peers = result.get("peers")
+    rows = []
+    if isinstance(subject, dict):
+        rows.append({"role": "subject", **subject})
+    for peer in peers if isinstance(peers, list) else []:
+        if isinstance(peer, dict):
+            rows.append({"role": "peer", **peer})
+    if rows:
+        pack["tables"].append(_table(
+            "audit_fee_peer_distribution",
+            "감사보수 Peer 분포",
+            [
+                ("role", "구분"),
+                ("corp_name", "회사"),
+                ("audit_fee_m", "감사보수(백만원)"),
+                ("audit_hours", "감사시간(시간)"),
+                ("non_audit_fee_m", "비감사보수(백만원)"),
+                ("nas_ratio", "비감사보수 비율"),
+            ],
+            rows,
+        ))
+        pack["charts"].append(_chart(
+            "audit_fee_peer_chart",
+            "bar",
+            "감사보수 Peer 분포",
+            data_ref="audit_fee_peer_distribution",
+            encodings={
+                "x": {"field": "corp_name"},
+                "y": {"field": "audit_fee_m"},
+                "series": {"field": "role"},
+            },
+        ))
+    return pack
+
+
+def _build_kam_lifecycle_pack(result: dict[str, Any]) -> dict[str, Any]:
+    pack = _base_pack(f"{_subject_label(result)} KAM lifecycle", result)
+    rows = [
+        event for event in (result.get("events") or [])
+        if isinstance(event, dict)
+    ]
+    if rows:
+        pack["tables"].append(_table(
+            "kam_lifecycle",
+            "KAM 생애주기",
+            [
+                ("year", "연도"),
+                ("topic", "주제"),
+                ("status", "상태"),
+                ("title", "KAM"),
+                ("reason_hint", "선정 이유"),
+                ("procedure_hint", "감사절차"),
+            ],
+            rows,
+        ))
+        pack["charts"].append(_chart(
+            "kam_lifecycle_chart",
+            "bar",
+            "KAM 생애주기",
+            data_ref="kam_lifecycle",
+            encodings={
+                "x": {"field": "year"},
+                "y": {"field": "status"},
+                "series": {"field": "topic"},
+            },
         ))
     return pack
 

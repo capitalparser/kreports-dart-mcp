@@ -219,3 +219,38 @@ def test_audit_procedure_answer_pack_exposes_links_with_sufficiency_warning():
     assert table["rows"][0]["source_kam"]["id"] == 7
     assert "navigation aid" in table["note"]
     assert "충분" in table["note"]
+
+
+def test_answer_pack_is_validated_visual_contract_for_all_capabilities():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.visual_contracts import VisualizationPackV1
+
+    pack = build_answer_pack("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "events": [{"year": 2024, "topic": "수익인식", "status": "new"}],
+        "data_quality": {"status": "usable"},
+    })
+
+    validated = VisualizationPackV1.model_validate(pack)
+    assert validated.version == "visualization_pack.v1"
+    assert validated.tables[0].id == "kam_lifecycle"
+    assert validated.charts[0].data_ref == "kam_lifecycle"
+
+
+def test_missing_visual_data_returns_explicit_table_and_limitation():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.visual_contracts import VisualizationPackV1
+
+    pack = build_answer_pack("compare_to_industry_multi", {
+        "subject": {"corp_name": "A"},
+        "results": {},
+        "data_quality": {"status": "missing"},
+        "limitations": ["Peer 표본을 확보하지 못했습니다."],
+    })
+
+    validated = VisualizationPackV1.model_validate(pack)
+    assert validated.status == "missing"
+    assert validated.tables
+    assert validated.tables[0].status == "missing"
+    assert validated.limitations
+    assert not validated.charts
