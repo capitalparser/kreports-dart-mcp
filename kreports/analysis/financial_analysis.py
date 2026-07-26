@@ -13,7 +13,7 @@ from kreports.db.models import Disclosure
 from kreports.analysis import queries as _queries
 
 from kreports.analysis._shared import _as_float, _avg, _clean_dict, _dedupe_confirmed_facts, _df_to_records, _has_db_table, _pct, _ratio
-from kreports.analysis.company_profile import _company_summary, _resolve_company_identifier, resolve_corp_code
+from kreports.analysis.company_profile import get_company_summary, resolve_company_identifier, resolve_corp_code
 
 
 def _annual_report_source(
@@ -366,7 +366,7 @@ def get_financial_snapshot(
           "row_count": int,
         }
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,
@@ -555,7 +555,7 @@ def get_investor_signals(
     DART 원문을 실시간으로 다시 긁기보다, 수집된 kreports DB 위에서
     반복 투자 점검에 바로 쓸 수 있는 신호를 만든다.
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,
@@ -563,7 +563,7 @@ def get_investor_signals(
             "error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다.",
         }
 
-    subject = _company_summary(corp_code)
+    subject = get_company_summary(corp_code)
     financial = get_financial_snapshot(corp_code, years=years, annual_only=True)
     rows = financial.get("rows", [])
     latest = rows[-1] if rows else {}
@@ -660,7 +660,7 @@ def score_going_concern(company: str) -> dict:
           "has_data": bool,
         }
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,
@@ -695,7 +695,7 @@ def detect_restatement(
           "count": int,
         }
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,
@@ -729,7 +729,7 @@ def get_quality_of_earnings_pack(
     from kreports.analysis.investor_quality import quality_of_earnings_pack
 
     corp_code = resolve_corp_code(company) or company
-    subject = _company_summary(corp_code)
+    subject = get_company_summary(corp_code)
     if not subject:
         return {"error": "company not found", "company": company}
     result = quality_of_earnings_pack(
@@ -753,7 +753,7 @@ def get_dcf_input_candidates(
     from kreports.analysis.dcf_inputs import dcf_input_candidates
 
     corp_code = resolve_corp_code(company) or company
-    subject = _company_summary(corp_code)
+    subject = get_company_summary(corp_code)
     if not subject:
         return {"error": "company not found", "company": company}
     result = dcf_input_candidates(
@@ -783,7 +783,7 @@ def search_disclosure_events(
     subject = None
     if company:
         corp_code = resolve_corp_code(company) or company
-        subject = _company_summary(corp_code)
+        subject = get_company_summary(corp_code)
         if not subject:
             return {"error": "company not found", "company": company}
     result = _search_events(

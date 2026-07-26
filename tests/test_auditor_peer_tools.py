@@ -420,12 +420,12 @@ def test_search_dataset_source_documents_marks_derived_evidence(temp_engine):
 
 
 def test_search_dataset_source_documents_reads_externalized_excerpt(temp_engine, tmp_path, monkeypatch):
-    import kreports.analysis.company_profile as company_profile_module
+    import kreports.analysis.search_adapter as search_adapter_module
     from kreports.db.engine import get_session
     from kreports.storage.raw_documents import RawDocumentStore, sha1_text
 
     store = RawDocumentStore(base_dir=tmp_path)
-    monkeypatch.setattr(company_profile_module, "RawDocumentStore", lambda: store)
+    monkeypatch.setattr(search_adapter_module, "RawDocumentStore", lambda: store)
     raw_content = "<DOCUMENT><P>외부 gzip 원문에서 수익인식 문단을 읽습니다.</P></DOCUMENT>"
     saved = store.write(
         corp_code="00000001",

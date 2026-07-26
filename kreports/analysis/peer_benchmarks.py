@@ -18,18 +18,18 @@ from kreports.analysis.peer import (
 )
 
 from kreports.analysis._shared import _clean_dict, _display_text, _has_db_column
-from kreports.analysis.company_profile import _get_industry_name, resolve_corp_code
+from kreports.analysis.company_profile import get_industry_name, resolve_corp_code
 from kreports.analysis.audit_reporting import (
-    _AUDIT_MATTER_KEYS,
-    _KAM_TOPIC_KEYWORDS,
-    _cache_quality_status,
-    _cached_years_for_sections,
-    _classify_audit_matter,
-    _evidence_audit_procedure_rows,
-    _evidence_report_section_rows,
-    _evidence_years_for_sections,
-    _kam_hint_coverage,
-    _topic_hits,
+    AUDIT_MATTER_KEYS,
+    KAM_TOPIC_KEYWORDS,
+    cache_quality_status,
+    cached_years_for_sections,
+    classify_audit_matter,
+    evidence_audit_procedure_rows,
+    evidence_report_section_rows,
+    evidence_years_for_sections,
+    kam_hint_coverage,
+    topic_hits,
 )
 
 
@@ -226,7 +226,7 @@ def get_industry_aggregates(
             ).scalar()
         if latest is None:
             industry_name = (
-                _get_industry_name(match_prefix) if matched_prefix_len == 2 else match_prefix
+                get_industry_name(match_prefix) if matched_prefix_len == 2 else match_prefix
             )
             return {
                 "induty_code": induty_code,
@@ -358,7 +358,7 @@ def get_industry_aggregates(
 
     # 업종명
     industry_name = (
-        _get_industry_name(match_prefix) if matched_prefix_len == 2 else match_prefix
+        get_industry_name(match_prefix) if matched_prefix_len == 2 else match_prefix
     )
 
     # 업종 내 전체 기업 수 vs 수집된 기업 수 (커버리지)
@@ -1154,7 +1154,7 @@ def compare_peer_accounting_policies(
 
     peer_coverage_pct = round(100.0 * len(peer_summaries) / len(peer_codes), 1) if peer_codes else 0.0
     data_quality = {
-        "status": _cache_quality_status(
+        "status": cache_quality_status(
             subject_count=len(subject_items),
             peer_total=len(peer_codes),
             peer_covered=len(peer_summaries),
@@ -1226,10 +1226,10 @@ def compare_peer_kam_topics(
         ).mappings().all()]
 
     events_by_corp: dict[str, list[dict]] = {}
-    topic_counts = {topic: 0 for topic in _KAM_TOPIC_KEYWORDS}
+    topic_counts = {topic: 0 for topic in KAM_TOPIC_KEYWORDS}
     restated = delayed = 0
     for row in rows:
-        row_topics = _topic_hits(row["report_nm"])
+        row_topics = topic_hits(row["report_nm"])
         for topic in row_topics:
             topic_counts[topic] += 1
         name = row["report_nm"] or ""
@@ -1269,7 +1269,7 @@ def compare_peer_kam_topics(
     section_source = "report_sections.audit_report"
     audit_report_sections_source = "audit_report_sections"
     if not section_rows:
-        section_rows = _evidence_report_section_rows(
+        section_rows = evidence_report_section_rows(
             corp_codes=all_codes,
             year=year,
             source_types=["audit_report"],
@@ -1333,7 +1333,9 @@ def compare_peer_kam_topics(
         if sections_by_corp.get(cc)
     }
     kam_body_rows = [r for r in section_rows if r.get("section_key") == "kam"]
-    kam_hint_coverage = _kam_hint_coverage([r for rows_for_corp in sections_by_corp.values() for r in rows_for_corp])
+    kam_coverage = kam_hint_coverage(
+        [row for company_rows in sections_by_corp.values() for row in company_rows]
+    )
     has_body = bool(kam_body_rows)
     limitations = (
         ["KAM paragraphs are based on cached audit_report body sections, not business-report summary tables."]
@@ -1354,7 +1356,7 @@ def compare_peer_kam_topics(
         )
 
     data_quality = {
-        "status": _cache_quality_status(
+        "status": cache_quality_status(
             subject_count=len([r for r in subject_sections if r.get("section_key") == "kam"]),
             peer_total=len(peer_codes),
             peer_covered=len(peer_sections),
@@ -1366,12 +1368,12 @@ def compare_peer_kam_topics(
         "peer_count": len(peer_codes),
         "total_audit_report_sections": len(section_rows),
         "total_kam_body_count": len(kam_body_rows),
-        "kam_reason_coverage": kam_hint_coverage["reason"],
-        "kam_procedure_coverage": kam_hint_coverage["procedure"],
+        "kam_reason_coverage": kam_coverage["reason"],
+        "kam_procedure_coverage": kam_coverage["procedure"],
         "business_report_summary_sections": len(summary_rows),
         "available_subject_kam_years": sorted(set(
-            _cached_years_for_sections(corp_code, "audit_report", "kam")
-            + _evidence_years_for_sections(corp_code, "audit_report", "kam")
+            cached_years_for_sections(corp_code, "audit_report", "kam")
+            + evidence_years_for_sections(corp_code, "audit_report", "kam")
         ), reverse=True),
         "coverage_note": (
             "KAM body comparison uses cached audit_report report_sections, with evidence_documents fallback. "
@@ -1402,8 +1404,8 @@ def compare_peer_kam_topics(
             "peer_companies_with_sections": len(peer_sections),
             "total_sections": len(section_rows),
             "kam_body_count": len(kam_body_rows),
-            "kam_reason_coverage": kam_hint_coverage["reason"],
-            "kam_procedure_coverage": kam_hint_coverage["procedure"],
+            "kam_reason_coverage": kam_coverage["reason"],
+            "kam_procedure_coverage": kam_coverage["procedure"],
             "source": audit_report_sections_source if has_body else "disclosure_events_only",
         },
         "data_quality": data_quality,
@@ -1467,15 +1469,15 @@ def compare_peer_audit_report_matters(
     with _engine_module.engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(
             stmt,
-            {"ccs": all_codes, "year": year, "section_keys": list(_AUDIT_MATTER_KEYS)},
+            {"ccs": all_codes, "year": year, "section_keys": list(AUDIT_MATTER_KEYS)},
         ).mappings().all()]
     row_source = "report_sections.audit_report"
     if not rows:
-        rows = _evidence_report_section_rows(
+        rows = evidence_report_section_rows(
             corp_codes=all_codes,
             year=year,
             source_types=["audit_report"],
-            section_keys=list(_AUDIT_MATTER_KEYS),
+            section_keys=list(AUDIT_MATTER_KEYS),
             limit=max(500, len(all_codes) * 8),
         )
         if rows:
@@ -1487,15 +1489,15 @@ def compare_peer_audit_report_matters(
             "peer_companies_with_section": 0,
             "total_sections": 0,
         }
-        for key in _AUDIT_MATTER_KEYS
+        for key in AUDIT_MATTER_KEYS
     }
     by_corp: dict[str, list[dict]] = {}
-    peer_corp_by_key: dict[str, set[str]] = {key: set() for key in _AUDIT_MATTER_KEYS}
+    peer_corp_by_key: dict[str, set[str]] = {key: set() for key in AUDIT_MATTER_KEYS}
     for row in rows:
         key = row["section_key"]
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
-        row.update(_classify_audit_matter(body, key))
+        row.update(classify_audit_matter(body, key))
         row.pop("body_text", None)
         counts[key]["total_sections"] += 1
         if row["corp_code"] == corp_code:
@@ -1504,7 +1506,7 @@ def compare_peer_audit_report_matters(
             peer_corp_by_key[key].add(row["corp_code"])
         by_corp.setdefault(row["corp_code"], []).append(row)
 
-    for key in _AUDIT_MATTER_KEYS:
+    for key in AUDIT_MATTER_KEYS:
         counts[key]["peer_companies_with_section"] = len(peer_corp_by_key[key])
         counts[key]["peer_coverage_pct"] = (
             round(100.0 * len(peer_corp_by_key[key]) / len(peer_codes), 1)
@@ -1520,22 +1522,22 @@ def compare_peer_audit_report_matters(
     subject_count = len(subject_matters)
     peer_covered = len(peer_sections_by_corp)
     data_quality = {
-        "status": _cache_quality_status(
+        "status": cache_quality_status(
             subject_count=subject_count,
             peer_total=len(peer_codes),
             peer_covered=peer_covered,
         ),
         "source": row_source,
         "requested_year": year,
-        "section_keys": list(_AUDIT_MATTER_KEYS),
+        "section_keys": list(AUDIT_MATTER_KEYS),
         "subject_section_count": subject_count,
         "peer_companies_with_sections": peer_covered,
         "peer_count": len(peer_codes),
         "total_sections": len(rows),
         "available_subject_years": sorted(set(
             year
-            for key in _AUDIT_MATTER_KEYS
-            for year in _cached_years_for_sections(corp_code, "audit_report", key)
+            for key in AUDIT_MATTER_KEYS
+            for year in cached_years_for_sections(corp_code, "audit_report", key)
         ), reverse=True),
         "interpretation": (
             "Emphasis/other-matter/going-concern paragraphs are audit-report "
@@ -1592,7 +1594,7 @@ def compare_peer_audit_procedures(
         rows = [dict(r) for r in conn.execute(stmt, {"year": year, "corp_codes": peer_codes}).mappings().all()]
     row_source = "audit_procedure_items"
     if not rows:
-        evidence_rows = _evidence_audit_procedure_rows(
+        evidence_rows = evidence_audit_procedure_rows(
             corp_codes=peer_codes,
             year=year,
             limit=max(500, len(peer_codes) * 10),

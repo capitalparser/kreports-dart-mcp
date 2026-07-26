@@ -11,7 +11,7 @@ from kreports.db.engine import get_session
 from kreports.db.models import BusinessAffiliateAuditor, Disclosure
 
 from kreports.analysis._shared import _clean_dict, _has_db_column, _has_db_table, _pct
-from kreports.analysis.company_profile import _resolve_company_identifier
+from kreports.analysis.company_profile import resolve_company_identifier
 
 
 _SUBSIDIARY_SLIM_FIELDS = (
@@ -211,7 +211,7 @@ def get_subsidiary_auditors(
           "truncated": bool,
         }
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,

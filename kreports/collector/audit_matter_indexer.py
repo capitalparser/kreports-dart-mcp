@@ -7,7 +7,7 @@ from datetime import datetime
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from kreports.analysis.audit_reporting import _classify_audit_matter
+from kreports.analysis.audit_reporting import classify_audit_matter
 from kreports.db.engine import get_session, init_db
 from kreports.db.models import AuditMatterItem, ReportSection
 
@@ -41,7 +41,7 @@ def rebuild_audit_matter_items(*, year: int | None = None, limit: int | None = N
         inserted = 0
         for row in rows:
             body = row.body_text or ""
-            classified = _classify_audit_matter(body, row.section_key)
+            classified = classify_audit_matter(body, row.section_key)
             values = {
                 "rcept_no": row.rcept_no,
                 "dcm_no": row.dcm_no,

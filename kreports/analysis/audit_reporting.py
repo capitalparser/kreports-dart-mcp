@@ -12,12 +12,14 @@ from kreports.analysis.audit_procedure_evidence import classify_audit_procedure_
 
 from kreports.analysis._shared import _clean_dict, _dedupe_confirmed_facts, _df_to_records, _display_text, _has_db_column, _has_db_table
 from kreports.analysis.company_profile import (
-    _company_filters,
-    _company_summary,
-    _get_industry_name,
-    _group_company_records,
-    _resolve_company_identifier,
+    get_company_summary,
+    get_industry_name,
+    resolve_company_identifier,
     resolve_corp_code,
+)
+from kreports.analysis.search_adapter import (
+    build_company_filters,
+    group_company_records,
 )
 
 
@@ -388,7 +390,7 @@ def get_accounting_policy(
           "item_count": int,
         } or None (수집된 사업보고서 없음)
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,
@@ -435,7 +437,7 @@ def get_audit_history(company: str) -> dict:
           "count": int,
         }
     """
-    corp_code = _resolve_company_identifier(company)
+    corp_code = resolve_company_identifier(company)
     if corp_code is None:
         return {
             "corp_code": None,
@@ -482,7 +484,7 @@ def get_audit_report_sections(
 ) -> dict:
     """Return cached audit-report body sections for a company/year."""
     corp_code = resolve_corp_code(company) or company
-    comp = _company_summary(corp_code)
+    comp = get_company_summary(corp_code)
     if not comp:
         return {"error": "company not found", "company": company}
 
@@ -702,7 +704,7 @@ def search_audit_report_matters(
     company_summary = None
     if company:
         corp_code = resolve_corp_code(company) or company
-        company_summary = _company_summary(corp_code)
+        company_summary = get_company_summary(corp_code)
         if not company_summary:
             return {"error": "company not found", "company": company}
 
@@ -813,7 +815,7 @@ def search_audit_report_matters(
             "corp_name": row.get("corp_name"),
             "market": row.get("market"),
             "induty_code": row.get("induty_code"),
-            "industry_name": _get_industry_name((row.get("induty_code") or "")[:2]) if row.get("induty_code") else "",
+            "industry_name": get_industry_name((row.get("induty_code") or "")[:2]) if row.get("induty_code") else "",
             "years": [],
             "matter_counts": {key: 0 for key in keys},
             "sections": [],
@@ -881,7 +883,7 @@ def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025
     from kreports.analysis.kam_lifecycle import kam_lifecycle_for_company
 
     corp_code = resolve_corp_code(company) or company
-    subject = _company_summary(corp_code)
+    subject = get_company_summary(corp_code)
     if not subject:
         return {"error": "company not found", "company": company}
     result = kam_lifecycle_for_company(corp_code, start_year=start_year, end_year=end_year)
@@ -899,7 +901,7 @@ def get_accounting_policy_changes(
     from kreports.analysis.policy_changes import accounting_policy_changes
 
     corp_code = resolve_corp_code(company) or company
-    subject = _company_summary(corp_code)
+    subject = get_company_summary(corp_code)
     if not subject:
         return {"error": "company not found", "company": company}
     result = accounting_policy_changes(
@@ -1030,7 +1032,7 @@ def search_audit_procedures(
         return {"error": "invalid procedure_type", "allowed": sorted(_AUDIT_PROCEDURE_TYPES)}
     limit = max(1, min(int(limit), 500))
     params: dict[str, object] = {"row_limit": limit * 10}
-    filters, subject = _company_filters(
+    filters, subject = build_company_filters(
         company=company,
         market=market,
         induty_prefix=induty_prefix,
@@ -1111,7 +1113,7 @@ def search_audit_procedures(
             text_value,
             kam_topic=row.get("kam_topic"),
         )
-    companies = _group_company_records(rows, limit=limit)
+    companies = group_company_records(rows, limit=limit)
     type_counts: dict[str, int] = {}
     topic_counts: dict[str, int] = {}
     for company_row in companies:
@@ -1150,3 +1152,16 @@ def search_audit_procedures(
     }
     result.update(_audit_procedures_evidence(result))
     return _clean_dict(result)
+
+
+# Stable audit-internal interfaces consumed by peer benchmarking.
+AUDIT_MATTER_KEYS = _AUDIT_MATTER_KEYS
+KAM_TOPIC_KEYWORDS = _KAM_TOPIC_KEYWORDS
+cache_quality_status = _cache_quality_status
+cached_years_for_sections = _cached_years_for_sections
+classify_audit_matter = _classify_audit_matter
+evidence_audit_procedure_rows = _evidence_audit_procedure_rows
+evidence_report_section_rows = _evidence_report_section_rows
+evidence_years_for_sections = _evidence_years_for_sections
+kam_hint_coverage = _kam_hint_coverage
+topic_hits = _topic_hits

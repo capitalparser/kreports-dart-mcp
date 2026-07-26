@@ -27,7 +27,6 @@ from kreports.analysis.company_profile import (
     get_company,
     resolve_corp_code,
     search_company,
-    search_dataset,
 )
 from kreports.analysis.financial_analysis import (
     detect_restatement,
@@ -39,7 +38,18 @@ from kreports.analysis.financial_analysis import (
     search_disclosure_events,
 )
 from kreports.analysis.group_audit import get_subsidiary_auditors
-from kreports.analysis.peer import resolve_fs_div_for_company, resolve_peers
+from kreports.analysis.audit_procedure_evidence import (
+    classify_audit_procedure_linkages,
+)
+from kreports.analysis.evidence import parent_rcept_no
+from kreports.analysis.peer import (
+    PeerResolution,
+    SectorGroup,
+    classify_sector,
+    confidence_band,
+    resolve_fs_div_for_company,
+    resolve_peers,
+)
 from kreports.analysis.peer_benchmarks import (
     _is_big4,
     _quantile,
@@ -57,8 +67,17 @@ from kreports.analysis.peer_benchmarks import (
     get_industry_audit_landscape,
     select_peer_group,
 )
+from kreports.analysis.search_adapter import search_dataset
 
 __all__ = [
+    "PeerResolution",
+    "SectorGroup",
+    "classify_sector",
+    "confidence_band",
+    "resolve_fs_div_for_company",
+    "resolve_peers",
+    "parent_rcept_no",
+    "classify_audit_procedure_linkages",
     "search_company",
     "get_company",
     "resolve_corp_code",
