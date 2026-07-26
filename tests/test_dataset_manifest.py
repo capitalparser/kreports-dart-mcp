@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import hashlib
 import json
 
 import pytest
@@ -9,6 +10,70 @@ from tests.factories import (
     disclosure_factory,
     evidence_document_factory,
 )
+
+_QUALITY_CONTENT_FIELDS = (
+    "corp_code",
+    "bsns_year",
+    "market",
+    "financial_core_status",
+    "auditor_status",
+    "audit_fee_status",
+    "policy_status",
+    "kam_status",
+    "audit_procedure_status",
+    "group_audit_status",
+    "investor_grade",
+    "auditor_grade",
+    "group_audit_grade",
+    "blockers_json",
+    "quality_version",
+)
+
+
+def _expected_quality_digest(rows: list[dict]) -> str:
+    ordered = sorted(
+        (
+            {
+                field: row[field]
+                for field in _QUALITY_CONTENT_FIELDS
+            }
+            for row in rows
+        ),
+        key=lambda row: (row["corp_code"], row["bsns_year"]),
+    )
+    payload = json.dumps(
+        ordered,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _quality_values(
+    corp_code: str,
+    bsns_year: int,
+    *,
+    investor_grade: str = "A",
+    quality_version: str = "v1",
+) -> dict:
+    return {
+        "corp_code": corp_code,
+        "bsns_year": bsns_year,
+        "market": "KOSPI",
+        "financial_core_status": "available",
+        "auditor_status": "available",
+        "audit_fee_status": "available",
+        "policy_status": "full_body",
+        "kam_status": "full_body",
+        "audit_procedure_status": "available",
+        "group_audit_status": "missing",
+        "investor_grade": investor_grade,
+        "auditor_grade": "A",
+        "group_audit_grade": "D",
+        "blockers_json": "[]",
+        "quality_version": quality_version,
+    }
 
 
 def _apply_contract(temp_engine) -> None:
@@ -60,10 +125,7 @@ def test_dataset_manifest_records_schema_version_counts_and_year_range(temp_engi
         "company_count": 2,
         "disclosure_count": 2,
         "evidence_document_count": 2,
-        "quality_snapshot_json": (
-            '{"coverage_year": null, "coverage_year_row_count": 0, '
-            '"quality_version": null, "row_count": 0}'
-        ),
+        "quality_snapshot_json": result["quality_snapshot_json"],
         "notes": "release candidate",
     }
 
@@ -87,9 +149,10 @@ def test_dataset_manifest_records_schema_version_counts_and_year_range(temp_engi
     assert stored_values["evidence_document_count"] == 2
     assert (stored_values["year_from"], stored_values["year_to"]) == (2021, 2024)
     assert json.loads(stored_values["quality_snapshot_json"]) == {
+        "content_digest": _expected_quality_digest([]),
         "coverage_year": None,
         "coverage_year_row_count": 0,
-        "quality_version": None,
+        "quality_version": "v1",
         "row_count": 0,
     }
 
@@ -222,21 +285,7 @@ def test_manifest_uses_business_year_and_snapshots_quality_ledger(
         )
         session.add(
             CompanyYearQuality(
-                corp_code="00126380",
-                bsns_year=2025,
-                market="KOSPI",
-                financial_core_status="available",
-                auditor_status="available",
-                audit_fee_status="available",
-                policy_status="full_body",
-                kam_status="full_body",
-                audit_procedure_status="available",
-                group_audit_status="missing",
-                investor_grade="A",
-                auditor_grade="A",
-                group_audit_grade="D",
-                blockers_json="[]",
-                quality_version="v1",
+                **_quality_values("00126380", 2025),
                 updated_at=datetime.now(timezone.utc),
             )
         )
@@ -245,8 +294,93 @@ def test_manifest_uses_business_year_and_snapshots_quality_ledger(
 
     assert (result["year_from"], result["year_to"]) == (2025, 2025)
     assert json.loads(result["quality_snapshot_json"]) == {
+        "content_digest": _expected_quality_digest(
+            [_quality_values("00126380", 2025)]
+        ),
         "coverage_year": 2025,
         "coverage_year_row_count": 1,
         "quality_version": "v1",
         "row_count": 1,
     }
+
+
+def test_manifest_quality_digest_is_stable_across_row_and_timestamp_order(
+    temp_engine,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    first_values = _quality_values("00000001", 2024)
+    second_values = _quality_values(
+        "00000002",
+        2025,
+        investor_grade="B",
+    )
+    with get_session() as session:
+        session.add_all(
+            [
+                CompanyYearQuality(
+                    **second_values,
+                    updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                ),
+                CompanyYearQuality(
+                    **first_values,
+                    updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+
+    first = json.loads(
+        write_dataset_manifest("quality-order-first")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        session.query(CompanyYearQuality).delete()
+        session.add_all(
+            [
+                CompanyYearQuality(
+                    **first_values,
+                    updated_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                ),
+                CompanyYearQuality(
+                    **second_values,
+                    updated_at=datetime(2030, 1, 2, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+    second = json.loads(
+        write_dataset_manifest("quality-order-second")[
+            "quality_snapshot_json"
+        ]
+    )
+
+    assert first.get("content_digest") == _expected_quality_digest(
+        [first_values, second_values]
+    )
+    assert second.get("content_digest") == first["content_digest"]
+
+
+def test_dataset_manifest_rejects_unsupported_quality_version(temp_engine):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values(
+                    "00126380",
+                    2025,
+                    quality_version="v2",
+                ),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="supported quality version",
+    ):
+        write_dataset_manifest("unsupported-quality-v2")

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, inspect
@@ -6,6 +6,7 @@ from sqlalchemy import func, inspect
 from kreports.db.engine import get_session
 from kreports.db.models import (
     AuditProcedureItem,
+    AuditFee,
     Company,
     BusinessAffiliateAuditor,
     FetchLog,
@@ -194,6 +195,72 @@ def test_kam_extraction_error_is_not_degraded_to_missing(
                 error_msg="parser failed",
             )
         )
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["kam"] == "error"
+    assert quality["statuses"]["audit_procedure"] == "error"
+    assert "kam_error" in quality["blockers"]
+
+
+def test_cached_default_all_extractor_error_outranks_missing(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            SourceDocument(
+                rcept_no="20250318000009",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                report_nm="감사보고서",
+                raw_content="<DOCUMENT>cached audit report</DOCUMENT>",
+                doc_hash="b" * 40,
+            )
+        )
+
+    def fail_cached_extraction(*_args, **_kwargs):
+        raise ValueError("cached parser failed")
+
+    monkeypatch.setattr(
+        collector_module,
+        "extract_document_features_from_content",
+        fail_cached_extraction,
+    )
+
+    extraction = collector_module.run_document_extractors(
+        year=2025,
+        source_type="audit_report",
+    )
+
+    assert extraction["failed"] == 1
+    with get_session() as session:
+        outcome = (
+            session.query(ExtractionRun)
+            .filter_by(
+                rcept_no="20250318000009",
+                extractor_name="all",
+                status="error",
+            )
+            .one()
+        )
+        assert outcome.error_msg == "cached parser failed"
 
     rebuild_company_year_quality(2025, 2025)
     quality = company_year_quality("00126380", 2025)
@@ -652,3 +719,120 @@ def test_audit_fee_quality_consumes_real_per_company_outcomes(temp_engine):
     assert company_year_quality("00999999", 2025)["statuses"][
         "audit_fee"
     ] == "missing"
+
+
+def test_audit_fee_later_success_timestamp_recovers_older_error(
+    temp_engine,
+):
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    now = datetime.now(timezone.utc)
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="recovered",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            AuditFee(
+                corp_code="00126380",
+                bsns_year=2025,
+                audit_fee_m=100,
+                audit_hours=200,
+                fetched_at=now,
+            )
+        )
+        session.add_all(
+            [
+                FetchLog(
+                    task_type="audit_fee",
+                    corp_code="00126380",
+                    year=2025,
+                    status="success",
+                    fetched_at=now,
+                ),
+                FetchLog(
+                    task_type="audit_fee",
+                    corp_code="00126380",
+                    year=2025,
+                    status="error",
+                    error_msg="older transport failure",
+                    fetched_at=now - timedelta(minutes=1),
+                ),
+            ]
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+
+    assert company_year_quality("00126380", 2025)["statuses"][
+        "audit_fee"
+    ] == "available"
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        (("error", "success"), "available"),
+        (("success", "error"), "error"),
+        (("error", "no_data"), "not_available"),
+    ],
+)
+def test_audit_fee_equal_timestamp_uses_later_fetch_log_id(
+    temp_engine,
+    statuses,
+    expected,
+):
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    now = datetime.now(timezone.utc)
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="same-timestamp",
+                market="KOSPI",
+            )
+        )
+        if "success" in statuses:
+            session.add(
+                AuditFee(
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    audit_fee_m=100,
+                    audit_hours=200,
+                    fetched_at=now,
+                )
+            )
+        session.add_all(
+            [
+                FetchLog(
+                    task_type="audit_fee",
+                    corp_code="00126380",
+                    year=2025,
+                    status=status,
+                    error_msg=(
+                        "transport failure"
+                        if status == "error"
+                        else None
+                    ),
+                    fetched_at=now,
+                )
+                for status in statuses
+            ]
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+
+    assert company_year_quality("00126380", 2025)["statuses"][
+        "audit_fee"
+    ] == expected

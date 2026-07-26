@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 import json
 
 import pytest
@@ -7,6 +8,44 @@ from kreports.db.engine import get_session
 from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
 from kreports.db.models import Company, CompanyYearQuality, DatasetManifest
 from typer.testing import CliRunner
+
+_QUALITY_CONTENT_FIELDS = (
+    "corp_code",
+    "bsns_year",
+    "market",
+    "financial_core_status",
+    "auditor_status",
+    "audit_fee_status",
+    "policy_status",
+    "kam_status",
+    "audit_procedure_status",
+    "group_audit_status",
+    "investor_grade",
+    "auditor_grade",
+    "group_audit_grade",
+    "blockers_json",
+    "quality_version",
+)
+
+
+def _expected_quality_digest(rows: list[CompanyYearQuality]) -> str:
+    ordered = sorted(
+        (
+            {
+                field: getattr(row, field)
+                for field in _QUALITY_CONTENT_FIELDS
+            }
+            for row in rows
+        ),
+        key=lambda row: (row["corp_code"], row["bsns_year"]),
+    )
+    payload = json.dumps(
+        ordered,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _seed_valid_manifest(temp_engine, *, year: int = 2025) -> None:
@@ -463,6 +502,107 @@ def test_release_gate_rejects_quality_snapshot_version_mismatch(
 
     assert "quality_snapshot_mismatch" in report["required_failures"]
     assert "release_manifest_unavailable" in report["required_failures"]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "tampered_value"),
+    [
+        ("investor_grade", "D"),
+        ("kam_status", "summary_only"),
+    ],
+)
+def test_release_gate_rejects_quality_content_tamper_without_count_change(
+    temp_engine,
+    monkeypatch,
+    field_name,
+    tampered_value,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        setattr(row, field_name, tampered_value)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "quality_snapshot_mismatch" in report["required_failures"]
+    assert "release_manifest_unavailable" in report["required_failures"]
+
+
+def test_release_gate_rejects_matching_snapshot_for_unsupported_version(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        quality_row = session.get(
+            CompanyYearQuality,
+            ("00126380", 2025),
+        )
+        manifest = session.get(DatasetManifest, "release-v1")
+        assert quality_row is not None
+        assert manifest is not None
+        quality_row.quality_version = "v2"
+        session.flush()
+        snapshot = json.loads(manifest.quality_snapshot_json)
+        snapshot["quality_version"] = "v2"
+        snapshot["content_digest"] = _expected_quality_digest(
+            [quality_row]
+        )
+        manifest.quality_snapshot_json = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert "quality_version_unsupported" in report["required_failures"]
+    assert "release_manifest_unavailable" in report["required_failures"]
+
+
+def test_release_gate_accepts_matching_quality_content_digest(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+    )
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        manifest = session.get(DatasetManifest, "release-v1")
+        assert manifest is not None
+        snapshot = json.loads(manifest.quality_snapshot_json)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert snapshot.get("content_digest")
+    assert "quality_snapshot_mismatch" not in report["required_failures"]
+    assert "release_manifest_unavailable" not in report[
+        "required_failures"
+    ]
+    assert report["ok"] is True
 
 
 def test_release_gate_rejects_quality_snapshot_row_count_mismatch(

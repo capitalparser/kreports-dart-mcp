@@ -13,6 +13,11 @@ from kreports.analysis.readiness import (
 )
 from kreports.db.engine import get_session
 from kreports.db.migrations import MIGRATIONS, _checksum
+from kreports.db.quality_snapshot import (
+    QUALITY_CONTENT_FIELDS,
+    QUALITY_VERSION,
+    quality_content_digest,
+)
 from kreports.runtime import is_readonly_mode
 
 
@@ -186,15 +191,17 @@ def _runtime_schema_state() -> tuple[
                 counts_valid = manifest_counts == live_counts
                 if manifest_row and not counts_valid:
                     failures.append("release_manifest_counts_mismatch")
-                quality_row_count = int(
+                quality_rows = list(
                     session.execute(
                         text(
-                            "SELECT COUNT(*) "
-                            "FROM company_year_quality"
+                            "SELECT "
+                            + ", ".join(QUALITY_CONTENT_FIELDS)
+                            + " FROM company_year_quality "
+                            "ORDER BY corp_code, bsns_year"
                         )
-                    ).scalar()
-                    or 0
+                    ).mappings()
                 )
+                quality_row_count = len(quality_rows)
                 live_coverage_year_value = session.execute(
                     text(
                         "SELECT MAX(bsns_year) "
@@ -221,24 +228,24 @@ def _runtime_schema_state() -> tuple[
                     if live_coverage_year is not None
                     else 0
                 )
-                quality_versions = [
-                    str(value)
-                    for value in session.execute(
-                        text(
-                            "SELECT DISTINCT quality_version "
-                            "FROM company_year_quality "
-                            "ORDER BY quality_version"
-                        )
-                    ).scalars()
-                ]
+                quality_versions = sorted(
+                    {
+                        str(row["quality_version"])
+                        for row in quality_rows
+                    }
+                )
+                live_quality_version = (
+                    quality_versions[0]
+                    if len(quality_versions) == 1
+                    else QUALITY_VERSION
+                    if not quality_versions
+                    else None
+                )
                 live_quality_snapshot = {
+                    "content_digest": quality_content_digest(quality_rows),
                     "coverage_year": live_coverage_year,
                     "coverage_year_row_count": coverage_year_row_count,
-                    "quality_version": (
-                        quality_versions[0]
-                        if len(quality_versions) == 1
-                        else None
-                    ),
+                    "quality_version": live_quality_version,
                     "row_count": quality_row_count,
                 }
                 try:
@@ -251,10 +258,20 @@ def _runtime_schema_state() -> tuple[
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     manifest_quality_snapshot = None
+                quality_version_supported = (
+                    (
+                        not quality_versions
+                        or quality_versions == [QUALITY_VERSION]
+                    )
+                    and isinstance(manifest_quality_snapshot, dict)
+                    and manifest_quality_snapshot.get("quality_version")
+                    == QUALITY_VERSION
+                )
+                if manifest_row and not quality_version_supported:
+                    failures.append("quality_version_unsupported")
                 quality_snapshot_valid = (
-                    len(quality_versions) <= 1
-                    and manifest_quality_snapshot
-                    == live_quality_snapshot
+                    quality_version_supported
+                    and manifest_quality_snapshot == live_quality_snapshot
                 )
                 if manifest_row and not quality_snapshot_valid:
                     failures.append("quality_snapshot_mismatch")

@@ -19,6 +19,11 @@ from kreports.db.models import (
     Financial,
     FinancialFactCompact,
 )
+from kreports.db.quality_snapshot import (
+    QUALITY_CONTENT_FIELDS,
+    QUALITY_VERSION,
+    quality_content_digest,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -382,26 +387,33 @@ def write_dataset_manifest(
             evidence_document_count = session.scalar(
                 select(func.count()).select_from(EvidenceDocument)
             )
-            quality_row_count = int(
-                session.scalar(
-                    select(func.count()).select_from(CompanyYearQuality)
-                )
-                or 0
+            quality_rows = list(
+                session.execute(
+                    select(
+                        *(
+                            getattr(CompanyYearQuality, field)
+                            for field in QUALITY_CONTENT_FIELDS
+                        )
+                    ).order_by(
+                        CompanyYearQuality.corp_code,
+                        CompanyYearQuality.bsns_year,
+                    )
+                ).mappings()
             )
+            quality_row_count = len(quality_rows)
             quality_coverage_year = session.scalar(
                 select(func.max(CompanyYearQuality.bsns_year))
             )
-            quality_versions = list(
-                session.scalars(
-                    select(CompanyYearQuality.quality_version)
-                    .distinct()
-                    .order_by(CompanyYearQuality.quality_version)
-                )
+            quality_versions = sorted(
+                {
+                    str(row["quality_version"])
+                    for row in quality_rows
+                }
             )
-            if quality_row_count and len(quality_versions) != 1:
+            if quality_versions and quality_versions != [QUALITY_VERSION]:
                 raise RuntimeError(
-                    "company-year quality ledger must have one quality_version "
-                    "before writing a dataset manifest"
+                    "company-year quality ledger must use supported quality "
+                    f"version {QUALITY_VERSION}"
                 )
             quality_coverage_year_row_count = (
                 int(
@@ -419,6 +431,7 @@ def write_dataset_manifest(
                 else 0
             )
             quality_snapshot = {
+                "content_digest": quality_content_digest(quality_rows),
                 "coverage_year": (
                     int(quality_coverage_year)
                     if quality_coverage_year is not None
@@ -427,11 +440,7 @@ def write_dataset_manifest(
                 "coverage_year_row_count": (
                     quality_coverage_year_row_count
                 ),
-                "quality_version": (
-                    str(quality_versions[0])
-                    if quality_versions
-                    else None
-                ),
+                "quality_version": QUALITY_VERSION,
                 "row_count": quality_row_count,
             }
             year_bounds = (

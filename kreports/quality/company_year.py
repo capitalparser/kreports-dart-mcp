@@ -32,9 +32,9 @@ from kreports.db.models import (
 )
 from kreports.runtime import require_runtime_write
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
+from kreports.db.quality_snapshot import QUALITY_VERSION
 
 
-QUALITY_VERSION = "v1"
 ANNUAL_CORE_YEARS_FOR_A = 5
 ANNUAL_CORE_YEARS_FOR_B = 3
 FULL_BODY_MIN_CHARS = 120
@@ -234,6 +234,33 @@ def _fetch_outcome(
     return None
 
 
+def _latest_fetch_outcome(
+    corp_code: str,
+    year: int,
+    task_types: tuple[str, ...],
+) -> str | None:
+    with get_session() as session:
+        latest = (
+            session.query(FetchLog.status)
+            .filter(
+                FetchLog.corp_code == corp_code,
+                FetchLog.year == year,
+                FetchLog.task_type.in_(task_types),
+            )
+            .order_by(
+                FetchLog.fetched_at.desc(),
+                FetchLog.id.desc(),
+            )
+            .first()
+        )
+        latest_status = str(latest.status) if latest else None
+    if latest_status == "error":
+        return "error"
+    if latest_status == "no_data":
+        return "not_available"
+    return None
+
+
 def _auditor_status(corp_code: str, year: int) -> str:
     fetch_outcome = _fetch_outcome(corp_code, year, ("auditor", "auditors"))
     if fetch_outcome == "error":
@@ -255,9 +282,11 @@ def _auditor_status(corp_code: str, year: int) -> str:
 
 
 def _audit_fee_status(corp_code: str, year: int) -> str:
-    fetch_outcome = _fetch_outcome(corp_code, year, ("audit_fee", "audit_fees"))
-    if fetch_outcome == "error":
-        return "error"
+    fetch_outcome = _latest_fetch_outcome(
+        corp_code,
+        year,
+        ("audit_fee", "audit_fees"),
+    )
     with get_session() as session:
         row = (
             session.query(AuditFee.audit_fee_m, AuditFee.audit_hours)
@@ -267,6 +296,8 @@ def _audit_fee_status(corp_code: str, year: int) -> str:
             )
             .first()
         )
+    if fetch_outcome == "error":
+        return "error"
     if row and row.audit_fee_m is not None and row.audit_hours is not None:
         return "available"
     if row:
@@ -375,6 +406,7 @@ def _kam_and_procedure_status(corp_code: str, year: int) -> tuple[str, str]:
                 SourceDocument.rcept_no == selected_receipt,
                 ExtractionRun.extractor_name.in_(
                     (
+                        "all",
                         "sections",
                         "document_features",
                         "kam_sections",
