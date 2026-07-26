@@ -22,6 +22,15 @@ import pytest
 from kreports.mcp.tools import ALL_TOOLS, HANDLERS, call_tool
 
 
+def test_new_catalog_and_dispatch_imports_remain_compatible():
+    from kreports.mcp.catalog import TOOL_CATALOG, ToolSpec
+    from kreports.mcp.dispatch import dispatch_tool, list_mcp_tools
+
+    assert all(isinstance(spec, ToolSpec) for spec in TOOL_CATALOG.values())
+    assert [tool.name for tool in list_mcp_tools()] == [tool.name for tool in ALL_TOOLS]
+    assert callable(dispatch_tool)
+
+
 PROJECT_ROOT = Path(__file__).parent.parent
 
 

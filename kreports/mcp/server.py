@@ -13,7 +13,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from kreports.mcp.tools import ALL_TOOLS, call_tool
+from kreports.mcp.dispatch import dispatch_tool, list_mcp_tools
 from kreports.runtime import runtime_mode
 
 logging.basicConfig(
@@ -28,7 +28,7 @@ server = Server("kreports")
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """MCP 클라이언트에 사용 가능한 도구 목록을 알린다."""
-    return ALL_TOOLS
+    return list_mcp_tools()
 
 
 @server.call_tool()
@@ -40,10 +40,11 @@ async def handle_call_tool(name: str, arguments: dict):
         runtime_mode(),
         sorted((arguments or {}).keys()),
     )
-    result_json = call_tool(name, arguments)
+    envelope = dispatch_tool(name, arguments)
+    result = envelope.model_dump(mode="json")
+    result_json = json.dumps(result, ensure_ascii=False)
     logger.info("call_tool_done: %s bytes=%d", name, len(result_json))
-    result = json.loads(result_json)
-    answer = result.get("answer") if isinstance(result, dict) else None
+    answer = result.get("answer")
     if isinstance(answer, str) and answer.strip():
         return [TextContent(type="text", text=answer)], result
     return result

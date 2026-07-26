@@ -208,8 +208,8 @@ def test_direct_contract_models_reject_coercion_and_unknown_fields():
         EvidenceRefV1(source_label="DART", source_url="https://dart.fss.or.kr/", unexpected=True)
 
 
-def test_fastmcp_wrap_matches_legacy_wrapper_answer_pack_and_narrative():
-    from kreports.mcp._handlers import _wrap
+def test_envelope_matches_legacy_wrapper_answer_pack_and_narrative():
+    from kreports.mcp.contracts import build_answer_envelope
     from kreports.mcp.tools import _attach_meta
 
     payload = {
@@ -221,10 +221,10 @@ def test_fastmcp_wrap_matches_legacy_wrapper_answer_pack_and_narrative():
     }
 
     legacy = _attach_meta("get_business_overview", payload)
-    fastmcp = _wrap("get_business_overview", payload).model_dump(by_alias=True)
+    envelope = build_answer_envelope("get_business_overview", legacy)
 
-    assert fastmcp["answer"] == legacy["answer"]
-    assert fastmcp["answer_pack"] == legacy["answer_pack"]
+    assert envelope.answer == legacy["answer"]
+    assert envelope.answer_pack == legacy["answer_pack"]
 
 
 def test_missing_accounting_policy_cache_does_not_render_zero_findings_or_internal_schema():

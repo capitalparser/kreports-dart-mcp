@@ -7,6 +7,14 @@ import json
 from kreports.mcp.tools import ALL_TOOLS, HANDLERS, call_tool
 
 
+def test_compatibility_exports_are_generated_from_the_single_catalog():
+    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.dispatch import list_mcp_tools
+
+    assert ALL_TOOLS == list_mcp_tools()
+    assert list(HANDLERS) == list(TOOL_CATALOG)
+
+
 def test_compare_to_industry_multi_in_all_tools():
     names = [t.name for t in ALL_TOOLS]
     assert "compare_to_industry_multi" in names
