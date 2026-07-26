@@ -5,14 +5,19 @@ import json
 from typing import Any, Callable
 
 from kreports.mcp.catalog import TOOL_CATALOG
-from kreports.mcp.dispatch import _attach_meta, legacy_result, list_mcp_tools
+from kreports.mcp.dispatch import (
+    _attach_meta,
+    legacy_result,
+    list_mcp_tools,
+    raw_result,
+)
 
 
 ALL_TOOLS = list_mcp_tools()
 
 
 def _compat_handler(name: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    return lambda arguments: legacy_result(name, arguments)
+    return lambda arguments: raw_result(name, arguments)
 
 
 HANDLERS = {name: _compat_handler(name) for name in TOOL_CATALOG}

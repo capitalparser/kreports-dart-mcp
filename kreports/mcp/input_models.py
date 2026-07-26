@@ -26,6 +26,31 @@ class ToolInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="before")
+    @classmethod
+    def trim_string_arguments(cls, value):
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: item.strip() if isinstance(item, str) else item
+            for key, item in value.items()
+        }
+
+    @model_validator(mode="after")
+    def reject_blank_required_strings(self):
+        blank_fields = [
+            name
+            for name, field in type(self).model_fields.items()
+            if field.is_required()
+            and isinstance(getattr(self, name), str)
+            and not getattr(self, name)
+        ]
+        if blank_fields:
+            raise ValueError(
+                f"{', '.join(blank_fields)} 값은 비어 있을 수 없습니다."
+            )
+        return self
+
 
 class SearchCompanyInput(ToolInput):
     query: str = Field(

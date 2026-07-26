@@ -25,6 +25,16 @@ from kreports.mcp.contracts import (
     enrich_answer_response,
 )
 
+_MAX_TOOL_NAME_LENGTH = 120
+
+
+class ArgumentValidationError(ValueError):
+    """Bounded public argument error, distinct from handler ValueError."""
+
+
+def _bounded_tool_name(name: object) -> str:
+    return str(name)[:_MAX_TOOL_NAME_LENGTH]
+
 
 def _to_iso(value: Any) -> str | None:
     if value is None:
@@ -189,32 +199,41 @@ def _safe_exception_message(
     return message
 
 
-def _validated_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+def raw_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate once and return the unmodified domain handler result."""
     from kreports.mcp.catalog import TOOL_CATALOG
 
     spec = TOOL_CATALOG.get(name)
     if spec is None:
-        raise LookupError(f"Unknown tool: {name}")
+        raise LookupError(f"Unknown tool: {_bounded_tool_name(name)}")
     try:
         validated = spec.input_model.model_validate(arguments or {})
     except ValidationError as exc:
-        raise ValueError(_bounded_validation_message(exc)) from None
+        raise ArgumentValidationError(_bounded_validation_message(exc)) from None
     result = spec.handler(validated)
     if not isinstance(result, dict):
         result = {"value": result}
-    return _attach_meta(name, result)
+    return result
+
+
+def _enriched_result(
+    name: str,
+    arguments: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return _attach_meta(name, raw_result(name, arguments))
 
 
 def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelopeV1:
     """Validate once, invoke once, and always return the v1 answer envelope."""
+    public_name = _bounded_tool_name(name)
     try:
-        result = _validated_result(name, arguments)
-        return build_answer_envelope(name, result)
-    except (LookupError, ValueError) as exc:
-        return _error_envelope(name, str(exc))
+        result = _enriched_result(name, arguments)
+        return build_answer_envelope(public_name, result)
+    except (LookupError, ArgumentValidationError) as exc:
+        return _error_envelope(public_name, str(exc))
     except Exception as exc:
         return _error_envelope(
-            name,
+            public_name,
             f"Internal error: {_safe_exception_message(exc, arguments)}",
         )
 
@@ -222,12 +241,15 @@ def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelope
 def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     """Compatibility result retaining domain fields for existing Python callers."""
     try:
-        return _validated_result(name, arguments)
+        return _enriched_result(name, arguments)
     except LookupError:
         from kreports.mcp.catalog import TOOL_CATALOG
 
-        return {"error": f"Unknown tool: {name}", "available": list(TOOL_CATALOG)}
-    except ValueError as exc:
+        return {
+            "error": f"Unknown tool: {_bounded_tool_name(name)}",
+            "available": list(TOOL_CATALOG),
+        }
+    except ArgumentValidationError as exc:
         return {"error": str(exc)}
     except Exception as exc:
         return {

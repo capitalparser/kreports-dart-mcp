@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import hashlib
+import json
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from kreports.mcp.contracts import AnswerEnvelopeV1
 
@@ -42,6 +44,7 @@ EXPECTED_TOOL_NAMES = [
     "build_audit_acceptance_pack",
     "get_industry_audit_landscape",
 ]
+EXPECTED_INTERFACE_SHA256 = "fe45426b80da6ccf28255f58e378eb94e7636e89cba17bbb7d88e46c7ea4e11c"
 
 
 MINIMAL_ARGUMENTS = {
@@ -97,6 +100,29 @@ def test_catalog_is_complete_ordered_and_immutable():
         TOOL_CATALOG["search_company"].name = "changed"
 
 
+def test_generated_tool_interface_keeps_the_pre_refactor_snapshot_hash():
+    from kreports.mcp.dispatch import list_mcp_tools
+
+    snapshot = []
+    for tool in list_mcp_tools():
+        snapshot.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.inputSchema,
+                "annotations": (
+                    tool.annotations.model_dump(mode="json", exclude_none=False)
+                    if tool.annotations
+                    else None
+                ),
+            }
+        )
+    payload = (
+        json.dumps(snapshot, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    assert hashlib.sha256(payload).hexdigest() == EXPECTED_INTERFACE_SHA256
+
+
 def test_user_api_key_is_secret_and_not_disclosed():
     from kreports.mcp.input_models import FetchDisclosureOnDemandInput
 
@@ -111,30 +137,98 @@ def test_user_api_key_is_secret_and_not_disclosed():
     assert model.user_dart_api_key.get_secret_value() == raw_secret
 
 
-def test_user_api_key_is_redacted_even_when_fetch_dependency_echoes_it(monkeypatch):
+@pytest.mark.parametrize("exception_type", [ValueError, RuntimeError])
+def test_user_api_key_is_redacted_on_every_compatibility_surface(
+    monkeypatch,
+    exception_type,
+):
     from dataclasses import replace
+    import asyncio
 
     from kreports.mcp.catalog import TOOL_CATALOG
     from kreports.mcp.dispatch import dispatch_tool
+    from kreports.mcp.server import handle_call_tool
+    from kreports.mcp.tools import call_tool
 
     raw_secret = "task7-dependency-echo-secret"
     original = TOOL_CATALOG["fetch_disclosure_on_demand"]
 
     def echoing_failure(_args):
-        raise RuntimeError(f"upstream rejected {raw_secret}")
+        raise exception_type(f"upstream rejected {raw_secret}")
 
     monkeypatch.setitem(
         TOOL_CATALOG,
         "fetch_disclosure_on_demand",
         replace(original, handler=echoing_failure),
     )
-    result = dispatch_tool(
-        "fetch_disclosure_on_demand",
-        {"rcept_no": "20250711000001", "user_dart_api_key": raw_secret},
+    arguments = {
+        "rcept_no": "20250711000001",
+        "user_dart_api_key": raw_secret,
+    }
+    envelope_json = dispatch_tool(
+        "fetch_disclosure_on_demand", arguments
+    ).model_dump_json()
+    legacy_json = call_tool("fetch_disclosure_on_demand", arguments)
+    stdio_result = asyncio.run(
+        handle_call_tool("fetch_disclosure_on_demand", arguments)
     )
-    serialized = result.model_dump_json()
-    assert raw_secret not in serialized
-    assert "[REDACTED]" in serialized
+    stdio_json = json.dumps(stdio_result, ensure_ascii=False, default=str)
+    for serialized in (envelope_json, legacy_json, stdio_json):
+        assert raw_secret not in serialized
+        assert "[REDACTED]" in serialized
+
+
+def test_compat_handlers_return_raw_domain_result_and_trim_required_strings():
+    from kreports.mcp.tools import HANDLERS, call_tool
+
+    raw = HANDLERS["search_company"]({"query": "  __task7_no_such_company__  "})
+    assert raw == {
+        "query": "__task7_no_such_company__",
+        "count": 0,
+        "results": [],
+    }
+    assert "_meta" not in raw
+    assert "answer" not in raw
+    assert "answer_pack" not in raw
+
+    enriched = json.loads(
+        call_tool("search_company", {"query": "  __task7_no_such_company__  "})
+    )
+    assert enriched["query"] == "__task7_no_such_company__"
+    assert enriched["_meta"]["tool"] == "search_company"
+
+
+def test_required_string_rejects_blank_after_trimming():
+    from kreports.mcp.tools import HANDLERS, call_tool
+
+    with pytest.raises(ValueError, match="query"):
+        HANDLERS["search_company"]({"query": "   "})
+    result = json.loads(call_tool("search_company", {"query": "   "}))
+    assert "error" in result
+    assert "query" in result["error"]
+
+
+def test_legacy_schema_aliases_keep_their_public_types_and_constraints():
+    from typing import get_args
+
+    from kreports.mcp.schemas import BsnsYear, CompanyIdent, COMPARE_METRICS
+
+    assert get_args(COMPARE_METRICS) == (
+        "영업이익률",
+        "순이익률",
+        "부채비율",
+        "ROE",
+        "ROA",
+        "자기자본비율",
+        "매출성장률",
+        "Beneish_M",
+    )
+    assert TypeAdapter(CompanyIdent).validate_python("005930") == "005930"
+    with pytest.raises(ValidationError):
+        TypeAdapter(CompanyIdent).validate_python("")
+    assert TypeAdapter(BsnsYear).validate_python(2025) == 2025
+    with pytest.raises(ValidationError):
+        TypeAdapter(BsnsYear).validate_python(1999)
 
 
 def test_extra_and_invalid_arguments_return_bounded_validation_envelope():
@@ -161,6 +255,22 @@ def test_unknown_tool_returns_bounded_error_envelope():
     assert result.data_quality.status == "error"
     assert "Unknown tool" in result.answer
     assert len(result.answer) <= 500
+
+
+def test_very_long_unknown_tool_name_is_bounded_on_all_surfaces():
+    from kreports.mcp.dispatch import dispatch_tool
+    from kreports.mcp.tools import call_tool
+
+    long_name = "x" * 10_000
+    envelope = dispatch_tool(long_name, {})
+    envelope_json = envelope.model_dump_json()
+    legacy_json = call_tool(long_name, {})
+
+    assert len(envelope.tool_name) <= 120
+    assert len(envelope_json) < 2_000
+    assert len(legacy_json) < 2_000
+    assert long_name not in envelope_json
+    assert long_name not in legacy_json
 
 
 @pytest.mark.parametrize("tool_name", EXPECTED_TOOL_NAMES)
