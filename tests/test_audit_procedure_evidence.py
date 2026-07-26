@@ -307,3 +307,42 @@ def test_evidence_map_fails_when_no_full_body_receipt_is_eligible(temp_engine):
     assert result["quality_gaps"]["summary_only"] == 1
     assert "no_eligible_full_body_receipts" in result["required_gaps"]
     assert result["verdict"] == "fail"
+
+
+def test_evidence_map_legacy_procedures_do_not_satisfy_zero_denominator(
+    temp_engine,
+):
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            AuditProcedureItem(
+                rcept_no="LEGACY1",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                section_ordinal=1,
+                procedure_ordinal=1,
+                kam_topic="revenue",
+                method="inspection",
+                procedure_type="substantive_test",
+                procedure_text="매출 계약서를 검사하였습니다.",
+                procedure_hash="l" * 40,
+                parser_version="audit_procedure.v1",
+                quality_status="full_body",
+                fetched_at=datetime(2026, 3, 1),
+            )
+        )
+
+    result = build_audit_procedure_evidence_map(year=2025)
+
+    assert result["counts"]["procedure_items"] == 1
+    assert result["counts"]["full_body_kam_receipts"] == 0
+    assert "no_eligible_full_body_receipts" in result["required_gaps"]
+    assert result["verdict"] == "fail"

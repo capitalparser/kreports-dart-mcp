@@ -649,7 +649,7 @@ def build_audit_procedure_evidence_map(
         if full_body_receipts
         else 0.0
     )
-    if structured_count > 0 and full_body_receipts == 0:
+    if full_body_receipts == 0:
         required_gaps.append("no_eligible_full_body_receipts")
     elif full_body_receipts and coverage_rate < 80.0:
         required_gaps.append("procedure_coverage_below_80")

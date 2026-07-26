@@ -126,6 +126,34 @@ def test_extract_procedure_steps_rejects_planning_responsibility_and_action_list
     assert extract_procedure_steps(_kam_item(text_value)) == []
 
 
+@pytest.mark.parametrize(
+    ("text_value", "expected_method"),
+    [
+        ("감사계획에 따라 주요 계약서를 검사하였습니다.", "inspection"),
+        (
+            "감사 계획의 일환으로 거래처 외부조회를 실시하였습니다.",
+            "confirmation",
+        ),
+        (
+            "감사절차에는 포함된 계약서 검사를 실제로 수행하였습니다.",
+            "inspection",
+        ),
+        (
+            "감사절차는 다음을 포함하였으며, 거래처에 확인서를 "
+            "발송하였습니다.",
+            "confirmation",
+        ),
+    ],
+)
+def test_extract_procedure_steps_keeps_performed_actions_in_planning_context(
+    text_value,
+    expected_method,
+):
+    steps = extract_procedure_steps(_kam_item(text_value))
+
+    assert [step.method for step in steps] == [expected_method]
+
+
 def test_extract_procedure_steps_preserves_independent_chained_actions():
     steps = extract_procedure_steps(
         _kam_item("경영진에게 질문하여 계약서를 검사하였습니다.")

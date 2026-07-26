@@ -53,7 +53,7 @@ _METHOD_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sampling", ("표본", "샘플", "sample")),
     ("reperformance", ("재수행", "reperform")),
     ("recalculation", ("재계산", "recalculate")),
-    ("confirmation", ("외부조회", "조회서", "confirmation")),
+    ("confirmation", ("외부조회", "조회서", "확인서", "confirmation")),
     ("observation", ("입회", "관찰", "observe")),
     ("inquiry", ("질문", "문의", "inquir")),
     (
@@ -112,13 +112,6 @@ _RESPONSIBILITY_BOILERPLATE = (
     "in accordance with",
     "왜곡표시위험을 식별",
     "감사절차를 설계",
-)
-
-_PLANNING_CONTEXT = (
-    "감사계획",
-    "감사 계획",
-    "감사절차에는",
-    "감사절차는 다음을 포함",
 )
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -180,8 +173,6 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
     def append_raw(raw: str, absolute_start: int) -> None:
         lowered_raw = raw.lower()
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
-            return
-        if any(marker in lowered_raw for marker in _PLANNING_CONTEXT):
             return
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
@@ -287,8 +278,11 @@ def _is_action_clause(clause: str, *, compound_context: bool = False) -> bool:
         )
     return bool(
         re.search(
-            r"(?:하였습니다|했습니다|하였다|했다|하였으며|했으며|하고|"
-            r"한\s+뒤|수행하였|발송하였|활용하였|평가하였|"
+            r"(?:(?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
+            r"분석|테스트|평가|추출|활용|대사|조사|확인|비교|발송|"
+            r"수행|실시)"
+            r"(?:하였습니다|했습니다|하였다|했다|하였으며|했으며|"
+            r"하고|한\s+뒤|하여|합니다)|"
             r"inspect(?:ed)?|inquir(?:ed)?|observ(?:ed)?|confirm(?:ed)?|"
             r"test(?:ed)?|evaluat(?:ed)?|compar(?:ed)?)",
             lowered,
