@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from mcp.types import Tool
-from pydantic import ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 from sqlalchemy import func
 
 from kreports.analysis.api import resolve_corp_code, search_company
@@ -30,6 +31,19 @@ _MAX_TOOL_NAME_LENGTH = 120
 
 class ArgumentValidationError(ValueError):
     """Bounded public argument error, distinct from handler ValueError."""
+
+
+class HandlerExecutionError(Exception):
+    """Carries a handler failure and its validated secret without rendering it."""
+
+    def __init__(
+        self,
+        original: Exception,
+        validated_secret: str | None,
+    ) -> None:
+        super().__init__(type(original).__name__)
+        self.original = original
+        self.validated_secret = validated_secret
 
 
 def _bounded_tool_name(name: object) -> str:
@@ -184,8 +198,11 @@ def _error_envelope(name: str, message: str) -> AnswerEnvelopeV1:
 def _safe_exception_message(
     exc: Exception,
     arguments: dict[str, Any] | None,
+    *,
+    validated_secret: str | None = None,
 ) -> str:
     message = f"{type(exc).__name__}: {exc}"
+    secrets: list[str] = []
     if isinstance(arguments, dict):
         secret = arguments.get("user_dart_api_key")
         if secret is not None:
@@ -195,12 +212,36 @@ def _safe_exception_message(
                 else str(secret)
             )
             if raw_secret:
-                message = message.replace(raw_secret, "[REDACTED]")
+                secrets.extend((raw_secret, raw_secret.strip()))
+    if validated_secret:
+        secrets.append(validated_secret)
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        if not secret:
+            continue
+        if len(secret) >= 4:
+            message = message.replace(secret, "[REDACTED]")
+        else:
+            message = re.sub(
+                rf"(?<!\w){re.escape(secret)}(?!\w)",
+                "[REDACTED]",
+                message,
+            )
     return message
 
 
-def raw_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
-    """Validate once and return the unmodified domain handler result."""
+def _validated_secret(arguments: BaseModel) -> str | None:
+    secret = getattr(arguments, "user_dart_api_key", None)
+    if isinstance(secret, SecretStr):
+        return secret.get_secret_value()
+    return None
+
+
+def _invoke_handler(
+    name: str,
+    arguments: dict[str, Any] | None,
+    *,
+    capture_failure: bool,
+) -> dict[str, Any]:
     from kreports.mcp.catalog import TOOL_CATALOG
 
     spec = TOOL_CATALOG.get(name)
@@ -210,17 +251,33 @@ def raw_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         validated = spec.input_model.model_validate(arguments or {})
     except ValidationError as exc:
         raise ArgumentValidationError(_bounded_validation_message(exc)) from None
-    result = spec.handler(validated)
+    try:
+        result = spec.handler(validated)
+    except Exception as exc:
+        if capture_failure:
+            raise HandlerExecutionError(
+                exc,
+                _validated_secret(validated),
+            ) from None
+        raise
     if not isinstance(result, dict):
         result = {"value": result}
     return result
+
+
+def raw_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate once and return the unmodified domain handler result."""
+    return _invoke_handler(name, arguments, capture_failure=False)
 
 
 def _enriched_result(
     name: str,
     arguments: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    return _attach_meta(name, raw_result(name, arguments))
+    return _attach_meta(
+        name,
+        _invoke_handler(name, arguments, capture_failure=True),
+    )
 
 
 def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelopeV1:
@@ -231,6 +288,16 @@ def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelope
         return build_answer_envelope(public_name, result)
     except (LookupError, ArgumentValidationError) as exc:
         return _error_envelope(public_name, str(exc))
+    except HandlerExecutionError as exc:
+        safe_message = _safe_exception_message(
+            exc.original,
+            arguments,
+            validated_secret=exc.validated_secret,
+        )
+        return _error_envelope(
+            public_name,
+            f"Internal error: {safe_message}",
+        )
     except Exception as exc:
         return _error_envelope(
             public_name,
@@ -251,6 +318,13 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
         }
     except ArgumentValidationError as exc:
         return {"error": str(exc)}
+    except HandlerExecutionError as exc:
+        safe_message = _safe_exception_message(
+            exc.original,
+            arguments,
+            validated_secret=exc.validated_secret,
+        )
+        return {"error": f"Internal error: {safe_message}"}
     except Exception as exc:
         return {
             "error": f"Internal error: {_safe_exception_message(exc, arguments)}"

@@ -32,7 +32,13 @@ class ToolInput(BaseModel):
         if not isinstance(value, dict):
             return value
         return {
-            key: item.strip() if isinstance(item, str) else item
+            key: (
+                item.strip()
+                if isinstance(item, str)
+                else SecretStr(item.get_secret_value().strip())
+                if isinstance(item, SecretStr)
+                else item
+            )
             for key, item in value.items()
         }
 

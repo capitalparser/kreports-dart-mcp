@@ -137,9 +137,13 @@ def test_user_api_key_is_secret_and_not_disclosed():
     assert model.user_dart_api_key.get_secret_value() == raw_secret
 
 
+@pytest.mark.parametrize("input_type", ["raw", "secret_str"])
+@pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("exception_type", [ValueError, RuntimeError])
 def test_user_api_key_is_redacted_on_every_compatibility_surface(
     monkeypatch,
+    input_type,
+    padded,
     exception_type,
 ):
     from dataclasses import replace
@@ -150,11 +154,19 @@ def test_user_api_key_is_redacted_on_every_compatibility_surface(
     from kreports.mcp.server import handle_call_tool
     from kreports.mcp.tools import call_tool
 
-    raw_secret = "task7-dependency-echo-secret"
+    normalized_secret = "task7-dependency-echo-secret"
+    supplied_secret = (
+        f"  {normalized_secret}  " if padded else normalized_secret
+    )
+    supplied_secret = (
+        SecretStr(supplied_secret) if input_type == "secret_str" else supplied_secret
+    )
     original = TOOL_CATALOG["fetch_disclosure_on_demand"]
 
-    def echoing_failure(_args):
-        raise exception_type(f"upstream rejected {raw_secret}")
+    def echoing_failure(validated_args):
+        handler_secret = validated_args.user_dart_api_key.get_secret_value()
+        assert handler_secret == normalized_secret
+        raise exception_type(f"upstream rejected {handler_secret}")
 
     monkeypatch.setitem(
         TOOL_CATALOG,
@@ -163,7 +175,7 @@ def test_user_api_key_is_redacted_on_every_compatibility_surface(
     )
     arguments = {
         "rcept_no": "20250711000001",
-        "user_dart_api_key": raw_secret,
+        "user_dart_api_key": supplied_secret,
     }
     envelope_json = dispatch_tool(
         "fetch_disclosure_on_demand", arguments
@@ -174,8 +186,45 @@ def test_user_api_key_is_redacted_on_every_compatibility_surface(
     )
     stdio_json = json.dumps(stdio_result, ensure_ascii=False, default=str)
     for serialized in (envelope_json, legacy_json, stdio_json):
-        assert raw_secret not in serialized
+        assert normalized_secret not in serialized
+        if padded:
+            assert f"  {normalized_secret}  " not in serialized
         assert "[REDACTED]" in serialized
+
+
+@pytest.mark.parametrize(
+    ("secret", "message"),
+    [
+        ("", "database unavailable"),
+        ("x", "database unavailable"),
+    ],
+)
+def test_secret_sanitizer_does_not_over_redact_empty_or_short_unrelated_text(
+    monkeypatch,
+    secret,
+    message,
+):
+    from dataclasses import replace
+
+    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.dispatch import dispatch_tool
+
+    original = TOOL_CATALOG["fetch_disclosure_on_demand"]
+
+    def unrelated_failure(_validated_args):
+        raise RuntimeError(message)
+
+    monkeypatch.setitem(
+        TOOL_CATALOG,
+        "fetch_disclosure_on_demand",
+        replace(original, handler=unrelated_failure),
+    )
+    serialized = dispatch_tool(
+        "fetch_disclosure_on_demand",
+        {"rcept_no": "20250711000001", "user_dart_api_key": secret},
+    ).model_dump_json()
+    assert message in serialized
+    assert "[REDACTED]" not in serialized
 
 
 def test_compat_handlers_return_raw_domain_result_and_trim_required_strings():
