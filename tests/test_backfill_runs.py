@@ -215,6 +215,11 @@ def test_stale_repair_preserves_live_owner(
         run_id = run.id
 
     monkeypatch.setattr(backfill_runs, "pid_is_alive", lambda pid: True)
+    monkeypatch.setattr(
+        backfill_runs,
+        "process_start_identity",
+        lambda pid: "live-start",
+    )
 
     assert backfill_runs.repair_stale_backfills(now, 3600)["repaired_ids"] == []
     assert _load_run(run_id).status == "running"
