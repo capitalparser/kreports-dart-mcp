@@ -268,3 +268,42 @@ def test_evidence_map_uses_receipt_denominator_and_eighty_percent_target(
     assert result["counts"]["full_body_kam_receipts_with_procedures"] == 4
     assert result["rates"]["procedure_coverage"] == 80.0
     assert result["verdict"] == "pass"
+
+
+def test_evidence_map_fails_when_no_full_body_receipt_is_eligible(temp_engine):
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            KamItem(
+                rcept_no="SUMMARY1",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                ordinal=1,
+                title="수익인식",
+                normalized_topic="revenue",
+                reason_text=None,
+                audit_response_text=None,
+                related_note_references_json="[]",
+                full_body_hash="s" * 40,
+                full_body_length=20,
+                source_basis="report_sections.derived_summary",
+                parser_version="kam.v1",
+                quality_status="summary_only",
+                fetched_at=datetime(2026, 3, 1),
+            )
+        )
+
+    result = build_audit_procedure_evidence_map(year=2025)
+
+    assert result["counts"]["full_body_kam_receipts"] == 0
+    assert result["quality_gaps"]["summary_only"] == 1
+    assert "no_eligible_full_body_receipts" in result["required_gaps"]
+    assert result["verdict"] == "fail"

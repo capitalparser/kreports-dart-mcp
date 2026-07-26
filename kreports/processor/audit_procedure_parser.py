@@ -110,6 +110,15 @@ _RESPONSIBILITY_BOILERPLATE = (
     "포함될 수 있습니다",
     "responsible for",
     "in accordance with",
+    "왜곡표시위험을 식별",
+    "감사절차를 설계",
+)
+
+_PLANNING_CONTEXT = (
+    "감사계획",
+    "감사 계획",
+    "감사절차에는",
+    "감사절차는 다음을 포함",
 )
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -169,13 +178,24 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
     clauses: list[tuple[str, int, int, bool]] = []
 
     def append_raw(raw: str, absolute_start: int) -> None:
+        lowered_raw = raw.lower()
+        if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
+            return
+        if any(marker in lowered_raw for marker in _PLANNING_CONTEXT):
+            return
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
             r"분석|테스트|평가|추출|활용|대사|조사|확인)"
-            r"(?:하고|한\s+뒤|하였으며|했으며)),?\s+"
+            r"(하여|하고|한\s+뒤|하였으며|했으며)),?\s+"
         )
 
-        def append_piece(piece: str, piece_start: int, piece_end: int) -> None:
+        def append_piece(
+            piece: str,
+            piece_start: int,
+            piece_end: int,
+            *,
+            performed_context: bool = False,
+        ) -> None:
             parts = [
                 value.strip()
                 for value in re.split(r"\s*(?:,|및)\s*", piece)
@@ -187,7 +207,8 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
                 and recognized >= 2
                 and bool(
                     re.search(
-                        r"(?:하였습니다|했습니다|하였다|했다|수행하였습니다)"
+                        r"(?:수행|실시|검사|확인|테스트|평가)"
+                        r"(?:하였습니다|했습니다|하였다|했다)"
                         r"[.!?。]?$",
                         piece,
                     )
@@ -197,7 +218,12 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
                 normalized = _normalize_clause(piece)
                 if normalized:
                     clauses.append(
-                        (normalized, piece_start, piece_end, False)
+                        (
+                            normalized,
+                            piece_start,
+                            piece_end,
+                            performed_context,
+                        )
                     )
                 return
             cursor = 0
@@ -217,10 +243,21 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
         for boundary in conjunction.finditer(raw):
             local_end = boundary.end(1)
             piece = raw[local_start:local_end]
+            left_method = _method(piece)
+            right_method = _method(raw[boundary.end():])
+            if (
+                boundary.group(2) == "하여"
+                and (
+                    left_method in {"other", "sampling"}
+                    or right_method == "other"
+                )
+            ):
+                continue
             append_piece(
                 piece,
                 absolute_start + local_start,
                 absolute_start + local_end,
+                performed_context=True,
             )
             local_start = boundary.end()
         piece = raw[local_start:]
@@ -342,6 +379,55 @@ def extract_procedure_steps(kam_item: ParsedKamItem) -> list[ParsedProcedureStep
     return steps
 
 
+def _procedure_identity_filter(
+    *,
+    rcept_no: str,
+    source_type: str,
+    section_ordinal: int,
+):
+    return and_(
+        AuditProcedureItem.rcept_no == rcept_no,
+        AuditProcedureItem.source_type == source_type,
+        AuditProcedureItem.section_ordinal == int(section_ordinal),
+    )
+
+
+def reconcile_procedure_steps_for_identity(
+    *,
+    rcept_no: str,
+    source_type: str,
+    section_ordinal: int,
+) -> int:
+    """Reconcile one logical KAM identity, including downgrade/deletion."""
+    require_runtime_write("reconcile structured audit procedure steps")
+    with get_session() as session:
+        stored = (
+            session.query(KamItem)
+            .filter(
+                KamItem.rcept_no == rcept_no,
+                KamItem.source_type == source_type,
+                KamItem.ordinal == int(section_ordinal),
+            )
+            .order_by(KamItem.fetched_at.desc(), KamItem.id.desc())
+            .first()
+        )
+        if stored is None:
+            (
+                session.query(AuditProcedureItem)
+                .filter(
+                    _procedure_identity_filter(
+                        rcept_no=rcept_no,
+                        source_type=source_type,
+                        section_ordinal=section_ordinal,
+                    )
+                )
+                .delete(synchronize_session=False)
+            )
+            return 0
+        stored_id = int(stored.id)
+    return replace_procedure_steps_for_kam(stored_id)
+
+
 def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
     require_runtime_write("persist structured audit procedure steps")
     with get_session() as session:
@@ -353,6 +439,11 @@ def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
                 .delete(synchronize_session=False)
             )
             return 0
+        identity_filter = _procedure_identity_filter(
+            rcept_no=stored.rcept_no,
+            source_type=stored.source_type,
+            section_ordinal=stored.ordinal,
+        )
         stale_sibling_ids = [
             int(row[0])
             for row in (
@@ -399,7 +490,7 @@ def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
         if stored.quality_status != "full_body":
             (
                 session.query(AuditProcedureItem)
-                .filter(AuditProcedureItem.kam_item_id == stored.id)
+                .filter(identity_filter)
                 .delete(synchronize_session=False)
             )
             return 0
@@ -491,7 +582,7 @@ def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
             (
                 session.query(AuditProcedureItem)
                 .filter(
-                    AuditProcedureItem.kam_item_id == stored.id,
+                    identity_filter,
                     ~current,
                 )
                 .delete(synchronize_session=False)
@@ -499,7 +590,7 @@ def replace_procedure_steps_for_kam(kam_item_id: int) -> int:
         else:
             (
                 session.query(AuditProcedureItem)
-                .filter(AuditProcedureItem.kam_item_id == stored.id)
+                .filter(identity_filter)
                 .delete(synchronize_session=False)
             )
         return len(rows)

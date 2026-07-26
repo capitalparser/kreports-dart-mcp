@@ -28,6 +28,7 @@ from kreports.db.engine import engine, get_session
 from kreports.db.models import (
     AccountingNoteChapter,
     AccountingPolicyItem,
+    AuditProcedureItem,
     Auditor,
     BusinessAffiliateAuditor,
     Company,
@@ -47,7 +48,7 @@ from kreports.processor.audit_report_parser import (
     extract_audit_report_sections,
 )
 from kreports.processor.audit_procedure_parser import (
-    replace_procedure_steps_for_kam,
+    reconcile_procedure_steps_for_identity,
 )
 from kreports.processor.kam_parser import (
     PARSER_VERSION,
@@ -684,7 +685,9 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
     affiliate_count = 0
     note_chapter_count = 0
     policy_item_count = 0
-    procedure_count = _persist_audit_procedure_items_from_sections(meta, rows)
+    procedure_count = 0
+    if meta.get("source_type") == "audit_report":
+        procedure_count = _rebuild_kam_receipt(meta)["procedure_items"]
     if meta.get("source_type") == "business_report":
         auditor_count = _persist_auditors_from_business_report(meta, content=content)
         affiliate_count = _persist_business_affiliate_auditors(meta, content=content)["count"]
@@ -701,26 +704,6 @@ def extract_document_features_from_content(meta: dict, *, content: str) -> dict:
         "audit_procedure_items": procedure_count,
         "rows_written": len(rows) + auditor_count + affiliate_count + note_chapter_count + policy_item_count + procedure_count,
     }
-
-
-def _persist_audit_procedure_items_from_sections(meta: dict, section_rows: list[dict]) -> int:
-    """Compatibility entrypoint backed only by structured full-body KAMs."""
-    require_runtime_write("persist audit procedure items")
-    with get_session() as session:
-        kam_ids = [
-            int(row[0])
-            for row in (
-                session.query(KamItem.id)
-                .filter(
-                    KamItem.rcept_no == meta["rcept_no"],
-                    KamItem.source_type == meta["source_type"],
-                    KamItem.quality_status == "full_body",
-                )
-                .order_by(KamItem.ordinal, KamItem.id)
-                .all()
-            )
-        ]
-    return sum(replace_procedure_steps_for_kam(kam_id) for kam_id in kam_ids)
 
 
 def _persist_auditors_from_business_report(meta: dict, *, content: str) -> int:
@@ -1376,18 +1359,25 @@ def index_audit_procedures_from_sections(
     limit: int | None = None,
     progress_callback=None,
 ) -> dict:
-    """Build procedure index from structured full-body KAM items only."""
+    """Reconcile procedure index for every persisted logical KAM identity."""
     sql = """
-        SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type,
-               ordinal, quality_status
+        SELECT rcept_no, corp_code, bsns_year, source_type, ordinal
         FROM kam_items
         WHERE source_type='audit_report'
-          AND quality_status='full_body'
     """
     params: dict[str, object] = {}
     if year is not None:
         sql += " AND bsns_year=:year"
         params["year"] = year
+    sql += """
+        UNION
+        SELECT rcept_no, corp_code, bsns_year, source_type,
+               section_ordinal AS ordinal
+        FROM audit_procedure_items
+        WHERE source_type='audit_report'
+    """
+    if year is not None:
+        sql += " AND bsns_year=:year"
     sql += " ORDER BY bsns_year, rcept_no, ordinal"
     if limit is not None:
         sql += " LIMIT :limit"
@@ -1405,7 +1395,11 @@ def index_audit_procedures_from_sections(
         if progress_callback:
             progress_callback(idx, totals["total"], row["corp_code"], row["bsns_year"], row["rcept_no"])
         try:
-            count = replace_procedure_steps_for_kam(int(row["id"]))
+            count = reconcile_procedure_steps_for_identity(
+                rcept_no=str(row["rcept_no"]),
+                source_type=str(row["source_type"]),
+                section_ordinal=int(row["ordinal"]),
+            )
             totals["ok"] += 1
             totals["rows_written"] += count
         except Exception as exc:
@@ -1420,6 +1414,7 @@ def _kam_rebuild_targets(
     *,
     year: int,
     market: str | None,
+    rcept_no: str | None = None,
 ) -> list[dict]:
     """Load cached KAM source candidates grouped by exact receipt."""
     targets: dict[tuple[str, str], dict] = {}
@@ -1495,6 +1490,13 @@ def _kam_rebuild_targets(
         evidence_query = evidence_query.filter(Company.market == market)
         section_query = section_query.filter(Company.market == market)
         report_query = report_query.filter(Company.market == market)
+    if rcept_no:
+        source_query = source_query.filter(SourceDocument.rcept_no == rcept_no)
+        evidence_query = evidence_query.filter(
+            EvidenceDocument.rcept_no == rcept_no
+        )
+        section_query = section_query.filter(ReportSection.rcept_no == rcept_no)
+        report_query = report_query.filter(ReportDocument.rcept_no == rcept_no)
     for row in source_query.order_by(SourceDocument.rcept_no, SourceDocument.id).all():
         add_target(row, candidate_type="source_documents")
     for row in evidence_query.order_by(EvidenceDocument.rcept_no, EvidenceDocument.id).all():
@@ -1716,7 +1718,32 @@ def _persist_rebuilt_kam_items(
         }
         for item in persisted_items
     ]
+    affected_ordinals = {int(row["ordinal"]) for row in rows}
     with get_session() as session:
+        affected_ordinals.update(
+            int(row[0])
+            for row in (
+                session.query(KamItem.ordinal)
+                .filter(
+                    KamItem.rcept_no == target["rcept_no"],
+                    KamItem.source_type == target["source_type"],
+                )
+                .all()
+            )
+        )
+        affected_ordinals.update(
+            int(row[0])
+            for row in (
+                session.query(AuditProcedureItem.section_ordinal)
+                .filter(
+                    AuditProcedureItem.rcept_no == target["rcept_no"],
+                    AuditProcedureItem.source_type
+                    == target["source_type"],
+                )
+                .distinct()
+                .all()
+            )
+        )
         stmt = sqlite_insert(KamItem).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
@@ -1762,7 +1789,87 @@ def _persist_rebuilt_kam_items(
             )
             .delete(synchronize_session=False)
         )
+    for ordinal in sorted(affected_ordinals):
+        reconcile_procedure_steps_for_identity(
+            rcept_no=target["rcept_no"],
+            source_type=target["source_type"],
+            section_ordinal=ordinal,
+        )
     return len(rows)
+
+
+def _kam_quality_status(
+    items: list[ParsedKamItem],
+    limitations: list[str],
+) -> str:
+    if items:
+        return items[0].quality_status
+    if any(
+        ":read_error:" in limitation
+        or limitation.endswith(":parse_error")
+        or limitation.endswith(":ambiguous_boundary")
+        or limitation.startswith("receipt_consistency_error:")
+        for limitation in limitations
+    ):
+        return "error"
+    return "missing"
+
+
+def _rebuild_kam_receipt(meta: dict) -> dict:
+    """Rebuild and index one audit-report receipt after section extraction."""
+    if meta.get("source_type") != "audit_report":
+        return {
+            "quality_status": "missing",
+            "kam_items": 0,
+            "procedure_items": 0,
+        }
+    with get_session() as session:
+        targets = _kam_rebuild_targets(
+            session,
+            year=int(meta["bsns_year"]),
+            market=None,
+            rcept_no=str(meta["rcept_no"]),
+        )
+    target = next(
+        (
+            candidate
+            for candidate in targets
+            if candidate["rcept_no"] == meta["rcept_no"]
+            and candidate["source_type"] == meta["source_type"]
+        ),
+        None,
+    )
+    if target is None:
+        return {
+            "quality_status": "missing",
+            "kam_items": 0,
+            "procedure_items": 0,
+        }
+    items, source_basis, limitations, source_fetched_at = (
+        _recover_kam_items(target)
+    )
+    quality_status = _kam_quality_status(items, limitations)
+    kam_count = _persist_rebuilt_kam_items(
+        target=target,
+        items=items,
+        source_basis=source_basis,
+        quality_status=quality_status,
+        source_fetched_at=source_fetched_at,
+    )
+    with get_session() as session:
+        procedure_count = (
+            session.query(AuditProcedureItem)
+            .filter(
+                AuditProcedureItem.rcept_no == meta["rcept_no"],
+                AuditProcedureItem.source_type == meta["source_type"],
+            )
+            .count()
+        )
+    return {
+        "quality_status": quality_status,
+        "kam_items": kam_count,
+        "procedure_items": procedure_count,
+    }
 
 
 def rebuild_kam_items(
@@ -1846,18 +1953,7 @@ def rebuild_kam_items(
         items, source_basis, limitations, source_fetched_at = (
             _recover_kam_items(target)
         )
-        if items:
-            status = items[0].quality_status
-        elif any(
-            ":read_error:" in limitation
-            or limitation.endswith(":parse_error")
-            or limitation.endswith(":ambiguous_boundary")
-            or limitation.startswith("receipt_consistency_error:")
-            for limitation in limitations
-        ):
-            status = "error"
-        else:
-            status = "missing"
+        status = _kam_quality_status(items, limitations)
         totals[status] = int(totals[status]) + 1
         totals["receipt_counts"][status] += 1
         totals["item_counts"][status] += len(items)

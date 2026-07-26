@@ -61,13 +61,20 @@ _N_MEDIUM = 10
 _N_LOW = 5
 
 
-def resolve_fs_div_for_company(corp_code: str, year: int | None, fs_strategy: str = "auto") -> str:
+def resolve_fs_div_for_company(
+    corp_code: str,
+    year: int | None,
+    fs_strategy: str = "auto",
+    *,
+    read_engine=None,
+) -> str:
     strategy = (fs_strategy or "auto").upper()
     if strategy in {"CFS", "OFS"}:
         return strategy
     if strategy != "AUTO":
         return "CFS"
-    with engine.connect() as conn:
+    active_engine = read_engine or engine
+    with active_engine.connect() as conn:
         if year is None:
             row = conn.execute(
                 text("SELECT MAX(year) FROM financials WHERE corp_code=:cc AND quarter=4"),
@@ -127,6 +134,7 @@ def resolve_peers(
     size_bucket_decade: Optional[float] = None,
     fs_div: str = "CFS",
     year: Optional[int] = None,
+    read_engine=None,
 ) -> PeerResolution:
     """동종업종 비교를 위한 peer corp_code 목록을 해석한다.
 
@@ -139,7 +147,8 @@ def resolve_peers(
 
     year=None이면 subject가 보유한 가장 최근 Q4/fs_div 연도를 사용한다.
     """
-    with engine.connect() as conn:
+    active_engine = read_engine or engine
+    with active_engine.connect() as conn:
         subject_row = conn.execute(
             text("SELECT induty_code FROM companies WHERE corp_code = :cc"),
             {"cc": corp_code},

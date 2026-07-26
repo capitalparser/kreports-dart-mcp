@@ -20,6 +20,7 @@ from kreports.analysis.peer import (
 from kreports.analysis._shared import _clean_dict, _display_text, _has_db_column
 from kreports.analysis.audit_procedure_evidence import (
     procedure_database_preflight,
+    procedure_read_engine,
 )
 from kreports.analysis.company_profile import get_industry_name, resolve_corp_code
 from kreports.analysis.audit_reporting import (
@@ -729,13 +730,43 @@ def select_peer_group(
     size_bucket_decade: Optional[float] = None,
     exclude_other_sectors: bool = True,
     year: int | None = None,
+    _read_engine=None,
 ) -> dict:
     criteria = criteria or ["industry", "sector", "financial_data"]
-    corp_code = resolve_corp_code(company)
+    active_engine = _read_engine or _engine_module.engine
+    if _read_engine is None:
+        corp_code = resolve_corp_code(company)
+    else:
+        with active_engine.connect() as conn:
+            corp_code = conn.execute(
+                text(
+                    """
+                    SELECT corp_code
+                    FROM companies
+                    WHERE corp_code=:company
+                       OR stock_code=:company
+                       OR corp_name=:company
+                       OR corp_name LIKE :company_like
+                    ORDER BY
+                        CASE
+                            WHEN corp_code=:company THEN 0
+                            WHEN stock_code=:company THEN 1
+                            WHEN corp_name=:company THEN 2
+                            ELSE 3
+                        END,
+                        corp_name
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "company": company,
+                    "company_like": f"%{company}%",
+                },
+            ).scalar()
     if corp_code is None:
         return {"error": f"'{company}'에 해당하는 기업을 찾을 수 없습니다."}
 
-    with _engine_module.engine.connect() as conn:
+    with active_engine.connect() as conn:
         subject_row = conn.execute(
             text("SELECT corp_name, stock_code, market, induty_code FROM companies WHERE corp_code=:cc"),
             {"cc": corp_code},
@@ -743,7 +774,12 @@ def select_peer_group(
     if subject_row is None:
         return {"error": f"corp_code '{corp_code}' 미등록"}
 
-    fs_div_used = resolve_fs_div_for_company(corp_code, year, fs_strategy)
+    fs_div_used = resolve_fs_div_for_company(
+        corp_code,
+        year,
+        fs_strategy,
+        read_engine=_read_engine,
+    )
     pr = resolve_peers(
         corp_code=corp_code,
         prefix_len_start=prefix_len_start,
@@ -752,6 +788,7 @@ def select_peer_group(
         size_bucket_decade=size_bucket_decade,
         fs_div=fs_div_used,
         year=year,
+        read_engine=_read_engine,
     )
 
     peers: list[dict] = []
@@ -772,7 +809,7 @@ def select_peer_group(
             LIMIT :limit
             """
         ).bindparams(bindparam("ccs", expanding=True))
-        with _engine_module.engine.connect() as conn:
+        with active_engine.connect() as conn:
             rows = conn.execute(
                 stmt,
                 {
@@ -1575,15 +1612,20 @@ def compare_peer_audit_procedures(
     _peer_group: dict | None = None,
 ) -> dict:
     """Compare KAM audit procedure patterns for a subject and its peer group."""
-    available, unavailable_reason = procedure_database_preflight(set())
-    if not available:
+    procedure_tables = {
+        "companies",
+        "kam_items",
+        "audit_procedure_items",
+    }
+
+    def unavailable_result(reason: str, group: dict | None) -> dict:
         return {
             "subject": (
-                (_peer_group or {}).get("subject")
+                (group or {}).get("subject")
                 or {"corp_code": company}
             ),
             "year": year,
-            "peer_count": 0,
+            "peer_count": len((group or {}).get("peers", [])),
             "companies_with_procedures": 0,
             "subject_procedure_type_counts": {},
             "peer_procedure_type_counts": {},
@@ -1599,38 +1641,38 @@ def compare_peer_audit_procedures(
             "data_quality": {
                 "status": "unavailable",
                 "source": "runtime_db",
-                "coverage_note": unavailable_reason,
+                "coverage_note": reason,
             },
         }
-    base = _peer_group if _peer_group is not None else select_peer_group(
-        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
-    )
+
+    if _peer_group is not None:
+        base = _peer_group
+    else:
+        selection_tables = {"companies", "financials", "audit_fees"}
+        available, unavailable_reason = procedure_database_preflight(
+            selection_tables
+        )
+        if not available:
+            return unavailable_result(
+                str(unavailable_reason),
+                None,
+            )
+        with procedure_read_engine(selection_tables) as read_engine:
+            base = select_peer_group(
+                company=company,
+                peer_limit=peer_limit,
+                fs_strategy=fs_strategy,
+                year=year,
+                _read_engine=read_engine,
+            )
     if "error" in base:
         return base
-    available, unavailable_reason = procedure_database_preflight()
+    available, unavailable_reason = procedure_database_preflight(
+        procedure_tables
+    )
     if not available:
-        return {
-            "subject": base.get("subject") or {"corp_code": company},
-            "year": year,
-            "peer_count": len(base.get("peers", [])),
-            "companies_with_procedures": 0,
-            "subject_procedure_type_counts": {},
-            "peer_procedure_type_counts": {},
-            "subject_method_counts": {},
-            "peer_method_counts": {},
-            "peer_kam_topic_counts": {},
-            "coverage": {
-                "denominator_full_body_kam_receipts": 0,
-                "full_body_kam_receipts_with_procedures": 0,
-                "rate": 0.0,
-                "quality_gaps": {},
-            },
-            "data_quality": {
-                "status": "unavailable",
-                "source": "runtime_db",
-                "coverage_note": unavailable_reason,
-            },
-        }
+        return unavailable_result(str(unavailable_reason), base)
+    required_tables = procedure_tables
     subject = base["subject"]
     peer_codes = [subject["corp_code"]] + [peer["corp_code"] for peer in base.get("peers", [])]
     if not peer_codes:
@@ -1691,25 +1733,29 @@ def compare_peer_audit_procedures(
         FROM kam_items ki
         WHERE ki.bsns_year=:year AND ki.corp_code IN :corp_codes
     """).bindparams(bindparam("corp_codes", expanding=True))
-    with _engine_module.engine.connect() as conn:
-        query_params = {"year": year, "corp_codes": peer_codes}
-        rows = [
-            dict(r)
-            for r in conn.execute(stmt, query_params).mappings().all()
-        ]
-        coverage_row = dict(
-            conn.execute(
-                coverage_stmt,
-                query_params,
-            ).mappings().one()
-        )
+    with procedure_read_engine(required_tables) as read_engine:
+        with read_engine.connect() as conn:
+            query_params = {"year": year, "corp_codes": peer_codes}
+            rows = [
+                dict(r)
+                for r in conn.execute(stmt, query_params).mappings().all()
+            ]
+            coverage_row = dict(
+                conn.execute(
+                    coverage_stmt,
+                    query_params,
+                ).mappings().one()
+            )
     row_source = "audit_procedure_items"
     if not rows:
-        evidence_rows = full_body_kam_procedure_rows(
-            corp_codes=peer_codes,
-            year=year,
-            limit=max(500, len(peer_codes) * 10),
-        )
+        with procedure_read_engine(required_tables) as read_engine:
+            with read_engine.connect() as conn:
+                evidence_rows = full_body_kam_procedure_rows(
+                    corp_codes=peer_codes,
+                    year=year,
+                    limit=max(500, len(peer_codes) * 10),
+                    _connection=conn,
+                )
         aggregated: dict[tuple[str, str, str, str, str | None], int] = {}
         names = {row["corp_code"]: row.get("corp_name") for row in evidence_rows}
         for row in evidence_rows:

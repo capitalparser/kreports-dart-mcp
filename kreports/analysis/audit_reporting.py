@@ -12,6 +12,7 @@ from kreports.analysis import queries as _queries
 from kreports.analysis.audit_procedure_evidence import (
     classify_audit_procedure_linkages,
     procedure_database_preflight,
+    procedure_read_connection,
 )
 
 from kreports.analysis._shared import _clean_dict, _dedupe_confirmed_facts, _df_to_records, _display_text, _has_db_column, _has_db_table
@@ -22,7 +23,6 @@ from kreports.analysis.company_profile import (
     resolve_corp_code,
 )
 from kreports.analysis.search_adapter import (
-    build_company_filters,
     group_company_records,
 )
 
@@ -1028,10 +1028,23 @@ def _full_body_kam_procedure_rows(
     procedure_type: str | None = None,
     method: str | None = None,
     limit: int = 500,
+    _connection=None,
 ) -> list[dict]:
     """Parse only reconstructed full-body KAMs without persisting rows."""
     if not corp_codes:
         return []
+    if _connection is None:
+        with procedure_read_connection() as connection:
+            return _full_body_kam_procedure_rows(
+                corp_codes=corp_codes,
+                year=year,
+                keyword=keyword,
+                kam_topic=kam_topic,
+                procedure_type=procedure_type,
+                method=method,
+                limit=limit,
+                _connection=connection,
+            )
     from kreports.processor.audit_procedure_parser import (
         extract_procedure_steps,
         legacy_procedure_type,
@@ -1053,14 +1066,13 @@ def _full_body_kam_procedure_rows(
           AND ki.corp_code IN :corp_codes
         ORDER BY c.market, c.corp_name, ki.rcept_no, ki.ordinal
     """).bindparams(bindparam("corp_codes", expanding=True))
-    with _engine_module.engine.connect() as conn:
-        kam_rows = [
-            dict(row)
-            for row in conn.execute(
-                stmt,
-                {"year": int(year), "corp_codes": corp_codes},
-            ).mappings().all()
-        ]
+    kam_rows = [
+        dict(row)
+        for row in _connection.execute(
+            stmt,
+            {"year": int(year), "corp_codes": corp_codes},
+        ).mappings().all()
+    ]
 
     out: list[dict] = []
     for row in kam_rows:
@@ -1191,14 +1203,47 @@ def search_audit_procedures(
         }
     limit = max(1, min(int(limit), 500))
     params: dict[str, object] = {"row_limit": limit * 10}
-    filters, subject = build_company_filters(
-        company=company,
-        market=market,
-        induty_prefix=induty_prefix,
-        params=params,
-    )
-    if "__company_not_found__" in filters:
-        return {"error": "company not found", "company": company}
+    filters: list[str] = []
+    subject = None
+    if company:
+        with procedure_read_connection() as conn:
+            subject_row = conn.execute(
+                text(
+                    """
+                    SELECT corp_code, stock_code, corp_name, market,
+                           induty_code
+                    FROM companies
+                    WHERE corp_code=:company
+                       OR stock_code=:company
+                       OR corp_name=:company
+                       OR corp_name LIKE :company_like
+                    ORDER BY
+                        CASE
+                            WHEN corp_code=:company THEN 0
+                            WHEN stock_code=:company THEN 1
+                            WHEN corp_name=:company THEN 2
+                            ELSE 3
+                        END,
+                        corp_name
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "company": company,
+                    "company_like": f"%{company}%",
+                },
+            ).mappings().first()
+        if subject_row is None:
+            return {"error": "company not found", "company": company}
+        subject = dict(subject_row)
+        filters.append("c.corp_code=:corp_code")
+        params["corp_code"] = subject["corp_code"]
+    if market:
+        filters.append("c.market=:market")
+        params["market"] = market
+    if induty_prefix:
+        filters.append("c.induty_code LIKE :induty_prefix")
+        params["induty_prefix"] = f"{induty_prefix}%"
     where = ["1=1", *filters]
     if year is not None:
         where.append("api.bsns_year=:year")
@@ -1235,23 +1280,22 @@ def search_audit_procedures(
         ORDER BY api.bsns_year DESC, c.market, c.corp_name, api.kam_topic, api.procedure_type
         LIMIT :row_limit
     """)
-    with _engine_module.engine.connect() as conn:
+    with procedure_read_connection() as conn:
         rows = [dict(r) for r in conn.execute(sql, params).mappings().all()]
     row_source = "audit_procedure_items"
     if not rows and year is not None:
         company_where = ["1=1"]
         company_params: dict[str, object] = {}
         if company:
-            corp_code = resolve_corp_code(company) or company
             company_where.append("corp_code=:corp_code")
-            company_params["corp_code"] = corp_code
+            company_params["corp_code"] = subject["corp_code"]
         if market:
             company_where.append("market=:market")
             company_params["market"] = market
         if induty_prefix:
             company_where.append("induty_code LIKE :induty_prefix")
             company_params["induty_prefix"] = f"{induty_prefix}%"
-        with _engine_module.engine.connect() as conn:
+        with procedure_read_connection() as conn:
             corp_codes = [str(r) for r in conn.execute(
                 text(
                     f"""
@@ -1264,15 +1308,16 @@ def search_audit_procedures(
                 ),
                 {**company_params, "corp_limit": max(limit * 20, 100)},
             ).scalars().all()]
-        rows = _full_body_kam_procedure_rows(
-            corp_codes=corp_codes,
-            year=int(year),
-            keyword=keyword,
-            kam_topic=kam_topic,
-            procedure_type=procedure_type,
-            method=method,
-            limit=limit * 10,
-        )
+            rows = _full_body_kam_procedure_rows(
+                corp_codes=corp_codes,
+                year=int(year),
+                keyword=keyword,
+                kam_topic=kam_topic,
+                procedure_type=procedure_type,
+                method=method,
+                limit=limit * 10,
+                _connection=conn,
+            )
         if rows:
             row_source = "kam_items.full_body"
 

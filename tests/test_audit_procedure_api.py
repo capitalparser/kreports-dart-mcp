@@ -1,11 +1,13 @@
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
 from kreports.analysis.api import search_audit_procedures
 from kreports.analysis.peer_benchmarks import compare_peer_audit_procedures
 from kreports.db.engine import get_session
-from kreports.db.models import AuditProcedureItem, Company, KamItem
+from kreports.db.models import AuditProcedureItem, Base, Company, KamItem
 
 
 def test_search_audit_procedures_returns_linkages_and_source_note(temp_engine):
@@ -322,6 +324,152 @@ def test_procedure_read_surfaces_report_unmigrated_schema_without_crash(
     assert evidence["database_reason"].startswith("missing_columns:")
     assert search["data_quality"]["status"] == "unavailable"
     assert peer["data_quality"]["status"] == "unavailable"
+
+
+def test_peer_preflight_rejects_empty_and_companies_missing_databases(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.engine as engine_module
+
+    empty_path = tmp_path / "empty-peer.db"
+    empty_path.touch()
+    empty_engine = create_engine(f"sqlite:///{empty_path}")
+    monkeypatch.setattr(engine_module, "engine", empty_engine)
+
+    empty_result = compare_peer_audit_procedures("000001", year=2025)
+
+    assert empty_result["data_quality"]["status"] == "unavailable"
+    assert not Path(f"{empty_path}-wal").exists()
+    assert not Path(f"{empty_path}-shm").exists()
+
+    partial_path = tmp_path / "partial-peer.db"
+    partial_engine = create_engine(f"sqlite:///{partial_path}")
+    Base.metadata.create_all(partial_engine)
+    with partial_engine.begin() as conn:
+        conn.execute(text("DROP TABLE companies"))
+    partial_engine.dispose()
+    monkeypatch.setattr(
+        engine_module,
+        "engine",
+        create_engine(f"sqlite:///{partial_path}"),
+    )
+
+    partial_result = compare_peer_audit_procedures("000001", year=2025)
+
+    assert partial_result["data_quality"]["status"] == "unavailable"
+    assert "companies" in partial_result["data_quality"]["coverage_note"]
+    assert not Path(f"{partial_path}-wal").exists()
+    assert not Path(f"{partial_path}-shm").exists()
+
+
+def test_procedure_reads_use_immutable_sqlite_without_creating_sidecars(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.engine as engine_module
+    from kreports.analysis.audit_procedure_evidence import (
+        build_audit_procedure_evidence_map,
+    )
+
+    db_path = tmp_path / "readonly-procedure.db"
+    seed_engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(seed_engine)
+    with Session(seed_engine) as session:
+        session.add(
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="읽기전용회사",
+                market="KOSPI",
+                induty_code="264",
+            )
+        )
+        session.commit()
+    seed_engine.dispose()
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{db_path}{suffix}")
+        if sidecar.exists():
+            sidecar.unlink()
+    empty_wal = Path(f"{db_path}-wal")
+    empty_wal.touch()
+    before_mtime = db_path.stat().st_mtime_ns
+    monkeypatch.setattr(
+        engine_module,
+        "engine",
+        create_engine(f"sqlite:///{db_path}"),
+    )
+
+    evidence = build_audit_procedure_evidence_map(year=2025)
+    search = search_audit_procedures(company="000001", year=2025)
+    peer = compare_peer_audit_procedures(
+        "000001",
+        year=2025,
+        _peer_group={
+            "subject": {
+                "corp_code": "00000001",
+                "corp_name": "읽기전용회사",
+            },
+            "peers": [],
+            "selection_policy": {},
+        },
+    )
+
+    assert evidence["database_status"] == "available"
+    assert search["total_procedures"] == 0
+    assert peer["data_quality"]["status"] == "missing"
+    assert db_path.stat().st_mtime_ns == before_mtime
+    assert empty_wal.exists() and empty_wal.stat().st_size == 0
+    assert not Path(f"{db_path}-shm").exists()
+
+
+def test_procedure_reads_fail_closed_on_uncheckpointed_wal(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.engine as engine_module
+    from kreports.analysis.audit_procedure_evidence import (
+        build_audit_procedure_evidence_map,
+    )
+
+    db_path = tmp_path / "wal-procedure.db"
+    wal_engine = create_engine(f"sqlite:///{db_path}")
+    with wal_engine.connect() as connection:
+        connection.execute(text("PRAGMA journal_mode=WAL"))
+        connection.execute(text("PRAGMA wal_autocheckpoint=0"))
+        connection.commit()
+    Base.metadata.create_all(wal_engine)
+    with Session(wal_engine) as session:
+        session.add(
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="WAL회사",
+                market="KOSPI",
+                induty_code="264",
+            )
+        )
+        session.commit()
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+    assert wal_path.exists() and wal_path.stat().st_size > 0
+    before = {
+        path: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in (db_path, wal_path, shm_path)
+    }
+    monkeypatch.setattr(engine_module, "engine", wal_engine)
+
+    evidence = build_audit_procedure_evidence_map(year=2025)
+    search = search_audit_procedures(year=2025)
+    peer = compare_peer_audit_procedures("000001", year=2025)
+
+    assert evidence["database_reason"].endswith("uncheckpointed_wal")
+    assert search["data_quality"]["status"] == "unavailable"
+    assert peer["data_quality"]["status"] == "unavailable"
+    assert {
+        path: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in (db_path, wal_path, shm_path)
+    } == before
 
 
 def test_peer_full_body_fallback_preserves_procedure_method(temp_engine):

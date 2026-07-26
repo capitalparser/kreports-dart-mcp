@@ -7,6 +7,7 @@ procedure.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,10 +27,14 @@ class EvidenceLink:
     confidence_basis: str
 
 
-def procedure_database_preflight(
+class ProcedureDatabaseUnavailable(RuntimeError):
+    """Procedure read surface cannot safely inspect the runtime database."""
+
+
+def _validate_procedure_schema(
+    read_engine,
     required_tables: set[str] | None = None,
-) -> tuple[bool, str | None]:
-    """Check procedure schema without creating a missing SQLite database."""
+) -> None:
     required = (
         {
             "companies",
@@ -39,14 +44,63 @@ def procedure_database_preflight(
         if required_tables is None
         else required_tables
     )
+    try:
+        inspector = inspect(read_engine)
+        tables = set(inspector.get_table_names())
+    except Exception as exc:
+        raise ProcedureDatabaseUnavailable(
+            f"runtime_db_unavailable:{type(exc).__name__}"
+        ) from exc
+    missing = sorted(required - tables)
+    if missing:
+        raise ProcedureDatabaseUnavailable(
+            f"missing_schema:{','.join(missing)}"
+        )
+    if "audit_procedure_items" not in required:
+        return
+    try:
+        columns = {
+            str(column["name"])
+            for column in inspector.get_columns("audit_procedure_items")
+        }
+    except Exception as exc:
+        raise ProcedureDatabaseUnavailable(
+            f"runtime_db_unavailable:{type(exc).__name__}"
+        ) from exc
+    required_columns = {
+        "kam_item_id",
+        "method",
+        "assertion_hints_json",
+        "linked_metric_keys_json",
+        "linked_note_keys_json",
+        "linked_event_keys_json",
+        "parser_version",
+        "quality_status",
+    }
+    missing_columns = sorted(required_columns - columns)
+    if missing_columns:
+        raise ProcedureDatabaseUnavailable(
+            f"missing_columns:{','.join(missing_columns)}"
+        )
+
+
+@contextmanager
+def procedure_read_engine(required_tables: set[str] | None = None):
+    """Yield a schema-checked engine without creating SQLite sidecars."""
     source_engine = engine_module.engine
-    audit_procedure_columns: set[str] | None = None
     if source_engine.dialect.name == "sqlite":
         database = source_engine.url.database
         if database not in {None, "", ":memory:"}:
             database_path = Path(str(database)).expanduser().resolve()
             if not database_path.is_file():
-                return False, "runtime_db_unavailable"
+                raise ProcedureDatabaseUnavailable(
+                    "runtime_db_unavailable"
+                )
+            wal_path = Path(f"{database_path}-wal")
+            if wal_path.exists() and wal_path.stat().st_size > 0:
+                raise ProcedureDatabaseUnavailable(
+                    "runtime_db_unavailable:uncheckpointed_wal"
+                )
             readonly_engine = create_engine(
                 (
                     f"sqlite:///file:{database_path.as_posix()}"
@@ -55,46 +109,35 @@ def procedure_database_preflight(
                 connect_args={"check_same_thread": False},
             )
             try:
-                readonly_inspector = inspect(readonly_engine)
-                tables = set(readonly_inspector.get_table_names())
-                if "audit_procedure_items" in tables:
-                    audit_procedure_columns = {
-                        str(column["name"])
-                        for column in readonly_inspector.get_columns(
-                            "audit_procedure_items"
-                        )
-                    }
-            except Exception as exc:
-                return False, f"runtime_db_unavailable:{type(exc).__name__}"
+                _validate_procedure_schema(
+                    readonly_engine,
+                    required_tables,
+                )
+                yield readonly_engine
             finally:
                 readonly_engine.dispose()
-        else:
-            tables = set(inspect(source_engine).get_table_names())
-    else:
-        tables = set(inspect(source_engine).get_table_names())
-    missing = sorted(required - tables)
-    if missing:
-        return False, f"missing_schema:{','.join(missing)}"
-    if "audit_procedure_items" in required:
-        columns = audit_procedure_columns or {
-            str(column["name"])
-            for column in inspect(source_engine).get_columns(
-                "audit_procedure_items"
-            )
-        }
-        required_columns = {
-            "kam_item_id",
-            "method",
-            "assertion_hints_json",
-            "linked_metric_keys_json",
-            "linked_note_keys_json",
-            "linked_event_keys_json",
-            "parser_version",
-            "quality_status",
-        }
-        missing_columns = sorted(required_columns - columns)
-        if missing_columns:
-            return False, f"missing_columns:{','.join(missing_columns)}"
+            return
+    _validate_procedure_schema(source_engine, required_tables)
+    yield source_engine
+
+
+@contextmanager
+def procedure_read_connection(required_tables: set[str] | None = None):
+    """Yield one actual read connection using the safe procedure engine."""
+    with procedure_read_engine(required_tables) as read_engine:
+        with read_engine.connect() as connection:
+            yield connection
+
+
+def procedure_database_preflight(
+    required_tables: set[str] | None = None,
+) -> tuple[bool, str | None]:
+    """Check procedure schema without creating a missing SQLite database."""
+    try:
+        with procedure_read_engine(required_tables):
+            pass
+    except ProcedureDatabaseUnavailable as exc:
+        return False, str(exc)
     return True, None
 
 
@@ -337,8 +380,14 @@ def build_audit_procedure_evidence_map(
     params["year"] = int(year)
     params["limit"] = max(1, min(int(limit), 500))
 
-    engine = engine_module.engine
-    with engine.connect() as conn:
+    with procedure_read_connection(
+        {
+            "companies",
+            "kam_items",
+            "audit_procedure_items",
+            "report_sections",
+        }
+    ) as conn:
         structured_kam_summary = dict(
             conn.execute(
                 text(f"""
@@ -600,7 +649,9 @@ def build_audit_procedure_evidence_map(
         if full_body_receipts
         else 0.0
     )
-    if full_body_receipts and coverage_rate < 80.0:
+    if structured_count > 0 and full_body_receipts == 0:
+        required_gaps.append("no_eligible_full_body_receipts")
+    elif full_body_receipts and coverage_rate < 80.0:
         required_gaps.append("procedure_coverage_below_80")
 
     if required_gaps:

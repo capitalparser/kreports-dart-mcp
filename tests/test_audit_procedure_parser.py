@@ -116,6 +116,24 @@ def test_extract_procedure_steps_rejects_boilerplate_and_noun_only_phrases(
     assert extract_procedure_steps(_kam_item(text_value)) == []
 
 
+def test_extract_procedure_steps_rejects_planning_responsibility_and_action_list():
+    text_value = (
+        "감사인은 중요한 왜곡표시위험을 식별하고 평가하며, "
+        "이에 대응하는 감사절차를 설계하고 수행합니다.\n"
+        "감사계획에는 표본, 검사 및 확인 항목을 포함하였습니다."
+    )
+
+    assert extract_procedure_steps(_kam_item(text_value)) == []
+
+
+def test_extract_procedure_steps_preserves_independent_chained_actions():
+    steps = extract_procedure_steps(
+        _kam_item("경영진에게 질문하여 계약서를 검사하였습니다.")
+    )
+
+    assert [step.method for step in steps] == ["inquiry", "inspection"]
+
+
 def test_extract_procedure_steps_keeps_unknown_action_as_other():
     steps = extract_procedure_steps(
         _kam_item("해당 매출 자료를 대사하여 차이를 조사하였습니다.")

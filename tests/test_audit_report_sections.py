@@ -5,6 +5,7 @@ from kreports.collector.fetcher import parse_attachment_options
 from kreports.collector.fetcher import _decode_dart_text
 from kreports.collector.report_document_collector import (
     collect_report_sections_for_disclosure,
+    extract_document_features_from_content,
     index_audit_procedures_from_sections,
 )
 from kreports.db.models import (
@@ -356,7 +357,9 @@ def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monke
           <TITLE>감사의견</TITLE>
           <P>{dcm_no} 감사의견은 적정입니다.</P>
           <TITLE>핵심감사사항</TITLE>
-          <P>건설중인자산의 감가상각개시시점 평가를 핵심감사사항으로 결정한 이유입니다.</P>
+          <TITLE>건설중인자산의 감가상각개시시점</TITLE>
+          <P>핵심감사사항으로 선정한 이유</P>
+          <P>감가상각개시시점 평가는 중요한 판단이 필요합니다.</P>
           <P>감사에서 다루어진 방법</P>
           <P>· 감가상각개시 관련 내부통제 테스트를 수행하였습니다.</P>
           <P>· 관련 문서 대사와 재계산을 수행하였습니다.</P>
@@ -385,7 +388,80 @@ def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monke
         "20250218800508_10316977",
     ]
     assert "감가상각개시시점" in first_kam_body
-    assert procedure_types == []
+    assert sorted(procedure_types) == [
+        "internal_control",
+        "internal_control",
+        "substantive_test",
+        "substantive_test",
+    ]
+
+
+def test_document_feature_refresh_rebuilds_kam_before_procedure_index(
+    temp_engine,
+):
+    from kreports.db.engine import get_session
+
+    meta = {
+        "rcept_no": "REFRESH1",
+        "dcm_no": "100",
+        "corp_code": "00126380",
+        "bsns_year": 2025,
+        "source_type": "audit_report",
+        "report_nm": "감사보고서",
+    }
+    old_content = """
+    <DOCUMENT>
+      <TITLE>핵심감사사항</TITLE>
+      <TITLE>수익인식</TITLE>
+      <P>핵심감사사항으로 선정한 이유</P>
+      <P>기간귀속 판단에 중요한 왜곡표시위험이 있습니다.</P>
+      <P>감사에서 다루어진 방법</P>
+      <P>계약서를 검사하였습니다.</P>
+      <P>거래처에 외부조회서를 발송하였습니다.</P>
+    </DOCUMENT>
+    """
+    new_content = """
+    <DOCUMENT>
+      <TITLE>핵심감사사항</TITLE>
+      <TITLE>수익인식</TITLE>
+      <P>핵심감사사항으로 선정한 이유</P>
+      <P>기간귀속 판단에 중요한 왜곡표시위험이 있습니다.</P>
+      <P>감사에서 다루어진 방법</P>
+      <P>감사인은 중요한 왜곡표시위험을 식별하고 평가하며,
+      이에 대응하는 감사절차를 설계하고 수행합니다.</P>
+    </DOCUMENT>
+    """
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+
+    first = extract_document_features_from_content(meta, content=old_content)
+    with get_session() as session:
+        first_methods = [
+            row.method
+            for row in session.query(AuditProcedureItem)
+            .filter_by(rcept_no="REFRESH1")
+            .order_by(AuditProcedureItem.procedure_ordinal)
+            .all()
+        ]
+    second = extract_document_features_from_content(meta, content=new_content)
+
+    assert first["audit_procedure_items"] == 2
+    assert first_methods == ["inspection", "confirmation"]
+    assert second["audit_procedure_items"] == 0
+    with get_session() as session:
+        assert (
+            session.query(AuditProcedureItem)
+            .filter_by(rcept_no="REFRESH1")
+            .count()
+            == 0
+        )
 
 
 def test_collect_business_report_collects_summary_and_attached_audit_reports(temp_engine, monkeypatch):
