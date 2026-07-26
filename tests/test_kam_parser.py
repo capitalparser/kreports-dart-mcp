@@ -931,6 +931,56 @@ def test_parse_outcome_rejects_any_incomplete_explicit_frame(invalid_matter):
     assert "incomplete_kam_structure" in outcome.limitations
 
 
+def test_parse_outcome_gives_incomplete_frame_precedence_over_unrelated_ambiguity():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    revenue = """
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    """
+    incomplete_inventory = """
+    <TITLE>Inventory valuation</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected inventory samples.</P>
+    """
+    ambiguous_goodwill = """
+    <TABLE>
+    <TR><TD>Goodwill impairment</TD></TR>
+    <TR><TD>Why the matter was determined to be a key audit matter</TD></TR>
+    <TR><TD>Cash-flow forecasts require significant judgment.</TD></TR>
+    <TR><TD>How the matter was addressed in the audit</TD></TR>
+    <TR><TD>We tested management's forecasts.</TD></TR>
+    </TABLE>
+    """
+
+    def outcome_for(*matters):
+        return parse_kam_items(
+            "<TITLE>Key Audit Matters</TITLE>" + "".join(matters)
+        )
+
+    incomplete_control = outcome_for(revenue, incomplete_inventory)
+    ambiguous_control = outcome_for(revenue, ambiguous_goodwill)
+
+    assert incomplete_control.status == "error"
+    assert incomplete_control.items == []
+    assert incomplete_control.limitations == ["incomplete_kam_structure"]
+    assert ambiguous_control.status == "ambiguous"
+    assert ambiguous_control.items == []
+    assert ambiguous_control.limitations == ["ambiguous_boundary"]
+
+    for outcome in (
+        outcome_for(revenue, incomplete_inventory, ambiguous_goodwill),
+        outcome_for(revenue, ambiguous_goodwill, incomplete_inventory),
+    ):
+        assert outcome.status == "error"
+        assert outcome.items == []
+        assert outcome.limitations == ["incomplete_kam_structure"]
+
+
 @pytest.mark.parametrize(
     "cdata_name",
     [

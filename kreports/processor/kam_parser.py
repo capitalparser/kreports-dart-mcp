@@ -208,6 +208,12 @@ class _MatterFrame:
 
 
 @dataclass(frozen=True)
+class _BoundaryClassification:
+    start: int
+    classification: str
+
+
+@dataclass(frozen=True)
 class _HeadingFrame:
     reason_heading: int
     reason_separators: tuple[int, ...]
@@ -1147,6 +1153,49 @@ def _deduplicate_items(
     return deduplicated
 
 
+def _classify_matter_boundaries(
+    lines: list[str],
+    frames: list[_MatterFrame],
+    candidate_items: list[ParsedKamItem | None],
+    ambiguous_starts: set[int],
+) -> list[_BoundaryClassification]:
+    classifications: list[_BoundaryClassification] = []
+    for index, (frame, item) in enumerate(
+        zip(frames, candidate_items, strict=True)
+    ):
+        if item is not None:
+            classification = (
+                "ambiguous"
+                if frame.title_start in ambiguous_starts
+                else "valid"
+            )
+        else:
+            next_start = (
+                frames[index + 1].title_start
+                if index + 1 < len(frames)
+                else None
+            )
+            split_is_ambiguous = next_start in ambiguous_starts
+            complete_without_split = (
+                _candidate_items_from_frames(lines, [frame])[0] is not None
+            )
+            classification = (
+                "artifact"
+                if (
+                    split_is_ambiguous
+                    and complete_without_split
+                )
+                else "incomplete"
+            )
+        classifications.append(
+            _BoundaryClassification(
+                start=frame.title_start,
+                classification=classification,
+            )
+        )
+    return classifications
+
+
 def parse_kam_items(full_text: str) -> KamParseOutcome:
     """Return KAM items with an explicit completeness/ambiguity outcome."""
     try:
@@ -1184,32 +1233,29 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
             )
         frames = _discover_matter_frames(lines, structured_lines)
         candidate_items = _candidate_items_from_frames(lines, frames)
-        invalid_frames = [
-            frame
-            for frame, item in zip(
-                frames,
-                candidate_items,
-                strict=True,
-            )
-            if item is None
-        ]
         ambiguous_starts = _ambiguous_plain_boundary_starts(
             lines,
             structured_lines,
         )
-        if invalid_frames and (
-            any(
-                frame.title_start in ambiguous_starts
-                for frame in invalid_frames
-            )
-            or not ambiguous_starts
+        boundary_classifications = _classify_matter_boundaries(
+            lines,
+            frames,
+            candidate_items,
+            ambiguous_starts,
+        )
+        if any(
+            boundary.classification == "incomplete"
+            for boundary in boundary_classifications
         ):
             return KamParseOutcome(
                 items=[],
                 status="error",
                 limitations=["incomplete_kam_structure"],
             )
-        if ambiguous_starts:
+        if ambiguous_starts or any(
+            boundary.classification == "artifact"
+            for boundary in boundary_classifications
+        ):
             return KamParseOutcome(
                 items=[],
                 status="ambiguous",
