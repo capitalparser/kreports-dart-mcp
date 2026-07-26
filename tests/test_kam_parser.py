@@ -137,6 +137,38 @@ def test_parser_keeps_numbered_response_step_before_unnumbered_next_matter():
     assert "표본 재고" in items[1].audit_response_text
 
 
+@pytest.mark.parametrize(
+    "procedure",
+    [
+        pytest.param("1. 계약 표본 검사", id="arabic"),
+        pytest.param("I. 계약 표본 검사", id="roman"),
+        pytest.param("가. 계약 표본 검사", id="korean"),
+    ],
+)
+def test_parser_keeps_unpunctuated_procedure_before_unnumbered_matter(procedure):
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = f"""
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단에 유의적인 위험이 있습니다.
+    감사인이 수행한 주요 절차
+    {procedure}
+    재고자산 평가
+    핵심감사사항으로 결정한 이유
+    순실현가능가치 추정에 유의적인 판단이 포함됩니다.
+    감사에서 다루어진 방법
+    표본 재고의 예상판매가격을 검사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert [item.title for item in items] == ["수익인식", "재고자산 평가"]
+    assert items[0].audit_response_text == procedure
+    assert "표본 재고" in items[1].audit_response_text
+
+
 def test_parser_joins_wrapped_numbered_next_matter_inside_response_state():
     from kreports.processor.kam_parser import extract_kam_items
 
@@ -347,6 +379,28 @@ def test_parser_does_not_promote_numbered_procedures_before_unnumbered_matter():
     assert "2. Recalculate contract cut-off." in items[0].audit_response_text
     assert "3. Confirm management assumptions." in items[0].audit_response_text
     assert items[1].title == "Goodwill impairment assessment"
+
+
+def test_parser_does_not_create_matter_without_reason_anchor():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단에 중요한 왜곡표시위험이 있습니다.
+    감사에서 다루어진 방법
+    1. 계약 표본 검사
+    2. 재고자산 평가
+    감사에서 다루어진 방법
+    예상판매가격을 검사했습니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+    assert "2. 재고자산 평가" in items[0].audit_response_text
 
 
 def test_parser_deduplicates_numbered_title_followed_by_same_unnumbered_title():
