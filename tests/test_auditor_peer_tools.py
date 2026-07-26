@@ -17,7 +17,15 @@ from kreports.analysis.api import (
     search_audit_procedures,
     search_audit_report_matters,
 )
-from kreports.db.models import AccountingNoteChapter, AuditProcedureItem, Company, EvidenceDocument, Financial, SourceDocument
+from kreports.db.models import (
+    AccountingNoteChapter,
+    AuditProcedureItem,
+    Company,
+    EvidenceDocument,
+    Financial,
+    KamItem,
+    SourceDocument,
+)
 from kreports.mcp.tools import call_tool
 
 
@@ -240,7 +248,7 @@ def test_search_audit_report_matters_falls_back_to_evidence_documents(temp_engin
     assert section["severity_hint"] == "high"
 
 
-def test_search_audit_procedures_falls_back_to_evidence_kam_text(temp_engine):
+def test_search_audit_procedures_falls_back_to_full_body_kam_only(temp_engine):
     from kreports.db.engine import get_session
 
     with get_session() as session:
@@ -251,29 +259,31 @@ def test_search_audit_procedures_falls_back_to_evidence_kam_text(temp_engine):
             market="KOSPI",
             induty_code="264",
         ))
-        session.add(EvidenceDocument(
+        session.add(KamItem(
             corp_code="00000001",
             bsns_year=2025,
             source_type="audit_report",
             rcept_no="20260311000003",
             dcm_no="D003",
-            evidence_scope="auditor_view",
-            title="2025 audit_report evidence",
-            normalized_text=(
-                "# Evidence document\n"
-                "## report_section/kam: 핵심감사사항\n"
-                "수익인식은 핵심감사사항입니다.\n"
-                "우리는 매출 관련 내부통제 이해 및 평가를 수행하였고, 표본 거래에 대해 문서검사를 수행하였습니다.\n"
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text="수익인식은 핵심감사사항입니다.",
+            audit_response_text=(
+                "매출 관련 내부통제의 운영효과성을 테스트하였습니다."
             ),
-            text_hash="x",
-            text_length=150,
-            source_count=1,
-            generated_at=datetime.utcnow(),
+            related_note_references_json="[]",
+            full_body_hash="x" * 40,
+            full_body_length=500,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime.utcnow(),
         ))
 
     out = search_audit_procedures(company="000001", year=2025, keyword="내부통제", limit=5)
 
-    assert out["data_quality"]["source"] == "evidence_documents.audit_report_kam"
+    assert out["data_quality"]["source"] == "kam_items.full_body"
     assert out["total_procedures"] == 1
     record = out["companies"][0]["records"][0]
     assert record["procedure_type"] == "internal_control"

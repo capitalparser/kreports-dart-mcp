@@ -3,9 +3,35 @@ from datetime import datetime
 from kreports.analysis.audit_procedure_evidence import (
     build_audit_procedure_evidence_map,
     classify_audit_procedure_linkages,
+    link_procedure_evidence,
 )
 from kreports.db.engine import get_session
-from kreports.db.models import AuditProcedureItem, Company, ReportSection
+from kreports.db.models import AuditProcedureItem, Company, KamItem, ReportSection
+from kreports.processor.audit_procedure_parser import ParsedProcedureStep
+from kreports.semantic.metrics import METRICS
+
+
+def test_link_procedure_evidence_has_complete_navigation_metadata():
+    step = ParsedProcedureStep(
+        ordinal=0,
+        procedure_text="매출 계약서를 검사하고 기간귀속을 테스트하였습니다.",
+        method="cutoff_test",
+        assertion_hints=("cutoff", "occurrence"),
+        source_start=0,
+        source_end=29,
+        source_kam_ordinal=1,
+        source_kam_hash="a" * 40,
+        procedure_hash="b" * 40,
+    )
+
+    links = link_procedure_evidence(step, METRICS)
+
+    metric = next(row for row in links if row.category == "metric")
+    assert metric.key == "revenue"
+    assert metric.label == "매출액"
+    assert metric.matching_phrase in step.procedure_text
+    assert metric.confidence_basis == "explicit_keyword_registry_match"
+    assert metric.key in METRICS
 
 
 def test_classify_audit_procedure_linkages_maps_procedure_to_accounts_and_notes():
@@ -122,3 +148,65 @@ def test_build_audit_procedure_evidence_map_separates_totals_from_sample_limit(t
     assert result["counts"]["kam_sections"] == 2
     assert result["counts"]["procedure_items"] == 3
     assert result["sample"]["kam_sections"] == 1
+
+
+def test_evidence_map_uses_full_body_denominator_and_reports_other_gaps(temp_engine):
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
+        statuses = ["full_body", "full_body", "summary_only", "missing", "error"]
+        for ordinal, status in enumerate(statuses, start=1):
+            item = KamItem(
+                rcept_no=f"2026030100000{ordinal}_100",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="audit_report",
+                ordinal=ordinal,
+                title=f"KAM {ordinal}",
+                normalized_topic="revenue",
+                reason_text="위험",
+                audit_response_text=(
+                    "계약서를 검사하였습니다." if status == "full_body" else None
+                ),
+                related_note_references_json="[]",
+                full_body_hash=str(ordinal) * 40,
+                full_body_length=500 if status == "full_body" else 20,
+                source_basis="source_documents.full_body",
+                parser_version="kam.v1",
+                quality_status=status,
+                fetched_at=datetime(2026, 3, 1),
+            )
+            session.add(item)
+            session.flush()
+            if ordinal == 1:
+                session.add(
+                    AuditProcedureItem(
+                        kam_item_id=item.id,
+                        corp_code="00126380",
+                        bsns_year=2025,
+                        rcept_no=item.rcept_no,
+                        source_type="audit_report",
+                        section_ordinal=ordinal,
+                        kam_topic="revenue",
+                        method="inspection",
+                        procedure_type="substantive_test",
+                        procedure_text="계약서를 검사하였습니다.",
+                        procedure_hash="z" * 40,
+                        procedure_ordinal=1,
+                        parser_version="audit_procedure.v1",
+                        quality_status="full_body",
+                    )
+                )
+
+    result = build_audit_procedure_evidence_map(year=2025, limit=10)
+
+    assert result["counts"]["full_body_kam_items"] == 2
+    assert result["counts"]["full_body_kam_items_with_procedures"] == 1
+    assert result["rates"]["procedure_coverage"] == 50.0
+    assert result["quality_gaps"] == {
+        "summary_only": 1,
+        "missing": 1,
+        "error": 1,
+    }
+    assert [row["rcept_no"] for row in result["missing_procedure_kams"]] == [
+        "20260301000002_100"
+    ]

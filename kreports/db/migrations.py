@@ -194,6 +194,49 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_06_audit_procedure_linkage",
+        description="Link structured audit procedures to KAM and evidence",
+        statements=(
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN kam_item_id INTEGER REFERENCES kam_items(id)"
+            ),
+            "ALTER TABLE audit_procedure_items ADD COLUMN method VARCHAR(50)",
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN assertion_hints_json TEXT"
+            ),
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN linked_metric_keys_json TEXT"
+            ),
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN linked_note_keys_json TEXT"
+            ),
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN linked_event_keys_json TEXT"
+            ),
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN parser_version VARCHAR(30)"
+            ),
+            (
+                "ALTER TABLE audit_procedure_items "
+                "ADD COLUMN quality_status VARCHAR(20)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_audit_procedure_kam_item "
+                "ON audit_procedure_items (kam_item_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_audit_procedure_method_year "
+                "ON audit_procedure_items (method, bsns_year)"
+            ),
+        ),
+    ),
 )
 
 

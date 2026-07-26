@@ -32,6 +32,7 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         "get_investor_signals": _build_investor_signals_pack,
         "get_subsidiary_auditors": _build_subsidiary_pack,
         "search_disclosure_events": _build_disclosure_events_pack,
+        "search_audit_procedures": _build_audit_procedure_pack,
         "compare_to_industry_multi": _build_peer_benchmark_pack,
     }
     builder = builders.get(tool_name)
@@ -516,4 +517,57 @@ def _build_generic_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any
             [("statement", "확인 내용"), ("source", "출처")],
             facts,
         ))
+    return pack
+
+
+def _build_audit_procedure_pack(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    pack = _base_pack(f"{_subject_label(result)} KAM 감사절차", result)
+    rows: list[dict[str, Any]] = []
+    for company in result.get("companies") or []:
+        if not isinstance(company, dict):
+            continue
+        for record in company.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            rows.append(
+                {
+                    "corp_name": company.get("corp_name"),
+                    "year": record.get("year"),
+                    "kam_topic": record.get("kam_topic"),
+                    "method": record.get("method"),
+                    "procedure_type": record.get("procedure_type"),
+                    "procedure_excerpt": record.get("procedure_excerpt"),
+                    "assertion_hints": record.get("assertion_hints"),
+                    "linked_metric_keys": record.get("linked_metric_keys"),
+                    "linked_note_keys": record.get("linked_note_keys"),
+                    "linked_event_keys": record.get("linked_event_keys"),
+                    "source_kam": record.get("source_kam"),
+                }
+            )
+    if rows:
+        pack["tables"].append(
+            _table(
+                "audit_procedures",
+                "KAM 감사절차와 탐색 링크",
+                [
+                    ("corp_name", "회사"),
+                    ("year", "연도"),
+                    ("kam_topic", "KAM 주제"),
+                    ("method", "감사절차 방법"),
+                    ("procedure_excerpt", "감사절차"),
+                    ("assertion_hints", "감사주장 힌트"),
+                    ("linked_metric_keys", "연결 지표"),
+                    ("linked_note_keys", "연결 주석"),
+                    ("linked_event_keys", "연결 공시"),
+                    ("source_kam", "원천 KAM"),
+                ],
+                rows,
+                note=(
+                    "연결 항목은 탐색을 위한 navigation aid이며 감사절차가 충분하고 "
+                    "적절하게 수행되었다는 증거가 아닙니다."
+                ),
+            )
+        )
     return pack

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger, Boolean, Column, Date, DateTime, Float, Integer,
-    SmallInteger, String, Text, UniqueConstraint, Index,
+    ForeignKey, SmallInteger, String, Text, UniqueConstraint, Index,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -513,11 +513,23 @@ class AuditProcedureItem(Base):
     corp_code = Column(String(8), nullable=False)
     bsns_year = Column(SmallInteger, nullable=False)
     source_type = Column(String(30), nullable=False)
+    kam_item_id = Column(
+        Integer,
+        ForeignKey("kam_items.id"),
+        nullable=True,
+    )
     kam_topic = Column(String(50), nullable=True)
+    method = Column(String(50), nullable=True)
     procedure_type = Column(String(50), nullable=False)
     procedure_text = Column(Text, nullable=False)
     procedure_hash = Column(String(40), nullable=True)
     procedure_length = Column(Integer, nullable=True)
+    assertion_hints_json = Column(Text, nullable=True)
+    linked_metric_keys_json = Column(Text, nullable=True)
+    linked_note_keys_json = Column(Text, nullable=True)
+    linked_event_keys_json = Column(Text, nullable=True)
+    parser_version = Column(String(30), nullable=True)
+    quality_status = Column(String(20), nullable=True)
     section_ordinal = Column(SmallInteger, nullable=False, default=0)
     procedure_ordinal = Column(SmallInteger, nullable=False, default=0)
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -530,6 +542,8 @@ class AuditProcedureItem(Base):
         Index("idx_audit_procedure_corp_year", "corp_code", "bsns_year"),
         Index("idx_audit_procedure_type", "procedure_type"),
         Index("idx_audit_procedure_topic", "kam_topic"),
+        Index("idx_audit_procedure_kam_item", "kam_item_id"),
+        Index("idx_audit_procedure_method_year", "method", "bsns_year"),
     )
 
 

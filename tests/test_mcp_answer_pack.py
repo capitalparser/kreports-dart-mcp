@@ -140,3 +140,44 @@ def test_answer_pack_normalizes_legacy_quality_through_the_v1_contract():
     assert pack is not None
     assert pack["data_quality"]["schema_version"] == "legacy-result-adapter"
     assert pack["sources"][0]["url"].startswith("https://dart.fss.or.kr/")
+
+
+def test_audit_procedure_answer_pack_exposes_links_with_sufficiency_warning():
+    result = {
+        "subject": {"corp_name": "A"},
+        "companies": [
+            {
+                "corp_name": "A",
+                "records": [
+                    {
+                        "year": 2025,
+                        "kam_topic": "revenue",
+                        "method": "cutoff_test",
+                        "procedure_type": "cutoff",
+                        "procedure_excerpt": "기간귀속 테스트를 수행하였습니다.",
+                        "assertion_hints": ["cutoff"],
+                        "linked_metric_keys": ["revenue"],
+                        "linked_note_keys": ["revenue_policy"],
+                        "linked_event_keys": [],
+                        "source_kam": {"id": 7, "rcept_no": "20260301000001"},
+                    }
+                ],
+            }
+        ],
+        "data_quality": {
+            "status": "usable",
+            "source": "audit_procedure_items",
+        },
+    }
+
+    out = _attach_meta("search_audit_procedures", result)
+
+    table = next(
+        table
+        for table in out["answer_pack"]["tables"]
+        if table["id"] == "audit_procedures"
+    )
+    assert table["rows"][0]["linked_metric_keys"] == ["revenue"]
+    assert table["rows"][0]["source_kam"]["id"] == 7
+    assert "navigation aid" in table["note"]
+    assert "충분" in table["note"]

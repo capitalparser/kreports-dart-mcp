@@ -1,6 +1,7 @@
 """Audit history, policies, report matters, KAMs, and procedures."""
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 
@@ -1015,6 +1016,131 @@ def _evidence_audit_procedure_rows(
     return out
 
 
+def _full_body_kam_procedure_rows(
+    *,
+    corp_codes: list[str],
+    year: int,
+    keyword: str | None = None,
+    kam_topic: str | None = None,
+    procedure_type: str | None = None,
+    method: str | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Parse only reconstructed full-body KAMs without persisting rows."""
+    if not corp_codes:
+        return []
+    from kreports.processor.audit_procedure_parser import (
+        extract_procedure_steps,
+        legacy_procedure_type,
+    )
+    from kreports.processor.kam_parser import ParsedKamItem
+
+    stmt = text("""
+        SELECT ki.id AS kam_item_id, ki.corp_code, c.stock_code, c.corp_name,
+               c.market, c.induty_code, ki.bsns_year, ki.rcept_no, ki.dcm_no,
+               ki.source_type, ki.ordinal, ki.title, ki.normalized_topic,
+               ki.reason_text, ki.audit_response_text,
+               ki.related_note_references_json, ki.full_body_hash,
+               ki.full_body_length, ki.parser_version AS kam_parser_version,
+               ki.quality_status
+        FROM kam_items ki
+        JOIN companies c ON c.corp_code=ki.corp_code
+        WHERE ki.bsns_year=:year
+          AND ki.quality_status='full_body'
+          AND ki.corp_code IN :corp_codes
+        ORDER BY c.market, c.corp_name, ki.rcept_no, ki.ordinal
+    """).bindparams(bindparam("corp_codes", expanding=True))
+    with _engine_module.engine.connect() as conn:
+        kam_rows = [
+            dict(row)
+            for row in conn.execute(
+                stmt,
+                {"year": int(year), "corp_codes": corp_codes},
+            ).mappings().all()
+        ]
+
+    out: list[dict] = []
+    for row in kam_rows:
+        response = str(row.get("audit_response_text") or "")
+        full_body = "\n".join(
+            value
+            for value in (
+                str(row.get("title") or ""),
+                str(row.get("reason_text") or ""),
+                response,
+            )
+            if value
+        )
+        item = ParsedKamItem(
+            ordinal=int(row.get("ordinal") or 0),
+            title=str(row.get("title") or ""),
+            normalized_topic=row.get("normalized_topic"),
+            reason_text=row.get("reason_text"),
+            audit_response_text=response or None,
+            related_note_references=[],
+            full_body=full_body,
+            full_body_hash=str(row.get("full_body_hash") or ""),
+            full_body_length=int(row.get("full_body_length") or len(full_body)),
+            quality_status="full_body",
+            parser_version=str(row.get("kam_parser_version") or "v1"),
+        )
+        for step in extract_procedure_steps(item):
+            legacy_type = legacy_procedure_type(step.method)
+            if kam_topic and row.get("normalized_topic") != kam_topic:
+                continue
+            if procedure_type and legacy_type != procedure_type:
+                continue
+            if method and step.method != method:
+                continue
+            if keyword and keyword not in step.procedure_text:
+                continue
+            out.append(
+                {
+                    "corp_code": row["corp_code"],
+                    "stock_code": row.get("stock_code"),
+                    "corp_name": row.get("corp_name"),
+                    "market": row.get("market"),
+                    "induty_code": row.get("induty_code"),
+                    "year": row["bsns_year"],
+                    "rcept_no": row["rcept_no"],
+                    "dcm_no": row.get("dcm_no"),
+                    "source_type": row.get("source_type"),
+                    "kam_topic": row.get("normalized_topic"),
+                    "method": step.method,
+                    "procedure_type": legacy_type,
+                    "procedure_text": step.procedure_text,
+                    "procedure_length": len(step.procedure_text),
+                    "section_ordinal": row.get("ordinal", 0),
+                    "procedure_ordinal": step.ordinal,
+                    "assertion_hints_json": json.dumps(
+                        step.assertion_hints,
+                        ensure_ascii=False,
+                    ),
+                    "linked_metric_keys_json": json.dumps(
+                        step.linked_metric_keys,
+                        ensure_ascii=False,
+                    ),
+                    "linked_note_keys_json": json.dumps(
+                        step.linked_note_keys,
+                        ensure_ascii=False,
+                    ),
+                    "linked_event_keys_json": json.dumps(
+                        step.linked_event_keys,
+                        ensure_ascii=False,
+                    ),
+                    "parser_version": step.parser_version,
+                    "quality_status": step.quality_status,
+                    "kam_item_id": row["kam_item_id"],
+                    "source_kam_title": row.get("title"),
+                    "source_kam_hash": row.get("full_body_hash"),
+                    "source_kam_quality_status": "full_body",
+                }
+            )
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def search_audit_procedures(
     *,
     company: str | None = None,
@@ -1023,13 +1149,19 @@ def search_audit_procedures(
     induty_prefix: str | None = None,
     kam_topic: str | None = None,
     procedure_type: str | None = None,
+    method: str | None = None,
     keyword: str | None = None,
     limit: int = 50,
     include_excerpt: bool = True,
 ) -> dict:
     """Search KAM audit procedures by company/year/industry/topic filters."""
+    from kreports.processor.audit_procedure_parser import PROCEDURE_METHODS
+
     if procedure_type and procedure_type not in _AUDIT_PROCEDURE_TYPES:
         return {"error": "invalid procedure_type", "allowed": sorted(_AUDIT_PROCEDURE_TYPES)}
+    allowed_methods = set(PROCEDURE_METHODS)
+    if method and method not in allowed_methods:
+        return {"error": "invalid method", "allowed": sorted(allowed_methods)}
     limit = max(1, min(int(limit), 500))
     params: dict[str, object] = {"row_limit": limit * 10}
     filters, subject = build_company_filters(
@@ -1050,6 +1182,9 @@ def search_audit_procedures(
     if procedure_type:
         where.append("api.procedure_type=:procedure_type")
         params["procedure_type"] = procedure_type
+    if method:
+        where.append("api.method=:method")
+        params["method"] = method
     if keyword:
         where.append("api.procedure_text LIKE :kw")
         params["kw"] = f"%{keyword}%"
@@ -1057,10 +1192,18 @@ def search_audit_procedures(
     sql = text(f"""
         SELECT api.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
                api.bsns_year AS year, api.rcept_no, api.dcm_no, api.source_type,
-               api.kam_topic, api.procedure_type, api.procedure_text,
-               api.procedure_length, api.section_ordinal, api.procedure_ordinal
+               api.kam_topic, api.method, api.procedure_type,
+               api.procedure_text, api.procedure_length, api.section_ordinal,
+               api.procedure_ordinal, api.assertion_hints_json,
+               api.linked_metric_keys_json, api.linked_note_keys_json,
+               api.linked_event_keys_json, api.parser_version,
+               api.quality_status, api.kam_item_id,
+               ki.title AS source_kam_title,
+               ki.full_body_hash AS source_kam_hash,
+               ki.quality_status AS source_kam_quality_status
         FROM audit_procedure_items api
         JOIN companies c ON c.corp_code=api.corp_code
+        LEFT JOIN kam_items ki ON ki.id=api.kam_item_id
         WHERE {" AND ".join(where)}
         ORDER BY api.bsns_year DESC, c.market, c.corp_name, api.kam_topic, api.procedure_type
         LIMIT :row_limit
@@ -1094,21 +1237,46 @@ def search_audit_procedures(
                 ),
                 {**company_params, "corp_limit": max(limit * 20, 100)},
             ).scalars().all()]
-        rows = _evidence_audit_procedure_rows(
+        rows = _full_body_kam_procedure_rows(
             corp_codes=corp_codes,
             year=int(year),
             keyword=keyword,
             kam_topic=kam_topic,
             procedure_type=procedure_type,
+            method=method,
             limit=limit * 10,
         )
         if rows:
-            row_source = "evidence_documents.audit_report_kam"
+            row_source = "kam_items.full_body"
 
     for row in rows:
         text_value = _display_text(row.pop("procedure_text") or "")
         if include_excerpt:
             row["procedure_excerpt"] = text_value[:900]
+        for source_key, output_key in (
+            ("assertion_hints_json", "assertion_hints"),
+            ("linked_metric_keys_json", "linked_metric_keys"),
+            ("linked_note_keys_json", "linked_note_keys"),
+            ("linked_event_keys_json", "linked_event_keys"),
+        ):
+            raw = row.pop(source_key, None)
+            try:
+                row[output_key] = list(json.loads(raw)) if raw else []
+            except (TypeError, ValueError):
+                row[output_key] = []
+        kam_item_id = row.pop("kam_item_id", None)
+        source_kam_title = row.pop("source_kam_title", None)
+        source_kam_hash = row.pop("source_kam_hash", None)
+        source_kam_quality = row.pop("source_kam_quality_status", None)
+        if kam_item_id is not None:
+            row["source_kam"] = {
+                "id": kam_item_id,
+                "title": source_kam_title,
+                "full_body_hash": source_kam_hash,
+                "quality_status": source_kam_quality,
+                "rcept_no": row.get("rcept_no"),
+                "dcm_no": row.get("dcm_no"),
+            }
         row["linkages"] = classify_audit_procedure_linkages(
             text_value,
             kam_topic=row.get("kam_topic"),
@@ -1130,6 +1298,7 @@ def search_audit_procedures(
             "induty_prefix": induty_prefix,
             "kam_topic": kam_topic,
             "procedure_type": procedure_type,
+            "method": method,
             "keyword": keyword,
             "limit": limit,
             "include_excerpt": include_excerpt,
@@ -1146,7 +1315,9 @@ def search_audit_procedures(
             "interpretation": (
                 "Procedure items are parsed hints from cached audit-report KAM response paragraphs. "
                 "The linkages explain which audit-report KAM, financial-statement account, "
-                "accounting note, or disclosure-event evidence should be checked with the procedure."
+                "accounting note, or disclosure-event evidence should be checked with the procedure. "
+                "Each linkage is a navigation aid, not evidence that the audit procedure was "
+                "sufficient or appropriately performed."
             ),
         },
     }
@@ -1161,6 +1332,7 @@ cache_quality_status = _cache_quality_status
 cached_years_for_sections = _cached_years_for_sections
 classify_audit_matter = _classify_audit_matter
 evidence_audit_procedure_rows = _evidence_audit_procedure_rows
+full_body_kam_procedure_rows = _full_body_kam_procedure_rows
 evidence_report_section_rows = _evidence_report_section_rows
 evidence_years_for_sections = _evidence_years_for_sections
 kam_hint_coverage = _kam_hint_coverage

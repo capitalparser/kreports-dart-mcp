@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime
+
+import pytest
+
+from kreports.db.engine import get_session
+from kreports.db.models import AuditProcedureItem, KamItem
+from kreports.processor.audit_procedure_parser import (
+    MAX_PROCEDURE_STEPS,
+    extract_procedure_steps,
+    replace_procedure_steps_for_kam,
+)
+from kreports.processor.kam_parser import ParsedKamItem
+
+
+def _kam_item(response: str, *, quality_status: str = "full_body") -> ParsedKamItem:
+    body = f"수익인식\n감사에서 다루어진 방법\n{response}"
+    return ParsedKamItem(
+        ordinal=2,
+        title="수익인식",
+        normalized_topic="revenue",
+        reason_text="기간귀속 판단에 유의적인 위험이 있습니다.",
+        audit_response_text=response,
+        related_note_references=["주석 2"],
+        full_body=body,
+        full_body_hash="a" * 40,
+        full_body_length=len(body),
+        quality_status=quality_status,
+    )
+
+
+@pytest.mark.parametrize(
+    ("text_value", "expected"),
+    [
+        ("주요 계약서를 검사하였습니다.", "inspection"),
+        ("담당자에게 질문하였습니다.", "inquiry"),
+        ("재고실사를 입회하였습니다.", "observation"),
+        ("거래처에 외부조회서를 발송하였습니다.", "confirmation"),
+        ("감가상각비를 재계산하였습니다.", "recalculation"),
+        ("통제의 수행을 재수행하였습니다.", "reperformance"),
+        ("월별 매출 추세에 분석적 절차를 수행하였습니다.", "analytical_procedure"),
+        ("기말 전후 매출의 기간귀속 테스트를 수행하였습니다.", "cutoff_test"),
+        ("현금흐름 할인모형을 평가하였습니다.", "valuation_model_test"),
+        ("매출 통제의 운영효과성을 테스트하였습니다.", "controls_test"),
+        ("IT 일반통제를 테스트하였습니다.", "it_control_test"),
+        ("매출 거래 표본을 추출하여 검사하였습니다.", "sampling"),
+        ("가치평가 전문가를 활용하였습니다.", "specialist_involvement"),
+    ],
+)
+def test_extract_procedure_steps_classifies_required_methods(text_value, expected):
+    steps = extract_procedure_steps(_kam_item(text_value))
+
+    assert [step.method for step in steps] == [expected]
+
+
+def test_extract_procedure_steps_splits_actions_and_has_stable_identity():
+    item = _kam_item(
+        "주요 계약서를 검사하였습니다.\n"
+        "관련 통제의 수행을 재수행하였습니다.\n"
+        "기말 전후 매출의 기간귀속 테스트를 수행하였습니다."
+    )
+
+    first = extract_procedure_steps(item)
+    second = extract_procedure_steps(item)
+
+    assert [step.method for step in first] == [
+        "inspection",
+        "reperformance",
+        "cutoff_test",
+    ]
+    assert [step.procedure_hash for step in first] == [
+        step.procedure_hash for step in second
+    ]
+    assert first[0].procedure_text.startswith("주요 계약서를 검사")
+    assert "revenue" in first[2].linked_metric_keys
+    assert [step.source_start for step in first] == sorted(
+        step.source_start for step in first
+    )
+
+
+def test_extract_procedure_steps_splits_conjoined_distinct_actions():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "주요 계약서를 검사하고, 매출 통제의 운영효과성을 "
+            "테스트하였습니다."
+        )
+    )
+
+    assert [step.method for step in steps] == ["inspection", "controls_test"]
+
+
+def test_extract_procedure_steps_rejects_generic_auditor_responsibility():
+    item = _kam_item(
+        "감사인은 전문가적 판단을 적용하고 감사 전반에 걸쳐 전문가적 "
+        "의구심을 유지할 책임이 있습니다."
+    )
+
+    assert extract_procedure_steps(item) == []
+
+
+def test_extract_procedure_steps_keeps_unknown_action_as_other():
+    steps = extract_procedure_steps(
+        _kam_item("해당 매출 자료를 대사하여 차이를 조사하였습니다.")
+    )
+
+    assert len(steps) == 1
+    assert steps[0].method == "other"
+
+
+def test_extract_procedure_steps_requires_full_body_quality():
+    assert extract_procedure_steps(
+        replace(_kam_item("계약서를 검사하였습니다."), quality_status="summary_only")
+    ) == []
+
+
+def test_extract_procedure_steps_bounds_adversarial_input_and_deduplicates():
+    repeated = "계약서를 검사하였습니다."
+    item = _kam_item("\n".join([repeated] * (MAX_PROCEDURE_STEPS * 4)))
+
+    steps = extract_procedure_steps(item)
+
+    assert len(steps) == 1
+    assert steps[0].procedure_text == repeated
+
+
+def test_replace_procedure_steps_is_idempotent_and_scoped(temp_engine):
+    with get_session() as session:
+        first = KamItem(
+            rcept_no="20260301000001_100",
+            dcm_no="100",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text="기간귀속 위험",
+            audit_response_text="계약서를 검사하였습니다.\n기간귀속 테스트를 수행하였습니다.",
+            related_note_references_json='["주석 2"]',
+            full_body_hash="1" * 40,
+            full_body_length=200,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime(2026, 3, 1),
+        )
+        second = KamItem(
+            rcept_no="20260301000002_100",
+            dcm_no="100",
+            corp_code="00164779",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="재고자산",
+            normalized_topic="inventory",
+            reason_text="평가 위험",
+            audit_response_text="재고실사를 입회하였습니다.",
+            related_note_references_json="[]",
+            full_body_hash="2" * 40,
+            full_body_length=200,
+            source_basis="source_documents.full_body",
+            parser_version="kam.v1",
+            quality_status="full_body",
+            fetched_at=datetime(2026, 3, 1),
+        )
+        session.add_all([first, second])
+        session.flush()
+        first_id = first.id
+        second_id = second.id
+
+    assert replace_procedure_steps_for_kam(first_id) == 2
+    assert replace_procedure_steps_for_kam(second_id) == 1
+    with get_session() as session:
+        stable_ids = [
+            row.id
+            for row in session.query(AuditProcedureItem)
+            .filter(AuditProcedureItem.kam_item_id == first_id)
+            .order_by(AuditProcedureItem.procedure_ordinal)
+        ]
+
+    assert replace_procedure_steps_for_kam(first_id) == 2
+    with get_session() as session:
+        assert [
+            row.id
+            for row in session.query(AuditProcedureItem)
+            .filter(AuditProcedureItem.kam_item_id == first_id)
+            .order_by(AuditProcedureItem.procedure_ordinal)
+        ] == stable_ids
+        assert (
+            session.query(AuditProcedureItem)
+            .filter(AuditProcedureItem.kam_item_id == second_id)
+            .count()
+            == 1
+        )
+
+
+def test_replace_procedure_steps_does_not_infer_summary_only_rows(temp_engine):
+    with get_session() as session:
+        item = KamItem(
+            rcept_no="20260301000003_100",
+            corp_code="00126380",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text=None,
+            audit_response_text=None,
+            related_note_references_json="[]",
+            full_body_hash="3" * 40,
+            full_body_length=20,
+            source_basis="report_sections.derived_summary",
+            parser_version="kam.v1",
+            quality_status="summary_only",
+            fetched_at=datetime(2026, 3, 1),
+        )
+        session.add(item)
+        session.flush()
+        item_id = item.id
+
+    assert replace_procedure_steps_for_kam(item_id) == 0
+    with get_session() as session:
+        assert session.query(AuditProcedureItem).count() == 0

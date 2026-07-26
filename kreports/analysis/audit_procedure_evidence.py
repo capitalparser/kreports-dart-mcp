@@ -7,11 +7,91 @@ procedure.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import bindparam, text
 
 import kreports.db.engine as engine_module
+from kreports.processor.audit_procedure_parser import ParsedProcedureStep
+
+
+@dataclass(frozen=True)
+class EvidenceLink:
+    category: str
+    key: str
+    label: str
+    matching_phrase: str
+    confidence_basis: str
+
+
+def link_procedure_evidence(
+    step: ParsedProcedureStep,
+    semantic_registry: Any,
+) -> list[EvidenceLink]:
+    body = step.procedure_text or ""
+    metric_map: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("revenue", ("매출", "수익", "계약서", "revenue")),
+        ("trade_receivables", ("매출채권", "수취채권", "receivable")),
+        ("inventories", ("재고", "inventory")),
+        ("cash_and_equivalents", ("현금및현금성", "현금성자산")),
+        ("interest_bearing_debt", ("차입금", "사채", "이자부부채")),
+        ("tax_expense", ("법인세", "tax")),
+        ("assets", ("자산", "손상", "공정가치")),
+        ("liabilities", ("부채", "충당부채")),
+    )
+    note_map: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("revenue_policy", ("매출", "수익", "계약서")),
+        ("inventory_policy", ("재고",)),
+        ("impairment_assumption", ("손상", "할인율", "현금흐름")),
+        ("fair_value_hierarchy", ("공정가치", "가치평가")),
+        ("contingency", ("충당부채", "우발", "소송")),
+        ("income_tax", ("법인세",)),
+    )
+    event_map: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+        (key, keywords) for key, keywords in _DISCLOSURE_EVENT_HINTS.items()
+    )
+
+    links: list[EvidenceLink] = []
+    for key, phrases in metric_map:
+        phrase = next((value for value in phrases if value.lower() in body.lower()), None)
+        if phrase is None or key not in semantic_registry:
+            continue
+        definition = semantic_registry[key]
+        links.append(
+            EvidenceLink(
+                category="metric",
+                key=key,
+                label=definition.label_ko,
+                matching_phrase=phrase,
+                confidence_basis="explicit_keyword_registry_match",
+            )
+        )
+    for key, phrases in note_map:
+        phrase = next((value for value in phrases if value.lower() in body.lower()), None)
+        if phrase is not None:
+            links.append(
+                EvidenceLink(
+                    category="note",
+                    key=key,
+                    label=f"회계주석: {key}",
+                    matching_phrase=phrase,
+                    confidence_basis="explicit_keyword_map_match",
+                )
+            )
+    for key, phrases in event_map:
+        phrase = next((value for value in phrases if value.lower() in body.lower()), None)
+        if phrase is not None:
+            links.append(
+                EvidenceLink(
+                    category="event",
+                    key=key,
+                    label=f"공시 이벤트: {key}",
+                    matching_phrase=phrase,
+                    confidence_basis="explicit_keyword_map_match",
+                )
+            )
+    return links
 
 
 _TOPIC_TO_LINKS: dict[str, list[dict[str, str]]] = {
@@ -94,7 +174,23 @@ def classify_audit_procedure_linkages(text_value: str, kam_topic: str | None = N
 
     links: list[dict[str, str]] = []
     for topic in topics:
-        links.extend(_TOPIC_TO_LINKS.get(topic, []))
+        for row in _TOPIC_TO_LINKS.get(topic, []):
+            keywords = _TEXT_TOPIC_KEYWORDS.get(topic, ())
+            matching_phrase = next(
+                (keyword for keyword in keywords if keyword in body),
+                f"kam_topic:{topic}",
+            )
+            links.append(
+                {
+                    **row,
+                    "matching_phrase": matching_phrase,
+                    "confidence_basis": (
+                        "explicit_keyword_map_match"
+                        if not matching_phrase.startswith("kam_topic:")
+                        else "source_kam_topic_match"
+                    ),
+                }
+            )
 
     for event_key, keywords in _DISCLOSURE_EVENT_HINTS.items():
         if any(keyword in body for keyword in keywords):
@@ -102,6 +198,10 @@ def classify_audit_procedure_linkages(text_value: str, kam_topic: str | None = N
                 "category": "disclosure_event",
                 "key": event_key,
                 "label": f"수시공시 이벤트: {event_key}",
+                "matching_phrase": next(
+                    keyword for keyword in keywords if keyword in body
+                ),
+                "confidence_basis": "explicit_keyword_map_match",
             })
     return _dedupe_links(links)
 
@@ -136,6 +236,69 @@ def build_audit_procedure_evidence_map(
 
     engine = engine_module.engine
     with engine.connect() as conn:
+        structured_kam_summary = dict(
+            conn.execute(
+                text(f"""
+                    SELECT
+                        COUNT(*) AS kam_items,
+                        COALESCE(SUM(
+                            CASE WHEN ki.quality_status='full_body' THEN 1 ELSE 0 END
+                        ), 0) AS full_body_kam_items,
+                        COALESCE(SUM(
+                            CASE
+                                WHEN ki.quality_status='full_body'
+                                 AND EXISTS (
+                                    SELECT 1
+                                    FROM audit_procedure_items api
+                                    WHERE api.kam_item_id=ki.id
+                                 )
+                                THEN 1 ELSE 0
+                            END
+                        ), 0) AS full_body_kam_items_with_procedures,
+                        COALESCE(SUM(
+                            CASE WHEN ki.quality_status='summary_only' THEN 1 ELSE 0 END
+                        ), 0) AS summary_only,
+                        COALESCE(SUM(
+                            CASE WHEN ki.quality_status='missing' THEN 1 ELSE 0 END
+                        ), 0) AS missing,
+                        COALESCE(SUM(
+                            CASE WHEN ki.quality_status='error' THEN 1 ELSE 0 END
+                        ), 0) AS error
+                    FROM kam_items ki
+                    JOIN companies c ON c.corp_code=ki.corp_code
+                    WHERE ki.bsns_year=:year
+                      {company_filter}
+                      {market_filter}
+                """),
+                params,
+            ).mappings().first()
+            or {}
+        )
+        missing_procedure_kams = [
+            dict(row)
+            for row in conn.execute(
+                text(f"""
+                    SELECT ki.id AS kam_item_id, ki.corp_code, c.stock_code,
+                           c.corp_name, c.market, c.induty_code,
+                           ki.bsns_year AS year, ki.rcept_no, ki.dcm_no,
+                           ki.title, ki.normalized_topic, ki.quality_status
+                    FROM kam_items ki
+                    JOIN companies c ON c.corp_code=ki.corp_code
+                    WHERE ki.bsns_year=:year
+                      AND ki.quality_status='full_body'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM audit_procedure_items api
+                          WHERE api.kam_item_id=ki.id
+                      )
+                      {company_filter}
+                      {market_filter}
+                    ORDER BY c.market, c.corp_name, ki.rcept_no, ki.ordinal
+                    LIMIT :limit
+                """),
+                params,
+            ).mappings().all()
+        ]
         kam_summary = dict(
             conn.execute(
                 text(f"""
@@ -275,6 +438,15 @@ def build_audit_procedure_evidence_map(
         "procedure_items": procedure_item_count,
         "procedure_receipts": procedure_receipt_count,
         "linked_procedure_items_sampled": linked_probe_count,
+        "full_body_kam_items": int(
+            structured_kam_summary.get("full_body_kam_items") or 0
+        ),
+        "full_body_kam_items_with_procedures": int(
+            structured_kam_summary.get(
+                "full_body_kam_items_with_procedures"
+            )
+            or 0
+        ),
     }
     sample = {
         "kam_sections": len(kam_rows),
@@ -289,7 +461,18 @@ def build_audit_procedure_evidence_map(
     if procedure_item_count > 0 and linked_probe_count == 0:
         required_gaps.append("procedure_evidence_linkages")
 
-    if "short_kam_body" in required_gaps or "audit_procedure_items" in required_gaps:
+    full_body_kams = counts["full_body_kam_items"]
+    full_body_with_procedures = counts[
+        "full_body_kam_items_with_procedures"
+    ]
+    if full_body_kams and full_body_with_procedures < full_body_kams:
+        required_gaps.append("full_body_kam_without_procedure")
+
+    if (
+        "short_kam_body" in required_gaps
+        or "audit_procedure_items" in required_gaps
+        or "full_body_kam_without_procedure" in required_gaps
+    ):
         verdict = "fail"
     elif required_gaps:
         verdict = "conditional"
@@ -311,14 +494,26 @@ def build_audit_procedure_evidence_map(
             "procedure_linkage_sample_rate": (
                 round(linked_probe_count * 100.0 / len(linkage_probe_rows), 1) if linkage_probe_rows else 0.0
             ),
+            "procedure_coverage": (
+                round(full_body_with_procedures * 100.0 / full_body_kams, 1)
+                if full_body_kams
+                else 0.0
+            ),
+        },
+        "quality_gaps": {
+            "summary_only": int(structured_kam_summary.get("summary_only") or 0),
+            "missing": int(structured_kam_summary.get("missing") or 0),
+            "error": int(structured_kam_summary.get("error") or 0),
         },
         "required_gaps": required_gaps,
+        "missing_procedure_kams": missing_procedure_kams,
         "samples": samples,
         "data_quality": {
             "source": "report_sections.audit_report_kam + audit_procedure_items",
             "note": (
                 "This diagnostic does not fetch new raw DART documents; it tests whether cached "
-                "audit-report KAM bodies can support procedure-level answers."
+                "full-body audit-report KAM items can support procedure-level answers. "
+                "Summary-only, missing, and error receipts are separate quality gaps."
             ),
         },
     }

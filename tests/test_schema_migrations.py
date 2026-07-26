@@ -23,6 +23,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_03_backfill_run_lifecycle",
         "20260711_04_backfill_owner_identity",
         "20260711_05_kam_items",
+        "20260711_06_audit_procedure_linkage",
     ]
     assert second == []
 
@@ -183,6 +184,9 @@ def test_backfill_owner_migration_is_append_only_and_enforces_active_lease(
     assert _checksum(MIGRATIONS[3]) == (
         "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
     )
+    assert _checksum(MIGRATIONS[4]) == (
+        "0fa52c82a3c4807885b757734417f5069e04698c954cabb414d67b7e4ac84d06"
+    )
     indexes = {
         item["name"]: item
         for item in inspect(temp_engine).get_indexes("backfill_runs")
@@ -234,6 +238,45 @@ def test_kam_item_migration_appends_matter_level_provenance(temp_engine):
         "quality_status",
         "fetched_at",
     }.issubset(columns)
+
+
+def test_audit_procedure_linkage_migration_is_append_only_and_nullable(temp_engine):
+    from kreports.db.migrations import MIGRATIONS, _checksum
+
+    assert _checksum(MIGRATIONS[2]) == (
+        "b5a958e21c751e72e4243b5f4a35b03ff41f313a87e5e058e7a9623bfaf4f324"
+    )
+    assert _checksum(MIGRATIONS[3]) == (
+        "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
+    )
+    assert MIGRATIONS[-1].revision == "20260711_06_audit_procedure_linkage"
+    columns = {
+        column["name"]: column
+        for column in inspect(temp_engine).get_columns("audit_procedure_items")
+    }
+    assert {
+        "kam_item_id",
+        "method",
+        "assertion_hints_json",
+        "linked_metric_keys_json",
+        "linked_note_keys_json",
+        "linked_event_keys_json",
+        "parser_version",
+        "quality_status",
+    }.issubset(columns)
+    assert all(
+        columns[name]["nullable"]
+        for name in {
+            "kam_item_id",
+            "method",
+            "assertion_hints_json",
+            "linked_metric_keys_json",
+            "linked_note_keys_json",
+            "linked_event_keys_json",
+            "parser_version",
+            "quality_status",
+        }
+    )
 
 
 def test_backfill_owner_migration_repairs_duplicate_running_leases_atomically(
