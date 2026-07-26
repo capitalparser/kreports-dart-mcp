@@ -176,6 +176,66 @@ def test_dcf_handler_forwards_all_explicit_layers(monkeypatch):
     }
 
 
+def test_dcf_handler_accepts_one_e_minus_31_and_fails_typed_on_money_rounding(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.analysis import dcf_source
+    from kreports.analysis.dcf_source import DcfSourceResult
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+    from kreports.mcp.handlers.investor import handle_build_dcf_model_pack
+    from kreports.mcp.input_models import BuildDcfModelPackInput
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00126380",
+            corp_name="정확회사",
+            stock_code="005930",
+            market="KOSPI",
+        ))
+    monkeypatch.setattr(
+        dcf_source,
+        "load_dcf_actuals",
+        lambda *_args, **_kwargs: DcfSourceResult(
+            status="usable",
+            facts=_facts_for_facade(),
+            missing_metrics=(),
+            limitations=(),
+        ),
+    )
+    tiny_wacc = BuildDcfModelPackInput(
+        company="005930",
+        base_year=2024,
+        forecast_years=2,
+        revenue_growth=1e-31,
+        operating_margin=1e-31,
+        tax_rate=1e-31,
+        da_to_revenue=1e-31,
+        capex_to_revenue=1e-31,
+        nwc_to_revenue=1e-31,
+        wacc=1e-31,
+        terminal_growth=-0.01,
+    )
+
+    valid = handle_build_dcf_model_pack(tiny_wacc)
+    rounded_invalid = handle_build_dcf_model_pack(
+        tiny_wacc.model_copy(update={
+            "normalized_revenue": 1e-31,
+            "normalization_reason": "KRW 반올림 경계",
+        })
+    )
+
+    assert valid["status"] == "complete_model"
+    assert valid["assumptions"][6]["value"] == (
+        "0.0000000000000000000000000000001"
+    )
+    assert rounded_invalid["status"] == "invalid_model"
+    assert rounded_invalid["missing_inputs"] == [
+        "base_revenue_nonpositive"
+    ]
+
+
 def test_dcf_answer_pack_preserves_all_review_layers_and_escapes_subject():
     from kreports.mcp.answer_pack import build_answer_pack
 

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, text
 
 
@@ -325,6 +326,42 @@ def test_dcf_source_withholds_null_provenance_but_allows_named_summary_source(
         for fact in synthetic.facts
         if fact.metric_key == "revenue"
     ) == "financials.revenue"
+
+
+@pytest.mark.parametrize(
+    "metric_key",
+    ["revenue", "cash_and_equivalents"],
+)
+def test_dcf_source_withholds_impossible_negative_fact_without_distortion(
+    tmp_path,
+    metric_key,
+):
+    from kreports.analysis.dcf_source import load_dcf_actuals
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'negative-balance.db'}")
+    _schema(engine)
+    _seed(engine)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE financial_facts_compact
+            SET amount='-1'
+            WHERE metric_key=:metric_key
+        """), {"metric_key": metric_key})
+
+    result = load_dcf_actuals(
+        "00126380",
+        2024,
+        "CFS",
+        read_engine=engine,
+    )
+
+    assert result.status == "partial"
+    assert metric_key in result.missing_metrics
+    assert f"invalid_fact_contract:{metric_key}" in result.limitations
+    assert all(
+        fact.metric_key != metric_key
+        for fact in result.facts
+    )
 
 
 def test_compact_registry_exposes_all_dcf_source_metrics_without_debt_double_counting():

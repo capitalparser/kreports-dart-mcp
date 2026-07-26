@@ -31,7 +31,6 @@ MAX_NORMALIZATION_REASON_LENGTH = 1_000
 _MAX_DECIMAL_TEXT = 128
 _MAX_DECIMAL_DIGITS = 38
 _MAX_DECIMAL_ADJUSTED = 30
-_MIN_DECIMAL_ADJUSTED = -30
 _MAX_PUBLIC_TEXT = 1_000
 _ASSUMPTION_KEYS = (
     "revenue_growth",
@@ -44,6 +43,18 @@ _ASSUMPTION_KEYS = (
     "terminal_growth",
 )
 _ACTUAL_METRIC_KEYS = frozenset(DCF_MODEL_METRICS)
+_NONNEGATIVE_ACTUAL_METRICS = frozenset({
+    "depreciation_amortization",
+    "trade_receivables",
+    "inventories",
+    "trade_payables",
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+})
+
+
+class _DcfConstructionError(ValueError):
+    """A bounded internal domain-construction failure."""
 
 
 def _decimal(value: Any, field_name: str) -> Decimal | None:
@@ -68,11 +79,7 @@ def _decimal(value: Any, field_name: str) -> Decimal | None:
         len(significant_digits) > _MAX_DECIMAL_DIGITS
         or (
             converted != 0
-            and not (
-                _MIN_DECIMAL_ADJUSTED
-                <= converted.adjusted()
-                <= _MAX_DECIMAL_ADJUSTED
-            )
+            and converted.adjusted() > _MAX_DECIMAL_ADJUSTED
         )
     ):
         raise ValueError(f"{field_name} exceeds decimal precision bounds")
@@ -163,6 +170,13 @@ class DcfActualFact:
             raise ValueError(
                 f"{metric_key}.amount exceeds the supported bound"
             )
+        if metric_key == "revenue" and amount <= 0:
+            raise ValueError("revenue.amount must be positive")
+        if (
+            metric_key in _NONNEGATIVE_ACTUAL_METRICS
+            and amount < 0
+        ):
+            raise ValueError(f"{metric_key}.amount must be non-negative")
         if self.fs_div not in {"CFS", "OFS"}:
             raise ValueError("actual fact fs_div must be CFS or OFS")
         unit = _text(self.unit, "unit")
@@ -599,6 +613,17 @@ class DcfValuationResult:
             raise TypeError("result.normalization is invalid")
         if tuple(item.key for item in self.assumptions) != _ASSUMPTION_KEYS:
             raise ValueError("result assumptions do not match the DCF contract")
+        assumption_values = {
+            assumption.key: assumption.value
+            for assumption in self.assumptions
+        }
+        DcfScenarioInput(
+            company=company,
+            base_year=base_year,
+            fs_div=self.fs_div,
+            forecast_years=self.forecast_years,
+            **assumption_values,
+        )
         actuals_by_metric: dict[str, list[DcfActualFact]] = {}
         for fact in self.actuals:
             if fact.year != base_year or fact.fs_div != self.fs_div:
@@ -874,20 +899,42 @@ class DcfValuationResult:
                 self.equity_value is not None,
             )):
                 raise ValueError("partial or invalid result does not reconcile")
-            missing_set = set(self.missing_inputs)
-            if (
-                self.status == "partial_model"
-                and not missing_set.intersection(
-                    (*_ASSUMPTION_KEYS, *_ENTERPRISE_ACTUALS)
+            invalid_reason = None
+            if self.status == "invalid_model":
+                normalized_revenue = (
+                    self.normalization.revenue.normalized_amount
                 )
-            ) or (
-                self.status == "invalid_model"
-                and not missing_set.intersection(
-                    {"base_revenue_nonpositive", "arithmetic_invalid"}
+                invalid_reason = "arithmetic_invalid"
+                if normalized_revenue is not None:
+                    try:
+                        rounded_revenue = _money(normalized_revenue)
+                    except DecimalException:
+                        pass
+                    else:
+                        if normalized_revenue <= 0 or rounded_revenue <= 0:
+                            invalid_reason = "base_revenue_nonpositive"
+            expected_missing = _expected_missing_inputs(
+                assumption_values,
+                actuals_by_metric,
+                invalid_reason=invalid_reason,
+            )
+            has_enterprise_gap = any(
+                assumption_values[key] is None
+                for key in _ASSUMPTION_KEYS
+            ) or any(
+                len(actuals_by_metric.get(key, ())) != 1
+                for key in _ENTERPRISE_ACTUALS
+            )
+            if (
+                tuple(self.missing_inputs) != expected_missing
+                or (
+                    self.status == "partial_model"
+                    and not has_enterprise_gap
                 )
             ):
                 raise ValueError(
-                    "partial or invalid result status semantics "
+                    "partial or invalid result missing inputs and "
+                    "status semantics "
                     "do not reconcile"
                 )
 
@@ -916,12 +963,37 @@ _ENTERPRISE_ACTUALS = (
     "inventories",
     "trade_payables",
 )
+_BRIDGE_ACTUALS = (
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+)
 _LIMITATIONS = (
     "Operating NWC is limited to receivables + inventory - payables; taxes, provisions, and other operating balances are excluded.",
     "Capex is modeled as a positive cash outflow; negative source cash-flow signs are normalized with the source amounts preserved in actuals.",
     "The equity bridge includes only interest-bearing debt and cash; minority interest, associates, options, and other non-operating assets are excluded unless separately sourced.",
     "This is a reviewable model, not investment advice, a fairness opinion, an approved forecast, or an audit conclusion.",
 )
+
+
+def _expected_missing_inputs(
+    assumption_values: dict[str, Decimal | None],
+    actuals_by_metric: dict[str, list[DcfActualFact]],
+    *,
+    invalid_reason: str | None = None,
+) -> tuple[str, ...]:
+    missing = [
+        key
+        for key in _ASSUMPTION_KEYS
+        if assumption_values[key] is None
+    ]
+    missing.extend(
+        key
+        for key in (*_ENTERPRISE_ACTUALS, *_BRIDGE_ACTUALS)
+        if len(actuals_by_metric.get(key, ())) != 1
+    )
+    if invalid_reason is not None:
+        missing.append(invalid_reason)
+    return tuple(missing)
 
 
 def _actual_map(
@@ -1066,14 +1138,18 @@ def _build_dcf_valuation_unchecked(
     by_metric = _actual_map(scenario, immutable_actuals)
     normalization = _normalization(scenario, by_metric)
     assumptions = _assumptions(scenario)
-    missing = [
-        key for key in _ASSUMPTION_FIELDS if getattr(scenario, key) is None
-    ]
-    missing.extend(
-        key for key in _ENTERPRISE_ACTUALS if key not in by_metric
-    )
-    missing.extend(source_missing)
-    missing = list(dict.fromkeys(missing))[:32]
+    assumption_values = {
+        key: getattr(scenario, key)
+        for key in _ASSUMPTION_FIELDS
+    }
+    actuals_by_metric = {
+        key: [fact]
+        for key, fact in by_metric.items()
+    }
+    missing = list(_expected_missing_inputs(
+        assumption_values,
+        actuals_by_metric,
+    ))
 
     common = {
         "company": scenario.company,
@@ -1088,7 +1164,10 @@ def _build_dcf_valuation_unchecked(
     }
     if (
         normalization.revenue.normalized_amount is not None
-        and normalization.revenue.normalized_amount <= 0
+        and (
+            normalization.revenue.normalized_amount <= 0
+            or _money(normalization.revenue.normalized_amount) <= 0
+        )
     ):
         invalid_missing = tuple(
             dict.fromkeys((*missing, "base_revenue_nonpositive"))
@@ -1121,7 +1200,10 @@ def _build_dcf_valuation_unchecked(
             missing_inputs=invalid_missing,
             **{key: value for key, value in common.items() if key != "missing_inputs"},
         )
-    if any(key in missing for key in (*_ASSUMPTION_FIELDS, *_ENTERPRISE_ACTUALS)):
+    if any(
+        key in missing
+        for key in (*_ASSUMPTION_FIELDS, *_ENTERPRISE_ACTUALS)
+    ):
         partial_cash = (
             by_metric.get("cash_and_equivalents").amount
             if by_metric.get("cash_and_equivalents") else None
@@ -1160,6 +1242,10 @@ def _build_dcf_valuation_unchecked(
     projections: list[DcfProjection] = []
     for index in range(1, scenario.forecast_years + 1):
         revenue = _money(revenue * (Decimal(1) + scenario.revenue_growth))
+        if revenue <= 0:
+            raise _DcfConstructionError(
+                "projection_revenue_nonpositive"
+            )
         ebit = _money(revenue * scenario.operating_margin)
         after_tax_ebit = _money(ebit * (Decimal(1) - scenario.tax_rate))
         da = _money(revenue * scenario.da_to_revenue)
@@ -1171,20 +1257,26 @@ def _build_dcf_valuation_unchecked(
             Decimal(1) / ((Decimal(1) + scenario.wacc) ** index)
         )
         present_value = _money(ufcf * discount_factor)
-        projections.append(DcfProjection(
-            year=scenario.base_year + index,
-            revenue=revenue,
-            ebit=ebit,
-            tax_rate=scenario.tax_rate,
-            after_tax_ebit=after_tax_ebit,
-            depreciation_amortization=da,
-            capex=capex,
-            nwc_balance=nwc_balance,
-            nwc_change=nwc_change,
-            ufcf=ufcf,
-            discount_factor=discount_factor,
-            present_value=present_value,
-        ))
+        try:
+            projection = DcfProjection(
+                year=scenario.base_year + index,
+                revenue=revenue,
+                ebit=ebit,
+                tax_rate=scenario.tax_rate,
+                after_tax_ebit=after_tax_ebit,
+                depreciation_amortization=da,
+                capex=capex,
+                nwc_balance=nwc_balance,
+                nwc_change=nwc_change,
+                ufcf=ufcf,
+                discount_factor=discount_factor,
+                present_value=present_value,
+            )
+        except ValueError as exc:
+            raise _DcfConstructionError(
+                "projection_contract_invalid"
+            ) from exc
+        projections.append(projection)
         base_nwc = nwc_balance
 
     immutable_projections = tuple(projections)
@@ -1208,12 +1300,6 @@ def _build_dcf_valuation_unchecked(
         if debt is not None and cash is not None
         else None
     )
-    bridge_missing = []
-    if cash is None:
-        bridge_missing.append("cash_and_equivalents")
-    if debt is None:
-        bridge_missing.append("interest_bearing_debt")
-    all_missing = tuple(dict.fromkeys((*missing, *bridge_missing)))
     return DcfValuationResult(
         status="complete_model",
         confidence=(
@@ -1235,7 +1321,7 @@ def _build_dcf_valuation_unchecked(
             scenario.wacc,
             scenario.terminal_growth,
         ),
-        missing_inputs=all_missing,
+        missing_inputs=tuple(missing),
         **{key: value for key, value in common.items() if key != "missing_inputs"},
     )
 
@@ -1271,8 +1357,17 @@ def build_dcf_valuation(
             source_missing=tuple(source_missing),
             source_limitations=tuple(source_limitations),
         )
-    except DecimalException as exc:
+    except (DecimalException, _DcfConstructionError) as exc:
         by_metric = _actual_map(scenario, immutable_actuals)
+        assumptions = _assumptions(scenario)
+        assumption_values = {
+            assumption.key: assumption.value
+            for assumption in assumptions
+        }
+        actuals_by_metric = {
+            key: [fact]
+            for key, fact in by_metric.items()
+        }
         cash = (
             by_metric["cash_and_equivalents"].amount
             if "cash_and_equivalents" in by_metric else None
@@ -1299,7 +1394,7 @@ def build_dcf_valuation(
             confidence="invalid",
             actuals=immutable_actuals,
             normalization=_normalization(scenario, by_metric),
-            assumptions=_assumptions(scenario),
+            assumptions=assumptions,
             projections=(),
             forecast_period_present_value=None,
             terminal_value=None,
@@ -1310,13 +1405,20 @@ def build_dcf_valuation(
             net_debt=net_debt,
             equity_value=None,
             sensitivity=(),
-            missing_inputs=tuple(dict.fromkeys(
-                (*source_missing, "arithmetic_invalid")
-            )),
+            missing_inputs=_expected_missing_inputs(
+                assumption_values,
+                actuals_by_metric,
+                invalid_reason="arithmetic_invalid",
+            ),
             limitations=tuple(dict.fromkeys((
                 *_LIMITATIONS,
                 *source_limitations,
-                f"arithmetic_invalid:{type(exc).__name__}",
+                "arithmetic_invalid:"
+                + (
+                    str(exc)
+                    if isinstance(exc, _DcfConstructionError)
+                    else type(exc).__name__
+                ),
             ))),
         )
 

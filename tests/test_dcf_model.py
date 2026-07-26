@@ -286,28 +286,69 @@ def test_sensitivity_center_reconciles_under_the_published_rounding_policy():
     assert center.enterprise_value == result.enterprise_value
 
 
-def test_nonpositive_normalized_base_revenue_returns_invalid_model():
-    from kreports.analysis.dcf_model import DcfActualFact, build_dcf_valuation
+def test_builder_revalidates_mutated_nonpositive_base_revenue_fact():
+    from kreports.analysis.dcf_model import build_dcf_valuation
 
-    facts = tuple(
-        DcfActualFact(
-            metric_key=fact.metric_key,
-            amount=Decimal("-1") if fact.metric_key == "revenue" else fact.amount,
-            unit=fact.unit,
-            year=fact.year,
-            fs_div=fact.fs_div,
-            source_account_id=fact.source_account_id,
-            source_account_name=fact.source_account_name,
-            source_table=fact.source_table,
-            fetched_at=fact.fetched_at,
-        )
-        for fact in _facts()
+    facts = list(_facts())
+    revenue = next(
+        fact for fact in facts if fact.metric_key == "revenue"
     )
-    result = build_dcf_valuation(_scenario(), facts)
+    object.__setattr__(revenue, "amount", Decimal("-1"))
+
+    with pytest.raises(ValueError, match="revenue.amount"):
+        build_dcf_valuation(_scenario(), tuple(facts))
+
+
+@pytest.mark.parametrize("source", ["actual", "normalization"])
+def test_sub_cent_positive_base_revenue_fails_typed_after_money_rounding(source):
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = _facts()
+    scenario = _scenario()
+    if source == "actual":
+        facts = tuple(
+            replace(fact, amount=Decimal("0.001"))
+            if fact.metric_key == "revenue"
+            else fact
+            for fact in facts
+        )
+    else:
+        scenario = _scenario(
+            normalized_revenue=Decimal("0.001"),
+            normalization_reason="KRW 반올림 경계 재현",
+        )
+
+    result = build_dcf_valuation(scenario, facts)
 
     assert result.status == "invalid_model"
     assert result.enterprise_value is None
-    assert "base_revenue_nonpositive" in result.missing_inputs
+    assert result.projections == ()
+    assert result.missing_inputs == ("base_revenue_nonpositive",)
+
+
+def test_positive_revenue_that_rounds_to_zero_in_projection_fails_typed():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = tuple(
+        replace(fact, amount=Decimal("0.01"))
+        if fact.metric_key == "revenue"
+        else fact
+        for fact in _facts()
+    )
+
+    result = build_dcf_valuation(
+        _scenario(revenue_growth=Decimal("-0.9")),
+        facts,
+    )
+
+    assert result.status == "invalid_model"
+    assert result.enterprise_value is None
+    assert result.projections == ()
+    assert result.missing_inputs == ("arithmetic_invalid",)
+    assert any(
+        item == "arithmetic_invalid:projection_revenue_nonpositive"
+        for item in result.limitations
+    )
 
 
 def test_negative_operating_margin_and_nwc_ratio_are_valid_economic_inputs():
@@ -464,6 +505,53 @@ def test_decimal_bounds_use_normalized_significance_and_allow_tiny_wacc():
 
 
 @pytest.mark.parametrize(
+    "field",
+    [
+        "revenue_growth",
+        "operating_margin",
+        "tax_rate",
+        "da_to_revenue",
+        "capex_to_revenue",
+        "nwc_to_revenue",
+        "wacc",
+        "terminal_growth",
+        "normalized_revenue",
+        "normalized_operating_profit",
+    ],
+)
+def test_decimal_domain_has_no_unpublished_tiny_positive_exponent_floor(field):
+    overrides = {field: Decimal("1E-31")}
+    if field == "wacc":
+        overrides["terminal_growth"] = Decimal("-0.01")
+    if field in {"normalized_revenue", "normalized_operating_profit"}:
+        overrides["normalization_reason"] = "초소형 값 경계 검토"
+
+    scenario = _scenario(**overrides)
+
+    assert getattr(scenario, field) == Decimal("1E-31")
+
+
+def test_one_e_minus_31_wacc_fails_typed_when_sensitivity_is_unsafe():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    result = build_dcf_valuation(
+        _scenario(
+            wacc=Decimal("1E-31"),
+            terminal_growth=Decimal("-0.01"),
+        ),
+        _facts(),
+    )
+
+    assert result.status == "invalid_model"
+    assert result.enterprise_value is None
+    assert result.missing_inputs == ("arithmetic_invalid",)
+    assert any(
+        item == "arithmetic_invalid:InvalidOperation"
+        for item in result.limitations
+    )
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("revenue_growth", Decimal("10.0001")),
@@ -581,18 +669,131 @@ def test_partial_and_invalid_result_missing_status_semantics():
     from kreports.analysis.dcf_model import build_dcf_valuation
 
     partial = build_dcf_valuation(_scenario(wacc=None), _facts())
-    zero_revenue = tuple(
-        replace(fact, amount=Decimal("0"))
+    sub_cent_revenue = tuple(
+        replace(fact, amount=Decimal("0.001"))
         if fact.metric_key == "revenue"
         else fact
         for fact in _facts()
     )
-    invalid = build_dcf_valuation(_scenario(), zero_revenue)
+    invalid = build_dcf_valuation(_scenario(), sub_cent_revenue)
 
     with pytest.raises(ValueError, match="status semantics"):
         replace(partial, missing_inputs=())
     with pytest.raises(ValueError, match="status semantics"):
         replace(invalid, missing_inputs=())
+
+
+@pytest.mark.parametrize(
+    ("key", "invalid_value"),
+    [
+        ("revenue_growth", Decimal("-1")),
+        ("operating_margin", Decimal("10.1")),
+        ("tax_rate", Decimal("1.1")),
+        ("da_to_revenue", Decimal("-0.1")),
+        ("capex_to_revenue", Decimal("-0.1")),
+        ("nwc_to_revenue", Decimal("10.1")),
+        ("wacc", Decimal("0")),
+        ("terminal_growth", Decimal("-1")),
+    ],
+)
+def test_partial_result_revalidates_every_assumption_domain(
+    key,
+    invalid_value,
+):
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = tuple(
+        fact
+        for fact in _facts()
+        if fact.metric_key != "depreciation_amortization"
+    )
+    partial = build_dcf_valuation(_scenario(), facts)
+    assumptions = tuple(
+        replace(assumption, value=invalid_value)
+        if assumption.key == key
+        else assumption
+        for assumption in partial.assumptions
+    )
+
+    with pytest.raises(ValueError, match=key):
+        replace(partial, assumptions=assumptions)
+
+
+def test_partial_result_revalidates_relational_assumption_domain():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = tuple(
+        fact
+        for fact in _facts()
+        if fact.metric_key != "depreciation_amortization"
+    )
+    partial = build_dcf_valuation(_scenario(), facts)
+    assumptions = tuple(
+        replace(assumption, value=Decimal("0.10"))
+        if assumption.key == "terminal_growth"
+        else assumption
+        for assumption in partial.assumptions
+    )
+
+    with pytest.raises(ValueError, match="terminal_growth"):
+        replace(partial, assumptions=assumptions)
+
+
+def test_missing_inputs_are_exact_ordered_assumption_enterprise_bridge_gaps():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = tuple(
+        fact
+        for fact in _facts()
+        if fact.metric_key
+        not in {"depreciation_amortization", "cash_and_equivalents"}
+    )
+    partial = build_dcf_valuation(
+        _scenario(wacc=None),
+        facts,
+        source_missing=(
+            "cash_and_equivalents",
+            "depreciation_amortization",
+        ),
+    )
+
+    assert partial.status == "partial_model"
+    assert partial.missing_inputs == (
+        "wacc",
+        "depreciation_amortization",
+        "cash_and_equivalents",
+    )
+    for contradictory in (
+        partial.missing_inputs[:-1],
+        (*partial.missing_inputs, "stale_gap"),
+        tuple(reversed(partial.missing_inputs)),
+    ):
+        with pytest.raises(ValueError, match="missing inputs"):
+            replace(partial, missing_inputs=contradictory)
+
+
+def test_invalid_result_missing_inputs_include_exact_bridge_and_reason_gaps():
+    from kreports.analysis.dcf_model import build_dcf_valuation
+
+    facts = tuple(
+        replace(fact, amount=Decimal("0.001"))
+        if fact.metric_key == "revenue"
+        else fact
+        for fact in _facts(include_cash=False)
+    )
+
+    invalid = build_dcf_valuation(_scenario(), facts)
+
+    assert invalid.status == "invalid_model"
+    assert invalid.missing_inputs == (
+        "cash_and_equivalents",
+        "base_revenue_nonpositive",
+    )
+    with pytest.raises(ValueError, match="missing inputs"):
+        replace(
+            invalid,
+            missing_inputs=("base_revenue_nonpositive",),
+        )
 
 
 def test_projection_direct_contract_rejects_impossible_domains():
@@ -651,6 +852,48 @@ def test_actual_fact_direct_contract_requires_canonical_traceability(
         source_account_name="매출액",
     )
     assert synthetic.source_account_id == "financials.revenue"
+
+
+@pytest.mark.parametrize(
+    ("metric_key", "message"),
+    [
+        ("revenue", "positive"),
+        ("depreciation_amortization", "non-negative"),
+        ("trade_receivables", "non-negative"),
+        ("inventories", "non-negative"),
+        ("trade_payables", "non-negative"),
+        ("cash_and_equivalents", "non-negative"),
+        ("interest_bearing_debt", "non-negative"),
+    ],
+)
+def test_actual_fact_rejects_metric_specific_impossible_negative_signs(
+    metric_key,
+    message,
+):
+    fact = next(
+        item for item in _facts() if item.metric_key == metric_key
+    )
+
+    with pytest.raises(ValueError, match=message):
+        replace(fact, amount=Decimal("-0.01"))
+
+
+@pytest.mark.parametrize(
+    "metric_key",
+    [
+        "operating_profit",
+        "purchase_ppe",
+        "purchase_intangible_assets",
+    ],
+)
+def test_actual_fact_preserves_valid_loss_and_capex_source_signs(metric_key):
+    fact = next(
+        item for item in _facts() if item.metric_key == metric_key
+    )
+
+    negative = replace(fact, amount=Decimal("-0.01"))
+
+    assert negative.amount == Decimal("-0.01")
 
 
 def test_builder_revalidates_frozen_actual_fact_instances():
