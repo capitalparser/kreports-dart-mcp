@@ -467,7 +467,7 @@ def merge_audit_fee_observations(
         if item.source_eligibility != "not_eligible"
     ]
     all_ineligible = bool(current_observations) and not active_observations
-    state_observations = active_observations or current_observations
+    state_observations = active_observations
     contract_fee, contract_fee_source = _pick_value(
         active_observations,
         "contract_fee_m",
@@ -527,18 +527,15 @@ def merge_audit_fee_observations(
         ),
         key=_source_priority,
     )
-    if blockers:
+    if all_ineligible:
+        availability = "not_available_from_endpoint"
+        quality = "missing"
+    elif blockers:
         availability = blockers[0].availability_status
         quality = "error"
     elif conflicts:
         availability = "conflict"
         quality = "conflict"
-    elif (
-        all_ineligible
-        and "not_available_from_endpoint" in statuses
-    ):
-        availability = "not_available_from_endpoint"
-        quality = "missing"
     elif compatibility_fee is not None and compatibility_hours is not None:
         availability = "available"
         quality = "verified"

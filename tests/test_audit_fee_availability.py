@@ -596,6 +596,65 @@ def test_all_ineligible_sources_retain_endpoint_unavailable_state():
     assert result.quality_status == "missing"
 
 
+def test_all_ineligible_transport_error_is_not_a_feature_blocker():
+    result = merge_audit_fee_observations(
+        [
+            AuditFeeObservation(
+                corp_code="001",
+                bsns_year=2014,
+                source_class="opendart_ds002",
+                source_eligibility="not_eligible",
+                availability_status="transport_error",
+                quality_status="error",
+            )
+        ],
+        previous={
+            "actual_fee_m": 100,
+            "actual_hours": 1000,
+            "audit_fee_m": 100,
+            "audit_hours": 1000,
+            "compatibility_basis": "actual",
+            "availability_status": "available",
+            "quality_status": "verified",
+        },
+    )
+
+    assert result.audit_fee_m == 100
+    assert result.audit_hours == 1000
+    assert result.availability_status == "not_available_from_endpoint"
+    assert result.quality_status == "missing"
+    assert len(json.loads(result.source_observations_json)) == 1
+
+
+def test_all_ineligible_parse_error_does_not_override_endpoint_gap():
+    result = merge_audit_fee_observations(
+        [
+            AuditFeeObservation(
+                corp_code="001",
+                bsns_year=2014,
+                source_class="opendart_ds002",
+                source_eligibility="not_eligible",
+                availability_status="not_available_from_endpoint",
+                quality_status="missing",
+            ),
+            AuditFeeObservation(
+                corp_code="001",
+                bsns_year=2014,
+                source_class="cached_business_report",
+                source_eligibility="not_eligible",
+                availability_status="parse_error",
+                quality_status="error",
+            ),
+        ]
+    )
+
+    assert result.audit_fee_m is None
+    assert result.audit_hours is None
+    assert result.availability_status == "not_available_from_endpoint"
+    assert result.quality_status == "missing"
+    assert len(json.loads(result.source_observations_json)) == 2
+
+
 def test_feature_grade_fails_when_any_eligible_period_has_source_blocker(
     monkeypatch,
 ):
