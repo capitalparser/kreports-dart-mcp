@@ -172,6 +172,12 @@ def test_parse_outcome_rejects_three_page_mixed_nominal_procedures():
         pytest.param("TITLE", id="title"),
         pytest.param("TH", id="table-header"),
         pytest.param('TD role="heading"', id="explicit-heading-cell"),
+        pytest.param("tItLe", id="mixed-case-title"),
+        pytest.param('tH data-kind="title"', id="mixed-case-table-header"),
+        pytest.param(
+            "tD RoLe = ' HeAdInG ' class=\"not-title\"",
+            id="normalized-exact-heading-role",
+        ),
     ],
 )
 @pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested-p"])
@@ -291,6 +297,45 @@ def test_parse_outcome_requires_explicit_role_for_generic_td_title():
     assert outcome.items == []
 
 
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        pytest.param('class="not-title"', id="negated-title-class"),
+        pytest.param('class="data-title-value"', id="data-title-class"),
+        pytest.param('class="non-heading"', id="negated-heading-class"),
+        pytest.param('CLASS="NoT-TiTlE"', id="mixed-case-negated-class"),
+        pytest.param('id="section-heading"', id="heading-id"),
+        pytest.param('ID="TITLE"', id="mixed-case-title-id"),
+        pytest.param('role="not-heading"', id="nonexact-heading-role"),
+    ],
+)
+def test_parse_outcome_does_not_infer_td_heading_from_generic_attributes(
+    attribute,
+):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <TITLE>핵심감사사항</TITLE>
+    <TABLE>
+    <TR><TH>1. 수익인식</TH></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>기간귀속 판단 위험</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>계약 표본 검사</TD></TR>
+    <TR><TD {attribute}>2. 재고자산 평가</TD></TR>
+    <TR><TD>핵심감사사항으로 선정한 이유</TD></TR>
+    <TR><TD>순실현가능가치 추정 위험</TD></TR>
+    <TR><TD>감사에서 다루어진 방법</TD></TR>
+    <TR><TD>예상판매가격 검사</TD></TR>
+    </TABLE>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
 def test_parse_outcome_recovers_malformed_nested_title_deterministically():
     from kreports.processor.kam_parser import parse_kam_items
 
@@ -309,6 +354,63 @@ def test_parse_outcome_recovers_malformed_nested_title_deterministically():
     assert first == second
     assert first.status == "complete"
     assert [item.title for item in first.items] == ["Revenue recognition"]
+
+
+@pytest.mark.parametrize(
+    "broken_title",
+    [
+        pytest.param("<TITLE>핵심감사사항", id="unclosed-title"),
+        pytest.param("<TITLE>핵심감사사항</TH>", id="mismatched-title-close"),
+    ],
+)
+def test_parse_outcome_does_not_leak_malformed_title_ancestry(broken_title):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    {broken_title}
+    <P>수익인식</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>계약 표본 검사</P>
+    <P>재고자산 평가</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>복합계약 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>예상판매가격 검사</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "ambiguous"
+    assert outcome.items == []
+
+
+def test_parse_outcome_sanitizes_multiple_mixed_case_malformed_blocks():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <tItLe>핵심감사사항</tH>
+    <TITLE/>
+    <P>수익인식</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>계약 표본 검사</P>
+    <tH data-kind="decorative"><P></P></TiTlE>
+    <P>재고자산 평가</P>
+    <P>핵심감사사항으로 선정한 이유</P>
+    <P>순실현가능가치 추정 위험</P>
+    <P>감사에서 다루어진 방법</P>
+    <P>예상판매가격 검사</P>
+    """
+
+    first = parse_kam_items(body)
+    second = parse_kam_items(body)
+
+    assert first == second
+    assert first.status == "ambiguous"
+    assert first.items == []
 
 
 def test_parser_collapses_only_adjacent_exact_full_matter_duplicates():

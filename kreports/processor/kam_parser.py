@@ -207,6 +207,13 @@ class _HeadingFrame:
     end: int
 
 
+@dataclass
+class _TagFrame:
+    tag: str
+    explicit_heading: bool
+    emitted_content: bool = False
+
+
 def _compact(value: str) -> str:
     return re.sub(r"\s+", "", value or "").lower()
 
@@ -214,18 +221,18 @@ def _compact(value: str) -> str:
 def _structured_lines(full_text: str) -> list[StructuredLine]:
     bounded = (full_text or "")[:MAX_INPUT_CHARS]
     lines: list[StructuredLine] = []
-    tag_stack: list[tuple[str, bool]] = []
+    tag_stack: list[_TagFrame] = []
     buffer: list[str] = []
     block_id = 0
     blank_before = False
 
     def current_origin() -> str:
-        for tag, _ in reversed(tag_stack):
-            if tag == "title":
+        for frame in reversed(tag_stack):
+            if frame.tag == "title":
                 return "title"
-            if tag in {"td", "th"}:
+            if frame.tag in {"td", "th"}:
                 return "table_cell"
-            if tag == "p":
+            if frame.tag == "p":
                 return "paragraph"
         return "plain"
 
@@ -236,7 +243,7 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
         if not value:
             blank_before = True
             return
-        tag_path = tuple(tag for tag, _ in tag_stack)
+        tag_path = tuple(frame.tag for frame in tag_stack)
         lines.append(
             StructuredLine(
                 text=value,
@@ -251,11 +258,13 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
                     for tag in tag_path
                 ),
                 is_explicit_heading=any(
-                    explicit_heading
-                    for _, explicit_heading in tag_stack
+                    frame.explicit_heading
+                    for frame in tag_stack
                 ),
             )
         )
+        for frame in tag_stack:
+            frame.emitted_content = True
         block_id += 1
         blank_before = False
 
@@ -274,14 +283,92 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
                 for value in match.groups()[1:]
                 if value is not None
             )
-        if attributes.get("role", "").lower() == "heading":
-            return True
-        class_tokens = {
-            value.lower()
-            for value in re.split(r"[\s_-]+", attributes.get("class", ""))
-            if value
-        }
-        return bool(class_tokens & {"heading", "title"})
+        # Generic table cells are strong title evidence only when the source
+        # declares the exact semantic role. Class/id names are presentation
+        # details and substring token inference creates false title evidence
+        # for values such as ``not-title`` and ``data-title-value``.
+        return attributes.get("role", "").strip().lower() == "heading"
+
+    def clear_strong_ancestry() -> None:
+        strong_index = next(
+            (
+                index
+                for index, frame in enumerate(tag_stack)
+                if frame.explicit_heading
+            ),
+            None,
+        )
+        if strong_index is not None:
+            del tag_stack[strong_index:]
+
+    def close_open_structure(
+        incompatible: set[str],
+        *,
+        after_tag: str | None = None,
+    ) -> None:
+        lower = 0
+        if after_tag is not None:
+            boundary = next(
+                (
+                    index
+                    for index in range(len(tag_stack) - 1, -1, -1)
+                    if tag_stack[index].tag == after_tag
+                ),
+                None,
+            )
+            if boundary is not None:
+                lower = boundary + 1
+        incompatible_index = next(
+            (
+                index
+                for index in range(lower, len(tag_stack))
+                if tag_stack[index].tag in incompatible
+            ),
+            None,
+        )
+        if incompatible_index is not None:
+            del tag_stack[incompatible_index:]
+
+    def prepare_opening(tag: str) -> None:
+        if tag == "p":
+            close_open_structure({"p"})
+
+            strong_with_content = next(
+                (
+                    index
+                    for index, frame in enumerate(tag_stack)
+                    if frame.explicit_heading and frame.emitted_content
+                ),
+                None,
+            )
+            if strong_with_content is not None:
+                del tag_stack[strong_with_content:]
+            return
+
+        if tag == "title":
+            close_open_structure({"title", "p"})
+            return
+
+        if tag == "tr":
+            # A new row/cell cannot inherit title semantics from a malformed
+            # container left open in a previous structural block.
+            clear_strong_ancestry()
+            close_open_structure(
+                {"tr", "td", "th", "title", "p"},
+                after_tag="table",
+            )
+            return
+
+        if tag in {"td", "th"}:
+            clear_strong_ancestry()
+            close_open_structure(
+                {"td", "th", "title", "p"},
+                after_tag="tr",
+            )
+            return
+
+        if tag == "table":
+            clear_strong_ancestry()
 
     block_tags = {"title", "p", "td", "th", "tr", "table", "br"}
     for token in _HTML_TOKEN_RE.findall(bounded):
@@ -299,14 +386,25 @@ def _structured_lines(full_text: str) -> list[StructuredLine]:
                     (
                         index
                         for index in range(len(tag_stack) - 1, -1, -1)
-                        if tag_stack[index][0] == tag
+                        if tag_stack[index].tag == tag
                     ),
                     None,
                 )
                 if matching_index is not None:
                     del tag_stack[matching_index:]
+                else:
+                    # A mismatched close is evidence that the structural
+                    # ancestry is unreliable. Fail closed instead of allowing
+                    # an unmatched TITLE/TH/role=heading TD to leak forward.
+                    clear_strong_ancestry()
             elif tag != "br" and not token.rstrip().endswith("/>"):
-                tag_stack.append((tag, explicit_heading(tag, token)))
+                prepare_opening(tag)
+                tag_stack.append(
+                    _TagFrame(
+                        tag=tag,
+                        explicit_heading=explicit_heading(tag, token),
+                    )
+                )
             continue
         text = unescape(token)
         text = re.sub(r"&cr;|&#13;", "\n", text, flags=re.IGNORECASE)
