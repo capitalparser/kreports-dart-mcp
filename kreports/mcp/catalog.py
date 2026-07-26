@@ -100,6 +100,7 @@ _DESCRIPTIONS = {
     "estimate_audit_hours_proxy": "표준감사시간 산정 전단계의 public-data 감사난이도 proxy. 자산규모, 감사시간 peer percentile, 현금흐름 괴리, 계속기업/Beneish signal을 종합해 complexity score를 제공한다. 표준감사시간 결론이나 법정 산정값은 아니다.",
     "build_audit_acceptance_pack": "수임/유지 검토용 DART 외부근거 pack. peer 선정, 감사보수·감사시간, 재무 risk signal, 회계정책 cache coverage, 감사보고서 event를 한 번에 묶어 반환한다. 독립성 확인·수임승인·감사판단을 대체하지 않는다.",
     "get_industry_audit_landscape": "업종 내 감사 시장 분석: 감사인 시장점유율(회사수·자산가중 top_n), Big4 점유율, 비적정 의견 발생율(years_back 누적), 평균 tenure(consecutive_years), subject 회사의 감사인 정보. peer는 adaptive ladder + sector 분리 적용. 감사 리스크 평가, 동종업종 감사 시장 이해, 거버넌스 디스카운트 분석에 사용. auditors 데이터가 부족하면 latest_year=None과 함께 graceful note.",
+    "build_dcf_model_pack": "정확한 사업연도와 CFS/OFS의 로컬 공시 실제값, 명시적 정규화와 분석가 가정을 분리해 Decimal 기반 DCF 검토 모델을 만든다. UFCF·터미널가치·기업가치·순부채 브리지와 5x5 민감도를 제공하며 누락 입력은 자동 보충하지 않는다. 투자 권유, 공정성 의견, 승인된 예측 또는 감사 결론이 아니다.",
 }
 
 
@@ -135,6 +136,7 @@ _INPUT_MODELS = {
     "estimate_audit_hours_proxy": models.EstimateAuditHoursProxyInput,
     "build_audit_acceptance_pack": models.BuildAuditAcceptancePackInput,
     "get_industry_audit_landscape": models.GetIndustryAuditLandscapeInput,
+    "build_dcf_model_pack": models.BuildDcfModelPackInput,
 }
 
 

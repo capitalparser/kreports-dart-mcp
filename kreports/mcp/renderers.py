@@ -669,6 +669,66 @@ def _render_dcf_inputs(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_dcf_model_pack(result: dict) -> str:
+    subject = html.escape(_subject_label(result), quote=True)
+    status = str(result.get("status") or _status(result))
+    bridge = result.get("valuation_bridge") or {}
+    projections = [
+        row for row in (result.get("projections") or [])
+        if isinstance(row, dict)
+    ]
+    assumptions = [
+        row for row in (result.get("assumptions") or [])
+        if isinstance(row, dict)
+    ]
+    lines = [
+        f"판정: {status}",
+        "",
+        f"{subject}의 검토 가능한 DCF 모델입니다.",
+        "",
+        "모델 레이어:",
+        f"- 실제값: {result.get('base_year')}년 {result.get('fs_div')} 로컬 재무 공시 캐시",
+        f"- 정규화: {len(result.get('normalization') or [])}개 항목을 실제값과 분리",
+        f"- 분석가 가정: {len(assumptions)}개 항목, 누락값 자동 대체 없음",
+        "- UFCF 공식: EBIT * (1-tax) + D&A - capex - change_in_NWC",
+    ]
+    if projections:
+        lines.extend(["", "연도별 예측:"])
+        for row in projections[:10]:
+            lines.append(
+                f"- {row.get('year')}: 매출 {row.get('revenue')}, "
+                f"EBIT {row.get('ebit')}, UFCF {row.get('ufcf')}, "
+                f"현재가치 {row.get('present_value')}"
+            )
+    lines.extend([
+        "",
+        "가치 브리지:",
+        f"- 예측기간 현재가치: {bridge.get('forecast_period_present_value')}",
+        f"- 터미널가치 현재가치: {bridge.get('terminal_value_present_value')}",
+        f"- 기업가치: {bridge.get('enterprise_value')}",
+        f"- 순부채: {bridge.get('net_debt')}",
+        f"- 자기자본가치: {bridge.get('equity_value')}",
+    ])
+    missing = result.get("missing_inputs") or []
+    if missing:
+        lines.extend([
+            "",
+            "누락 입력:",
+            "- " + ", ".join(html.escape(str(item), quote=True) for item in missing[:32]),
+        ])
+    lines.extend([
+        "",
+        "용도 제한:",
+        "- 이 결과는 투자 권유가 아닙니다.",
+        "- 공정성 의견이 아닙니다.",
+        "- 승인된 예측이 아닙니다.",
+        "- 감사 결론이 아닙니다.",
+    ])
+    for limitation in (result.get("limitations") or [])[:8]:
+        lines.append(f"- {html.escape(str(limitation), quote=True)}")
+    return "\n".join(lines)[:20_000]
+
+
 def _render_disclosure_events(result: dict) -> str:
     query = result.get("query") or {}
     lines = [
@@ -1055,6 +1115,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         detail = _render_quality_of_earnings(legacy_result)
     elif tool_name == "get_dcf_input_candidates":
         detail = _render_dcf_inputs(legacy_result)
+    elif tool_name == "build_dcf_model_pack":
+        detail = _render_dcf_model_pack(legacy_result)
     elif tool_name == "search_disclosure_events":
         detail = _render_disclosure_events(legacy_result)
     elif tool_name == "get_investor_signals":

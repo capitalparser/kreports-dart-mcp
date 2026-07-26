@@ -38,7 +38,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 31  # base tools plus auditor peer/planning/on-demand/investor tools
+EXPECTED_TOOL_COUNT = 32  # approved catalog including the reviewable DCF model pack
 
 
 class TestToolRegistryConsistency:

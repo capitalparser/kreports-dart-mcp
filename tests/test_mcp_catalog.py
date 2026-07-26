@@ -43,8 +43,9 @@ EXPECTED_TOOL_NAMES = [
     "estimate_audit_hours_proxy",
     "build_audit_acceptance_pack",
     "get_industry_audit_landscape",
+    "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "fe45426b80da6ccf28255f58e378eb94e7636e89cba17bbb7d88e46c7ea4e11c"
+EXPECTED_INTERFACE_SHA256 = "f72fa64c26aada05aecb18c45ea6f0a6484073c69acc5300ba3bb07d5f1e55f1"
 
 
 MINIMAL_ARGUMENTS = {
@@ -82,6 +83,10 @@ MINIMAL_ARGUMENTS = {
     "estimate_audit_hours_proxy": {"company": "__task7_no_such_company__"},
     "build_audit_acceptance_pack": {"company": "__task7_no_such_company__"},
     "get_industry_audit_landscape": {"induty_code": "__task7_no_such_industry__"},
+    "build_dcf_model_pack": {
+        "company": "__task7_no_such_company__",
+        "base_year": 2025,
+    },
 }
 
 
@@ -91,7 +96,7 @@ def test_catalog_is_complete_ordered_and_immutable():
 
     assert list(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
     assert [tool.name for tool in list_mcp_tools()] == EXPECTED_TOOL_NAMES
-    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 31
+    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 32
     assert all(
         spec.input_model.model_config.get("extra") == "forbid"
         for spec in TOOL_CATALOG.values()
@@ -100,7 +105,7 @@ def test_catalog_is_complete_ordered_and_immutable():
         TOOL_CATALOG["search_company"].name = "changed"
 
 
-def test_generated_tool_interface_keeps_the_pre_refactor_snapshot_hash():
+def test_generated_tool_interface_keeps_the_approved_32_tool_snapshot_hash():
     from kreports.mcp.dispatch import list_mcp_tools
 
     snapshot = []

@@ -279,6 +279,18 @@ DCF_SUPPORT_METRICS = DCF_REQUIRED_METRICS + (
     "purchase_ppe",
     "purchase_intangible_assets",
 )
+DCF_MODEL_METRICS = (
+    "revenue",
+    "operating_profit",
+    "depreciation_amortization",
+    "purchase_ppe",
+    "purchase_intangible_assets",
+    "trade_receivables",
+    "inventories",
+    "trade_payables",
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+)
 
 # Public QoE/DCF rows historically expose these two names. The compact table
 # remains canonical so stored keys and existing public result keys do not move.

@@ -25,6 +25,7 @@ from kreports.mcp.handlers.company import (
     handle_search_company,
 )
 from kreports.mcp.handlers.investor import (
+    handle_build_dcf_model_pack,
     handle_detect_restatement,
     handle_get_dcf_input_candidates,
     handle_get_investor_signals,
@@ -74,4 +75,5 @@ HANDLERS = {
     "estimate_audit_hours_proxy": handle_estimate_audit_hours_proxy,
     "build_audit_acceptance_pack": handle_build_audit_acceptance_pack,
     "get_industry_audit_landscape": handle_get_industry_audit_landscape,
+    "build_dcf_model_pack": handle_build_dcf_model_pack,
 }

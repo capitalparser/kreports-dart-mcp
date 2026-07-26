@@ -25,9 +25,21 @@ def _statement_preferred_row(definition, rows: list[dict]) -> dict | None:
     if not populated:
         return None
     rank = {statement: index for index, statement in enumerate(definition.statement_division_preference)}
+    best_rank = min(
+        (rank.get(row["sj_div"] or "", len(rank)), row["sj_div"] or "")
+        for row in populated
+    )
+    preferred = [
+        row
+        for row in populated
+        if (rank.get(row["sj_div"] or "", len(rank)), row["sj_div"] or "")
+        == best_rank
+    ]
+    if len({row["thstrm_amount"] for row in preferred}) > 1:
+        return None
     return min(
-        populated,
-        key=lambda row: (rank.get(row["sj_div"] or "", len(rank)), row["sj_div"] or ""),
+        preferred,
+        key=lambda row: (row["account_nm"] or "", row["account_id"]),
     )
 
 

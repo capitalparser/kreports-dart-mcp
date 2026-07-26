@@ -29,6 +29,7 @@ from kreports.analysis.company_profile import (
     search_company,
 )
 from kreports.analysis.financial_analysis import (
+    build_dcf_model_pack,
     detect_restatement,
     get_dcf_input_candidates,
     get_financial_snapshot,
@@ -89,6 +90,7 @@ __all__ = [
     "detect_restatement",
     "get_quality_of_earnings_pack",
     "get_dcf_input_candidates",
+    "build_dcf_model_pack",
     "search_disclosure_events",
     "get_accounting_policy",
     "get_audit_history",

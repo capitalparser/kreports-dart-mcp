@@ -1,9 +1,17 @@
-"""Strict typed arguments for the 31 public MCP tools."""
+"""Strict typed arguments for the 32 public MCP tools."""
 from __future__ import annotations
 
+import math
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 
 FsDiv = Literal["CFS", "OFS"]
@@ -290,6 +298,71 @@ class GetQualityOfEarningsPackInput(GetKamLifecycleInput):
 
 class GetDcfInputCandidatesInput(GetQualityOfEarningsPackInput):
     pass
+
+
+class BuildDcfModelPackInput(ToolInput):
+    company: str = Field(description="corp_code / 종목코드 / 정확한 회사명")
+    base_year: Year
+    fs_div: FsDiv = "CFS"
+    forecast_years: int = Field(5, ge=1, le=10)
+    revenue_growth: float | None = Field(None, gt=-1)
+    operating_margin: float | None = Field(None, gt=-1)
+    tax_rate: float | None = Field(None, ge=0, le=1)
+    da_to_revenue: float | None = Field(None, ge=0)
+    capex_to_revenue: float | None = Field(None, ge=0)
+    nwc_to_revenue: float | None = Field(None, ge=0)
+    wacc: float | None = Field(None, gt=0)
+    terminal_growth: float | None = Field(None, gt=-1)
+    normalized_revenue: float | None = Field(None, gt=0)
+    normalized_operating_profit: float | None = None
+    normalization_reason: str | None = None
+
+    @field_validator(
+        "base_year",
+        "forecast_years",
+        "revenue_growth",
+        "operating_margin",
+        "tax_rate",
+        "da_to_revenue",
+        "capex_to_revenue",
+        "nwc_to_revenue",
+        "wacc",
+        "terminal_growth",
+        "normalized_revenue",
+        "normalized_operating_profit",
+        mode="before",
+    )
+    @classmethod
+    def reject_bool_and_nonfinite(cls, value, info):
+        if value is None:
+            return value
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} 값은 boolean일 수 없습니다.")
+        try:
+            if not math.isfinite(float(value)):
+                raise ValueError(
+                    f"{info.field_name} 값은 유한한 숫자여야 합니다."
+                )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{info.field_name} 값은 유한한 숫자여야 합니다."
+            ) from exc
+        return value
+
+    @model_validator(mode="after")
+    def validate_terminal_and_normalization(self):
+        if (
+            self.wacc is not None
+            and self.terminal_growth is not None
+            and self.terminal_growth >= self.wacc
+        ):
+            raise ValueError("terminal_growth는 wacc보다 작아야 합니다.")
+        if (
+            self.normalized_revenue is not None
+            or self.normalized_operating_profit is not None
+        ) and not str(self.normalization_reason or "").strip():
+            raise ValueError("normalization_reason이 필요합니다.")
+        return self
 
 
 class SearchDisclosureEventsInput(ToolInput):

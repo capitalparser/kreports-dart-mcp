@@ -767,6 +767,88 @@ def get_dcf_input_candidates(
     return _clean_dict(result)
 
 
+def build_dcf_model_pack(
+    company: str,
+    base_year: int,
+    fs_div: str = "CFS",
+    forecast_years: int = 5,
+    revenue_growth: float | str | None = None,
+    operating_margin: float | str | None = None,
+    tax_rate: float | str | None = None,
+    da_to_revenue: float | str | None = None,
+    capex_to_revenue: float | str | None = None,
+    nwc_to_revenue: float | str | None = None,
+    wacc: float | str | None = None,
+    terminal_growth: float | str | None = None,
+    normalized_revenue: float | str | None = None,
+    normalized_operating_profit: float | str | None = None,
+    normalization_reason: str | None = None,
+) -> dict:
+    """Build an exact-year, source-grounded and reviewable DCF model pack."""
+    from kreports.analysis.dcf_model import (
+        DcfScenarioInput,
+        build_dcf_valuation,
+        dcf_result_to_dict,
+    )
+    from kreports.analysis.dcf_source import load_dcf_actuals
+
+    corp_code = resolve_corp_code(company) or company
+    subject = get_company_summary(corp_code)
+    if not subject:
+        return {"error": "company not found", "company": company}
+    scenario = DcfScenarioInput(
+        company=corp_code,
+        base_year=int(base_year),
+        fs_div=fs_div,
+        forecast_years=forecast_years,
+        revenue_growth=revenue_growth,
+        operating_margin=operating_margin,
+        tax_rate=tax_rate,
+        da_to_revenue=da_to_revenue,
+        capex_to_revenue=capex_to_revenue,
+        nwc_to_revenue=nwc_to_revenue,
+        wacc=wacc,
+        terminal_growth=terminal_growth,
+        normalized_revenue=normalized_revenue,
+        normalized_operating_profit=normalized_operating_profit,
+        normalization_reason=normalization_reason,
+    )
+    source = load_dcf_actuals(corp_code, int(base_year), fs_div)
+    result = build_dcf_valuation(
+        scenario,
+        source.facts,
+        source_missing=source.missing_metrics,
+        source_limitations=source.limitations,
+    )
+    payload = dcf_result_to_dict(result)
+    payload["subject"] = subject
+    payload["data_quality"] = {
+        "status": (
+            "usable"
+            if result.status == "complete_model"
+            else "limited" if source.facts else "missing"
+        ),
+        "source": "financial_facts_compact",
+        "covered_years": [int(base_year)] if source.facts else [],
+        "missing_fields": list(result.missing_inputs),
+        "limitations": list(result.limitations),
+    }
+    payload["analysis"] = [{
+        "perspective": "investor",
+        "statement": (
+            "실제값, 정규화, 분석가 가정, 예측 공식과 가치 브리지를 "
+            "분리한 검토용 모델입니다."
+        ),
+        "basis": f"{int(base_year)} {fs_div} local compact facts",
+    }]
+    payload["next_checks"] = [
+        "가정의 승인 주체와 근거 문서를 별도로 확인하세요.",
+        "순부채 외 비영업 항목과 소수주주지분의 별도 조정 필요성을 검토하세요.",
+        "민감도 범위 밖의 downside 시나리오도 별도로 검토하세요.",
+    ]
+    return payload
+
+
 def search_disclosure_events(
     *,
     company: str | None = None,

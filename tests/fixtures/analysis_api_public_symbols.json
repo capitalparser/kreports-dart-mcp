@@ -1,9 +1,10 @@
 {
-  "base_commit": "0920b57",
+  "base_commit": "0a6a932",
   "symbols": {
     "PeerResolution": "kreports.analysis.peer",
     "SectorGroup": "kreports.analysis.peer",
     "build_audit_acceptance_pack": "kreports.analysis.peer_benchmarks",
+    "build_dcf_model_pack": "kreports.analysis.financial_analysis",
     "classify_audit_procedure_linkages": "kreports.analysis.audit_procedure_evidence",
     "classify_sector": "kreports.analysis.peer",
     "compare_peer_accounting_policies": "kreports.analysis.peer_benchmarks",

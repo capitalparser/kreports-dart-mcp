@@ -34,6 +34,7 @@ DOMAIN_EXPORTS = {
         "detect_restatement",
         "get_quality_of_earnings_pack",
         "get_dcf_input_candidates",
+        "build_dcf_model_pack",
         "search_disclosure_events",
     ),
     audit_reporting: (

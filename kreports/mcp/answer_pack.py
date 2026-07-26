@@ -30,6 +30,7 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
 
     builders = {
         "get_dcf_input_candidates": _build_dcf_pack,
+        "build_dcf_model_pack": _build_dcf_model_pack,
         "get_quality_of_earnings_pack": _build_quality_pack,
         "get_investor_signals": _build_investor_signals_pack,
         "get_subsidiary_auditors": _build_subsidiary_pack,
@@ -230,6 +231,148 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
             encodings={"x": {"field": "metric"}, "y": {"field": "value"}},
             note="가치평가 결론이 아니라 공시 기반 입력 후보입니다.",
         ))
+    return pack
+
+
+def _safe_dcf_rows(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in (value if isinstance(value, list) else [])[:limit]:
+        if not isinstance(raw, dict):
+            continue
+        rows.append({
+            str(key)[:80]: (
+                html.escape(str(item), quote=True)[:1000]
+                if isinstance(item, str)
+                else item
+            )
+            for key, item in raw.items()
+        })
+    return rows
+
+
+def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
+    subject = html.escape(_subject_label(result), quote=True)
+    pack = _base_pack(
+        f"{subject} 검토 가능한 DCF 모델",
+        result,
+        status=str(result.get("status") or _status(result)),
+    )
+    actuals = _safe_dcf_rows(result.get("actuals"), limit=20)
+    normalization = _safe_dcf_rows(result.get("normalization"), limit=2)
+    assumptions = _safe_dcf_rows(result.get("assumptions"), limit=8)
+    projections = _safe_dcf_rows(result.get("projections"), limit=10)
+    sensitivity = _safe_dcf_rows(result.get("sensitivity"), limit=25)
+    bridge = result.get("valuation_bridge")
+    bridge_rows = _safe_dcf_rows(
+        [bridge] if isinstance(bridge, dict) else [],
+        limit=1,
+    )
+
+    pack["tables"].extend([
+        _table(
+            "dcf_actuals",
+            "요청 기준연도 공시 실제값",
+            [
+                ("metric_key", "지표"),
+                ("amount", "금액"),
+                ("unit", "단위"),
+                ("year", "연도"),
+                ("fs_div", "재무제표"),
+                ("source_account_id", "원천 계정 ID"),
+                ("source_account_name", "원천 계정명"),
+                ("source_table", "원천 테이블"),
+                ("fetched_at", "수집시각"),
+            ],
+            actuals,
+        ),
+        _table(
+            "dcf_normalization",
+            "정규화 레이어",
+            [
+                ("metric_key", "지표"),
+                ("original_actual", "원 실제값"),
+                ("normalized_amount", "정규화값"),
+                ("basis", "구분"),
+                ("reason", "분석가 근거"),
+            ],
+            normalization,
+        ),
+        _table(
+            "dcf_assumptions",
+            "명시적 분석가 가정",
+            [("key", "가정"), ("value", "값"), ("basis", "근거 구분")],
+            assumptions,
+        ),
+        _table(
+            "dcf_projections",
+            "연도별 UFCF 예측",
+            [
+                ("year", "연도"),
+                ("revenue", "매출"),
+                ("ebit", "EBIT"),
+                ("after_tax_ebit", "세후 EBIT"),
+                ("depreciation_amortization", "D&A"),
+                ("capex", "CAPEX"),
+                ("nwc_balance", "NWC"),
+                ("nwc_change", "NWC 증감"),
+                ("ufcf", "UFCF"),
+                ("discount_factor", "할인계수"),
+                ("present_value", "현재가치"),
+                ("formula", "공식"),
+            ],
+            projections,
+        ),
+        _table(
+            "dcf_valuation_bridge",
+            "기업가치·순부채·자기자본 브리지",
+            [
+                ("forecast_period_present_value", "예측기간 PV"),
+                ("terminal_value_present_value", "터미널가치 PV"),
+                ("enterprise_value", "기업가치"),
+                ("debt", "이자부부채"),
+                ("cash", "현금"),
+                ("net_debt", "순부채"),
+                ("equity_value", "자기자본가치"),
+                ("formula", "브리지 공식"),
+            ],
+            bridge_rows,
+        ),
+        _table(
+            "dcf_sensitivity",
+            "WACC·영구성장률 5x5 민감도",
+            [
+                ("wacc", "WACC"),
+                ("terminal_growth", "영구성장률"),
+                ("status", "상태"),
+                ("enterprise_value", "기업가치"),
+            ],
+            sensitivity,
+        ),
+    ])
+    pack["charts"].extend([
+        _chart(
+            "dcf_ufcf_projection",
+            "line",
+            "연도별 UFCF와 현재가치",
+            data_ref="dcf_projections",
+            encodings={
+                "x": {"field": "year"},
+                "y": {"fields": ["ufcf", "present_value"]},
+            },
+        ),
+        _chart(
+            "dcf_sensitivity_matrix",
+            "heatmap",
+            "WACC·영구성장률 기업가치 민감도",
+            data_ref="dcf_sensitivity",
+            encodings={
+                "x": {"field": "wacc"},
+                "y": {"field": "terminal_growth"},
+                "color": {"field": "enterprise_value"},
+            },
+            note="terminal_growth >= wacc 조합은 invalid_rate_pair로 비워 둡니다.",
+        ),
+    ])
     return pack
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from kreports.analysis.financial_analysis import (
+    build_dcf_model_pack,
     detect_restatement,
     get_dcf_input_candidates,
     get_investor_signals,
@@ -11,6 +12,7 @@ from kreports.analysis.financial_analysis import (
 )
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
+    BuildDcfModelPackInput,
     DetectRestatementInput,
     GetDcfInputCandidatesInput,
     GetInvestorSignalsInput,
@@ -56,6 +58,26 @@ def handle_get_dcf_input_candidates(args: GetDcfInputCandidatesInput) -> dict:
         start_year=args.start_year,
         end_year=args.end_year,
         fs_div=args.fs_div,
+    )
+
+
+def handle_build_dcf_model_pack(args: BuildDcfModelPackInput) -> dict:
+    return build_dcf_model_pack(
+        company=resolve_company(args.company),
+        base_year=args.base_year,
+        fs_div=args.fs_div,
+        forecast_years=args.forecast_years,
+        revenue_growth=args.revenue_growth,
+        operating_margin=args.operating_margin,
+        tax_rate=args.tax_rate,
+        da_to_revenue=args.da_to_revenue,
+        capex_to_revenue=args.capex_to_revenue,
+        nwc_to_revenue=args.nwc_to_revenue,
+        wacc=args.wacc,
+        terminal_growth=args.terminal_growth,
+        normalized_revenue=args.normalized_revenue,
+        normalized_operating_profit=args.normalized_operating_profit,
+        normalization_reason=args.normalization_reason,
     )
 
 
