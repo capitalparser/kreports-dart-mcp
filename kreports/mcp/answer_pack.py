@@ -497,6 +497,43 @@ def _build_peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 "series": {"field": "metric"},
             },
         ))
+    cohort_metadata = result.get("cohort_metadata")
+    if isinstance(cohort_metadata, dict):
+        exclusion_counts = cohort_metadata.get("exclusion_counts") or {}
+        metadata_rows = [
+            {
+                "profile": cohort_metadata.get("profile"),
+                "requested_year": cohort_metadata.get("requested_year"),
+                "fs_div": cohort_metadata.get("fs_div"),
+                "total_candidates": cohort_metadata.get("total_candidates"),
+                "eligible_count": cohort_metadata.get("eligible_count"),
+                "exclusion_reason": reason,
+                "exclusion_count": count,
+            }
+            for reason, count in sorted(exclusion_counts.items())
+        ] or [{
+            "profile": cohort_metadata.get("profile"),
+            "requested_year": cohort_metadata.get("requested_year"),
+            "fs_div": cohort_metadata.get("fs_div"),
+            "total_candidates": cohort_metadata.get("total_candidates"),
+            "eligible_count": cohort_metadata.get("eligible_count"),
+            "exclusion_reason": None,
+            "exclusion_count": 0,
+        }]
+        pack["tables"].append(_table(
+            "peer_cohort_metadata",
+            "Peer cohort 선정 근거",
+            [
+                ("profile", "프로필"),
+                ("requested_year", "요청연도"),
+                ("fs_div", "재무제표 기준"),
+                ("total_candidates", "전체 후보"),
+                ("eligible_count", "적격 후보"),
+                ("exclusion_reason", "제외 사유"),
+                ("exclusion_count", "제외 수"),
+            ],
+            metadata_rows,
+        ))
     return pack
 
 

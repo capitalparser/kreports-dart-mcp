@@ -17,7 +17,7 @@ class MetricDefinition:
     source_account_ids: tuple[str, ...]
     aggregation: Literal["last", "sum", "average", "none"]
     null_meaning: Literal["missing", "not_applicable", "unknown"]
-    source_unit: Literal["KRW", "million_KRW", "hours", "text"]
+    source_unit: Literal["KRW", "million_KRW", "hours", "ratio", "text"]
     source_multiplier: int
     source_account_groups: tuple[tuple[str, ...], ...]
     statement_division_preference: tuple[str, ...]
@@ -39,7 +39,7 @@ def _metric(
     source_account_groups: tuple[tuple[str, ...], ...],
     aggregation: Literal["last", "sum", "average", "none"],
     null_meaning: Literal["missing", "not_applicable", "unknown"],
-    source_unit: Literal["KRW", "million_KRW", "hours", "text"] = "KRW",
+    source_unit: Literal["KRW", "million_KRW", "hours", "ratio", "text"] = "KRW",
     source_multiplier: int = 1,
     statement_division_preference: tuple[str, ...] | None = None,
 ) -> MetricDefinition:
@@ -197,6 +197,48 @@ _METRICS = {
     "audit_hours": _metric(
         "audit_hours", "감사시간", "hours", "event", "either", ("audit_fees",), (),
         "last", "missing", source_unit="hours",
+    ),
+    "operating_margin": _metric(
+        "operating_margin", "영업이익률", "ratio", "duration", "either",
+        ("financials",), (), "none", "missing", source_unit="ratio",
+    ),
+    "net_margin": _metric(
+        "net_margin", "순이익률", "ratio", "duration", "either",
+        ("financials",), (), "none", "missing", source_unit="ratio",
+    ),
+    "debt_ratio": _metric(
+        "debt_ratio", "부채비율", "ratio", "instant", "either",
+        ("financials",), (), "none", "missing", source_unit="ratio",
+    ),
+    "roe": _metric(
+        "roe", "자기자본이익률", "ratio", "duration", "either",
+        ("financials",), (), "none", "missing", source_unit="ratio",
+    ),
+    "roa": _metric(
+        "roa", "총자산이익률", "ratio", "duration", "either",
+        ("financials",), (), "none", "missing", source_unit="ratio",
+    ),
+    "audit_fee_actual": _metric(
+        "audit_fee_actual", "실제 감사보수", "KRW", "event", "either",
+        ("audit_fees",), (), "last", "missing",
+        source_unit="million_KRW", source_multiplier=1_000_000,
+    ),
+    "audit_fee_contract": _metric(
+        "audit_fee_contract", "계약 감사보수", "KRW", "event", "either",
+        ("audit_fees",), (), "last", "missing",
+        source_unit="million_KRW", source_multiplier=1_000_000,
+    ),
+    "audit_hours_actual": _metric(
+        "audit_hours_actual", "실제 감사시간", "hours", "event", "either",
+        ("audit_fees",), (), "last", "missing", source_unit="hours",
+    ),
+    "audit_hours_contract": _metric(
+        "audit_hours_contract", "계약 감사시간", "hours", "event", "either",
+        ("audit_fees",), (), "last", "missing", source_unit="hours",
+    ),
+    "nas_ratio": _metric(
+        "nas_ratio", "비감사보수비율", "ratio", "event", "either",
+        ("audit_fees",), (), "last", "missing", source_unit="ratio",
     ),
 }
 

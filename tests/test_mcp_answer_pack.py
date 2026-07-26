@@ -1,6 +1,41 @@
 from kreports.mcp.tools import _attach_meta
 
 
+def test_peer_answer_pack_surfaces_typed_cohort_denominators_conditionally():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack(
+        "compare_to_industry_multi",
+        {
+            "subject": {"corp_name": "A"},
+            "results": {},
+            "cohort_metadata": {
+                "profile": "investor",
+                "requested_year": 2024,
+                "fs_div": "CFS",
+                "total_candidates": 20,
+                "eligible_count": 8,
+                "exclusion_counts": {"year_unavailable": 4},
+            },
+        },
+    )
+
+    table = next(
+        table for table in pack["tables"] if table["id"] == "peer_cohort_metadata"
+    )
+    assert table["rows"] == [
+        {
+            "profile": "investor",
+            "requested_year": 2024,
+            "fs_div": "CFS",
+            "total_candidates": 20,
+            "eligible_count": 8,
+            "exclusion_reason": "year_unavailable",
+            "exclusion_count": 4,
+        }
+    ]
+
+
 def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():
     result = {
         "subject": {"corp_name": "A"},

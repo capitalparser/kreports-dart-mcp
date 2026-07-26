@@ -73,3 +73,42 @@ def test_select_peer_group_propagates_requested_year_to_cohort_resolution(temp_e
     assert seen == {"fs_year": 2022, "peer_year": 2022}
     assert out["selection_policy"]["requested_year"] == 2022
     assert out["selection_policy"]["resolved_year"] == 2022
+
+
+def test_select_peer_group_accepts_typed_cohort_without_changing_default_contract(
+    temp_engine,
+):
+    from kreports.analysis.peer import build_peer_cohort
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        for index in range(2):
+            corp_code = f"{index + 1:08d}"
+            session.add(
+                Company(
+                    corp_code=corp_code,
+                    stock_code=f"{index + 1:06d}",
+                    corp_name=f"C{index + 1}",
+                    induty_code="26410",
+                )
+            )
+            session.add(
+                Financial(
+                    corp_code=corp_code,
+                    year=2024,
+                    quarter=4,
+                    fs_div="CFS",
+                    revenue=100,
+                    operating_profit=10,
+                    total_assets=200,
+                )
+            )
+
+    cohort = build_peer_cohort("00000001", 2024, "investor", 5)
+    out = select_peer_group("ignored", _cohort=cohort)
+
+    assert out["subject"]["corp_code"] == "00000001"
+    assert out["peers"][0]["corp_code"] == "00000002"
+    assert out["cohort_metadata"]["profile"] == "investor"
+    assert out["selection_policy"]["requested_year"] == 2024

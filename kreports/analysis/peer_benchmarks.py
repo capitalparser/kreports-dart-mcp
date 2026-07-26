@@ -10,8 +10,10 @@ import kreports.db.engine as _engine_module
 from kreports.db.engine import get_session
 from kreports.db.models import Company
 from kreports.analysis.peer import (
+    PeerCohort,
     PeerResolution,
     classify_sector,
+    cohort_to_peer_group,
     confidence_band,
     resolve_fs_div_for_company,
     resolve_peers,
@@ -731,7 +733,10 @@ def select_peer_group(
     exclude_other_sectors: bool = True,
     year: int | None = None,
     _read_engine=None,
+    _cohort: PeerCohort | None = None,
 ) -> dict:
+    if _cohort is not None:
+        return cohort_to_peer_group(_cohort)
     criteria = criteria or ["industry", "sector", "financial_data"]
     active_engine = _read_engine or _engine_module.engine
     if _read_engine is None:
