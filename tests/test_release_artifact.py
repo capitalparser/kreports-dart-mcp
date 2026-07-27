@@ -740,6 +740,111 @@ def test_runtime_readiness_rejects_nonempty_wal(
     assert "nonempty_wal" in report["required_failures"]
 
 
+def test_runtime_readiness_rejects_large_wal_before_any_hash(
+    tmp_path,
+    monkeypatch,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    db_path.with_suffix(".db.release.json").write_text(
+        release_artifact.ReleaseManifest.model_validate(
+            _minimal_manifest_payload()
+        ).model_dump_json(by_alias=True)
+    )
+    db_path.with_name(f"{db_path.name}-wal").write_bytes(b"x" * 1_000_000)
+
+    monkeypatch.setattr(
+        release_artifact,
+        "_sha256_file",
+        lambda _path: pytest.fail("non-empty WAL must fail before hashing"),
+    )
+
+    report = release_artifact.evaluate_artifact_readiness(db_path)
+
+    assert report["ok"] is False
+    assert "nonempty_wal" in report["required_failures"]
+
+
+def test_runtime_readiness_hashes_once_per_file_identity(
+    tmp_path,
+    monkeypatch,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    payload = _minimal_manifest_payload()
+    payload["database"] = {
+        "file_name": db_path.name,
+        "byte_count": db_path.stat().st_size,
+        "sha256": hashlib.sha256(db_path.read_bytes()).hexdigest(),
+    }
+    payload["contracts"]["golden_contract_sha256"] = (
+        release_artifact.APPROVED_GOLDEN_CONTRACT_SHA256
+    )
+    db_path.with_suffix(".db.release.json").write_text(
+        release_artifact.ReleaseManifest.model_validate(
+            payload
+        ).model_dump_json(by_alias=True)
+    )
+    release_artifact._RUNTIME_DIGEST_CACHE.clear()
+    real_sha256 = release_artifact._sha256_file
+    calls = 0
+
+    def counted(path):
+        nonlocal calls
+        calls += 1
+        return real_sha256(path)
+
+    monkeypatch.setattr(release_artifact, "_sha256_file", counted)
+
+    release_artifact.evaluate_artifact_readiness(db_path)
+    release_artifact.evaluate_artifact_readiness(db_path)
+
+    assert calls == 1
+
+
+def test_runtime_readiness_rehashes_and_rejects_same_size_db_change(
+    tmp_path,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    payload = _minimal_manifest_payload()
+    payload["release_gate"] = {
+        **payload["release_gate"],
+        "passed": True,
+        "blockers": [],
+    }
+    payload["database"] = {
+        "file_name": db_path.name,
+        "byte_count": db_path.stat().st_size,
+        "sha256": hashlib.sha256(db_path.read_bytes()).hexdigest(),
+    }
+    payload["contracts"]["golden_contract_sha256"] = (
+        release_artifact.APPROVED_GOLDEN_CONTRACT_SHA256
+    )
+    db_path.with_suffix(".db.release.json").write_text(
+        release_artifact.ReleaseManifest.model_validate(
+            payload
+        ).model_dump_json(by_alias=True)
+    )
+    release_artifact._RUNTIME_DIGEST_CACHE.clear()
+
+    before = release_artifact.evaluate_artifact_readiness(db_path)
+    changed = bytearray(db_path.read_bytes())
+    changed[-1] ^= 1
+    db_path.write_bytes(changed)
+    after = release_artifact.evaluate_artifact_readiness(db_path)
+
+    assert before["ok"] is True
+    assert after["ok"] is False
+    assert "database_sha256_mismatch" in after["required_failures"]
+
+
 def test_readyz_and_manifest_share_the_same_fail_closed_predicate(monkeypatch):
     from starlette.testclient import TestClient
     from kreports.mcp import http_server

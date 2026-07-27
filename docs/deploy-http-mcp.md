@@ -191,7 +191,9 @@ hash. The user-keyed network fetch is forced to `refresh` and checked in its
 no-key fail-closed state, so an existing cache row cannot satisfy that check.
 Verify exits non-zero on drift or any current blocker. Runtime `/readyz` reads
 this pre-verified artifact and performs cheap WAL/file/static-contract drift
-checks; it does not repeat the full DB hash and handler smoke for every probe.
+checks. It hashes the DB once per process and file identity, rehashes after
+device/inode/size/mtime/ctime drift, and never repeats handler smoke in a
+health probe.
 
 Do not substitute code-test success for live-data readiness. The immutable
 artifact manifest is the source for current market/year coverage and feature

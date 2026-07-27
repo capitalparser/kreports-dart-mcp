@@ -542,7 +542,8 @@ blocker가 있으면 non-zero로 종료합니다. 32개 도구 smoke는 격리 �
 실제 handler를 실행하고, 사용자 키 기반 DART 조회는 cache hit를 허용하지
 않는 `refresh` 모드에서 키가 없는 fail-closed 상태를 검증합니다.
 `/readyz`는 사전 검증된 artifact와 WAL·파일·정적 계약 drift를 빠르게
-확인하며, 매 probe마다 전체 DB 해시와 32개 도구를 다시 실행하지 않습니다.
+확인합니다. 전체 DB 해시는 파일 identity가 바뀔 때만 다시 계산하고,
+32개 도구는 health probe에서 다시 실행하지 않습니다.
 
 투자자 기능은 `investor_core` gate가 통과한 데이터에서만 ready입니다.
 회계정책·감사절차·그룹감사 등 감사인 기능은 artifact의 개별 등급에 따라

@@ -29,10 +29,11 @@ report.ok is true AND report.required_failures is empty
 ```
 
 `/readyz` returns HTTP 200 only for that state. It reads the deployment artifact
-without rehashing a multi-gigabyte DB or rerunning 32 tools on every probe, and
-fails closed on a missing/invalid artifact, non-empty WAL, DB file-name/size
-drift, catalog drift, golden drift, or stored blockers. Cryptographic DB digest
-verification remains the pre-deployment `verify-release-artifact` step. HTTP
+without rerunning 32 tools on every probe and fails closed on a missing/invalid
+artifact, non-empty WAL, DB file-name/size/hash drift, catalog drift, golden
+drift, or stored blockers. The DB digest is computed once per process and file
+identity, then reused until device, inode, size, mtime, or ctime changes.
+Pre-deployment `verify-release-artifact` remains the mandatory full proof. HTTP
 transport success, `data_quality.status=usable`, code tests, Ruff, doctor, or
 smoke cannot hide a failed live-data gate.
 

@@ -403,6 +403,14 @@ def get_financial_snapshot(
             "row_count": 0,
         }
 
+    resolved_divisions = {
+        str(value)
+        for value in df["구분"].dropna().unique()
+        if str(value) in {"CFS", "OFS"}
+    }
+    if len(resolved_divisions) == 1:
+        fs_div = resolved_divisions.pop()
+
     if annual_only:
         df = df[df["분기"] == 4]
     if years is not None and not df.empty:
@@ -952,6 +960,23 @@ def build_dcf_model_pack(
         "missing_fields": list(result.missing_inputs),
         "limitations": list(result.limitations),
     }
+    payload["confirmed_facts"] = [{
+        "statement": (
+            f"{scenario.base_year}년 DCF source actuals를 "
+            "로컬 구조화 재무 데이터에서 조회했습니다."
+        ),
+        "source": _annual_report_source(
+            corp_code,
+            subject,
+            scenario.base_year,
+            section_title="재무제표",
+            source_table="financial_facts_compact",
+        ),
+        "excerpt": (
+            "source_actuals="
+            + ",".join(sorted(str(key) for key in source.facts))
+        ),
+    }]
     payload["analysis"] = [{
         "perspective": "investor",
         "statement": (

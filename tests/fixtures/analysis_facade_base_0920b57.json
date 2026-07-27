@@ -551,7 +551,7 @@
   },
   "financial_cfs_fallback": {
     "corp_code": "00000004",
-    "fs_div": "CFS",
+    "fs_div": "OFS",
     "row_count": 1,
     "rows": [
       {

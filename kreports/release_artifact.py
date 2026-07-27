@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any
 
 from pydantic import (
@@ -40,6 +41,8 @@ APPROVED_GOLDEN_CONTRACT_SHA256 = (
     "c6552ed45c0fb5032d45e337e2e75fae92b0bda6854b4b0aa97ebff11b0dd617"
 )
 _CONTRACT_RUNNER_MARKER = "KREPORTS_RELEASE_CONTRACT="
+_RUNTIME_DIGEST_CACHE: dict[tuple[Any, ...], str] = {}
+_RUNTIME_DIGEST_LOCK = threading.Lock()
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_COUNT = 10**12
 _MAX_TEXT_LENGTH = 10_000
@@ -925,11 +928,126 @@ def _list_size(result: dict[str, Any], *keys: str) -> int:
 
 
 def _has_public_provenance(envelope: Any) -> bool:
-    return bool(
-        envelope.evidence
-        or envelope.data_quality.limitations
-        or envelope.warnings
+    for reference in envelope.evidence:
+        if reference.rcept_no or "dart.fss.or.kr" in reference.source_url:
+            return True
+    explicit_source_gaps = (
+        "로컬 캐시에 확인 가능한 데이터가 없습니다",
+        "공개적으로 해석 가능한 근거 링크를 확인하지 못했습니다",
+        "요청 사업연도",
+        "원 공시 부재를 뜻하지 않습니다",
     )
+    return (
+        envelope.data_quality.status in {"limited", "missing"}
+        and any(
+            marker in limitation
+            for limitation in envelope.data_quality.limitations
+            for marker in explicit_source_gaps
+        )
+    )
+
+
+def _find_ofs_only_company(database: Path) -> str | None:
+    """Find a real row set that must exercise the public CFS-to-OFS fallback."""
+    with _open_immutable_sqlite(database) as connection:
+        row = connection.execute(
+            """
+            SELECT COALESCE(NULLIF(c.stock_code, ''), c.corp_code)
+            FROM companies AS c
+            WHERE (
+                EXISTS (
+                    SELECT 1 FROM financials AS f
+                    WHERE f.corp_code = c.corp_code AND f.fs_div = 'OFS'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM financial_facts_compact AS f
+                    WHERE f.corp_code = c.corp_code AND f.fs_div = 'OFS'
+                )
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM financials AS f
+                WHERE f.corp_code = c.corp_code AND f.fs_div = 'CFS'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM financial_facts_compact AS f
+                WHERE f.corp_code = c.corp_code AND f.fs_div = 'CFS'
+            )
+            ORDER BY c.corp_code
+            LIMIT 1
+            """
+        ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _share_matches(
+    amount: Any,
+    denominator: Any,
+    reported_share: Any,
+) -> bool:
+    if amount is None or denominator in (None, 0):
+        return reported_share is None
+    try:
+        expected = round(float(amount) / float(denominator) * 100, 1)
+        actual = float(reported_share)
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return False
+    return math.isfinite(actual) and actual == expected
+
+
+def _qsc_denominator_identity(result: dict[str, Any]) -> bool:
+    criterion = result.get("qsc_criterion") or {}
+    consolidated = result.get("consolidated_totals") or {}
+    entities = result.get("subsidiaries") or []
+    asset_denominator = consolidated.get("assets_amount_m")
+    revenue_denominator = consolidated.get("revenue_amount_m")
+    if (
+        criterion.get("threshold_pct") != 10.0
+        or "asset_share_pct" not in str(criterion.get("basis"))
+        or "revenue_share_pct" not in str(criterion.get("basis"))
+        or asset_denominator in (None, 0)
+        or revenue_denominator in (None, 0)
+        or not entities
+    ):
+        return False
+    checked_asset = 0
+    for entity in entities:
+        asset_amount = entity.get("asset_amount_m")
+        revenue_amount = entity.get("revenue_amount_m")
+        asset_share = entity.get("asset_share_pct")
+        revenue_share = entity.get("revenue_share_pct")
+        if asset_amount is not None:
+            checked_asset += 1
+        if not _share_matches(
+            asset_amount,
+            asset_denominator,
+            asset_share,
+        ) or not _share_matches(
+            revenue_amount,
+            revenue_denominator,
+            revenue_share,
+        ):
+            return False
+        available = [
+            value for value in (asset_share, revenue_share)
+            if value is not None
+        ]
+        expected_status = (
+            "qsc"
+            if any(float(value) >= 10.0 for value in available)
+            else "not_qsc"
+            if len(available) == 2
+            else "undetermined"
+        )
+        if entity.get("qsc_status") != expected_status:
+            return False
+        expected_is_qsc = {
+            "qsc": True,
+            "not_qsc": False,
+            "undetermined": None,
+        }[expected_status]
+        if entity.get("is_qsc") is not expected_is_qsc:
+            return False
+    return checked_asset > 0
 
 
 def execute_golden_contracts(
@@ -960,6 +1078,14 @@ def execute_golden_contracts(
             "get_investor_signals", {"company": "005930"}
         )
         samsung_rows = samsung_raw.get("rows") or []
+        fallback_company = _find_ofs_only_company(database)
+        fallback_raw: dict[str, Any] = {}
+        if fallback_company is not None:
+            _, fallback_raw = invoke(
+                "get_financial_snapshot",
+                {"company": fallback_company, "years": 1},
+            )
+        fallback_rows = fallback_raw.get("rows") or []
         details["samsung_five_year_investor"] = {
             "covered_years": max(
                 len(samsung.data_quality.covered_years),
@@ -977,7 +1103,12 @@ def execute_golden_contracts(
                 and bool(samsung_rows)
                 and all(row.get("구분") == "CFS" for row in samsung_rows)
             ),
-            "provenance_or_limitation": all(
+            "ofs_fallback_explicit": (
+                fallback_raw.get("fs_div") == "OFS"
+                and bool(fallback_rows)
+                and all(row.get("구분") == "OFS" for row in fallback_rows)
+            ),
+            "provenance_or_limitation": any(
                 _has_public_provenance(envelope)
                 for envelope in (
                     samsung,
@@ -992,24 +1123,13 @@ def execute_golden_contracts(
             "get_subsidiary_auditors", {"company": "000660"}
         )
         group_entities = group_raw.get("subsidiaries") or []
-        qsc_criterion = group_raw.get("qsc_criterion") or {}
-        consolidated = group_raw.get("consolidated_totals") or {}
         details["sk_hynix_group_qsc"] = {
             "entity_count": _list_size(
                 group_raw, "entities", "subsidiaries", "rows", "total"
             ),
             "relationship_count": max(len(group_entities), 0),
-            "qsc_denominator_identity": (
-                qsc_criterion.get("threshold_pct") == 10.0
-                and "asset_share_pct" in str(qsc_criterion.get("basis"))
-                and "revenue_share_pct" in str(qsc_criterion.get("basis"))
-                and consolidated.get("assets_amount") is not None
-                and consolidated.get("revenue_amount") is not None
-                and all(
-                    entity.get("qsc_status")
-                    in {"qsc", "not_qsc", "undetermined"}
-                    for entity in group_entities
-                )
+            "qsc_denominator_identity": _qsc_denominator_identity(
+                group_raw
             ),
             "provenance_or_limitation": _has_public_provenance(
                 group_envelope
@@ -1131,6 +1251,7 @@ def execute_golden_contracts(
     semantic_passed = (
         details["samsung_five_year_investor"]["covered_years"] >= 5
         and details["samsung_five_year_investor"]["cfs_preferred"]
+        and details["samsung_five_year_investor"]["ofs_fallback_explicit"]
         and details["samsung_five_year_investor"][
             "provenance_or_limitation"
         ]
@@ -1295,8 +1416,9 @@ def evaluate_artifact_readiness(
     """Read deployment proof cheaply while checking runtime drift fail-closed."""
     database = _safe_existing_db_path(db_path)
     runtime_failures: list[str] = []
+    fingerprint: tuple[Any, ...] | None = None
     try:
-        _require_quiescent_db(database)
+        fingerprint = _require_runtime_quiescent_db(database)
     except ReleaseArtifactError as exc:
         runtime_failures.append(str(exc))
     source = _safe_manifest_path(database, None)
@@ -1326,6 +1448,20 @@ def evaluate_artifact_readiness(
         runtime_failures.append("database_filename_mismatch")
     if stored.database.byte_count != database.stat().st_size:
         runtime_failures.append("database_size_mismatch")
+    if fingerprint is not None:
+        current_digest = _cached_runtime_db_digest(
+            database,
+            fingerprint,
+        )
+        if stored.database.sha256 != current_digest:
+            runtime_failures.append("database_sha256_mismatch")
+        try:
+            if _require_runtime_quiescent_db(database) != fingerprint:
+                runtime_failures.append(
+                    "database_changed_during_readiness_check"
+                )
+        except ReleaseArtifactError as exc:
+            runtime_failures.append(str(exc))
     if (
         stored.tool_contract.tool_count != FROZEN_TOOL_COUNT
         or stored.tool_contract.wire_sha256 != _tool_wire_sha256()
@@ -1360,6 +1496,23 @@ def evaluate_artifact_readiness(
         "coverage": gate.feature_coverage,
         "feature_grades": gate.feature_grades,
     }
+
+
+def _cached_runtime_db_digest(
+    database: Path,
+    fingerprint: tuple[Any, ...],
+) -> str:
+    identity = (str(database), *fingerprint[:5])
+    with _RUNTIME_DIGEST_LOCK:
+        cached = _RUNTIME_DIGEST_CACHE.get(identity)
+        if cached is not None:
+            return cached
+        digest = _sha256_file(database)
+        if len(_RUNTIME_DIGEST_CACHE) >= 8:
+            oldest = next(iter(_RUNTIME_DIGEST_CACHE))
+            del _RUNTIME_DIGEST_CACHE[oldest]
+        _RUNTIME_DIGEST_CACHE[identity] = digest
+        return digest
 
 
 def _unavailable_artifact_readiness(
@@ -1414,6 +1567,36 @@ def _require_quiescent_db(db_path: Path) -> tuple[Any, ...]:
         if suffix == "-wal" and size > 0:
             raise ReleaseArtifactError("nonempty_wal")
     return fingerprint
+
+
+def _require_runtime_quiescent_db(db_path: Path) -> tuple[Any, ...]:
+    """Fingerprint readiness inputs without reading sidecar contents."""
+    stat = db_path.stat()
+    sidecars: list[tuple[str, int, int, int]] = []
+    for suffix in ("-wal", "-shm"):
+        path = db_path.with_name(f"{db_path.name}{suffix}")
+        if not path.exists():
+            sidecars.append((suffix, 0, 0, 0))
+            continue
+        sidecar_stat = path.stat()
+        if suffix == "-wal" and sidecar_stat.st_size > 0:
+            raise ReleaseArtifactError("nonempty_wal")
+        sidecars.append(
+            (
+                suffix,
+                sidecar_stat.st_size,
+                sidecar_stat.st_mtime_ns,
+                sidecar_stat.st_ctime_ns,
+            )
+        )
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        tuple(sidecars),
+    )
 
 
 def _atomic_write_json(

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -98,6 +99,7 @@ def _seed_dispatch_fixture(db_path: Path) -> None:
             Company(corp_code="90000001", stock_code="900001", corp_name="수정의견픽스처", market="KOSPI", induty_code="264"),
             Company(corp_code="90000002", stock_code="900002", corp_name="복수KAM픽스처", market="KOSPI", induty_code="264"),
             Company(corp_code="90000003", stock_code="900003", corp_name="불완전기업픽스처", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000004", stock_code="900004", corp_name="OFS폴백픽스처", market="KOSPI", induty_code="264"),
             Company(corp_code="80000001", stock_code="800001", corp_name="삼성피어A", market="KOSPI", induty_code="264"),
             Company(corp_code="80000002", stock_code="800002", corp_name="삼성피어B", market="KOSPI", induty_code="264"),
         ]
@@ -120,6 +122,22 @@ def _seed_dispatch_fixture(db_path: Path) -> None:
                         account_map_confidence=1.0,
                     )
                 )
+        session.add(
+            Financial(
+                corp_code="90000004",
+                year=2025,
+                quarter=4,
+                fs_div="OFS",
+                revenue=10_000_000_000,
+                operating_profit=1_000_000_000,
+                net_income=800_000_000,
+                total_assets=20_000_000_000,
+                total_debt=8_000_000_000,
+                total_equity=12_000_000_000,
+                operating_cf=1_200_000_000,
+                account_map_confidence=1.0,
+            )
+        )
         for metric_key in (
             "revenue",
             "operating_profit",
@@ -209,6 +227,9 @@ def test_each_golden_case_executes_fixture_backed_tools_and_asserts_semantics(
     assert result["cases"]["samsung_five_year_investor"]["covered_years"] == 5
     assert result["cases"]["samsung_five_year_investor"]["cfs_preferred"]
     assert result["cases"]["samsung_five_year_investor"][
+        "ofs_fallback_explicit"
+    ]
+    assert result["cases"]["samsung_five_year_investor"][
         "provenance_or_limitation"
     ]
     assert result["cases"]["sk_hynix_group_qsc"]["entity_count"] >= 2
@@ -236,6 +257,62 @@ def test_each_golden_case_executes_fixture_backed_tools_and_asserts_semantics(
     }
     assert result["cases"]["incomplete_company"]["missing_fields_shape"]
     assert result["cases"]["incomplete_company"]["explicit_limitations"]
+
+
+def test_qsc_golden_identity_rejects_tampered_computed_share():
+    from kreports.release_artifact import _qsc_denominator_identity
+
+    result = {
+        "qsc_criterion": {
+            "threshold_pct": 10.0,
+            "basis": (
+                "asset_share_pct >= 10.0 OR "
+                "revenue_share_pct >= 10.0"
+            ),
+        },
+        "consolidated_totals": {
+            "assets_amount_m": 1_000.0,
+            "revenue_amount_m": 500.0,
+        },
+        "subsidiaries": [
+            {
+                "asset_amount_m": 120.0,
+                "asset_share_pct": 12.0,
+                "revenue_amount_m": 40.0,
+                "revenue_share_pct": 8.0,
+                "qsc_status": "qsc",
+                "is_qsc": True,
+            }
+        ],
+    }
+
+    assert _qsc_denominator_identity(result) is True
+    result["subsidiaries"][0]["asset_share_pct"] = 11.9
+    assert _qsc_denominator_identity(result) is False
+
+
+def test_golden_provenance_rejects_arbitrary_warning_or_limitation():
+    from kreports.release_artifact import _has_public_provenance
+
+    arbitrary = SimpleNamespace(
+        evidence=[],
+        data_quality=SimpleNamespace(
+            status="limited",
+            limitations=["model assumptions require review"],
+        ),
+        warnings=["generic warning"],
+    )
+    explicit_gap = SimpleNamespace(
+        evidence=[],
+        data_quality=SimpleNamespace(
+            status="missing",
+            limitations=["로컬 캐시에 확인 가능한 데이터가 없습니다."],
+        ),
+        warnings=[],
+    )
+
+    assert _has_public_provenance(arbitrary) is False
+    assert _has_public_provenance(explicit_gap) is True
 
 
 def test_live_regression_is_opt_in_by_default():
