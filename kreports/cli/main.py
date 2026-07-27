@@ -2187,6 +2187,119 @@ def quality_release_gate_cmd(
         raise typer.Exit(1)
 
 
+@app.command("build-release-manifest")
+def build_release_manifest_cmd(
+    db_path: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Runtime SQLite DB (기본: configured local DB)",
+    ),
+    manifest_path: Optional[Path] = typer.Option(
+        None,
+        "--manifest",
+        help="Release manifest JSON (기본: DB 옆 *.release.json)",
+    ),
+    profile: str = typer.Option(
+        "public_runtime",
+        "--profile",
+        help="public_runtime 또는 auditor_full",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """현재 DB 증거를 원자적으로 기록한다. Gate 실패도 blocker로 보존한다."""
+    from kreports import release_artifact
+
+    try:
+        selected_db = db_path or release_artifact.default_runtime_db_path()
+        output = release_artifact.build_release_manifest(
+            selected_db,
+            manifest_path,
+            profile=profile,
+        )
+        manifest = release_artifact.ReleaseManifest.model_validate_json(
+            output.read_text()
+        )
+    except (
+        OSError,
+        ValueError,
+        release_artifact.ReleaseArtifactError,
+    ) as exc:
+        typer.echo(
+            f"release manifest build rejected: {exc}",
+            err=True,
+        )
+        raise typer.Exit(2) from exc
+
+    result = {
+        "artifact": str(output),
+        "ready": manifest.release_gate.passed,
+        "blockers": manifest.release_gate.blockers,
+    }
+    if json_output:
+        _json_print(result)
+    else:
+        typer.echo(f"Release manifest: {output}")
+        typer.echo(f"Ready: {str(result['ready']).lower()}")
+        typer.echo(
+            "Blockers: " + (", ".join(result["blockers"]) or "none")
+        )
+
+
+@app.command("verify-release-artifact")
+def verify_release_artifact_cmd(
+    db_path: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Runtime SQLite DB (기본: configured local DB)",
+    ),
+    manifest_path: Optional[Path] = typer.Option(
+        None,
+        "--manifest",
+        help="Release manifest JSON (기본: DB 옆 *.release.json)",
+    ),
+    profile: str = typer.Option(
+        "public_runtime",
+        "--profile",
+        help="public_runtime 또는 auditor_full",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+):
+    """저장된 값을 신뢰하지 않고 현재 DB와 모든 release 증거를 재검증한다."""
+    from kreports import release_artifact
+
+    try:
+        selected_db = db_path or release_artifact.default_runtime_db_path()
+        result = release_artifact.verify_release_artifact(
+            selected_db,
+            manifest_path,
+            profile=profile,
+        )
+    except (
+        OSError,
+        ValueError,
+        release_artifact.ReleaseArtifactError,
+    ) as exc:
+        typer.echo(
+            f"release artifact verification rejected: {exc}",
+            err=True,
+        )
+        raise typer.Exit(2) from exc
+
+    payload = result.model_dump(mode="json")
+    if json_output:
+        _json_print(payload)
+    else:
+        typer.echo(
+            f"Release artifact verification: "
+            f"{'PASS' if result.ok else 'FAIL'}"
+        )
+        typer.echo(
+            "Failures: " + (", ".join(result.failures) or "none")
+        )
+    if not result.ok:
+        raise typer.Exit(1)
+
+
 @app.command("export-runtime-db")
 def export_runtime_db_cmd(
     output_path: Path = typer.Option(..., "--output", help="exported SQLite DB path"),

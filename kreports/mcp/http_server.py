@@ -24,6 +24,7 @@ from kreports.mcp.prompts import list_prompts
 from kreports.mcp.resources import list_resource_templates, list_resources
 from kreports.mcp.tools import ALL_TOOLS
 from kreports.quality.release_gate import evaluate_release_gate, runtime_db_unavailable_report
+from kreports.release_artifact import release_gate_is_ready
 
 logger = logging.getLogger("kreports.mcp.http")
 
@@ -117,7 +118,10 @@ async def _ready(_: Request) -> JSONResponse:
         report = evaluate_release_gate("public_runtime")
     except Exception:
         report = runtime_db_unavailable_report("public_runtime")
-    return JSONResponse(report, status_code=503 if report["required_failures"] else 200)
+    return JSONResponse(
+        report,
+        status_code=200 if release_gate_is_ready(report) else 503,
+    )
 
 
 def create_app(

@@ -81,6 +81,10 @@ curl http://127.0.0.1:8765/healthz
 curl http://127.0.0.1:8765/readyz
 ```
 
+`/readyz` is ready only when the public-runtime report has `ok: true` and
+`required_failures` is empty. A `usable` tool response or HTTP transport success
+does not override a release blocker.
+
 MCP URL:
 
 ```text
@@ -172,7 +176,23 @@ kreports upload-runtime-db-artifact \
   --profile compact \
   --year-from 2021 \
   --year-to 2025
+kreports build-release-manifest \
+  --db artifacts/kreports-runtime-2021-2025.db
+kreports verify-release-artifact \
+  --db artifacts/kreports-runtime-2021-2025.db
 ```
+
+The build command is evidence-producing: it writes atomically and may record
+`release_gate.passed=false` with named blockers. The verify command is
+deployment-gating: it recomputes the DB size/hash, schema and required indexes,
+dataset manifest, inline raw count, current release gate, 32-tool wire contract,
+catalog-wide tool contract, and golden contract hash. It exits non-zero on
+drift or any current blocker.
+
+Do not substitute code-test success for live-data readiness. The immutable
+artifact manifest is the source for current market/year coverage and feature
+grades. Investor functions and conditional auditor functions must be presented
+separately according to that evidence.
 
 Measured smoke result:
 
@@ -217,6 +237,7 @@ time for more than a small pilot.
 - `kreports dataset-audit --top 20`
 - `kreports dataset-completeness --year 2025 --years-back 5 --sample-size 100`
 - `curl /healthz` returns `ok: true`
-- `curl /readyz` returns nonzero company count
+- `kreports verify-release-artifact --db <runtime.db>` exits zero
+- `curl /readyz` returns HTTP 200 with `ok: true` and no required failures
 - Endpoint has `KREPORTS_MCP_TOKEN`
 - Endpoint does not have `DART_API_KEY`

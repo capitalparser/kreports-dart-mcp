@@ -8,6 +8,17 @@ or hot-year audit evidence review.
 
 ## Dataset Tiers
 
+Every tier is part of one evidence chain:
+
+1. **Raw layer**: source XML/HTML retained only under the policy below.
+2. **Evidence layer**: receipt-bound sections, excerpts, hashes, and DART links.
+3. **Structured layer**: financial, audit, peer, group, and quality facts used
+   by MCP tools.
+
+The release artifact binds the selected SQLite DB hash and inline raw count.
+`verify-release-artifact` recomputes both, so retained raw content cannot drift
+silently between build and deployment.
+
 ### Tier A: Always-on Runtime DB
 
 Keep these compact tables available for public MCP responses:
@@ -48,6 +59,8 @@ keeps the excerpt plus `full_text_uri`, `full_text_hash`, `full_text_length`, an
 Older or rarely queried raw filings can be fetched on demand with the user's
 DART API key or restored from external storage. Public MCP runtime should report
 the cache status instead of pretending the raw filing is locally available.
+The caller key is request-scoped: it must not be stored, logged, echoed, or
+included in structured, legacy, stdio, error, or release-manifest surfaces.
 
 ## Operational Rules
 

@@ -25,9 +25,11 @@ def temp_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(engine_module, "SessionLocal", new_session_maker)
 
     import kreports.analysis.search_adapter as search_adapter_module
+    import kreports.analysis.disclosure_events as disclosure_events_module
     import kreports.analysis.peer as peer_module
     import kreports.analysis.readiness as readiness_module
 
+    monkeypatch.setattr(disclosure_events_module, "engine", test_engine)
     monkeypatch.setattr(peer_module, "engine", test_engine)
     monkeypatch.setattr(readiness_module, "engine", test_engine)
 

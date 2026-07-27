@@ -40,7 +40,7 @@ KReports turns that raw disclosure pile into questions you can ask Claude:
 
 ### What it does
 
-KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). It covers 3,900+ KOSPI/KOSDAQ/KONEX listed companies and converts filings into structured financial intelligence.
+KReports connects [DART](https://dart.fss.or.kr) (Korea's SEC) to Claude via the [Model Context Protocol](https://modelcontextprotocol.io). It converts the companies and filing years proven by the selected runtime release manifest into structured financial intelligence; coverage is an artifact property, not a timeless product claim.
 
 ### What makes it different
 
@@ -158,9 +158,9 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Beneish M-Score for this company — earnings manipulation risk"
 ```
 
-### MCP Tools (31)
+### MCP Tools (32)
 
-KReports exposes 31 read-oriented MCP tools. The tools are grouped around the
+KReports exposes 32 catalog-bound MCP tools. The tools are grouped around the
 maintenance questions that usually force analysts and auditors back into DART:
 
 | Area | Representative tools | What it returns |
@@ -213,7 +213,7 @@ kreports sync-companies
 kreports enrich-market
 kreports collect-seed --size small   # ~350 companies, ~20 min
 # or
-kreports collect-all --year-from 2021 --year-to 2025   # all 3,900+ companies
+kreports collect-all --year-from 2021 --year-to 2025   # configured company universe
 
 # Start MCP server
 kreports serve
@@ -243,23 +243,36 @@ Add `https://your-host/mcp` as a custom connector in claude.ai Settings → Inte
 
 Grades: **Stable** (80+) / **Caution** (60–79) / **Warning** (40–59) / **Danger** (<40)
 
-### Data coverage
+### Release evidence and data coverage
 
-| Entity | Coverage |
-|--------|---------|
-| Listed companies | 3,900+ (KOSPI + KOSDAQ + KONEX) |
-| Financial history | Up to 5 years |
-| Auditor records | Opinion, firm, consecutive years |
-| Audit fees | Audit + non-audit, NAS ratio |
-| Industry benchmarks | KSIC 2/3-digit, 8 metrics |
-| Accounting policies | 15 standard K-IFRS items |
-| Investor signals | Quality checks, accounting/governance risk, disclosure event categories |
+Coverage and readiness are read from the JSON release artifact next to the
+runtime SQLite DB. Build evidence even when a gate is blocked, then verify it
+against the exact DB that will be deployed:
+
+```bash
+kreports build-release-manifest --db artifacts/kreports-runtime.db
+kreports verify-release-artifact --db artifacts/kreports-runtime.db
+```
+
+Build exits successfully after writing a valid proof whose
+`release_gate.passed` value may be false. Verify returns non-zero for DB drift,
+contract drift, or any current named release blocker. `/readyz` uses the same
+`public_runtime` predicate.
+
+Investor functions are ready only when `investor_core` passes the manifest
+gate. Auditor functions remain conditional where accounting-policy,
+audit-procedure, or group-audit grades are degraded. Code/test success does not
+override a blocked live-data gate.
+
+DCF packs keep four boundaries visible: source filing actuals, explicit
+assumptions, Decimal model mechanics, and analyst judgment. The model does not
+turn missing inputs into inferred actuals.
 
 ### Architecture
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP servers (31 tools)
+├── mcp/         MCP stdio + HTTP servers (32 tools)
 ├── analysis/    Public Python API and evidence-grounded answer layer
 ├── collector/   DART API collectors and document-first backfill runners
 ├── processor/   XBRL/XML parsers
@@ -325,7 +338,7 @@ KReports는 그 일을 Claude가 바로 물어볼 수 있는 형태로 바꿉니
 
 ### 무엇을 하나
 
-KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. KOSPI/KOSDAQ/KONEX 상장사 3,900여 개의 공시와 재무 데이터를 투자자가 질문하기 쉬운 인텔리전스로 제공합니다.
+KReports는 한국 금융감독원 [DART](https://dart.fss.or.kr) 공시 데이터를 [MCP 프로토콜](https://modelcontextprotocol.io)로 Claude에 연결합니다. 선택한 runtime release manifest가 증명하는 기업·연도 범위의 공시와 재무 데이터를 투자자가 질문하기 쉬운 인텔리전스로 제공합니다.
 
 ### 무엇이 다른가
 
@@ -440,9 +453,9 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
 ```
 
-### MCP 도구 (31개)
+### MCP 도구 (32개)
 
-KReports는 읽기 중심 MCP 도구 31개를 제공합니다. 투자자와 감사인이
+KReports는 catalog에 고정된 MCP 도구 32개를 제공합니다. 투자자와 감사인이
 DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
 
 | 영역 | 대표 도구 | 반환 |
@@ -509,23 +522,32 @@ K-IFRS 감사기준 기반 100점 감점 방식:
 
 등급: **안정** (80+) / **주의** (60–79) / **경고** (40–59) / **위험** (<40)
 
-### 데이터 커버리지
+### 릴리스 증거와 데이터 커버리지
 
-| 대상 | 범위 |
-|------|------|
-| 상장사 | 3,900개+ (KOSPI + KOSDAQ + KONEX) |
-| 재무 이력 | 최근 5개년 |
-| 감사인 기록 | 감사의견, 감사법인, 연속연수 |
-| 감사보수 | 감사보수 + 비감사보수, NAS ratio |
-| 업종 벤치마킹 | KSIC 2/3자리, 8개 지표 |
-| 회계정책 | K-IFRS 표준 15개 항목 |
-| 투자자 신호 | 퀄리티 체크, 회계/거버넌스 리스크, 공시 이벤트 분류 |
+연도·시장·기능 커버리지는 배포할 SQLite DB 옆의 JSON release artifact에서
+확인합니다. 문서의 고정 숫자는 현재 배포 범위를 증명하지 않습니다.
+
+```bash
+kreports build-release-manifest --db artifacts/kreports-runtime.db
+kreports verify-release-artifact --db artifacts/kreports-runtime.db
+```
+
+build는 blocker가 있어도 `release_gate.passed=false`와 정확한 blocker를
+기록하고 0으로 종료합니다. verify는 현재 DB의 해시·스키마·인덱스·raw
+count·catalog·golden contract·release gate를 다시 계산하며 drift나
+blocker가 있으면 non-zero로 종료합니다. `/readyz`도 동일한
+`public_runtime` 의미를 사용합니다.
+
+투자자 기능은 `investor_core` gate가 통과한 데이터에서만 ready입니다.
+회계정책·감사절차·그룹감사 등 감사인 기능은 artifact의 개별 등급에 따라
+conditional일 수 있습니다. DCF는 공시 실제값, 명시적 가정, 모델 계산,
+분석가 판단을 서로 섞지 않습니다.
 
 ### 아키텍처
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP 서버 (31개 도구)
+├── mcp/         MCP stdio + HTTP 서버 (32개 도구)
 ├── analysis/    Python 공개 API와 근거 기반 응답 레이어
 ├── collector/   DART API 수집기와 문서 우선 백필 러너
 ├── processor/   XBRL/XML 파서
