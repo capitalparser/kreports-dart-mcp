@@ -256,7 +256,9 @@ kreports verify-release-artifact --db artifacts/kreports-runtime.db
 
 Build exits successfully after writing a valid proof whose
 `release_gate.passed` value may be false. Verify returns non-zero for DB drift,
-contract drift, or any current named release blocker. `/readyz` uses the same
+contract drift, or any current named release blocker. The 32-tool smoke executes
+legacy handlers in an isolated process and checks the request-scoped DART fetch
+in its no-key fail-closed state. `/readyz` recomputes the same
 `public_runtime` predicate.
 
 Investor functions are ready only when `investor_core` passes the manifest
@@ -535,8 +537,9 @@ kreports verify-release-artifact --db artifacts/kreports-runtime.db
 build는 blocker가 있어도 `release_gate.passed=false`와 정확한 blocker를
 기록하고 0으로 종료합니다. verify는 현재 DB의 해시·스키마·인덱스·raw
 count·catalog·golden contract·release gate를 다시 계산하며 drift나
-blocker가 있으면 non-zero로 종료합니다. `/readyz`도 동일한
-`public_runtime` 의미를 사용합니다.
+blocker가 있으면 non-zero로 종료합니다. 32개 도구 smoke는 격리 프로세스에서
+실제 handler를 실행하고, 사용자 키 기반 DART 조회는 키가 없는 fail-closed
+상태를 검증합니다. `/readyz`도 동일한 `public_runtime` 의미를 재계산합니다.
 
 투자자 기능은 `investor_core` gate가 통과한 데이터에서만 ready입니다.
 회계정책·감사절차·그룹감사 등 감사인 기능은 artifact의 개별 등급에 따라

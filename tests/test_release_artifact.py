@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -49,6 +51,7 @@ def _minimal_manifest_payload() -> dict:
         "contracts": {
             "all_tools": {"passed": True, "checks": 32},
             "golden_contract_sha256": "b" * 64,
+            "golden_contract_passed": True,
         },
     }
 
@@ -377,12 +380,28 @@ def test_inline_raw_count_excludes_derived_sections_and_blocks_original_bodies(
         connection.execute(
             "ALTER TABLE source_documents ADD COLUMN content_type TEXT"
         )
+        connection.execute(
+            "ALTER TABLE source_documents ADD COLUMN report_nm TEXT"
+        )
+        connection.execute(
+            "ALTER TABLE source_documents ADD COLUMN doc_hash TEXT"
+        )
+        derived_body = (
+            "DERIVED FROM report_sections\n# reconstructed evidence"
+        )
         connection.executemany(
-            "INSERT INTO source_documents(id, raw_content, content_type) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO source_documents"
+            "(id, raw_content, content_type, report_nm, doc_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
             [
-                (1, "<original/>", "xml"),
-                (2, "# reconstructed evidence", "derived_report_sections"),
+                (1, "<original/>", "xml", None, None),
+                (
+                    2,
+                    derived_body,
+                    "derived_report_sections",
+                    "derived from report_sections",
+                    hashlib.sha1(derived_body.encode()).hexdigest(),
+                ),
             ],
         )
         connection.commit()
@@ -494,7 +513,7 @@ def test_manifest_cannot_be_db_symlink_or_hardlink(tmp_path, monkeypatch):
 
     hardlink = tmp_path / "hardlink.json"
     os.link(db_path, hardlink)
-    with pytest.raises(ValueError, match="alias"):
+    with pytest.raises(ValueError, match="hardlink|alias"):
         release_artifact.build_release_manifest(db_path, hardlink)
 
 
@@ -670,3 +689,240 @@ def test_cli_build_writes_blocked_proof_with_zero_but_verify_exits_nonzero(
         ],
     )
     assert unsafe.exit_code == 2
+
+
+def test_wrong_index_definition_with_expected_name_is_blocked(tmp_path):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "DROP INDEX idx_company_year_quality_year_market"
+        )
+        connection.execute(
+            "CREATE INDEX idx_company_year_quality_year_market "
+            "ON company_year_quality (market, bsns_year)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+    assert (
+        "invalid_required_index:idx_company_year_quality_year_market"
+        in evidence["release_gate"]["blockers"]
+    )
+
+
+def test_verify_rejects_database_filename_mismatch(tmp_path, monkeypatch):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    payload = _minimal_manifest_payload()
+    monkeypatch.setattr(
+        release_artifact,
+        "_collect_current_evidence",
+        lambda _db, _profile: json.loads(json.dumps(payload)),
+    )
+    manifest_path = release_artifact.build_release_manifest(db_path)
+    stored = json.loads(manifest_path.read_text())
+    stored["database"]["file_name"] = "different.db"
+    manifest_path.write_text(json.dumps(stored))
+
+    result = release_artifact.verify_release_artifact(
+        db_path,
+        manifest_path,
+    )
+    assert "database_filename_mismatch" in result.failures
+
+
+def test_hardlinked_db_cannot_bypass_original_wal_state(tmp_path):
+    from kreports import release_artifact
+
+    original = tmp_path / "runtime.db"
+    _create_contract_db(original)
+    alias = tmp_path / "alias.db"
+    os.link(original, alias)
+    original.with_name(f"{original.name}-wal").write_bytes(b"pending")
+
+    with pytest.raises(ValueError, match="hardlink"):
+        release_artifact.build_release_manifest(alias)
+
+
+def test_original_body_mislabeled_as_derived_remains_blocked(tmp_path):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "ALTER TABLE source_documents ADD COLUMN content_type TEXT"
+        )
+        connection.execute(
+            "ALTER TABLE source_documents ADD COLUMN report_nm TEXT"
+        )
+        connection.execute(
+            "ALTER TABLE source_documents ADD COLUMN doc_hash TEXT"
+        )
+        body = "<original-filing/>"
+        connection.execute(
+            "INSERT INTO source_documents"
+            "(id, raw_content, content_type, report_nm, doc_hash) "
+            "VALUES (1, ?, 'derived_report_sections', "
+            "'original DART report', ?)",
+            (body, hashlib.sha1(body.encode()).hexdigest()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+    assert evidence["inline_raw_count"] == 1
+    assert "inline_raw_bodies_present" in evidence["release_gate"]["blockers"]
+
+
+def test_manifest_redacts_or_rejects_secret_canaries_from_dataset_state(
+    tmp_path,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    secret = "task17-secret-canary"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO dataset_manifest VALUES "
+            "(?, 'schema', 'dataset', '2026-07-27', NULL, NULL, "
+            "0, 0, 0, '{}', ?)",
+            ("manifest", secret),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+    serialized = json.dumps(evidence)
+    assert secret not in serialized
+
+
+def test_feature_grades_include_only_release_coverage_year(tmp_path):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executemany(
+            "INSERT INTO company_year_quality "
+            "(corp_code, bsns_year, market, investor_grade, auditor_grade, "
+            "group_audit_grade, policy_status, audit_procedure_status) "
+            "VALUES (?, ?, 'KOSPI', ?, ?, ?, 'full_body', 'available')",
+            [
+                ("00000001", 2024, "D", "D", "D"),
+                ("00000001", 2025, "A", "B", "C"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        grades = release_artifact._feature_grades(
+            connection,
+            {"company_year_quality"},
+            coverage_year=2025,
+        )
+    finally:
+        connection.close()
+    assert grades == {
+        "investor_core": {"A": 1},
+        "auditor_full": {"B": 1},
+        "group_audit": {"C": 1},
+    }
+
+
+def test_readyz_is_503_when_artifact_bound_index_or_contract_blocker_exists(
+    monkeypatch,
+):
+    from starlette.testclient import TestClient
+    from kreports.mcp import http_server
+
+    monkeypatch.setattr(
+        http_server,
+        "evaluate_artifact_readiness",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "required_failures": [
+                "invalid_required_index:idx_company_year_quality_year_market"
+            ],
+        },
+        raising=False,
+    )
+    app = http_server.create_app(token="secret")
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503
+
+
+def test_explicit_db_cli_has_no_global_db_side_effects():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import kreports.cli.main; "
+                "print(int('kreports.db.engine' in sys.modules))"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0"
+
+
+def test_wheel_contains_approved_golden_package_resource_and_hash(
+    tmp_path,
+):
+    import subprocess
+    import zipfile
+
+    from kreports import release_artifact
+
+    subprocess.run(
+        [
+            "uv",
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(tmp_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(tmp_path.glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        body = archive.read("kreports/data/golden_companies.json")
+    assert hashlib.sha256(body).hexdigest() == (
+        release_artifact.APPROVED_GOLDEN_CONTRACT_SHA256
+    )
+    assert release_artifact.golden_contract_result()["passed"] is True

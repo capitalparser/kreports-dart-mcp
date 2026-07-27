@@ -43,6 +43,11 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         return None
 
     envelope = build_answer_envelope(tool_name, result)
+    if (
+        tool_name == "build_dcf_model_pack"
+        and envelope.data_quality.status == "missing"
+    ):
+        return None
     normalized_result = dict(result)
     normalized_quality = dict(result.get("data_quality") or {})
     normalized_quality.update(envelope.data_quality.model_dump())
@@ -244,25 +249,36 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
             "5개년 실적치",
             [
                 ("year", "연도"),
-                ("revenue", "매출(원)"),
-                ("operating_profit", "영업이익(원)"),
-                ("profit_loss", "순이익(원)"),
-                ("net_income", "순이익(원)"),
-                ("operating_cf", "영업현금흐름(원)"),
-                ("purchase_ppe", "유형자산 취득(원)"),
+                ("revenue", "매출(원)", "KRW"),
+                ("operating_profit", "영업이익(원)", "KRW"),
+                ("profit_loss", "순이익(원)", "KRW"),
+                ("net_income", "순이익(원)", "KRW"),
+                ("operating_cf", "영업현금흐름(원)", "KRW"),
+                ("purchase_ppe", "유형자산 취득(원)", "KRW"),
             ],
             actuals,
         ))
-        pack["charts"].append(_chart(
-            "financial_trend",
-            "line",
-            "매출·영업이익·영업현금흐름 추이",
-            data_ref="historical_actuals",
-            encodings={
-                "x": {"field": "year"},
-                "y": {"fields": ["revenue", "operating_profit", "operating_cf"]},
-            },
-        ))
+        trend_fields = [
+            field
+            for field in ("revenue", "operating_profit", "operating_cf")
+            if any(_is_numeric_measure(row.get(field)) for row in actuals)
+        ]
+        if trend_fields:
+            pack["charts"].append(_chart(
+                "financial_trend",
+                "line",
+                "매출·영업이익·영업현금흐름 추이",
+                data_ref="historical_actuals",
+                encodings={
+                    "x": {"field": "year"},
+                    "y": {"fields": trend_fields},
+                },
+            ))
+        else:
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                "dcf_actuals_chart_suppressed:no_numeric_facts",
+            ]
 
     basis_labels = {
         "historical_median": "과거 중앙값",
@@ -628,16 +644,27 @@ def _build_audit_fee_trend_pack(result: dict[str, Any]) -> dict[str, Any]:
             ],
             history,
         ))
-        pack["charts"].append(_chart(
-            "audit_fee_trend_chart",
-            "line",
-            "감사보수 추이",
-            data_ref="audit_fee_trend",
-            encodings={
-                "x": {"field": "year"},
-                "y": {"fields": ["audit_fee_m", "non_audit_fee_m"]},
-            },
-        ))
+        fee_fields = [
+            field
+            for field in ("audit_fee_m", "non_audit_fee_m")
+            if any(_is_numeric_measure(row.get(field)) for row in history)
+        ]
+        if fee_fields:
+            pack["charts"].append(_chart(
+                "audit_fee_trend_chart",
+                "line",
+                "감사보수 추이",
+                data_ref="audit_fee_trend",
+                encodings={
+                    "x": {"field": "year"},
+                    "y": {"fields": fee_fields},
+                },
+            ))
+        else:
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                "audit_fee_chart_suppressed:no_numeric_facts",
+            ]
     return pack
 
 
@@ -665,17 +692,26 @@ def _build_audit_fee_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             ],
             rows,
         ))
-        pack["charts"].append(_chart(
-            "audit_fee_peer_chart",
-            "bar",
-            "감사보수 Peer 분포",
-            data_ref="audit_fee_peer_distribution",
-            encodings={
-                "x": {"field": "corp_name"},
-                "y": {"field": "audit_fee_m"},
-                "series": {"field": "role"},
-            },
-        ))
+        if any(
+            _is_numeric_measure(row.get("audit_fee_m"))
+            for row in rows
+        ):
+            pack["charts"].append(_chart(
+                "audit_fee_peer_chart",
+                "bar",
+                "감사보수 Peer 분포",
+                data_ref="audit_fee_peer_distribution",
+                encodings={
+                    "x": {"field": "corp_name"},
+                    "y": {"field": "audit_fee_m"},
+                    "series": {"field": "role"},
+                },
+            ))
+        else:
+            pack["limitations"] = [
+                *pack.get("limitations", []),
+                "audit_fee_peer_chart_suppressed:no_numeric_facts",
+            ]
     return pack
 
 

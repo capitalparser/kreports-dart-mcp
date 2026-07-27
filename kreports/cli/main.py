@@ -16,7 +16,6 @@ import typer
 from tabulate import tabulate
 
 from kreports.config import settings
-from kreports.db.engine import init_db, get_session
 from kreports.db.models import (
     Company, Financial, Disclosure, Auditor, AuditFee, FetchLog,
     AccountingPolicyItem,
@@ -51,6 +50,20 @@ GOLDEN_STOCK_CODES = [
 ]
 
 _ACTIVE_BACKFILL_LEASES = {}
+
+
+def init_db() -> None:
+    """Load mutable database initialization only for commands that need it."""
+    from kreports.db.engine import init_db as initialize_database
+
+    initialize_database()
+
+
+def get_session():
+    """Load the configured session factory only for commands that need it."""
+    from kreports.db.engine import get_session as configured_session
+
+    return configured_session()
 
 
 @contextmanager

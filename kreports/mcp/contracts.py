@@ -143,6 +143,10 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
         )
     if status == "missing":
         limitations.append("로컬 캐시에 확인 가능한 데이터가 없습니다. 이는 원 공시 부재를 뜻하지 않습니다.")
+    if status == "limited" and not limitations:
+        limitations.append(
+            "확인 가능한 데이터가 제한되어 결과를 완전한 판단 근거로 사용할 수 없습니다."
+        )
     if is_error:
         error_message = str(result["error"]).strip()
         limitations.insert(0, error_message or "도구 처리 중 오류가 발생했습니다. 원인 확인이 필요합니다.")
@@ -225,6 +229,18 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
 def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
     """Apply the shared answer-pack and narrative behavior after metadata is attached."""
     enriched = dict(result)
+    raw_quality = enriched.get("data_quality")
+    if isinstance(raw_quality, dict):
+        normalized_status = {
+            "cache_missing": "missing",
+            "incomplete_core_metrics": "limited",
+            "unavailable": "missing",
+        }.get(raw_quality.get("status"))
+        if normalized_status is not None:
+            enriched["data_quality"] = {
+                **raw_quality,
+                "status": normalized_status,
+            }
     # Local imports avoid an import cycle: answer_pack and renderers consume this module.
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.renderers import render_answer

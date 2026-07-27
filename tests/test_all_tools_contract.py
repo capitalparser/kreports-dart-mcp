@@ -53,9 +53,29 @@ def _fixture_arguments(tool_name, model) -> dict:
         elif name == "dataset":
             values[name] = "financials"
         else:
-            values[name] = "__task17_fixture_missing__"
+            values[name] = "005930"
     if tool_name == "get_industry_audit_landscape":
         values["induty_code"] = "264"
+    if tool_name in {
+        "compare_to_industry",
+        "search_audit_report_matters",
+        "search_audit_procedures",
+        "search_disclosure_events",
+    }:
+        values["company"] = "005930"
+    if tool_name == "fetch_disclosure_on_demand":
+        values["rcept_no"] = "20250101000001"
+    if tool_name == "build_dcf_model_pack":
+        values.update(
+            revenue_growth=0.03,
+            operating_margin=0.1,
+            tax_rate=0.22,
+            da_to_revenue=0.03,
+            capex_to_revenue=0.04,
+            nwc_to_revenue=0.1,
+            wacc=0.09,
+            terminal_growth=0.02,
+        )
     return values
 
 
@@ -78,8 +98,23 @@ def test_all_tool_contract_is_derived_from_catalog_and_covers_all_32_tools(
 def test_all_32_catalog_tools_have_strict_inputs_and_answer_envelopes(
     temp_engine,
 ):
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Company
     from kreports.mcp.catalog import TOOL_CATALOG
     from kreports.mcp.dispatch import dispatch_tool
+
+    with Session(temp_engine) as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+                induty_code="264",
+            )
+        )
+        session.commit()
 
     assert tuple(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
     for name, spec in TOOL_CATALOG.items():
@@ -92,12 +127,18 @@ def test_all_32_catalog_tools_have_strict_inputs_and_answer_envelopes(
         assert isinstance(result, AnswerEnvelopeV1)
         assert result.tool_name == name
         assert result.answer.strip()
+        if name == "fetch_disclosure_on_demand":
+            assert result.data_quality.status == "error"
+            assert (
+                "user_dart_api_key is required"
+                in result.data_quality.limitations
+            )
+            continue
         assert result.data_quality.status in {
             "usable",
             "limited",
             "missing",
-            "error",
-        }
+        }, name
         if spec.professional:
             assert (
                 any(ref.source_url.startswith("https://dart.fss.or.kr/")
@@ -158,3 +199,39 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
         "[REDACTED]" in surface
         for surface in surfaces[:3]
     )
+
+
+def test_all_tool_contract_fails_when_any_valid_fixture_invocation_errors(
+    tmp_path,
+    monkeypatch,
+):
+    from dataclasses import replace
+
+    from sqlalchemy import create_engine
+
+    from kreports import release_artifact
+    from kreports.db.models import Base
+    from kreports.mcp.catalog import TOOL_CATALOG
+
+    db_path = tmp_path / "runtime.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    original = TOOL_CATALOG["search_company"]
+    invoked = False
+
+    def fail(_validated):
+        nonlocal invoked
+        invoked = True
+        raise RuntimeError("fixture invocation failed")
+
+    monkeypatch.setitem(
+        TOOL_CATALOG,
+        "search_company",
+        replace(original, handler=fail),
+    )
+
+    passed = release_artifact._run_catalog_dispatch_contract(db_path)
+
+    assert invoked is True
+    assert passed is False

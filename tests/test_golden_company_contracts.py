@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 GOLDEN_PATH = Path(__file__).parent / "golden" / "companies.yaml"
@@ -72,6 +74,144 @@ def test_six_declarative_golden_cases_cover_stable_semantic_boundaries():
             "explicit_source_access_limitation",
         }
         assert all("amount" not in field for field in case["required_shapes"])
+
+
+def _seed_dispatch_fixture(db_path: Path) -> None:
+    from kreports.db.models import (
+        Auditor,
+        Base,
+        BusinessAffiliateAuditor,
+        Company,
+        Financial,
+        FinancialFactCompact,
+        ReportSection,
+    )
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session.begin() as session:
+        companies = [
+            Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI", induty_code="264"),
+            Company(corp_code="00164779", stock_code="000660", corp_name="SK하이닉스", market="KOSPI", induty_code="261"),
+            Company(corp_code="00111855", stock_code="003220", corp_name="대원제약", market="KOSPI", induty_code="212"),
+            Company(corp_code="90000001", stock_code="900001", corp_name="수정의견픽스처", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000002", stock_code="900002", corp_name="복수KAM픽스처", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000003", stock_code="900003", corp_name="불완전기업픽스처", market="KOSPI", induty_code="264"),
+            Company(corp_code="80000001", stock_code="800001", corp_name="삼성피어A", market="KOSPI", induty_code="264"),
+            Company(corp_code="80000002", stock_code="800002", corp_name="삼성피어B", market="KOSPI", induty_code="264"),
+        ]
+        session.add_all(companies)
+        for corp_code in ("00126380", "00164779", "00111855", "80000001", "80000002"):
+            for year in range(2021, 2026):
+                session.add(
+                    Financial(
+                        corp_code=corp_code,
+                        year=year,
+                        quarter=4,
+                        fs_div="CFS",
+                        revenue=100_000_000_000 + year,
+                        operating_profit=10_000_000_000,
+                        net_income=8_000_000_000,
+                        total_assets=200_000_000_000,
+                        total_debt=80_000_000_000,
+                        total_equity=120_000_000_000,
+                        operating_cf=12_000_000_000,
+                        account_map_confidence=1.0,
+                    )
+                )
+        for metric_key in (
+            "revenue",
+            "operating_profit",
+            "depreciation_amortization",
+            "purchase_ppe",
+            "purchase_intangible_assets",
+            "trade_receivables",
+            "inventories",
+            "trade_payables",
+            "cash_and_equivalents",
+            "interest_bearing_debt",
+        ):
+            session.add(
+                FinancialFactCompact(
+                    corp_code="00111855",
+                    bsns_year=2025,
+                    fs_div="CFS",
+                    metric_key=metric_key,
+                    metric_name=metric_key,
+                    amount=100_000_000,
+                    source_account_id=f"fixture_{metric_key}",
+                    source_account_nm=metric_key,
+                )
+            )
+        session.add(
+            Auditor(
+                corp_code="90000001",
+                bsns_year=2025,
+                fs_div="CFS",
+                auditor_nm="검증회계법인",
+                audit_opinion="한정",
+                rcept_no="20260331000001",
+                consecutive_years=1,
+            )
+        )
+        for ordinal, topic in enumerate(("수익인식", "재고자산 평가")):
+            session.add(
+                ReportSection(
+                    rcept_no="20260331000002",
+                    corp_code="90000002",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    section_key="kam",
+                    section_title=topic,
+                    body_text=f"{topic} 선정 이유 및 감사절차를 수행했습니다.",
+                    body_hash=f"kam-{ordinal}",
+                    body_length=30,
+                    ordinal=ordinal,
+                )
+            )
+        for ordinal, name in enumerate(("SK자회사A", "SK자회사B")):
+            session.add(
+                BusinessAffiliateAuditor(
+                    parent_corp_code="00164779",
+                    parent_rcept_no="20260331000003",
+                    bsns_year=2025,
+                    name=name,
+                    relation="subsidiary",
+                    ownership_pct=80.0,
+                    listed_yn="N",
+                    business="반도체",
+                    assets=str(30_000 - ordinal),
+                    auditor_nm="검증회계법인",
+                    audit_opinion="적정",
+                    auditor_year=2025,
+                    ordinal=ordinal,
+                )
+            )
+    engine.dispose()
+
+
+def test_each_golden_case_executes_fixture_backed_tools_and_asserts_semantics(
+    tmp_path,
+):
+    from kreports.release_artifact import execute_golden_contracts
+
+    db_path = tmp_path / "golden.db"
+    _seed_dispatch_fixture(db_path)
+
+    result = execute_golden_contracts(db_path)
+
+    assert result["passed"] is True
+    assert set(result["cases"]) == EXPECTED_IDS
+    assert result["cases"]["samsung_five_year_investor"]["covered_years"] == 5
+    assert result["cases"]["sk_hynix_group_qsc"]["entity_count"] >= 2
+    assert result["cases"]["daewon_five_year_dcf"]["actuals_assumptions_separate"]
+    assert result["cases"]["modified_opinion"]["modified_opinion_preserved"]
+    assert result["cases"]["multiple_kam"]["kam_count"] >= 2
+    assert result["cases"]["incomplete_company"]["quality"] in {
+        "limited",
+        "missing",
+    }
 
 
 def test_live_regression_is_opt_in_by_default():

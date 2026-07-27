@@ -14,7 +14,10 @@ allowed to finish when live data is not ready; the artifact then contains
 Verify is the deployment gate. It reopens the explicit DB immutably and
 recomputes its hash and size, schema/table/index contract, dataset manifest,
 inline raw count, current release gate, feature coverage and grades, the frozen
-32-tool wire hash, catalog-wide tool contract, and the golden fixture hash.
+32-tool wire hash, isolated real-dispatch smoke for all catalog tools, and the
+approved packaged golden-contract hash. The user-keyed DART fetch is proven
+fail-closed when no request-scoped key is supplied; the release check never
+injects or persists a credential.
 Drift or any current blocker returns non-zero.
 
 ## Readiness meaning
@@ -36,7 +39,9 @@ investor coverage, catalog drift, and golden-contract drift.
 ## Immutable proof
 
 Build and verify reject non-empty SQLite WAL state. They fingerprint DB/WAL/SHM
-content and metadata across proof collection, reject a file swap, and never use
-the process-global SQLAlchemy engine when an explicit `--db` is supplied.
+content and metadata across proof collection and reject a file swap. Explicit
+evidence queries use the selected immutable DB; legacy tool handlers execute in
+an isolated child process whose temporary engine binding cannot mutate the
+calling CLI or HTTP server process.
 Manifest output cannot alias the DB through the same path, a symlink, or a hard
 link. A failed temp write or atomic replace preserves the previous manifest.

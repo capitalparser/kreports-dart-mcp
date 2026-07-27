@@ -24,13 +24,31 @@ from kreports.mcp.prompts import list_prompts
 from kreports.mcp.resources import list_resource_templates, list_resources
 from kreports.mcp.tools import ALL_TOOLS
 from kreports.quality.release_gate import evaluate_release_gate, runtime_db_unavailable_report
-from kreports.release_artifact import release_gate_is_ready
+from kreports.release_artifact import (
+    default_runtime_db_path,
+    evaluate_artifact_readiness as _evaluate_artifact_readiness,
+    release_gate_is_ready,
+)
 
 logger = logging.getLogger("kreports.mcp.http")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_PATH = "/mcp"
+
+
+def evaluate_artifact_readiness(profile: str) -> dict:
+    """Use artifact proof for real datasets while preserving stable legacy errors."""
+    base = evaluate_release_gate(profile)
+    if (
+        base.get("schema_version") == "unknown"
+        or base.get("dataset_version") == "unknown"
+    ):
+        return base
+    return _evaluate_artifact_readiness(
+        default_runtime_db_path(),
+        profile,
+    )
 
 
 class BearerTokenMiddleware:
@@ -115,7 +133,7 @@ async def _health(_: Request) -> JSONResponse:
 
 async def _ready(_: Request) -> JSONResponse:
     try:
-        report = evaluate_release_gate("public_runtime")
+        report = evaluate_artifact_readiness("public_runtime")
     except Exception:
         report = runtime_db_unavailable_report("public_runtime")
     return JSONResponse(

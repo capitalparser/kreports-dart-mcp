@@ -10,6 +10,9 @@ def _resolve_default_db_url() -> str:
     dev_db = BASE_DIR / "kreports.db"
     if dev_db.exists():
         return f"sqlite:///{dev_db}"
+    legacy_dev_db = BASE_DIR / "dart_platform.db"
+    if legacy_dev_db.exists():
+        return f"sqlite:///{legacy_dev_db}"
     if sys.platform == "darwin":
         data_dir = Path.home() / "Library" / "Application Support" / "kreports"
     elif sys.platform == "win32":

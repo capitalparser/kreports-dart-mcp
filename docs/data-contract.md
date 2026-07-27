@@ -19,8 +19,10 @@ crosses response, error, log, or release-manifest boundaries.
 
 `build-release-manifest` binds the DB file name, bytes, streaming SHA-256,
 schema and required indexes, dataset manifest, inline raw count, catalog wire
-hash, catalog-wide tool contract, golden contract hash, and current release-gate
-evidence.
+hash, isolated real-dispatch catalog smoke, approved packaged golden-contract
+hash, and current release-gate evidence. The golden hash binds the declarative
+semantic contract; fixture-backed semantic execution remains a test-suite
+proof, not a claim that live company values are frozen.
 Unknown or missing fields and unsupported versions are rejected.
 
 `verify-release-artifact` recomputes those facts from immutable/read-only SQLite

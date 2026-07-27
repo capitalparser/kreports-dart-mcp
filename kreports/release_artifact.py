@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+from importlib import resources
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -32,6 +35,10 @@ FROZEN_TOOL_COUNT = 32
 FROZEN_TOOL_WIRE_SHA256 = (
     "055f54993bf45f2e4a1388642871d09c1e2f45fc0b5fde1e83228bb910b38339"
 )
+APPROVED_GOLDEN_CONTRACT_SHA256 = (
+    "c6552ed45c0fb5032d45e337e2e75fae92b0bda6854b4b0aa97ebff11b0dd617"
+)
+_CONTRACT_RUNNER_MARKER = "KREPORTS_RELEASE_CONTRACT="
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_COUNT = 10**12
 _MAX_TEXT_LENGTH = 10_000
@@ -66,6 +73,62 @@ REQUIRED_INDEXES = (
     "idx_group_metric_entity_kind",
     "idx_group_metric_qsc_year",
 )
+REQUIRED_INDEX_SPECS = {
+    "idx_company_year_quality_year_market": (
+        "company_year_quality", ("bsns_year", "market"), False, None
+    ),
+    "uq_backfill_runs_active_lease": (
+        "backfill_runs", ("lease_key",), True, "where status = 'running'"
+    ),
+    "idx_kam_item_corp_year": (
+        "kam_items", ("corp_code", "bsns_year"), False, None
+    ),
+    "idx_kam_item_quality_year": (
+        "kam_items", ("bsns_year", "quality_status"), False, None
+    ),
+    "idx_kam_item_receipt": (
+        "kam_items", ("rcept_no", "source_type"), False, None
+    ),
+    "idx_audit_procedure_kam_item": (
+        "audit_procedure_items", ("kam_item_id",), False, None
+    ),
+    "idx_audit_procedure_method_year": (
+        "audit_procedure_items", ("method", "bsns_year"), False, None
+    ),
+    "idx_audit_fee_availability_year": (
+        "audit_fees", ("bsns_year", "availability_status"), False, None
+    ),
+    "idx_group_entity_parent_year": (
+        "group_entities", ("parent_corp_code", "effective_year"), False, None
+    ),
+    "idx_group_entity_resolved_year": (
+        "group_entities", ("resolved_corp_code", "effective_year"), False, None
+    ),
+    "idx_group_relationship_parent_year": (
+        "group_relationships",
+        ("parent_corp_code", "effective_year"),
+        False,
+        None,
+    ),
+    "idx_group_relationship_nodes": (
+        "group_relationships",
+        ("parent_entity_key", "child_entity_key"),
+        False,
+        None,
+    ),
+    "idx_group_metric_parent_year": (
+        "group_component_metrics",
+        ("parent_corp_code", "effective_year"),
+        False,
+        None,
+    ),
+    "idx_group_metric_entity_kind": (
+        "group_component_metrics", ("entity_key", "metric_key"), False, None
+    ),
+    "idx_group_metric_qsc_year": (
+        "group_component_metrics", ("effective_year", "qsc_status"), False, None
+    ),
+}
 
 
 class ReleaseArtifactError(RuntimeError):
@@ -132,6 +195,7 @@ class AllToolContractEvidence(_StrictModel):
 class ContractEvidence(_StrictModel):
     all_tools: AllToolContractEvidence
     golden_contract_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
+    golden_contract_passed: StrictBool = True
 
 
 def _validate_bounded_json(value: Any, *, depth: int = 0) -> None:
@@ -225,11 +289,123 @@ def _tool_wire_sha256() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def run_all_tool_contract() -> dict[str, bool | int]:
-    """Recompute the catalog-wide strict-input and frozen-wire contract."""
+def _valid_tool_arguments(name: str, model: type[BaseModel]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for field_name, field in model.model_fields.items():
+        if not field.is_required():
+            continue
+        if field_name in {"year", "bsns_year", "base_year"}:
+            values[field_name] = 2025
+        elif field_name == "dataset":
+            values[field_name] = "financials"
+        else:
+            values[field_name] = "005930"
+    if name == "get_industry_audit_landscape":
+        values["induty_code"] = "264"
+    if name in {
+        "compare_to_industry",
+        "search_audit_report_matters",
+        "search_audit_procedures",
+        "search_disclosure_events",
+    }:
+        values["company"] = "005930"
+    if name == "fetch_disclosure_on_demand":
+        values["rcept_no"] = "20250101000001"
+    if name == "build_dcf_model_pack":
+        values.update(
+            revenue_growth=0.03,
+            operating_margin=0.1,
+            tax_rate=0.22,
+            da_to_revenue=0.03,
+            capex_to_revenue=0.04,
+            nwc_to_revenue=0.1,
+            wacc=0.09,
+            terminal_growth=0.02,
+        )
+    return values
+
+
+def _run_catalog_dispatch_contract(
+    db_path: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Execute dispatch checks in the current process.
+
+    Explicit-DB callers run this helper only in the isolated runner process.
+    """
     from kreports.mcp.catalog import TOOL_CATALOG
     from kreports.mcp.contracts import AnswerEnvelopeV1
     from kreports.mcp.dispatch import dispatch_tool
+
+    context = (
+        _bound_explicit_runtime(_safe_existing_db_path(db_path))
+        if db_path is not None
+        else nullcontext()
+    )
+    try:
+        with context:
+            for name, spec in TOOL_CATALOG.items():
+                arguments = (
+                    _valid_tool_arguments(name, spec.input_model)
+                    if db_path is not None
+                    else {"__release_contract_unknown__": True}
+                )
+                envelope = dispatch_tool(name, arguments)
+                expected_status = (
+                    {"usable", "limited", "missing"}
+                    if db_path is not None
+                    else {"error"}
+                )
+                valid_envelope = (
+                    isinstance(envelope, AnswerEnvelopeV1)
+                    and envelope.tool_name == name
+                    and envelope.answer.strip()
+                    and envelope.data_quality.status in expected_status
+                )
+                if (
+                    db_path is not None
+                    and name == "fetch_disclosure_on_demand"
+                    and isinstance(envelope, AnswerEnvelopeV1)
+                    and envelope.data_quality.status == "error"
+                    and "user_dart_api_key is required"
+                    in envelope.data_quality.limitations
+                ):
+                    valid_envelope = True
+                if not valid_envelope:
+                    return False
+    except Exception:
+        return False
+    return True
+
+
+def _isolated_catalog_dispatch_contract(db_path: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kreports.release_contract_runner",
+                str(db_path),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    for line in reversed(completed.stdout.splitlines()):
+        if line.startswith(_CONTRACT_RUNNER_MARKER):
+            return line.removeprefix(_CONTRACT_RUNNER_MARKER) == "1"
+    return False
+
+
+def run_all_tool_contract(
+    db_path: str | os.PathLike[str] | None = None,
+) -> dict[str, bool | int]:
+    """Recompute static wire checks and catalog dispatches without DB leakage."""
+    from kreports.mcp.catalog import TOOL_CATALOG
 
     passed = (
         len(TOOL_CATALOG) == FROZEN_TOOL_COUNT
@@ -239,21 +415,14 @@ def run_all_tool_contract() -> dict[str, bool | int]:
         )
         and _tool_wire_sha256() == FROZEN_TOOL_WIRE_SHA256
     )
-    if passed:
-        for name in TOOL_CATALOG:
-            envelope = dispatch_tool(
-                name,
-                {"__release_contract_unknown__": True},
-            )
-            if not (
-                isinstance(envelope, AnswerEnvelopeV1)
-                and envelope.tool_name == name
-                and envelope.answer.strip()
-                and envelope.data_quality.status == "error"
-                and "__release_contract_unknown__" in envelope.answer
-            ):
-                passed = False
-                break
+    dispatch_passed = (
+        _run_catalog_dispatch_contract()
+        if db_path is None
+        else _isolated_catalog_dispatch_contract(
+            _safe_existing_db_path(db_path)
+        )
+    )
+    passed = passed and dispatch_passed
     return {"passed": passed, "checks": len(TOOL_CATALOG)}
 
 
@@ -267,6 +436,8 @@ def _safe_existing_db_path(db_path: str | os.PathLike[str]) -> Path:
         raise ValueError("database path must be an existing file") from exc
     if not resolved.is_file():
         raise ValueError("database path must be an existing file")
+    if resolved.stat().st_nlink != 1:
+        raise ValueError("database path must not be a hardlink")
     return resolved
 
 
@@ -322,6 +493,45 @@ def _explicit_session_scope(db_path: Path):
         sqlalchemy_engine.dispose()
 
 
+@contextmanager
+def _bound_explicit_runtime(db_path: Path):
+    """Temporarily bind legacy handlers to the explicit immutable DB."""
+    import kreports.db.engine as engine_module
+
+    explicit_engine = create_engine(
+        "sqlite+pysqlite://",
+        creator=lambda: _open_immutable_sqlite(db_path),
+    )
+    explicit_sessions = sessionmaker(
+        bind=explicit_engine,
+        autocommit=False,
+        autoflush=False,
+    )
+    old_engine = engine_module.engine
+    old_sessions = engine_module.SessionLocal
+    module_engines: list[tuple[Any, Any]] = []
+    engine_module.engine = explicit_engine
+    engine_module.SessionLocal = explicit_sessions
+    try:
+        for module_name in (
+            "kreports.analysis.disclosure_events",
+            "kreports.analysis.peer",
+            "kreports.analysis.readiness",
+            "kreports.analysis.search_adapter",
+        ):
+            module = __import__(module_name, fromlist=["engine"])
+            if hasattr(module, "engine"):
+                module_engines.append((module, module.engine))
+                module.engine = explicit_engine
+        yield
+    finally:
+        for module, previous in module_engines:
+            module.engine = previous
+        engine_module.engine = old_engine
+        engine_module.SessionLocal = old_sessions
+        explicit_engine.dispose()
+
+
 def _table_columns(
     connection: sqlite3.Connection,
     table_name: str,
@@ -340,8 +550,22 @@ def _dataset_manifest_state(
 ) -> tuple[str, dict[str, Any]]:
     if "dataset_manifest" not in table_names:
         return "unknown", {"status": "missing"}
+    columns = (
+        "manifest_id",
+        "schema_version",
+        "dataset_version",
+        "generated_at",
+        "year_from",
+        "year_to",
+        "company_count",
+        "disclosure_count",
+        "evidence_document_count",
+        "quality_snapshot_json",
+    )
+    available = _table_columns(connection, "dataset_manifest")
+    selected = [column for column in columns if column in available]
     row = connection.execute(
-        "SELECT * FROM dataset_manifest "
+        "SELECT " + ", ".join(selected) + " FROM dataset_manifest "
         "ORDER BY generated_at DESC, manifest_id DESC LIMIT 1"
     ).fetchone()
     if row is None:
@@ -379,24 +603,38 @@ def _inline_raw_count(
     if "raw_content" not in _table_columns(connection, "source_documents"):
         return 0
     columns = _table_columns(connection, "source_documents")
-    derived_filter = (
-        " AND COALESCE(content_type, '') != 'derived_report_sections'"
-        if "content_type" in columns
-        else ""
+    optional = [
+        name
+        for name in ("content_type", "report_nm", "doc_hash")
+        if name in columns
+    ]
+    rows = connection.execute(
+        "SELECT raw_content"
+        + "".join(f", {name}" for name in optional)
+        + " FROM source_documents "
+        "WHERE raw_content IS NOT NULL AND length(raw_content) > 0"
     )
-    return int(
-        connection.execute(
-            "SELECT COUNT(*) FROM source_documents "
-            "WHERE raw_content IS NOT NULL AND length(raw_content) > 0"
-            + derived_filter
-        ).fetchone()[0]
-        or 0
-    )
+    count = 0
+    for raw_row in rows:
+        row = dict(raw_row)
+        body = str(row["raw_content"])
+        trusted_derived = (
+            row.get("content_type") == "derived_report_sections"
+            and row.get("report_nm") == "derived from report_sections"
+            and body.startswith("DERIVED FROM report_sections\n")
+            and row.get("doc_hash")
+            == hashlib.sha1(body.encode()).hexdigest()
+        )
+        if not trusted_derived:
+            count += 1
+    return count
 
 
 def _feature_grades(
     connection: sqlite3.Connection,
     table_names: set[str],
+    *,
+    coverage_year: int | None = None,
 ) -> dict[str, dict[str, int]]:
     if "company_year_quality" not in table_names:
         return {}
@@ -409,9 +647,16 @@ def _feature_grades(
     ):
         if column not in columns:
             continue
+        where = " WHERE bsns_year=?" if coverage_year is not None else ""
+        params = (coverage_year,) if coverage_year is not None else ()
+        query = (
+            f'SELECT "{column}", COUNT(*) FROM company_year_quality'
+            + where
+            + f' GROUP BY "{column}" ORDER BY "{column}"'
+        )
         rows = connection.execute(
-            f'SELECT "{column}", COUNT(*) FROM company_year_quality '
-            f'GROUP BY "{column}" ORDER BY "{column}"'
+            query,
+            params,
         ).fetchall()
         result[public_name] = {
             str(row[0]): int(row[1])
@@ -419,6 +664,41 @@ def _feature_grades(
             if row[0] is not None
         }
     return result
+
+
+def _index_contract_blockers(
+    connection: sqlite3.Connection,
+    table_names: set[str],
+) -> list[str]:
+    blockers: list[str] = []
+    for name, (table, columns, unique, where) in REQUIRED_INDEX_SPECS.items():
+        if table not in table_names:
+            continue
+        rows = {
+            str(row["name"]): row
+            for row in connection.execute(f'PRAGMA index_list("{table}")')
+        }
+        row = rows.get(name)
+        if row is None:
+            blockers.append(f"missing_required_index:{name}")
+            continue
+        actual_columns = tuple(
+            str(item["name"])
+            for item in connection.execute(f'PRAGMA index_info("{name}")')
+        )
+        sql_row = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?",
+            (name,),
+        ).fetchone()
+        sql = " ".join(str(sql_row[0] or "").lower().split()) if sql_row else ""
+        if (
+            actual_columns != columns
+            or bool(row["unique"]) is not unique
+            or (where is not None and where not in sql)
+            or (where is None and " where " in f" {sql} ")
+        ):
+            blockers.append(f"invalid_required_index:{name}")
+    return blockers
 
 
 def _duplicate_key_blockers(
@@ -453,11 +733,162 @@ def _duplicate_key_blockers(
     return blockers
 
 
-def _golden_contract_digest() -> tuple[str, bool]:
-    path = Path(__file__).resolve().parents[1] / "tests" / "golden" / "companies.yaml"
-    if not path.is_file() or path.is_symlink():
-        return "0" * 64, False
-    return _sha256_file(path), True
+def golden_contract_result() -> dict[str, Any]:
+    try:
+        body = (
+            resources.files("kreports")
+            .joinpath("data/golden_companies.json")
+            .read_bytes()
+        )
+        payload = json.loads(body)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"passed": False, "sha256": "0" * 64, "cases": 0}
+    digest = hashlib.sha256(body).hexdigest()
+    cases = payload.get("cases") if isinstance(payload, dict) else None
+    expected_ids = {
+        "samsung_five_year_investor",
+        "sk_hynix_group_qsc",
+        "daewon_five_year_dcf",
+        "modified_opinion",
+        "multiple_kam",
+        "incomplete_company",
+    }
+    valid = (
+        payload.get("contract_version") == "1.0"
+        and isinstance(cases, list)
+        and {case.get("id") for case in cases if isinstance(case, dict)}
+        == expected_ids
+        and all(
+            isinstance(case.get("required_shapes"), list)
+            and case["required_shapes"]
+            and isinstance(case.get("stable_semantics"), list)
+            and case["stable_semantics"]
+            for case in cases
+        )
+    )
+    return {
+        "passed": valid and digest == APPROVED_GOLDEN_CONTRACT_SHA256,
+        "sha256": digest,
+        "cases": len(cases) if isinstance(cases, list) else 0,
+    }
+
+
+def _list_size(result: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = result.get(key)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def execute_golden_contracts(
+    db_path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Execute all six approved golden cases through real dispatch handlers."""
+    from kreports.mcp.dispatch import dispatch_tool, legacy_result
+
+    database = _safe_existing_db_path(db_path)
+    details: dict[str, dict[str, Any]] = {}
+    passed = True
+    with _bound_explicit_runtime(database):
+        def invoke(name: str, arguments: dict[str, Any]):
+            nonlocal passed
+            envelope = dispatch_tool(name, arguments)
+            raw = legacy_result(name, arguments)
+            if envelope.data_quality.status == "error":
+                passed = False
+            return envelope, raw
+
+        samsung, samsung_raw = invoke(
+            "get_financial_snapshot", {"company": "005930", "years": 5}
+        )
+        invoke("select_peer_group", {"company": "005930"})
+        invoke("get_investor_signals", {"company": "005930"})
+        details["samsung_five_year_investor"] = {
+            "covered_years": max(
+                len(samsung.data_quality.covered_years),
+                _list_size(
+                    samsung_raw,
+                    "years",
+                    "financials",
+                    "history",
+                    "rows",
+                    "row_count",
+                ),
+            )
+        }
+
+        invoke("get_investor_signals", {"company": "000660"})
+        _, group_raw = invoke(
+            "get_subsidiary_auditors", {"company": "000660"}
+        )
+        details["sk_hynix_group_qsc"] = {
+            "entity_count": _list_size(
+                group_raw, "entities", "subsidiaries", "rows", "total"
+            )
+        }
+
+        invoke("get_dcf_input_candidates", {"company": "003220"})
+        _, dcf_raw = invoke(
+            "build_dcf_model_pack",
+            {
+                "company": "003220",
+                "base_year": 2025,
+                "revenue_growth": 0.03,
+                "operating_margin": 0.1,
+                "tax_rate": 0.22,
+                "da_to_revenue": 0.03,
+                "capex_to_revenue": 0.04,
+                "nwc_to_revenue": 0.1,
+                "wacc": 0.09,
+                "terminal_growth": 0.02,
+            },
+        )
+        details["daewon_five_year_dcf"] = {
+            "actuals_assumptions_separate": (
+                ("source_actuals" in dcf_raw or "actuals" in dcf_raw)
+                and "assumptions" in dcf_raw
+                and (
+                    dcf_raw.get("source_actuals", dcf_raw.get("actuals"))
+                    is not dcf_raw["assumptions"]
+                )
+            )
+        }
+
+        _, opinion_raw = invoke(
+            "get_audit_history", {"company": "900001"}
+        )
+        details["modified_opinion"] = {
+            "modified_opinion_preserved": "한정" in json.dumps(
+                opinion_raw, ensure_ascii=False
+            )
+        }
+
+        _, kam_raw = invoke(
+            "get_audit_report_sections",
+            {"company": "900002", "year": 2025, "section_key": "kam"},
+        )
+        details["multiple_kam"] = {
+            "kam_count": _list_size(kam_raw, "sections", "items", "rows")
+        }
+
+        incomplete, _ = invoke(
+            "get_investor_signals", {"company": "900003"}
+        )
+        details["incomplete_company"] = {
+            "quality": incomplete.data_quality.status
+        }
+    semantic_passed = (
+        details["samsung_five_year_investor"]["covered_years"] >= 5
+        and details["sk_hynix_group_qsc"]["entity_count"] >= 2
+        and details["daewon_five_year_dcf"]["actuals_assumptions_separate"]
+        and details["modified_opinion"]["modified_opinion_preserved"]
+        and details["multiple_kam"]["kam_count"] >= 2
+        and details["incomplete_company"]["quality"] in {"limited", "missing"}
+    )
+    return {"passed": passed and semantic_passed, "cases": details}
 
 
 def release_gate_is_ready(report: dict[str, Any]) -> bool:
@@ -480,20 +911,17 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
                 "SELECT name FROM sqlite_schema WHERE type='table'"
             )
         }
-        index_names = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_schema WHERE type='index'"
-            )
-        }
         dataset_version, dataset_state = _dataset_manifest_state(
             connection,
             table_names,
         )
         schema_version = _schema_version(connection, table_names)
         inline_raw_count = _inline_raw_count(connection, table_names)
-        grades = _feature_grades(connection, table_names)
         duplicate_blockers = _duplicate_key_blockers(
+            connection,
+            table_names,
+        )
+        index_blockers = _index_contract_blockers(
             connection,
             table_names,
         )
@@ -512,21 +940,25 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
         for name in REQUIRED_TABLES
         if name not in table_names
     )
-    blockers.extend(
-        f"missing_required_index:{name}"
-        for name in REQUIRED_INDEXES
-        if name not in index_names
-    )
+    blockers.extend(index_blockers)
     blockers.extend(duplicate_blockers)
     if inline_raw_count > 0:
         blockers.append("inline_raw_bodies_present")
 
-    all_tools = run_all_tool_contract()
+    coverage_year = gate_report.get("coverage_year")
+    with _open_immutable_sqlite(database) as connection:
+        grades = _feature_grades(
+            connection,
+            table_names,
+            coverage_year=coverage_year,
+        )
+
+    all_tools = run_all_tool_contract(database)
     if not all_tools["passed"]:
         blockers.append("all_tool_contract_failed")
-    golden_digest, golden_available = _golden_contract_digest()
-    if not golden_available:
-        blockers.append("golden_contract_missing")
+    golden = golden_contract_result()
+    if not golden["passed"]:
+        blockers.append("golden_contract_invalid")
     blockers = sorted(set(blockers))
     ready = release_gate_is_ready(
         {
@@ -563,14 +995,15 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
             "degraded_features": sorted(
                 set(gate_report.get("degraded_features") or [])
             ),
-            "coverage_year": gate_report.get("coverage_year"),
+            "coverage_year": coverage_year,
             "feature_coverage": gate_report.get("coverage") or {},
             "feature_grades": grades,
         },
         "inline_raw_count": inline_raw_count,
         "contracts": {
             "all_tools": all_tools,
-            "golden_contract_sha256": golden_digest,
+            "golden_contract_sha256": golden["sha256"],
+            "golden_contract_passed": golden["passed"],
         },
     }
 
@@ -585,6 +1018,30 @@ def default_runtime_db_path() -> Path:
             "release artifacts require an explicit local SQLite --db path"
         )
     return Path(settings.db_url.removeprefix(prefix)).expanduser()
+
+
+def evaluate_artifact_readiness(
+    db_path: str | os.PathLike[str],
+    profile: str = "public_runtime",
+) -> dict[str, Any]:
+    """Return HTTP-ready semantics from the same artifact-bound evaluator."""
+    evidence = _collect_current_evidence(
+        _safe_existing_db_path(db_path),
+        profile,
+    )
+    gate = evidence["release_gate"]
+    return {
+        "ok": gate["passed"],
+        "profile": gate["profile"],
+        "schema_version": evidence["schema"]["version"],
+        "dataset_version": evidence["dataset"]["version"],
+        "required_failures": gate["blockers"],
+        "degraded_features": gate["degraded_features"],
+        "tool_count": evidence["tool_contract"]["tool_count"],
+        "coverage_year": gate["coverage_year"],
+        "coverage": gate["feature_coverage"],
+        "feature_grades": gate["feature_grades"],
+    }
 
 
 def _proof_fingerprint(db_path: Path) -> tuple[Any, ...]:
@@ -739,6 +1196,8 @@ def verify_release_artifact(
     failures: list[str] = []
     current_size = database.stat().st_size
     current_digest = _sha256_file(database)
+    if stored.database.file_name != database.name:
+        failures.append("database_filename_mismatch")
     if stored.database.byte_count != current_size:
         failures.append("database_size_mismatch")
     if stored.database.sha256 != current_digest:

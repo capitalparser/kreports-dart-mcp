@@ -1,5 +1,4 @@
 import json
-import logging
 import re
 from datetime import date, datetime, timezone
 from sqlalchemy import create_engine, func, inspect, select, text
@@ -8,7 +7,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql.dml import Delete, Insert, Update
 from sqlalchemy.sql.elements import TextClause
 from contextlib import contextmanager
-from kreports.config import settings, BASE_DIR
+from kreports.config import settings
 from kreports.db.models import (
     Base,
     Company,
@@ -24,15 +23,6 @@ from kreports.db.quality_snapshot import (
     QUALITY_VERSION,
     quality_content_digest,
 )
-
-_logger = logging.getLogger(__name__)
-
-# 레거시 DB 파일명 자동 마이그레이션 (dart_platform.db → kreports.db)
-_old_db = BASE_DIR / "dart_platform.db"
-_new_db = BASE_DIR / "kreports.db"
-if _old_db.exists() and not _new_db.exists():
-    _old_db.rename(_new_db)
-    _logger.info("DB 파일 마이그레이션: dart_platform.db → kreports.db")
 
 _sqlite_connect_args = {
     "check_same_thread": False,
