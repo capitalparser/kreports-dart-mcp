@@ -31,6 +31,10 @@ def handle_get_financial_snapshot(args: GetFinancialSnapshotInput) -> dict:
         annual_only=True,
     )
     rows = result.get("rows") or []
+    data_quality = result.get("data_quality") or {}
+    source_table = data_quality.get("source")
+    if source_table not in {"financials", "financial_facts_compact"}:
+        source_table = "financials"
     latest_year = max(
         (
             int(row["연도"])
@@ -50,7 +54,7 @@ def handle_get_financial_snapshot(args: GetFinancialSnapshotInput) -> dict:
                 None,
                 latest_year,
                 section_title="재무제표",
-                source_table="financials",
+                source_table=source_table,
             ),
             "excerpt": (
                 f"years={len(rows)}, fs_div={result.get('fs_div')}"

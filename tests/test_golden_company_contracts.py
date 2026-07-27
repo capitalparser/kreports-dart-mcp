@@ -100,6 +100,7 @@ def _seed_dispatch_fixture(db_path: Path) -> None:
             Company(corp_code="90000002", stock_code="900002", corp_name="복수KAM픽스처", market="KOSPI", induty_code="264"),
             Company(corp_code="90000003", stock_code="900003", corp_name="불완전기업픽스처", market="KOSPI", induty_code="264"),
             Company(corp_code="90000004", stock_code="900004", corp_name="OFS폴백픽스처", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000005", stock_code="900005", corp_name="Compact픽스처", market="KOSPI", induty_code="264"),
             Company(corp_code="80000001", stock_code="800001", corp_name="삼성피어A", market="KOSPI", induty_code="264"),
             Company(corp_code="80000002", stock_code="800002", corp_name="삼성피어B", market="KOSPI", induty_code="264"),
         ]
@@ -162,6 +163,18 @@ def _seed_dispatch_fixture(db_path: Path) -> None:
                     source_account_nm=metric_key,
                 )
             )
+        session.add(
+            FinancialFactCompact(
+                corp_code="90000005",
+                bsns_year=2025,
+                fs_div="CFS",
+                metric_key="revenue",
+                metric_name="revenue",
+                amount=10_000_000_000,
+                source_account_id="fixture_revenue",
+                source_account_nm="revenue",
+            )
+        )
         session.add(
             Auditor(
                 corp_code="90000001",
@@ -349,6 +362,27 @@ def test_missing_dcf_never_claims_source_actuals_were_found(tmp_path):
     assert envelope.data_quality.status == "missing"
     assert envelope.confirmed_facts == []
     assert "source actuals를" not in envelope.answer
+
+
+def test_compact_snapshot_provenance_names_actual_source_table(tmp_path):
+    from kreports.release_artifact import (
+        _bound_explicit_runtime,
+        _safe_existing_db_path,
+    )
+    from kreports.mcp.dispatch import legacy_result
+
+    db_path = tmp_path / "golden.db"
+    _seed_dispatch_fixture(db_path)
+    with _bound_explicit_runtime(_safe_existing_db_path(db_path)):
+        result = legacy_result(
+            "get_financial_snapshot",
+            {"company": "900005", "years": 1},
+        )
+
+    assert result["data_quality"]["source"] == "financial_facts_compact"
+    assert result["confirmed_facts"][0]["source"]["source_table"] == (
+        "financial_facts_compact"
+    )
 
 
 def test_live_regression_is_opt_in_by_default():
