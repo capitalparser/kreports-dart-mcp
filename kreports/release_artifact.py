@@ -1086,6 +1086,11 @@ def execute_golden_contracts(
                 {"company": fallback_company, "years": 1},
             )
         fallback_rows = fallback_raw.get("rows") or []
+        samsung_provenance = {
+            "financial_snapshot": _has_public_provenance(samsung),
+            "peer_group": _has_public_provenance(samsung_peer),
+            "investor_signals": _has_public_provenance(samsung_investor),
+        }
         details["samsung_five_year_investor"] = {
             "covered_years": max(
                 len(samsung.data_quality.covered_years),
@@ -1108,13 +1113,9 @@ def execute_golden_contracts(
                 and bool(fallback_rows)
                 and all(row.get("구분") == "OFS" for row in fallback_rows)
             ),
-            "provenance_or_limitation": any(
-                _has_public_provenance(envelope)
-                for envelope in (
-                    samsung,
-                    samsung_peer,
-                    samsung_investor,
-                )
+            "provenance_by_pack": samsung_provenance,
+            "provenance_or_limitation": all(
+                samsung_provenance.values()
             ),
         }
 

@@ -7,6 +7,7 @@ from kreports.analysis.peer_benchmarks import (
     get_industry_audit_landscape,
     select_peer_group,
 )
+from kreports.analysis.financial_analysis import _annual_report_source
 from kreports.analysis.search_adapter import search_dataset
 from kreports.collector.on_demand import fetch_disclosure_on_demand
 from kreports.mcp.dispatch import resolve_company
@@ -47,7 +48,7 @@ def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
 
 
 def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
-    return select_peer_group(
+    result = select_peer_group(
         company=resolve_company(args.company),
         criteria=args.criteria,
         peer_limit=args.peer_limit,
@@ -56,6 +57,30 @@ def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
         size_bucket_decade=args.size_bucket_decade,
         exclude_other_sectors=args.exclude_other_sectors,
     )
+    subject = result.get("subject") or {}
+    policy = result.get("selection_policy") or {}
+    corp_code = subject.get("corp_code")
+    if corp_code:
+        resolved_year = policy.get("resolved_year")
+        result["confirmed_facts"] = [{
+            "statement": (
+                f"선정 정책에 따라 비교기업 "
+                f"{result.get('returned_peer_count', len(result.get('peers') or []))}"
+                "개를 구성했습니다."
+            ),
+            "source": _annual_report_source(
+                str(corp_code),
+                subject,
+                int(resolved_year) if resolved_year else None,
+                section_title="재무제표",
+                source_table="peer_cohort",
+            ),
+            "excerpt": (
+                f"resolved_year={resolved_year}, "
+                f"fs_div={policy.get('fs_div_used')}"
+            ),
+        }]
+    return result
 
 
 def handle_search_dataset(args: SearchDatasetInput) -> dict:

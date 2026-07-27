@@ -5,7 +5,10 @@ from kreports.analysis.company_profile import (
     get_business_overview,
     search_company,
 )
-from kreports.analysis.financial_analysis import get_financial_snapshot
+from kreports.analysis.financial_analysis import (
+    _annual_report_source,
+    get_financial_snapshot,
+)
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     GetBusinessOverviewInput,
@@ -20,12 +23,40 @@ def handle_search_company(args: SearchCompanyInput) -> dict:
 
 
 def handle_get_financial_snapshot(args: GetFinancialSnapshotInput) -> dict:
-    return get_financial_snapshot(
-        resolve_company(args.company),
+    corp_code = resolve_company(args.company)
+    result = get_financial_snapshot(
+        corp_code,
         fs_div=args.fs_div,
         years=args.years,
         annual_only=True,
     )
+    rows = result.get("rows") or []
+    latest_year = max(
+        (
+            int(row["연도"])
+            for row in rows
+            if row.get("연도") is not None
+        ),
+        default=None,
+    )
+    if rows:
+        result["confirmed_facts"] = [{
+            "statement": (
+                f"{latest_year}년까지 {result.get('fs_div')} 기준 "
+                f"재무 스냅샷 {len(rows)}개 연도를 조회했습니다."
+            ),
+            "source": _annual_report_source(
+                corp_code,
+                None,
+                latest_year,
+                section_title="재무제표",
+                source_table="financials",
+            ),
+            "excerpt": (
+                f"years={len(rows)}, fs_div={result.get('fs_div')}"
+            ),
+        }]
+    return result
 
 
 def handle_get_business_overview(args: GetBusinessOverviewInput) -> dict:

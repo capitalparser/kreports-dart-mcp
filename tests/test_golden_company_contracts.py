@@ -232,6 +232,11 @@ def test_each_golden_case_executes_fixture_backed_tools_and_asserts_semantics(
     assert result["cases"]["samsung_five_year_investor"][
         "provenance_or_limitation"
     ]
+    assert all(
+        result["cases"]["samsung_five_year_investor"][
+            "provenance_by_pack"
+        ].values()
+    )
     assert result["cases"]["sk_hynix_group_qsc"]["entity_count"] >= 2
     assert result["cases"]["sk_hynix_group_qsc"]["relationship_count"] >= 2
     assert result["cases"]["sk_hynix_group_qsc"][
@@ -313,6 +318,37 @@ def test_golden_provenance_rejects_arbitrary_warning_or_limitation():
 
     assert _has_public_provenance(arbitrary) is False
     assert _has_public_provenance(explicit_gap) is True
+
+
+def test_missing_dcf_never_claims_source_actuals_were_found(tmp_path):
+    from kreports.release_artifact import (
+        _bound_explicit_runtime,
+        _safe_existing_db_path,
+    )
+    from kreports.mcp.dispatch import dispatch_tool
+
+    db_path = tmp_path / "golden.db"
+    _seed_dispatch_fixture(db_path)
+    with _bound_explicit_runtime(_safe_existing_db_path(db_path)):
+        envelope = dispatch_tool(
+            "build_dcf_model_pack",
+            {
+                "company": "900003",
+                "base_year": 2025,
+                "revenue_growth": 0.03,
+                "operating_margin": 0.1,
+                "tax_rate": 0.22,
+                "da_to_revenue": 0.03,
+                "capex_to_revenue": 0.04,
+                "nwc_to_revenue": 0.1,
+                "wacc": 0.09,
+                "terminal_growth": 0.02,
+            },
+        )
+
+    assert envelope.data_quality.status == "missing"
+    assert envelope.confirmed_facts == []
+    assert "source actuals를" not in envelope.answer
 
 
 def test_live_regression_is_opt_in_by_default():
