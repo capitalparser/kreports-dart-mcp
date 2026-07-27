@@ -23,6 +23,7 @@
         "교체여부": "최초",
         "구분": "CFS",
         "연속연수": 1,
+        "접수번호": "20250401000001",
         "회계연도": 2024
       }
     ]
@@ -318,6 +319,7 @@
             "revenue"
           ]
         },
+        "ordinal": 0,
         "rcept_no": "20250401000001",
         "related_audit_procedure_count": 1,
         "related_audit_procedure_source": "audit_procedure_items",
@@ -342,6 +344,7 @@
         "body_length": 32,
         "bsns_year": 2024,
         "dcm_no": null,
+        "ordinal": 0,
         "rcept_no": "20250401000001",
         "section_key": "other_matter",
         "section_title": "기타사항",

@@ -914,7 +914,15 @@ def get_audit_history(company: str) -> dict:
         {
           "corp_code",
           "history": [
-            {"회계연도", "구분", "감사인", "감사의견", "교체여부", "연속연수"},
+            {
+                "회계연도",
+                "구분",
+                "감사인",
+                "감사의견",
+                "접수번호",
+                "교체여부",
+                "연속연수",
+            },
             ...
           ],
           "count": int,
@@ -977,8 +985,8 @@ def get_audit_report_sections(
     dcm_select = "dcm_no" if _has_db_column("report_sections", "dcm_no") else "NULL AS dcm_no"
     stmt = text(
         f"""
-        SELECT rcept_no, {dcm_select}, bsns_year, source_type, section_key, section_title,
-               body_text, body_length, fetched_at
+        SELECT rcept_no, {dcm_select}, bsns_year, source_type, section_key,
+               section_title, body_text, body_length, ordinal, fetched_at
         FROM report_sections
         WHERE corp_code=:corp_code
           AND bsns_year=:year

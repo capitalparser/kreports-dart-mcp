@@ -65,6 +65,7 @@ def _fixture_arguments(tool_name, model) -> dict:
         values["company"] = "005930"
     if tool_name == "fetch_disclosure_on_demand":
         values["rcept_no"] = "20250101000001"
+        values["cache_policy"] = "refresh"
     if tool_name == "build_dcf_model_pack":
         values.update(
             revenue_growth=0.03,
@@ -235,3 +236,55 @@ def test_all_tool_contract_fails_when_any_valid_fixture_invocation_errors(
 
     assert invoked is True
     assert passed is False
+
+
+def test_release_no_key_contract_bypasses_cache_and_fails_closed(
+    tmp_path,
+):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Base, SourceDocument
+    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.dispatch import dispatch_tool
+    from kreports.release_artifact import (
+        _bound_explicit_runtime,
+        _valid_tool_arguments,
+    )
+
+    db_path = tmp_path / "runtime.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            SourceDocument(
+                rcept_no="20250101000001",
+                corp_code="00126380",
+                bsns_year=2025,
+                source_type="event_disclosure",
+                report_nm="cached event",
+                content_type="xml",
+                raw_content="<cached/>",
+                doc_hash="a" * 40,
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    spec = TOOL_CATALOG["fetch_disclosure_on_demand"]
+    arguments = _valid_tool_arguments(
+        "fetch_disclosure_on_demand",
+        spec.input_model,
+    )
+    with _bound_explicit_runtime(db_path):
+        envelope = dispatch_tool(
+            "fetch_disclosure_on_demand",
+            arguments,
+        )
+
+    assert arguments["cache_policy"] == "refresh"
+    assert envelope.data_quality.status == "error"
+    assert (
+        "user_dart_api_key is required"
+        in envelope.data_quality.limitations
+    )

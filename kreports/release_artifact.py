@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 from importlib import resources
+import re
 import sqlite3
 import subprocess
 import sys
@@ -311,6 +312,7 @@ def _valid_tool_arguments(name: str, model: type[BaseModel]) -> dict[str, Any]:
         values["company"] = "005930"
     if name == "fetch_disclosure_on_demand":
         values["rcept_no"] = "20250101000001"
+        values["cache_policy"] = "refresh"
     if name == "build_dcf_model_pack":
         values.update(
             revenue_growth=0.03,
@@ -574,11 +576,59 @@ def _dataset_manifest_state(
     raw_quality = state.get("quality_snapshot_json")
     if isinstance(raw_quality, str):
         try:
-            state["quality_snapshot"] = json.loads(raw_quality)
+            parsed_quality = json.loads(raw_quality)
         except json.JSONDecodeError:
             state["quality_snapshot"] = {"status": "malformed"}
+        else:
+            state["quality_snapshot"] = _safe_quality_snapshot(
+                parsed_quality
+            )
         del state["quality_snapshot_json"]
     return str(state.get("dataset_version") or "unknown"), state
+
+
+def _safe_quality_snapshot(value: Any) -> dict[str, Any]:
+    """Expose only the fixed, non-secret dataset quality contract."""
+    if not isinstance(value, dict):
+        return {"status": "malformed"}
+    result: dict[str, Any] = {}
+    digest = value.get("content_digest")
+    if (
+        isinstance(digest, str)
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+    ):
+        result["content_digest"] = digest
+    coverage_year = value.get("coverage_year")
+    if coverage_year is None or (
+        isinstance(coverage_year, int)
+        and not isinstance(coverage_year, bool)
+        and 1900 <= coverage_year <= 2100
+    ):
+        result["coverage_year"] = coverage_year
+    for key in ("coverage_year_row_count", "row_count"):
+        count = value.get(key)
+        if (
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and 0 <= count <= _MAX_COUNT
+        ):
+            result[key] = count
+    quality_version = value.get("quality_version")
+    if (
+        isinstance(quality_version, str)
+        and re.fullmatch(r"v[0-9]{1,4}", quality_version)
+    ):
+        result["quality_version"] = quality_version
+    if set(result) != {
+        "content_digest",
+        "coverage_year",
+        "coverage_year_row_count",
+        "quality_version",
+        "row_count",
+    }:
+        return {"status": "malformed"}
+    return result
 
 
 def _schema_version(
@@ -603,9 +653,20 @@ def _inline_raw_count(
     if "raw_content" not in _table_columns(connection, "source_documents"):
         return 0
     columns = _table_columns(connection, "source_documents")
+    identity_columns = (
+        "rcept_no",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+    )
     optional = [
         name
-        for name in ("content_type", "report_nm", "doc_hash")
+        for name in (
+            "content_type",
+            "report_nm",
+            "doc_hash",
+            *identity_columns,
+        )
         if name in columns
     ]
     rows = connection.execute(
@@ -618,16 +679,96 @@ def _inline_raw_count(
     for raw_row in rows:
         row = dict(raw_row)
         body = str(row["raw_content"])
+        expected_body = _expected_derived_body(
+            connection,
+            table_names,
+            row,
+        )
         trusted_derived = (
             row.get("content_type") == "derived_report_sections"
             and row.get("report_nm") == "derived from report_sections"
-            and body.startswith("DERIVED FROM report_sections\n")
+            and expected_body is not None
+            and body == expected_body
             and row.get("doc_hash")
             == hashlib.sha1(body.encode()).hexdigest()
         )
         if not trusted_derived:
             count += 1
     return count
+
+
+def _expected_derived_body(
+    connection: sqlite3.Connection,
+    table_names: set[str],
+    source_row: dict[str, Any],
+) -> str | None:
+    required = {
+        "rcept_no",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+    }
+    if (
+        "report_sections" not in table_names
+        or not required.issubset(source_row)
+        or not {
+            "rcept_no",
+            "corp_code",
+            "bsns_year",
+            "source_type",
+            "section_key",
+            "section_title",
+            "body_text",
+            "ordinal",
+        }.issubset(_table_columns(connection, "report_sections"))
+    ):
+        return None
+    sections = connection.execute(
+        "SELECT rcept_no, source_type, section_key, section_title, "
+        "body_text, ordinal FROM report_sections "
+        "WHERE rcept_no=? AND corp_code=? AND bsns_year=? AND source_type=? "
+        "ORDER BY ordinal, section_key",
+        (
+            source_row["rcept_no"],
+            source_row["corp_code"],
+            source_row["bsns_year"],
+            source_row["source_type"],
+        ),
+    ).fetchall()
+    if not sections:
+        return None
+    parts = [
+        "DERIVED FROM report_sections",
+        (
+            "This is not the original DART filing body. It is a legacy "
+            "evidence bundle reconstructed from cached extracted sections."
+        ),
+        "",
+    ]
+    included = 0
+    for section in sections:
+        body = str(section["body_text"] or "").strip()
+        if not body:
+            continue
+        title = (
+            section["section_title"]
+            or section["section_key"]
+            or "section"
+        )
+        parts.extend(
+            [
+                f"## {section['section_key']} | {title}",
+                (
+                    f"rcept_no={section['rcept_no']} "
+                    f"source_type={section['source_type']} "
+                    f"ordinal={section['ordinal']}"
+                ),
+                body,
+                "",
+            ]
+        )
+        included += 1
+    return "\n".join(parts).strip() if included else None
 
 
 def _feature_grades(
@@ -783,6 +924,14 @@ def _list_size(result: dict[str, Any], *keys: str) -> int:
     return 0
 
 
+def _has_public_provenance(envelope: Any) -> bool:
+    return bool(
+        envelope.evidence
+        or envelope.data_quality.limitations
+        or envelope.warnings
+    )
+
+
 def execute_golden_contracts(
     db_path: str | os.PathLike[str],
 ) -> dict[str, Any]:
@@ -804,8 +953,13 @@ def execute_golden_contracts(
         samsung, samsung_raw = invoke(
             "get_financial_snapshot", {"company": "005930", "years": 5}
         )
-        invoke("select_peer_group", {"company": "005930"})
-        invoke("get_investor_signals", {"company": "005930"})
+        samsung_peer, _ = invoke(
+            "select_peer_group", {"company": "005930"}
+        )
+        samsung_investor, _ = invoke(
+            "get_investor_signals", {"company": "005930"}
+        )
+        samsung_rows = samsung_raw.get("rows") or []
         details["samsung_five_year_investor"] = {
             "covered_years": max(
                 len(samsung.data_quality.covered_years),
@@ -817,21 +971,55 @@ def execute_golden_contracts(
                     "rows",
                     "row_count",
                 ),
-            )
+            ),
+            "cfs_preferred": (
+                samsung_raw.get("fs_div") == "CFS"
+                and bool(samsung_rows)
+                and all(row.get("구분") == "CFS" for row in samsung_rows)
+            ),
+            "provenance_or_limitation": all(
+                _has_public_provenance(envelope)
+                for envelope in (
+                    samsung,
+                    samsung_peer,
+                    samsung_investor,
+                )
+            ),
         }
 
         invoke("get_investor_signals", {"company": "000660"})
-        _, group_raw = invoke(
+        group_envelope, group_raw = invoke(
             "get_subsidiary_auditors", {"company": "000660"}
         )
+        group_entities = group_raw.get("subsidiaries") or []
+        qsc_criterion = group_raw.get("qsc_criterion") or {}
+        consolidated = group_raw.get("consolidated_totals") or {}
         details["sk_hynix_group_qsc"] = {
             "entity_count": _list_size(
                 group_raw, "entities", "subsidiaries", "rows", "total"
-            )
+            ),
+            "relationship_count": max(len(group_entities), 0),
+            "qsc_denominator_identity": (
+                qsc_criterion.get("threshold_pct") == 10.0
+                and "asset_share_pct" in str(qsc_criterion.get("basis"))
+                and "revenue_share_pct" in str(qsc_criterion.get("basis"))
+                and consolidated.get("assets_amount") is not None
+                and consolidated.get("revenue_amount") is not None
+                and all(
+                    entity.get("qsc_status")
+                    in {"qsc", "not_qsc", "undetermined"}
+                    for entity in group_entities
+                )
+            ),
+            "provenance_or_limitation": _has_public_provenance(
+                group_envelope
+            ),
         }
 
-        invoke("get_dcf_input_candidates", {"company": "003220"})
-        _, dcf_raw = invoke(
+        dcf_candidates, _ = invoke(
+            "get_dcf_input_candidates", {"company": "003220"}
+        )
+        dcf_envelope, dcf_raw = invoke(
             "build_dcf_model_pack",
             {
                 "company": "003220",
@@ -854,39 +1042,119 @@ def execute_golden_contracts(
                     dcf_raw.get("source_actuals", dcf_raw.get("actuals"))
                     is not dcf_raw["assumptions"]
                 )
-            )
+            ),
+            "five_year_mechanics": (
+                len(dcf_raw.get("projections") or []) == 5
+                and all(
+                    projection.get("formula")
+                    for projection in dcf_raw.get("projections") or []
+                )
+            ),
+            "actuals_source_bound": (
+                bool(dcf_raw.get("actuals"))
+                and all(
+                    actual.get("fs_div") == "CFS"
+                    and actual.get("source_account_id")
+                    and actual.get("source_table")
+                    for actual in dcf_raw.get("actuals") or []
+                )
+            ),
+            "judgment_limitations": bool(
+                dcf_envelope.data_quality.limitations
+            ),
+            "provenance_or_limitation": all(
+                _has_public_provenance(envelope)
+                for envelope in (dcf_candidates, dcf_envelope)
+            ),
         }
 
-        _, opinion_raw = invoke(
+        opinion_envelope, opinion_raw = invoke(
             "get_audit_history", {"company": "900001"}
         )
+        opinion_history = opinion_raw.get("history") or []
         details["modified_opinion"] = {
             "modified_opinion_preserved": "한정" in json.dumps(
                 opinion_raw, ensure_ascii=False
-            )
+            ),
+            "receipt_preserved": (
+                bool(opinion_history)
+                and opinion_history[0].get("접수번호")
+                == "20260331000001"
+            ),
+            "provenance_or_limitation": _has_public_provenance(
+                opinion_envelope
+            ),
         }
 
-        _, kam_raw = invoke(
+        kam_envelope, kam_raw = invoke(
             "get_audit_report_sections",
             {"company": "900002", "year": 2025, "section_key": "kam"},
         )
+        kam_sections = kam_raw.get("sections") or []
         details["multiple_kam"] = {
-            "kam_count": _list_size(kam_raw, "sections", "items", "rows")
+            "kam_count": _list_size(kam_raw, "sections", "items", "rows"),
+            "receipt_ordinal_identity": (
+                {section.get("rcept_no") for section in kam_sections}
+                == {"20260331000002"}
+                and sorted(
+                    section.get("ordinal") for section in kam_sections
+                )
+                == [0, 1]
+            ),
+            "reason_and_procedure_shapes": all(
+                (section.get("kam_analysis") or {}).get(
+                    "has_reason_hint"
+                )
+                and (section.get("kam_analysis") or {}).get(
+                    "has_procedure_hint"
+                )
+                for section in kam_sections
+            ),
+            "provenance_or_limitation": _has_public_provenance(
+                kam_envelope
+            ),
         }
 
         incomplete, _ = invoke(
             "get_investor_signals", {"company": "900003"}
         )
         details["incomplete_company"] = {
-            "quality": incomplete.data_quality.status
+            "quality": incomplete.data_quality.status,
+            "missing_fields_shape": isinstance(
+                incomplete.data_quality.missing_fields,
+                list,
+            ),
+            "explicit_limitations": bool(
+                incomplete.data_quality.limitations
+            ),
         }
     semantic_passed = (
         details["samsung_five_year_investor"]["covered_years"] >= 5
+        and details["samsung_five_year_investor"]["cfs_preferred"]
+        and details["samsung_five_year_investor"][
+            "provenance_or_limitation"
+        ]
         and details["sk_hynix_group_qsc"]["entity_count"] >= 2
+        and details["sk_hynix_group_qsc"]["relationship_count"] >= 2
+        and details["sk_hynix_group_qsc"]["qsc_denominator_identity"]
+        and details["sk_hynix_group_qsc"]["provenance_or_limitation"]
         and details["daewon_five_year_dcf"]["actuals_assumptions_separate"]
+        and details["daewon_five_year_dcf"]["five_year_mechanics"]
+        and details["daewon_five_year_dcf"]["actuals_source_bound"]
+        and details["daewon_five_year_dcf"]["judgment_limitations"]
+        and details["daewon_five_year_dcf"][
+            "provenance_or_limitation"
+        ]
         and details["modified_opinion"]["modified_opinion_preserved"]
+        and details["modified_opinion"]["receipt_preserved"]
+        and details["modified_opinion"]["provenance_or_limitation"]
         and details["multiple_kam"]["kam_count"] >= 2
+        and details["multiple_kam"]["receipt_ordinal_identity"]
+        and details["multiple_kam"]["reason_and_procedure_shapes"]
+        and details["multiple_kam"]["provenance_or_limitation"]
         and details["incomplete_company"]["quality"] in {"limited", "missing"}
+        and details["incomplete_company"]["missing_fields_shape"]
+        and details["incomplete_company"]["explicit_limitations"]
     )
     return {"passed": passed and semantic_passed, "cases": details}
 
@@ -1024,23 +1292,91 @@ def evaluate_artifact_readiness(
     db_path: str | os.PathLike[str],
     profile: str = "public_runtime",
 ) -> dict[str, Any]:
-    """Return HTTP-ready semantics from the same artifact-bound evaluator."""
-    evidence = _collect_current_evidence(
-        _safe_existing_db_path(db_path),
-        profile,
+    """Read deployment proof cheaply while checking runtime drift fail-closed."""
+    database = _safe_existing_db_path(db_path)
+    runtime_failures: list[str] = []
+    try:
+        _require_quiescent_db(database)
+    except ReleaseArtifactError as exc:
+        runtime_failures.append(str(exc))
+    source = _safe_manifest_path(database, None)
+    try:
+        stored = _read_release_manifest(source)
+    except _DuplicateManifestKey as exc:
+        return _unavailable_artifact_readiness(
+            profile,
+            f"duplicate_manifest_key:{exc.key}",
+        )
+    except ReleaseArtifactError as exc:
+        return _unavailable_artifact_readiness(profile, str(exc))
+    except FileNotFoundError:
+        return _unavailable_artifact_readiness(
+            profile,
+            "release_artifact_missing",
+        )
+    except (OSError, ValueError):
+        return _unavailable_artifact_readiness(
+            profile,
+            "invalid_release_manifest",
+        )
+
+    if stored.release_gate.profile != profile:
+        runtime_failures.append("release_artifact_profile_mismatch")
+    if stored.database.file_name != database.name:
+        runtime_failures.append("database_filename_mismatch")
+    if stored.database.byte_count != database.stat().st_size:
+        runtime_failures.append("database_size_mismatch")
+    if (
+        stored.tool_contract.tool_count != FROZEN_TOOL_COUNT
+        or stored.tool_contract.wire_sha256 != _tool_wire_sha256()
+    ):
+        runtime_failures.append("tool_contract_drift")
+    golden = golden_contract_result()
+    if (
+        not golden["passed"]
+        or stored.contracts.golden_contract_sha256 != golden["sha256"]
+        or not stored.contracts.golden_contract_passed
+    ):
+        runtime_failures.append("golden_contract_drift")
+    if (
+        not stored.contracts.all_tools.passed
+        or stored.contracts.all_tools.checks != FROZEN_TOOL_COUNT
+    ):
+        runtime_failures.append("all_tool_contract_failed")
+
+    gate = stored.release_gate
+    required_failures = sorted(
+        set(gate.blockers) | set(runtime_failures)
     )
-    gate = evidence["release_gate"]
     return {
-        "ok": gate["passed"],
-        "profile": gate["profile"],
-        "schema_version": evidence["schema"]["version"],
-        "dataset_version": evidence["dataset"]["version"],
-        "required_failures": gate["blockers"],
-        "degraded_features": gate["degraded_features"],
-        "tool_count": evidence["tool_contract"]["tool_count"],
-        "coverage_year": gate["coverage_year"],
-        "coverage": gate["feature_coverage"],
-        "feature_grades": gate["feature_grades"],
+        "ok": gate.passed and not required_failures,
+        "profile": gate.profile,
+        "schema_version": stored.schema_evidence.version,
+        "dataset_version": stored.dataset.version,
+        "required_failures": required_failures,
+        "degraded_features": gate.degraded_features,
+        "tool_count": stored.tool_contract.tool_count,
+        "coverage_year": gate.coverage_year,
+        "coverage": gate.feature_coverage,
+        "feature_grades": gate.feature_grades,
+    }
+
+
+def _unavailable_artifact_readiness(
+    profile: str,
+    failure: str,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "profile": profile,
+        "schema_version": "unknown",
+        "dataset_version": "unknown",
+        "required_failures": [failure],
+        "degraded_features": [],
+        "tool_count": FROZEN_TOOL_COUNT,
+        "coverage_year": None,
+        "coverage": {},
+        "feature_grades": {},
     }
 
 

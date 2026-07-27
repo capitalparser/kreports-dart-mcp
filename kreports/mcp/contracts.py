@@ -190,6 +190,12 @@ def _evidence(result: dict[str, Any]) -> list[EvidenceRefV1]:
     for field in ("rcept_no", "parent_rcept_no"):
         if result.get(field):
             candidates.append(({field: result[field]}, None))
+    for row in result.get("history") or []:
+        if not isinstance(row, dict):
+            continue
+        receipt = row.get("rcept_no") or row.get("접수번호")
+        if receipt:
+            candidates.append(({"rcept_no": receipt}, None))
     meta = result.get("_meta")
     if isinstance(meta, dict) and meta.get("source_rcept_no"):
         candidates.append(({"rcept_no": meta["source_rcept_no"]}, None))

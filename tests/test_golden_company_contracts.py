@@ -164,7 +164,10 @@ def _seed_dispatch_fixture(db_path: Path) -> None:
                     source_type="audit_report",
                     section_key="kam",
                     section_title=topic,
-                    body_text=f"{topic} 선정 이유 및 감사절차를 수행했습니다.",
+                    body_text=(
+                        f"{topic}은 유의적인 위험으로 핵심감사사항으로 "
+                        "결정하였고 감사절차를 수행했습니다."
+                    ),
                     body_hash=f"kam-{ordinal}",
                     body_length=30,
                     ordinal=ordinal,
@@ -204,14 +207,35 @@ def test_each_golden_case_executes_fixture_backed_tools_and_asserts_semantics(
     assert result["passed"] is True
     assert set(result["cases"]) == EXPECTED_IDS
     assert result["cases"]["samsung_five_year_investor"]["covered_years"] == 5
+    assert result["cases"]["samsung_five_year_investor"]["cfs_preferred"]
+    assert result["cases"]["samsung_five_year_investor"][
+        "provenance_or_limitation"
+    ]
     assert result["cases"]["sk_hynix_group_qsc"]["entity_count"] >= 2
+    assert result["cases"]["sk_hynix_group_qsc"]["relationship_count"] >= 2
+    assert result["cases"]["sk_hynix_group_qsc"][
+        "qsc_denominator_identity"
+    ]
     assert result["cases"]["daewon_five_year_dcf"]["actuals_assumptions_separate"]
+    assert result["cases"]["daewon_five_year_dcf"]["five_year_mechanics"]
+    assert result["cases"]["daewon_five_year_dcf"]["actuals_source_bound"]
+    assert result["cases"]["daewon_five_year_dcf"][
+        "judgment_limitations"
+    ]
     assert result["cases"]["modified_opinion"]["modified_opinion_preserved"]
+    assert result["cases"]["modified_opinion"]["receipt_preserved"]
+    assert result["cases"]["modified_opinion"][
+        "provenance_or_limitation"
+    ]
     assert result["cases"]["multiple_kam"]["kam_count"] >= 2
+    assert result["cases"]["multiple_kam"]["receipt_ordinal_identity"]
+    assert result["cases"]["multiple_kam"]["reason_and_procedure_shapes"]
     assert result["cases"]["incomplete_company"]["quality"] in {
         "limited",
         "missing",
     }
+    assert result["cases"]["incomplete_company"]["missing_fields_shape"]
+    assert result["cases"]["incomplete_company"]["explicit_limitations"]
 
 
 def test_live_regression_is_opt_in_by_default():

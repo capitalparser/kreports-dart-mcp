@@ -6,7 +6,9 @@ charts/diagrams can use it, and plain MCP clients can ignore it.
 """
 from __future__ import annotations
 
+from decimal import Decimal
 import html
+import math
 import re
 from typing import Any
 
@@ -31,10 +33,22 @@ _DCF_CANDIDATE_METRICS = {
 
 
 def _is_numeric_measure(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-    )
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float, Decimal)):
+        return not isinstance(value, float) or math.isfinite(value)
+    if not isinstance(value, str) or len(value) > 128:
+        return False
+    if not re.fullmatch(
+        r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?",
+        value,
+        re.ASCII,
+    ):
+        return False
+    try:
+        return Decimal(value).is_finite()
+    except Exception:
+        return False
 
 
 def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] | None:

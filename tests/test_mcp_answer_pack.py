@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 
 from kreports.mcp.tools import _attach_meta
@@ -285,6 +287,32 @@ def test_answer_pack_uses_meta_company_when_result_has_no_subject():
     assert pack["summary"]["title"] == "SK하이닉스 연결실체 구조"
     assert 'P["SK하이닉스<br/>2024년 연결실체"]' in pack["diagrams"][0]["definition"]
     assert "미판정" in pack["diagrams"][0]["definition"]
+
+
+@pytest.mark.parametrize(
+    "audit_fee",
+    ["123.5", pytest.param(Decimal("123.5"), id="decimal")],
+)
+def test_audit_fee_chart_accepts_contract_numeric_types(audit_fee):
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack(
+        "compare_peer_audit_fees",
+        {
+            "subject": {"corp_name": "A"},
+            "subject_metrics": {
+                "corp_name": "A",
+                "audit_fee_m": audit_fee,
+            },
+            "peers": [],
+            "data_quality": {"status": "usable"},
+        },
+    )
+
+    assert any(
+        chart["id"] == "audit_fee_peer_chart"
+        for chart in pack["charts"]
+    )
 
 
 def test_attach_meta_adds_disclosure_event_timeline_pack():

@@ -187,8 +187,11 @@ The build command is evidence-producing: it writes atomically and may record
 deployment-gating: it recomputes the DB size/hash, schema and required indexes,
 dataset manifest, inline raw count, current release gate, 32-tool wire contract,
 isolated real-dispatch catalog smoke, and the approved packaged golden contract
-hash. The user-keyed network fetch is checked in its no-key fail-closed state.
-Verify exits non-zero on drift or any current blocker.
+hash. The user-keyed network fetch is forced to `refresh` and checked in its
+no-key fail-closed state, so an existing cache row cannot satisfy that check.
+Verify exits non-zero on drift or any current blocker. Runtime `/readyz` reads
+this pre-verified artifact and performs cheap WAL/file/static-contract drift
+checks; it does not repeat the full DB hash and handler smoke for every probe.
 
 Do not substitute code-test success for live-data readiness. The immutable
 artifact manifest is the source for current market/year coverage and feature

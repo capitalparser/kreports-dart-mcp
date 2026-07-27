@@ -390,6 +390,7 @@ def get_auditors(corp_code: str) -> pd.DataFrame:
                 "회계연도": r.bsns_year, "구분": r.fs_div,
                 "감사인": r.auditor_nm,
                 "감사의견": r.audit_opinion or "-",
+                "접수번호": r.rcept_no,
                 "교체여부": (
                     "최초" if r.is_auditor_changed is None
                     else ("교체" if r.is_auditor_changed else "유지")

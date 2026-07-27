@@ -214,6 +214,9 @@ def test_verify_recomputes_db_digest_and_reports_named_drift(tmp_path, monkeypat
         "byte_count": db_path.stat().st_size,
         "sha256": hashlib.sha256(db_path.read_bytes()).hexdigest(),
     }
+    payload["contracts"]["golden_contract_sha256"] = (
+        release_artifact.APPROVED_GOLDEN_CONTRACT_SHA256
+    )
     monkeypatch.setattr(
         release_artifact,
         "_collect_current_evidence",
@@ -386,21 +389,72 @@ def test_inline_raw_count_excludes_derived_sections_and_blocks_original_bodies(
         connection.execute(
             "ALTER TABLE source_documents ADD COLUMN doc_hash TEXT"
         )
+        for definition in (
+            "rcept_no TEXT",
+            "corp_code TEXT",
+            "bsns_year INTEGER",
+            "source_type TEXT",
+        ):
+            connection.execute(
+                f"ALTER TABLE source_documents ADD COLUMN {definition}"
+            )
+        for definition in (
+            "rcept_no TEXT",
+            "corp_code TEXT",
+            "bsns_year INTEGER",
+            "source_type TEXT",
+            "section_key TEXT",
+            "section_title TEXT",
+            "body_text TEXT",
+            "ordinal INTEGER",
+        ):
+            connection.execute(
+                f"ALTER TABLE report_sections ADD COLUMN {definition}"
+            )
+        connection.execute(
+            "INSERT INTO report_sections "
+            "(id, rcept_no, corp_code, bsns_year, source_type, "
+            "section_key, section_title, body_text, ordinal) "
+            "VALUES (1, '20250101000001', '00126380', 2025, "
+            "'audit_report', 'kam', '핵심감사사항', "
+            "'수익인식 감사절차', 0)"
+        )
         derived_body = (
-            "DERIVED FROM report_sections\n# reconstructed evidence"
+            "DERIVED FROM report_sections\n"
+            "This is not the original DART filing body. It is a legacy "
+            "evidence bundle reconstructed from cached extracted sections.\n"
+            "\n"
+            "## kam | 핵심감사사항\n"
+            "rcept_no=20250101000001 source_type=audit_report ordinal=0\n"
+            "수익인식 감사절차"
         )
         connection.executemany(
             "INSERT INTO source_documents"
-            "(id, raw_content, content_type, report_nm, doc_hash) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "(id, raw_content, content_type, report_nm, doc_hash, "
+            "rcept_no, corp_code, bsns_year, source_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (1, "<original/>", "xml", None, None),
+                (
+                    1,
+                    "<original/>",
+                    "xml",
+                    None,
+                    None,
+                    "20250101000002",
+                    "00126380",
+                    2025,
+                    "audit_report",
+                ),
                 (
                     2,
                     derived_body,
                     "derived_report_sections",
                     "derived from report_sections",
                     hashlib.sha1(derived_body.encode()).hexdigest(),
+                    "20250101000001",
+                    "00126380",
+                    2025,
+                    "audit_report",
                 ),
             ],
         )
@@ -419,6 +473,52 @@ def test_inline_raw_count_excludes_derived_sections_and_blocks_original_bodies(
         in evidence["release_gate"]["blockers"]
     )
     assert evidence["release_gate"]["passed"] is False
+
+
+def test_inline_raw_count_rejects_self_attested_unlinked_derived_body(
+    tmp_path,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        for definition in (
+            "content_type TEXT",
+            "report_nm TEXT",
+            "doc_hash TEXT",
+            "rcept_no TEXT",
+            "corp_code TEXT",
+            "bsns_year INTEGER",
+            "source_type TEXT",
+        ):
+            connection.execute(
+                f"ALTER TABLE source_documents ADD COLUMN {definition}"
+            )
+        body = "DERIVED FROM report_sections\n<original-filing/>"
+        connection.execute(
+            "INSERT INTO source_documents "
+            "(id, raw_content, content_type, report_nm, doc_hash, "
+            "rcept_no, corp_code, bsns_year, source_type) "
+            "VALUES (1, ?, 'derived_report_sections', "
+            "'derived from report_sections', ?, '20250101009999', "
+            "'00126380', 2025, 'audit_report')",
+            (body, hashlib.sha1(body.encode()).hexdigest()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+
+    assert evidence["inline_raw_count"] == 1
+    assert "inline_raw_bodies_present" in evidence["release_gate"][
+        "blockers"
+    ]
 
 
 def test_manifest_rejects_nonfinite_unbounded_and_unsupported_versions():
@@ -576,6 +676,68 @@ def test_release_gate_readiness_predicate_requires_ok_and_no_failures():
         "tool_count": 32,
     }
     assert release_gate_is_ready(ambiguous) is False
+
+
+def test_runtime_readiness_uses_deployment_artifact_without_full_recompute(
+    tmp_path,
+    monkeypatch,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    payload = _minimal_manifest_payload()
+    payload["database"] = {
+        "file_name": db_path.name,
+        "byte_count": db_path.stat().st_size,
+        "sha256": hashlib.sha256(db_path.read_bytes()).hexdigest(),
+    }
+    payload["contracts"]["golden_contract_sha256"] = (
+        release_artifact.APPROVED_GOLDEN_CONTRACT_SHA256
+    )
+    db_path.with_suffix(".db.release.json").write_text(
+        release_artifact.ReleaseManifest.model_validate(
+            payload
+        ).model_dump_json(by_alias=True)
+    )
+    monkeypatch.setattr(
+        release_artifact,
+        "_collect_current_evidence",
+        lambda *_args, **_kwargs: pytest.fail(
+            "runtime readiness must not recompute full artifact evidence"
+        ),
+    )
+
+    report = release_artifact.evaluate_artifact_readiness(db_path)
+
+    assert report["ok"] is False
+    assert report["required_failures"] == ["investor_core_coverage"]
+
+
+def test_runtime_readiness_rejects_nonempty_wal(
+    tmp_path,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    payload = _minimal_manifest_payload()
+    payload["database"] = {
+        "file_name": db_path.name,
+        "byte_count": db_path.stat().st_size,
+        "sha256": hashlib.sha256(db_path.read_bytes()).hexdigest(),
+    }
+    db_path.with_suffix(".db.release.json").write_text(
+        release_artifact.ReleaseManifest.model_validate(
+            payload
+        ).model_dump_json(by_alias=True)
+    )
+    db_path.with_name(f"{db_path.name}-wal").write_bytes(b"pending")
+
+    report = release_artifact.evaluate_artifact_readiness(db_path)
+
+    assert report["ok"] is False
+    assert "nonempty_wal" in report["required_failures"]
 
 
 def test_readyz_and_manifest_share_the_same_fail_closed_predicate(monkeypatch):
@@ -816,6 +978,41 @@ def test_manifest_redacts_or_rejects_secret_canaries_from_dataset_state(
     )
     serialized = json.dumps(evidence)
     assert secret not in serialized
+
+
+def test_manifest_rejects_arbitrary_quality_snapshot_strings(
+    tmp_path,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    secret = "task17-quality-secret-canary"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO dataset_manifest VALUES "
+            "(?, 'schema', 'dataset', '2026-07-27', NULL, NULL, "
+            "0, 0, 0, ?, NULL)",
+            (
+                "manifest",
+                json.dumps({"debug": secret}),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+    serialized = json.dumps(evidence)
+
+    assert secret not in serialized
+    assert evidence["dataset"]["manifest_state"]["quality_snapshot"] == {
+        "status": "malformed"
+    }
 
 
 def test_feature_grades_include_only_release_coverage_year(tmp_path):

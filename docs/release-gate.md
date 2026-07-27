@@ -28,9 +28,13 @@ The common predicate is:
 report.ok is true AND report.required_failures is empty
 ```
 
-`/readyz` returns HTTP 200 only for that state. HTTP transport success,
-`data_quality.status=usable`, code tests, Ruff, doctor, or smoke cannot hide a
-failed live-data gate.
+`/readyz` returns HTTP 200 only for that state. It reads the deployment artifact
+without rehashing a multi-gigabyte DB or rerunning 32 tools on every probe, and
+fails closed on a missing/invalid artifact, non-empty WAL, DB file-name/size
+drift, catalog drift, golden drift, or stored blockers. Cryptographic DB digest
+verification remains the pre-deployment `verify-release-artifact` step. HTTP
+transport success, `data_quality.status=usable`, code tests, Ruff, doctor, or
+smoke cannot hide a failed live-data gate.
 
 Typical named blockers include missing schema tables or indexes, dataset
 manifest mismatch, inline or quality drift, duplicate keys, insufficient
