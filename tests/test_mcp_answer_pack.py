@@ -1,4 +1,5 @@
 from decimal import Decimal
+import re
 
 import pytest
 
@@ -220,8 +221,10 @@ def test_peer_pack_suppresses_charts_without_numeric_encoded_facts():
     })
 
     assert not pack["charts"]
-    assert any(
-        limitation.startswith("peer_chart_suppressed:no_numeric_facts")
+    assert pack["limitations"]
+    assert all(re.search(r"[가-힣]", limitation) for limitation in pack["limitations"])
+    assert not any(
+        re.fullmatch(r"[a-z][a-z0-9_]*(?::[a-z0-9_,.-]+)+", limitation)
         for limitation in pack["limitations"]
     )
 
@@ -368,14 +371,14 @@ def test_attach_meta_adds_peer_benchmark_pack():
         column["field"]: column for column in table["columns"]
     }
     assert columns["subject_value"]["label"] == "대상회사 값"
-    assert columns["p25"]["label"] == "Peer P25 값"
-    assert columns["p50"]["label"] == "Peer 중앙값 P50"
-    assert columns["p75"]["label"] == "Peer P75 값"
+    assert columns["p25"]["label"] == "비교군 P25 값"
+    assert columns["p50"]["label"] == "비교군 중앙값 P50"
+    assert columns["p75"]["label"] == "비교군 P75 값"
     assert columns["percentile"]["unit"] == "%"
     assert columns["n"]["unit"] == "개"
     assert any(chart["id"] == "peer_percentile_matrix" and chart["type"] == "heatmap" for chart in pack["charts"])
     assert not any(chart["id"] == "peer_band" for chart in pack["charts"])
-    assert "peer_band_suppressed:mixed_units:KRW,ratio" in pack["limitations"]
+    assert "표시 가능한 수치 또는 일관된 단위를 확보하지 못해 시각화를 제공하지 않습니다." in pack["limitations"]
 
 
 @pytest.mark.parametrize("unit", ["ratio", "KRW"])
@@ -437,7 +440,7 @@ def test_real_peer_missing_units_suppress_raw_value_band():
         for chart in pack["charts"]
     )
     assert not any(chart["id"] == "peer_band" for chart in pack["charts"])
-    assert "peer_band_suppressed:missing_units" in pack["limitations"]
+    assert "표시 가능한 수치 또는 일관된 단위를 확보하지 못해 시각화를 제공하지 않습니다." in pack["limitations"]
 
 
 def test_audit_peer_nas_ratio_is_explicitly_a_ratio_in_all_views():

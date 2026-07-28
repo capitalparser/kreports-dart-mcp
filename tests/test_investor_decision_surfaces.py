@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 
 
 def _seed_public_peer_matrix(*, years: range, peer_count: int) -> None:
@@ -341,8 +342,16 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
     resource = read_resource(pack["resource_uri"])
     matrix = next(table for table in pack["tables"] if table["id"] == "peer_metric_matrix")
     matrix_row = matrix["rows"][0]
+    assert matrix["title"] == "비교군 지표 비교"
+    labels = {column["field"]: column["label"] for column in matrix["columns"]}
+    assert labels["p25"] == "비교군 P25 값"
+    assert labels["p50"] == "비교군 중앙값 P50"
+    assert labels["p75"] == "비교군 P75 값"
+    assert labels["n"] == "비교군 표본 수(개)"
     for field in ("n", "metric_n", "missing_n", "percentile", "p25", "p50", "p75"):
-        assert matrix_row.get(field) is None
+        assert matrix_row[field] == "집계 보류"
+        assert not isinstance(matrix_row[field], (int, float))
+    assert matrix_row["cohort_digest"] == "미제공"
     assert matrix_row["aggregate_status"] == "전체 비교군 미확보로 집계 보류"
     assert not pack["charts"]
     public_rendered = "\n".join([enriched["answer"], str(pack), resource["text"]])
@@ -352,12 +361,29 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
         "withheld_incomplete_cohort",
     ):
         assert internal_code not in public_rendered
+    machine_limitation = re.compile(
+        r"^[a-z][a-z0-9_]*(?::[a-z0-9_,.-]+)+$", re.ASCII
+    )
+    public_limitations = [
+        *(pack.get("limitations") or []),
+        *((pack.get("data_quality") or {}).get("limitations") or []),
+    ]
+    assert public_limitations
+    assert all(re.search(r"[가-힣]", limitation) for limitation in public_limitations)
+    assert not any(machine_limitation.fullmatch(limitation) for limitation in public_limitations)
+    assert not re.search(
+        r"\b[a-z][a-z0-9_]*_suppressed:[a-z0-9_,.-]+\b",
+        public_rendered,
+    )
     visible_text = "\n".join([enriched["answer"], resource["text"]])
     visible_labels = " ".join(column["label"] for column in matrix["columns"])
     assert "Cohort" not in visible_text
     assert "cohort" not in visible_text
     assert "Cohort" not in visible_labels
     assert "cohort" not in visible_labels
+    assert "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | 비교군 표본 수 |" in enriched["answer"]
+    assert "Peer 수" not in enriched["answer"]
+    assert "None" not in enriched["answer"]
     assert (
         enriched["data_quality"]["status"]
         == envelope.verdict

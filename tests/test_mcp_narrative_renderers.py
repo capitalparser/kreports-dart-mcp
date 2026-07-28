@@ -329,7 +329,7 @@ def test_compare_to_industry_multi_renderer_prints_peer_benchmark_table():
     })
 
     assert "Peer 벤치마크" in text
-    assert "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | Peer 수 |" in text
+    assert "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | 비교군 표본 수 |" in text
     assert "| 2025 | 자기자본이익률(ROE) | 0.12 | 70" in text
     assert "Generic" not in text
 

@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from copy import deepcopy
+import re
 from typing import Any
 
 PackBuilder = Callable[[dict[str, Any]], dict[str, Any] | None]
@@ -40,6 +41,13 @@ _PUBLIC_AGGREGATE_STATUS_LABELS = {
     "withheld_empty_cohort": "비교군 없음으로 집계 보류",
     "withheld_incomplete_cohort": "전체 비교군 미확보로 집계 보류",
 }
+_MACHINE_LIMITATION = re.compile(
+    r"^[a-z][a-z0-9_]*(?::[a-z0-9_,.-]+)+$", re.ASCII
+)
+_HANGUL = re.compile(r"[가-힣]")
+_PUBLIC_VISUALIZATION_LIMITATION = (
+    "표시 가능한 수치 또는 일관된 단위를 확보하지 못해 시각화를 제공하지 않습니다."
+)
 
 
 def _public_metric_label(value: Any) -> str:
@@ -56,6 +64,49 @@ def _public_takeaway_label(value: Any) -> str:
 
 def _public_aggregate_status_label(value: Any) -> str:
     return _PUBLIC_AGGREGATE_STATUS_LABELS.get(str(value), "집계 상태 미확인")
+
+
+def _public_limitation(value: Any) -> str:
+    """Translate inherited machine limitations without exposing implementation codes."""
+    text = str(value or "").strip()
+    if "_suppressed:" in text:
+        return _PUBLIC_VISUALIZATION_LIMITATION
+    if _MACHINE_LIMITATION.fullmatch(text):
+        return "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
+    if not _HANGUL.search(text):
+        return "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
+    return text
+
+
+def _public_limitations(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [
+        _public_limitation(value)
+        for value in values
+        if str(value or "").strip()
+    ]
+
+
+def _publicize_pack_limitations(pack: dict[str, Any]) -> dict[str, Any]:
+    """Keep every professional peer-pack limitation in Korean public language."""
+    pack["limitations"] = _public_limitations(pack.get("limitations"))
+    quality = pack.get("data_quality")
+    if isinstance(quality, dict):
+        public_quality = dict(quality)
+        public_quality["limitations"] = _public_limitations(
+            quality.get("limitations")
+        )
+        pack["data_quality"] = public_quality
+    return pack
+
+
+def _public_aggregate_value(value: Any, aggregate_status: Any) -> Any:
+    if value is not None:
+        return value
+    if str(aggregate_status).startswith("withheld_"):
+        return "집계 보류"
+    return "미제공"
 
 
 def _status(result: dict[str, Any]) -> str:
@@ -128,6 +179,11 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _build_peer_benchmark_pack
 
     public_result = deepcopy(result)
+    public_quality = dict(public_result.get("data_quality") or {})
+    public_quality["limitations"] = _public_limitations(
+        public_quality.get("limitations")
+    )
+    public_result["data_quality"] = public_quality
     public_result["metrics"] = [
         _public_metric_label(metric)
         for metric in (result.get("metrics") or [])
@@ -140,10 +196,20 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
         for year, metrics in (result.get("results") or {}).items()
     }
     result = public_result
-    pack = _build_peer_benchmark_pack(public_result)
+    pack = _publicize_pack_limitations(_build_peer_benchmark_pack(public_result))
     for table in pack.get("tables") or []:
         if table.get("id") != "peer_metric_matrix":
             continue
+        table["title"] = "비교군 지표 비교"
+        for column in table["columns"]:
+            label = {
+                "p25": "비교군 P25 값",
+                "p50": "비교군 중앙값 P50",
+                "p75": "비교군 P75 값",
+                "n": "비교군 표본 수(개)",
+            }.get(column.get("field"))
+            if label:
+                column["label"] = label
         fields = [
             ("fs_div", "FS", None), ("metric_n", "지표 표본수", "개"),
             ("cohort_n", "비교군 표본수", "개"), ("missing_n", "누락/제외", "개"),
@@ -160,6 +226,7 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
         )
         for row in table["rows"]:
             metric_values = ((result.get("results") or {}).get(row.get("year"), {}) or {}).get(row.get("metric"), {})
+            aggregate_status = metric_values.get("aggregate_status")
             row["fs_div"] = result.get("fs_div_used") or result.get("fs_div")
             row["metric_n"] = metric_values.get("metric_n", row.get("n"))
             row["cohort_n"] = metric_values.get("cohort_n", result.get("n_peers"))
@@ -167,13 +234,22 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             row["observed_n"] = metric_values.get("observed_n")
             row["selection_truncated_n"] = metric_values.get("selection_truncated_n")
             row["aggregate_status"] = _public_aggregate_status_label(
-                metric_values.get("aggregate_status")
+                aggregate_status
             )
-            row["cohort_digest"] = metric_values.get("cohort_digest")
+            for field in ("n", "metric_n", "missing_n", "percentile", "p25", "p50", "p75"):
+                row[field] = _public_aggregate_value(
+                    row.get(field), aggregate_status
+                )
+            row["cohort_digest"] = _public_aggregate_value(
+                metric_values.get("cohort_digest"), ""
+            )
             row["source"] = (
                 (metric_values.get("source") or {}).get("rcept_no")
                 or "사업보고서 접수번호 미확보"
             )
+    for chart in pack.get("charts") or []:
+        if isinstance(chart.get("title"), str):
+            chart["title"] = chart["title"].replace("Peer", "비교군")
     return pack
 
 
@@ -256,11 +332,20 @@ def _render_peer_selection(result: dict[str, Any]) -> str:
 
 
 def _render_peer_benchmark(result: dict[str, Any]) -> str:
-    lines = [f"판정: {_status(result)}", "", f"{_subject(result)} Peer 벤치마크 결과입니다. 동종업종 상대 위치를 확인하는 스크리닝입니다.", "", "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | Peer 수 |", "|---:|---|---:|---:|---:|---:|---:|---:|"]
+    lines = [f"판정: {_status(result)}", "", f"{_subject(result)} Peer 벤치마크 결과입니다. 동종업종 상대 위치를 확인하는 스크리닝입니다.", "", "| 연도 | 지표 | 대상회사 | 백분위 | P25 | P50 | P75 | 비교군 표본 수 |", "|---:|---|---:|---:|---:|---:|---:|---:|"]
     for year, metrics in (result.get("results") or {}).items():
         for metric, values in (metrics or {}).items():
             if isinstance(values, dict):
-                lines.append(f"| {year} | {_public_metric_label(metric)} | {values.get('subject_value')} | {values.get('percentile')} | {values.get('p25')} | {values.get('p50')} | {values.get('p75')} | {values.get('metric_n', values.get('n'))} |")
+                aggregate_status = values.get("aggregate_status")
+                lines.append(
+                    f"| {year} | {_public_metric_label(metric)} | "
+                    f"{_public_aggregate_value(values.get('subject_value'), '')} | "
+                    f"{_public_aggregate_value(values.get('percentile'), aggregate_status)} | "
+                    f"{_public_aggregate_value(values.get('p25'), aggregate_status)} | "
+                    f"{_public_aggregate_value(values.get('p50'), aggregate_status)} | "
+                    f"{_public_aggregate_value(values.get('p75'), aggregate_status)} | "
+                    f"{_public_aggregate_value(values.get('metric_n', values.get('n')), aggregate_status)} |"
+                )
     lines.extend(["", "표본/출처:", "- 지표 표본수, 비교군 표본수, 누락/제외 수와 비교군 재현키는 표에서 확인할 수 있습니다.", "- 비교기업 개별 식별자와 내부 계산키는 표시하지 않습니다."])
     return "\n".join(lines)
 
