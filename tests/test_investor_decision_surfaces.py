@@ -592,28 +592,71 @@ def test_peer_canonical_normalization_publicizes_promoted_coverage_and_error_cod
     assert "전체 비교군 확인 필요" in enriched["answer"]
 
 
-def test_peer_error_pack_resource_and_enriched_dispatch_match_canonical_error():
+def test_peer_error_quarantines_raw_exception_and_stale_evidence_across_public_surfaces():
     from kreports.mcp.answer_pack import build_answer_pack
-    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        normalize_answer_result,
+    )
     from kreports.mcp.renderers import render_answer
     from kreports.mcp.resources import read_resource
     from kreports.mcp.tools import _attach_meta
 
+    safe_limitation = "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
+    stale_receipt = "20250101000001"
     raw = {
         "subject": {"corp_name": "대상"},
-        "error": "Identity_Query_Unavailable:OperationalError",
+        "error": "OperationalError: SELECT secret_column FROM internal_table",
+        "answer": "stale peer answer",
+        "metrics": ["ROE"],
+        "results": {2024: {"ROE": {
+            "subject_value": 0.12, "percentile": 70, "p25": 0.05,
+            "p50": 0.10, "p75": 0.15, "n": 30, "unit": "ratio",
+        }}},
+        "confirmed_facts": [{
+            "statement": "stale filing fact must not be public after an error",
+            "source": {"rcept_no": stale_receipt},
+        }],
+        "analysis": [{
+            "statement": "stale internal analysis must not be public after an error",
+            "perspective": "investor",
+        }],
+        "next_checks": ["stale next check"],
+        "data_quality": {
+            "status": "usable",
+            "coverage_note": "OperationalError: SELECT secret_column FROM internal_table",
+            "limitations": ["OperationalError: SELECT secret_column FROM internal_table"],
+        },
     }
     before = deepcopy(raw)
 
+    normalized = normalize_answer_result("compare_to_industry_multi", raw)
     envelope = build_answer_envelope("compare_to_industry_multi", raw)
     answer = render_answer("compare_to_industry_multi", raw)
     direct_pack = build_answer_pack("compare_to_industry_multi", raw)
     enriched = _attach_meta("compare_to_industry_multi", raw)
+    enriched_envelope = build_answer_envelope(
+        "compare_to_industry_multi", enriched,
+    )
 
     assert raw == before
-    assert raw["error"] == "Identity_Query_Unavailable:OperationalError"
+    assert raw["error"] == "OperationalError: SELECT secret_column FROM internal_table"
     assert enriched["error"] == raw["error"]
+    for field in (
+        "confirmed_facts", "analysis", "next_checks", "metrics", "results",
+        "rcept_no", "parent_rcept_no",
+    ):
+        assert field not in enriched
     assert envelope.verdict == "error"
+    assert enriched_envelope.model_dump() == envelope.model_dump()
+    assert normalized["data_quality"]["status"] == "error"
+    assert normalized["data_quality"]["limitations"] == [safe_limitation]
+    assert "coverage_note" not in normalized["data_quality"]
+    assert envelope.answer == ""
+    assert envelope.confirmed_facts == []
+    assert envelope.analysis == []
+    assert envelope.evidence == []
+    assert envelope.next_checks == []
     assert direct_pack is not None
     assert enriched["answer_pack"] is not None
     assert direct_pack["summary"]["status"] == "error"
@@ -621,8 +664,11 @@ def test_peer_error_pack_resource_and_enriched_dispatch_match_canonical_error():
     assert [table["id"] for table in direct_pack["tables"]] == ["availability"]
     assert direct_pack["tables"][0]["rows"] == [{"status": "error"}]
     assert not direct_pack["charts"]
-    assert direct_pack["limitations"] == envelope.data_quality.limitations
-    assert enriched["answer_pack"]["limitations"] == envelope.data_quality.limitations
+    assert not direct_pack["diagrams"]
+    assert not direct_pack["timelines"]
+    assert direct_pack["sources"] == []
+    assert direct_pack["limitations"] == [safe_limitation]
+    assert enriched["answer_pack"]["limitations"] == [safe_limitation]
 
     direct_resource = read_resource(direct_pack["resource_uri"])["text"]
     enriched_resource = read_resource(
@@ -637,22 +683,49 @@ def test_peer_error_pack_resource_and_enriched_dispatch_match_canonical_error():
         enriched_resource,
     )
     for public_surface in public_surfaces:
-        assert "Identity_Query_Unavailable" not in public_surface
         assert "OperationalError" not in public_surface
-        assert "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다." in public_surface
+        assert "secret_column" not in public_surface
+        assert "internal_table" not in public_surface
+        assert "stale filing fact" not in public_surface
+        assert "stale internal analysis" not in public_surface
+        assert stale_receipt not in public_surface
+        assert safe_limitation in public_surface
     assert direct_resource == enriched_resource
+
+
+def test_peer_known_code_error_uses_the_same_safe_canonical_limitation():
+    from kreports.mcp.contracts import build_answer_envelope
+
+    for error in (
+        "Identity_Query_Unavailable:OperationalError",
+        {"type": "OperationalError", "query": "SELECT secret_column"},
+    ):
+        envelope = build_answer_envelope("compare_to_industry_multi", {
+            "error": error,
+        })
+
+        assert envelope.verdict == "error"
+        assert envelope.data_quality.limitations == [
+            "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다.",
+        ]
 
 
 def test_non_peer_error_results_still_do_not_build_answer_packs():
     from kreports.mcp.answer_pack import build_answer_pack
-    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        enrich_answer_response,
+    )
 
-    raw = {"error": "Identity_Query_Unavailable:OperationalError"}
+    raw = {"error": "OperationalError: SELECT secret_column FROM internal_table"}
 
     assert build_answer_pack("search_disclosure_events", raw) is None
     assert "answer_pack" not in enrich_answer_response(
         "search_disclosure_events", raw,
     )
+    assert raw["error"] in build_answer_envelope(
+        "search_disclosure_events", raw,
+    ).data_quality.limitations
 
 
 def test_non_peer_canonical_normalization_preserves_raw_coverage_note():

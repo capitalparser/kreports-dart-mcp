@@ -14,6 +14,8 @@ from kreports.analysis.evidence import evidence_reference_fields
 _CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
 _QUALITY_STATUSES = _CANONICAL_STATUSES
 _ADAPTER_VERSION = "legacy-result-adapter"
+_PEER_COMPARISON_TOOL = "compare_to_industry_multi"
+_PEER_ERROR_LIMITATION = "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
 
 ToolPurposePredicate = Callable[[dict[str, Any]], bool]
 
@@ -502,6 +504,19 @@ def _has_tool_purpose_result(tool_name: str, result: dict[str, Any]) -> bool:
 
 
 def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
+    # A peer-comparison handler error is an opaque implementation diagnostic,
+    # not presentation data.  Establish a complete public quality contract
+    # before inspecting any raw error, coverage, facts, or section metadata.
+    # The raw top-level error stays in the caller-owned result for programmatic
+    # handling, but cannot be promoted into a public limitation.
+    if tool_name == _PEER_COMPARISON_TOOL and "error" in result:
+        return DataQualityV1(
+            status="error",
+            dataset_version=_ADAPTER_VERSION,
+            schema_version=_ADAPTER_VERSION,
+            limitations=[_PEER_ERROR_LIMITATION],
+        )
+
     raw_quality = result.get("data_quality")
     quality = raw_quality if isinstance(raw_quality, dict) else {}
     is_error = "error" in result
@@ -579,7 +594,7 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
         limitations.append("섹션 상태 형식을 해석할 수 없어 전체 상태를 제한으로 표시합니다.")
 
     grade = quality.get("grade")
-    if tool_name == "compare_to_industry_multi":
+    if tool_name == _PEER_COMPARISON_TOOL:
         # This is the canonical-limitation boundary.  coverage_note and error
         # have already been promoted above, so sanitizing here cannot be
         # bypassed by a later quality-normalization pass.
@@ -608,8 +623,21 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
         raise TypeError("result must be a dict")
     normalized = dict(result)
     quality = _data_quality(tool_name, normalized)
+    peer_error = (
+        tool_name == _PEER_COMPARISON_TOOL
+        and quality.status == "error"
+    )
+    if peer_error:
+        # The normalizer feeds every public peer surface.  Preserve only the
+        # raw top-level error for programmatic callers; stale facts, sources,
+        # results, and legacy presentation payloads must not survive an error.
+        normalized = (
+            {"error": normalized["error"]}
+            if "error" in normalized
+            else {}
+        )
     public_quality: dict[str, Any] | None = None
-    if tool_name == "compare_to_industry_multi":
+    if tool_name == _PEER_COMPARISON_TOOL and not peer_error:
         # _data_quality() synthesizes the canonical limitation list from every
         # promotable field, including coverage_note and error.  Public peer
         # localization must happen *after* that synthesis; doing it earlier
@@ -638,11 +666,14 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     normalized["domain_verdict"] = raw_verdict if raw_verdict in allowed else None
     # Keep additive legacy metadata (for example the local source label) but
     # replace every typed quality field with the canonical validated value.
-    raw_quality = normalized.get("data_quality")
-    normalized_quality = dict(raw_quality) if isinstance(raw_quality, dict) else {}
-    if public_quality is not None and "coverage_note" in public_quality:
-        normalized_quality["coverage_note"] = public_quality["coverage_note"]
-    normalized_quality.update(quality.model_dump())
+    if peer_error:
+        normalized_quality = quality.model_dump()
+    else:
+        raw_quality = normalized.get("data_quality")
+        normalized_quality = dict(raw_quality) if isinstance(raw_quality, dict) else {}
+        if public_quality is not None and "coverage_note" in public_quality:
+            normalized_quality["coverage_note"] = public_quality["coverage_note"]
+        normalized_quality.update(quality.model_dump())
     normalized["data_quality"] = normalized_quality
     normalized["quality_status"] = quality.status
     if tool_name == "get_kam_lifecycle":
@@ -711,6 +742,10 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
 
     normalized = normalize_answer_result(tool_name, result)
     quality = _data_quality(tool_name, normalized)
+    peer_error = (
+        tool_name == _PEER_COMPARISON_TOOL
+        and quality.status == "error"
+    )
     warnings = list(quality.limitations)
     if quality.status == "missing" and not warnings:
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
@@ -718,14 +753,25 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         tool_name=tool_name,
         verdict=quality.status,
         domain_verdict=normalized["domain_verdict"],
-        answer=str(normalized.get("answer") or ""),
-        confirmed_facts=[fact for fact in normalized.get("confirmed_facts") or [] if isinstance(fact, dict)],
-        analysis=_analysis(normalized),
-        evidence=_evidence(normalized),
+        answer="" if peer_error else str(normalized.get("answer") or ""),
+        confirmed_facts=(
+            [] if peer_error
+            else [
+                fact for fact in normalized.get("confirmed_facts") or []
+                if isinstance(fact, dict)
+            ]
+        ),
+        analysis=[] if peer_error else _analysis(normalized),
+        evidence=[] if peer_error else _evidence(normalized),
         data_quality=quality,
         warnings=warnings,
-        next_checks=_string_list(normalized.get("next_checks")),
-        answer_pack=normalized.get("answer_pack") if isinstance(normalized.get("answer_pack"), dict) else None,
+        next_checks=[] if peer_error else _string_list(normalized.get("next_checks")),
+        answer_pack=(
+            None if peer_error
+            else normalized.get("answer_pack")
+            if isinstance(normalized.get("answer_pack"), dict)
+            else None
+        ),
     )
 
 

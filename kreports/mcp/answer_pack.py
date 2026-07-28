@@ -81,9 +81,14 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     # resource.  The canonical envelope supplies the localized limitation;
     # the raw structured error remains only on the programmatic result.
     if envelope.data_quality.status == "error":
+        error_result = (
+            {"data_quality": envelope.data_quality.model_dump()}
+            if tool_name == "compare_to_industry_multi"
+            else normalized_result
+        )
         raw_pack = _base_pack(
             "데이터 가용성",
-            normalized_result,
+            error_result,
             status="error",
         )
         raw_pack["tables"] = [{
