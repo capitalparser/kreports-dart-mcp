@@ -107,11 +107,39 @@ def test_usable_quality_separates_allowlisted_domain_verdict():
 
     envelope = build_answer_envelope("get_quality_of_earnings_pack", {
         "verdict": "stable",
+        "signals": [{"signal": "cash_conversion"}],
         "data_quality": {"status": "usable"},
     })
 
     assert envelope.verdict == "usable"
     assert envelope.domain_verdict == "stable"
+
+
+def test_direct_envelope_rejects_domain_verdict_outside_tool_allowlist():
+    from kreports.mcp.contracts import AnswerEnvelopeV1
+
+    payload = {
+        "tool_name": "get_business_overview",
+        "verdict": "usable",
+        "domain_verdict": "stable",
+        "answer": "",
+        "confirmed_facts": [],
+        "analysis": [],
+        "evidence": [],
+        "data_quality": {
+            "status": "usable", "dataset_version": "v1", "schema_version": "v1",
+        },
+        "warnings": [],
+        "next_checks": [],
+    }
+
+    with pytest.raises(ValidationError, match="domain verdict is not allowed"):
+        AnswerEnvelopeV1.model_validate(payload)
+
+    assert AnswerEnvelopeV1.model_validate({
+        **payload,
+        "tool_name": "get_quality_of_earnings_pack",
+    }).domain_verdict == "stable"
 
 
 def test_usable_quality_is_limited_when_confirmed_facts_have_no_resolvable_evidence():

@@ -6,7 +6,11 @@ import re
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no, source_line
-from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
+from kreports.mcp.contracts import (
+    AnswerEnvelopeV1,
+    build_answer_envelope,
+    public_domain_verdict_label,
+)
 from kreports.mcp.professional_surfaces import DETAIL_RENDERERS as PROFESSIONAL_DETAIL_RENDERERS
 
 
@@ -1026,7 +1030,7 @@ def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | N
     """Render the stable V1 prose sections from an AnswerEnvelopeV1."""
     lines = [
         "판정:", f"- {envelope.verdict}", "", "업무 결론:",
-        f"- {envelope.domain_verdict or '별도 결론 없음'}", "",
+        f"- {public_domain_verdict_label(envelope.tool_name, envelope.domain_verdict)}", "",
         "확인된 내용 (공시에서 확인되는 내용):",
     ]
     if envelope.confirmed_facts:

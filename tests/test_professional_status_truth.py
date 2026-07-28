@@ -1,3 +1,5 @@
+import pytest
+
 from kreports.mcp.contracts import enrich_answer_response
 
 
@@ -18,6 +20,60 @@ def test_enrichment_uses_one_canonical_status_across_layers():
     assert out["answer_pack"]["summary"]["status"] == "limited"
     assert "판정:\n- limited" in out["answer"]
     assert "승인" not in out["answer"]
+
+
+def test_empty_upstream_usable_response_is_missing_across_response_and_pack():
+    out = enrich_answer_response("get_business_overview", {
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "missing"
+    assert out["data_quality"]["status"] == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+    assert out["answer_pack"]["data_quality"]["status"] == "missing"
+
+
+def test_analysis_without_public_facts_cannot_keep_upstream_usable_status():
+    out = enrich_answer_response("get_business_overview", {
+        "analysis": [{"statement": "근거 없는 해석"}],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] != "usable"
+
+
+@pytest.mark.parametrize(("tool_name", "verdict", "expected_label"), [
+    ("get_dcf_input_candidates", "screen_grade", "입력 후보 선별 결과"),
+    ("build_dcf_model_pack", "reviewable_model", "검토 가능한 모델"),
+    ("build_dcf_model_pack", "calculation_unavailable", "계산 불가"),
+])
+def test_allowlisted_domain_verdict_uses_public_korean_label_not_snake_case(
+    tool_name, verdict, expected_label,
+):
+    out = enrich_answer_response(tool_name, {
+        "verdict": verdict,
+        "inputs": {"wacc": 0.1},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert f"- {expected_label}" in out["answer"]
+    assert verdict not in out["answer"]
+
+
+def test_enrichment_replaces_injected_professional_verdict_prose():
+    for injected in ("승인", "거절", "매수", "매도", "적정 의견 확정"):
+        out = enrich_answer_response("get_business_overview", {
+            "answer": f"기존 결론: {injected}",
+            "verdict": injected,
+            "data_quality": {"status": "usable"},
+            "confirmed_facts": [{
+                "statement": "공시로 확인된 사실",
+                "source": {"rcept_no": "20250301000001"},
+            }],
+        })
+
+        assert injected not in out["answer"]
+        assert "판정:\n- usable" in out["answer"]
 
 
 def test_cited_complete_result_stays_usable_and_uncited_fact_is_limited():
@@ -83,7 +139,7 @@ def test_legacy_verdict_is_never_promoted_and_optional_domain_verdict_is_additiv
             "verdict": legacy_verdict,
             "data_quality": {"status": "usable"},
         })
-        assert out.verdict == "usable"
+        assert out.verdict == "missing"
         assert out.domain_verdict is None
 
 

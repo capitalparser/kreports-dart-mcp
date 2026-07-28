@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kreports.analysis.evidence import evidence_reference_fields
 
@@ -22,6 +22,33 @@ DOMAIN_VERDICT_ALLOWLISTS = {
     },
     "prepare_standard_audit_hours_inputs": {"not_assessed"},
 }
+
+DOMAIN_VERDICT_LABELS = {
+    "get_quality_of_earnings_pack": {
+        "stable": "안정적",
+        "monitor": "모니터링 필요",
+    },
+    "get_dcf_input_candidates": {
+        "screen_grade": "입력 후보 선별 결과",
+        "partial": "일부 입력 확인",
+        "blocked": "입력 산정 차단",
+    },
+    "build_dcf_model_pack": {
+        "reviewable_model": "검토 가능한 모델",
+        "partial_model": "일부 모델 구성",
+        "calculation_unavailable": "계산 불가",
+    },
+    "prepare_standard_audit_hours_inputs": {
+        "not_assessed": "평가 미실시",
+    },
+}
+
+
+def public_domain_verdict_label(tool_name: str, verdict: str | None) -> str:
+    """Return a Korean user-facing label for an allowlisted domain conclusion."""
+    if verdict is None:
+        return "별도 결론 없음"
+    return DOMAIN_VERDICT_LABELS.get(tool_name, {}).get(verdict, "별도 결론 없음")
 
 
 class SectionSourceV1(BaseModel):
@@ -94,6 +121,17 @@ class AnswerEnvelopeV1(BaseModel):
     next_checks: list[str]
     answer_pack: dict[str, Any] | None = None
 
+    @model_validator(mode="after")
+    def _domain_verdict_matches_tool(self) -> AnswerEnvelopeV1:
+        if (
+            self.domain_verdict is not None
+            and self.domain_verdict not in DOMAIN_VERDICT_ALLOWLISTS.get(
+                self.tool_name, set(),
+            )
+        ):
+            raise ValueError("domain verdict is not allowed for this tool")
+        return self
+
 
 def _string_list(value: Any) -> list[str]:
     if isinstance(value, str):
@@ -124,8 +162,17 @@ def _has_partial_payload(result: dict[str, Any]) -> bool:
     """Return whether an unqualified legacy response contains affirmative data."""
     if result.get("has_data") is True:
         return True
-    for key in ("confirmed_facts", "evidence", "rows", "records", "history", "sections", "events", "items"):
-        if isinstance(result.get(key), list) and result[key]:
+    for key, value in result.items():
+        if key in {
+            "confirmed_facts", "evidence", "rows", "records", "history",
+            "sections", "events", "items",
+        }:
+            if isinstance(value, list) and value:
+                return True
+            continue
+        if key in {"analysis", "limitations", "warnings", "next_checks"}:
+            continue
+        if isinstance(value, list) and value:
             return True
     for key in ("count", "total", "total_records", "total_companies", "section_count", "peer_count"):
         value = result.get(key)
@@ -151,6 +198,12 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
         status = "limited" if _has_partial_payload(result) else "missing"
     if status not in _QUALITY_STATUSES:
         raise ValueError(f"unsupported data quality status: {status}")
+
+    # An upstream quality claim alone is not evidence.  Empty legacy payloads
+    # have neither purpose-bearing inputs nor public facts, so availability is
+    # genuinely missing before presentation layers build an availability pack.
+    if status == "usable" and not _has_partial_payload(result):
+        status = "missing"
 
     confirmed_facts = [
         fact for fact in result.get("confirmed_facts") or []
@@ -341,8 +394,10 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
         answer_pack = build_answer_pack(tool_name, enriched)
         if answer_pack:
             enriched["answer_pack"] = answer_pack
-    if not enriched.get("answer"):
-        answer = render_answer(tool_name, enriched)
-        if answer:
-            enriched["answer"] = answer
+    # The public professional answer is always regenerated from the normalized
+    # envelope.  A legacy free-text answer remains in the raw input only and
+    # cannot bypass verdict and evidence safeguards.
+    answer = render_answer(tool_name, enriched)
+    if answer:
+        enriched["answer"] = answer
     return enriched
