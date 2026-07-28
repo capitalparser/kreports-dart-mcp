@@ -793,3 +793,18 @@ def test_peer_comparators_select_the_requested_year_when_no_cohort_is_supplied(m
 
     assert result == {"error": "stop after selection"}
     assert selected_years == [2022]
+
+
+def test_auditor_handler_routes_peer_risk_through_decision_wrapper(monkeypatch):
+    from kreports.mcp.handlers import auditor
+
+    captured = {}
+    monkeypatch.setattr(auditor, "resolve_company", lambda value: f"resolved:{value}")
+    monkeypatch.setattr(auditor, "compare_peer_risk_profile", lambda **kwargs: captured.setdefault("value", kwargs) or kwargs)
+
+    result = auditor.handle_compare_peer_risk_profile(type("Args", (), {
+        "company": "005930", "year": 2025, "peer_limit": 5, "fs_strategy": "auto",
+    })())
+
+    assert captured["value"]["company"] == "resolved:005930"
+    assert result == captured["value"]

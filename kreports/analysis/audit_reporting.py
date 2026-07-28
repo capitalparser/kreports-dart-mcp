@@ -18,6 +18,7 @@ from kreports.analysis.audit_procedure_evidence import (
 )
 
 from kreports.analysis._shared import _clean_dict, _dedupe_confirmed_facts, _df_to_records, _display_text, _has_db_column, _has_db_table
+from kreports.analysis.evidence import parent_rcept_no
 from kreports.analysis.company_profile import (
     get_company_summary,
     get_industry_name,
@@ -938,11 +939,73 @@ def get_audit_history(company: str) -> dict:
         }
 
     df = _queries.get_auditors(corp_code)
-    records = _df_to_records(df)
+    legacy_records = _df_to_records(df)
+    normalized: list[dict] = []
+    previous_by_fs: dict[str, str] = {}
+    tenure_by_fs: dict[str, int] = {}
+    for row in sorted(
+        legacy_records,
+        key=lambda value: (int(value.get("회계연도") or value.get("year") or 0), str(value.get("구분") or value.get("fs_div") or "")),
+    ):
+        year = row.get("회계연도") if row.get("회계연도") is not None else row.get("year")
+        fs_div = str(row.get("구분") or row.get("fs_div") or "")
+        auditor_nm = row.get("감사인") if row.get("감사인") is not None else row.get("auditor_nm")
+        if year is None or not fs_div or not auditor_nm:
+            continue
+        previous = previous_by_fs.get(fs_div)
+        changed = previous is not None and previous != auditor_nm
+        tenure = tenure_by_fs.get(fs_div, 0) + 1 if previous == auditor_nm else 1
+        previous_by_fs[fs_div] = str(auditor_nm)
+        tenure_by_fs[fs_div] = tenure
+        normalized.append({
+            "year": int(year),
+            "fs_div": fs_div,
+            "auditor_nm": str(auditor_nm),
+            "audit_opinion": str(row.get("감사의견") or row.get("audit_opinion") or "-"),
+            "auditor_changed": changed,
+            "consecutive_years": tenure,
+            "rcept_no": parent_rcept_no(str(row.get("접수번호") or row.get("rcept_no") or "")),
+        })
+
+    sources = [
+        {
+            "corp_code": corp_code,
+            "corp_name": corp_code,
+            "report_nm": "감사인 이력",
+            "bsns_year": row["year"],
+            "rcept_no": row["rcept_no"],
+            "section_title": "감사인·감사의견",
+            "source_table": "auditors",
+        }
+        for row in normalized if row.get("rcept_no")
+    ]
+    uncitable = len(sources) != len(normalized)
+    status = "missing" if not normalized else "limited" if uncitable else "usable"
     return {
         "corp_code": corp_code,
-        "history": records,
-        "count": len(records),
+        "history": normalized,
+        "count": len(normalized),
+        "data_quality": {
+            "status": status,
+            "limitations": (
+                ["감사인 이력 중 접수번호가 없는 행은 공개 인용 근거로 사용할 수 없습니다."]
+                if uncitable else []
+            ),
+        },
+        "confirmed_facts": [
+            {
+                "statement": f"{row['year']}년 {row['fs_div']} 감사인은 {row['auditor_nm']}이며 감사의견은 {row['audit_opinion']}입니다.",
+                "source": source,
+            }
+            for row, source in zip(
+                [row for row in normalized if row.get("rcept_no")],
+                sources,
+            )
+        ],
+        "next_checks": (
+            ["접수번호가 없는 감사인 이력 행은 원 공시에서 추가 확인하세요."]
+            if uncitable else []
+        ),
     }
 
 

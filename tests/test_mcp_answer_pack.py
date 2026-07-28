@@ -658,3 +658,53 @@ def test_missing_visual_data_returns_explicit_table_and_limitation():
     assert validated.tables[0].status == "missing"
     assert validated.limitations
     assert not validated.charts
+
+
+def test_audit_history_uses_dedicated_history_columns_not_audit_fee_title():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_audit_history", {
+        "subject": {"corp_name": "A"},
+        "history": [{
+            "year": 2025, "fs_div": "CFS", "auditor_nm": "감사법인",
+            "audit_opinion": "적정", "auditor_changed": False,
+            "consecutive_years": 3, "rcept_no": "20260310002820",
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    table = next(table for table in pack["tables"] if table["id"] == "audit_history")
+    assert table["title"] == "감사인 이력"
+    assert [column["label"] for column in table["columns"]] == [
+        "연도", "FS", "감사인", "감사의견", "변경 여부", "연속감사연수", "접수번호",
+    ]
+    assert "감사보수" not in str(pack)
+
+
+def test_acceptance_pack_has_exactly_seven_public_review_rows_without_internal_signal_keys():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    sections = {
+        key: {
+            "status": "limited", "required": True, "applicability": "applicable",
+            "coverage": {}, "blockers": ["audit_effort_helper_not_integrated"], "sources": [],
+        }
+        for key in (
+            "peer_group", "audit_effort", "financial_risk", "audit_history",
+            "accounting_policy", "kam", "audit_report_matters",
+        )
+    }
+    pack = build_answer_pack("build_audit_acceptance_pack", {
+        "subject": {"corp_name": "A"},
+        "risk_summary": {"benchmarks": {"accrual_ratio": {"n": 5}}},
+        "data_quality": {"status": "limited", "section_statuses": sections, "kam_body": {"status": "usable"}},
+        "acceptance_signals": [{"signal": "audit_report_other_matter_paragraph_present"}],
+    })
+
+    table = next(table for table in pack["tables"] if table["id"] == "audit_acceptance_evidence")
+    assert len(table["rows"]) == 7
+    assert [column["label"] for column in table["columns"]] == [
+        "검토영역", "상태", "확인 사실", "값/coverage", "접수번호", "필수 후속 확인",
+    ]
+    assert "kam_body" not in str(table)
+    assert "audit_report_other_matter_paragraph_present" not in str(table)

@@ -11,14 +11,16 @@ from kreports.analysis.audit_reporting import (
     search_audit_report_matters,
 )
 from kreports.analysis.group_audit import get_subsidiary_auditors
-from kreports.analysis.peer_benchmarks import (
+from kreports.analysis.auditor_decisions import (
     build_audit_acceptance_pack,
+    compare_peer_risk_profile,
+)
+from kreports.analysis.peer_benchmarks import (
     compare_peer_accounting_policies,
     compare_peer_audit_fees,
     compare_peer_audit_procedures,
     compare_peer_audit_report_matters,
     compare_peer_kam_topics,
-    compare_peer_risk_profile,
     estimate_audit_hours_proxy,
 )
 from kreports.mcp.dispatch import resolve_company

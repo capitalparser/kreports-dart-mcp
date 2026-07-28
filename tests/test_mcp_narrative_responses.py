@@ -230,3 +230,33 @@ def test_dcf_detail_uses_public_assumption_labels_and_safe_basis_text():
     assert "historical_median" not in text
     assert "operating_cf_to_net_income" not in text
     assert "basis 없음" not in text
+
+
+def test_acceptance_narrative_uses_public_labels_without_approval_or_internal_signal_keys():
+    sections = {
+        key: {
+            "status": "limited", "required": True, "applicability": "applicable",
+            "coverage": {}, "blockers": ["audit_effort_helper_not_integrated"], "sources": [],
+        }
+        for key in (
+            "peer_group", "audit_effort", "financial_risk", "audit_history",
+            "accounting_policy", "kam", "audit_report_matters",
+        )
+    }
+    text = render_answer("build_audit_acceptance_pack", {
+        "subject": {"corp_name": "A"},
+        "risk_summary": {"benchmarks": {"accrual_ratio": {"n": 5}}},
+        "data_quality": {"status": "limited", "section_statuses": sections},
+        "acceptance_signals": [{
+            "signal": "audit_report_other_matter_paragraph_present",
+            "label": "감사보고서 기타사항 문단이 확인되었습니다.",
+        }],
+        "next_checks": ["업무상 결정 또는 감사 결론을 제시하지 않습니다."],
+    })
+
+    assert text is not None
+    assert "감사보고서 기타사항 문단" in text
+    assert "kam_body" not in text
+    assert "audit_report_other_matter_paragraph_present" not in text
+    assert "승인" not in text
+    assert "거절" not in text
