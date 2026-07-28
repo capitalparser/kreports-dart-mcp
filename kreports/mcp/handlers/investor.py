@@ -83,7 +83,7 @@ def handle_build_dcf_model_pack(args: BuildDcfModelPackInput) -> dict:
 
 def handle_search_disclosure_events(args: SearchDisclosureEventsInput) -> dict:
     return search_disclosure_events(
-        company=args.company,
+        company=resolve_company(args.company) if args.company else None,
         start_date=args.start_date,
         end_date=args.end_date,
         event_types=args.event_types,

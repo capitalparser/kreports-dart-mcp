@@ -12,6 +12,7 @@ from kreports.db.engine import get_session
 from kreports.db.models import Disclosure
 from kreports.analysis import queries as _queries
 from kreports.analysis.filing_provenance import annual_filing_source
+from kreports.analysis.investor_peer_evidence import evaluate_investor_check
 
 from kreports.analysis._shared import _as_float, _avg, _clean_dict, _dedupe_confirmed_facts, _df_to_records, _has_db_table, _pct, _ratio
 from kreports.analysis.company_profile import get_company_summary, resolve_company_identifier, resolve_corp_code
@@ -191,7 +192,7 @@ def _disclosure_event_evidence(result: dict) -> dict:
         facts.append({
             "statement": (
                 f"{event.get('event_date')} {event.get('corp_name') or event.get('corp_code')}의 "
-                f"{event.get('event_title')} 공시가 {event.get('event_type')} 이벤트로 분류되었습니다."
+                f"{event.get('event_title')} 공시 목록과 접수번호가 확인됩니다."
             ),
             "source": {
                 "corp_code": event.get("corp_code"),
@@ -205,7 +206,7 @@ def _disclosure_event_evidence(result: dict) -> dict:
         })
     analysis = [{
         "perspective": "investor",
-        "statement": "수시공시는 로컬에는 목록과 분류를 선적재하고, 본문 검토는 사용자 DART API key로 온디맨드 확인하는 구조입니다.",
+        "statement": "event_type은 캐시된 공시 제목 기반 KReports 스크리닝 분류이며, 원문 확인 또는 확정된 지배구조 변경 판단이 아닙니다.",
     }]
     next_checks = [
         "중요 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문 본문을 확인하세요.",
@@ -371,7 +372,7 @@ def _financial_snapshot_from_compact(
 
     out_df = pd.DataFrame(out_rows)
     selected_cols = [c for c in _ANNUAL_FIELDS if c in out_df.columns] if not out_df.empty else []
-    return {
+    result = {
         "corp_code": corp_code,
         "fs_div": fs_div_used,
         "unit": "억원",
@@ -384,6 +385,52 @@ def _financial_snapshot_from_compact(
             "coverage_note": "Compact runtime DB uses annual core metrics; full account-level financial_facts are not bundled.",
         },
     }
+    return _attach_annual_sources(result, source_table="financial_facts_compact")
+
+
+def _attach_annual_sources(result: dict, *, source_table: str) -> dict:
+    """Attach annual filing provenance in one batch, never one query per row."""
+    rows = result.get("rows") or []
+    corp_code = result.get("corp_code")
+    if not rows or not corp_code:
+        return result
+    years = sorted({int(row["연도"]) for row in rows if row.get("연도") is not None})
+    sources: dict[int, dict] = {}
+    if years:
+        with _engine_module.engine.connect() as conn:
+            disclosures = conn.execute(text("""
+                SELECT rcept_no, corp_name, report_nm
+                FROM disclosures
+                WHERE corp_code=:corp_code
+                  AND (""" + " OR ".join(
+                    f"report_nm LIKE :year_{index}" for index, _ in enumerate(years)
+                ) + ") ORDER BY disc_date DESC, rcept_no DESC"), {
+                    "corp_code": corp_code,
+                    **{f"year_{index}": f"%사업보고서 ({year}.%" for index, year in enumerate(years)},
+                }).mappings().all()
+        for year in years:
+            row = next((item for item in disclosures if f"사업보고서 ({year}." in str(item.get("report_nm") or "")), None)
+            if row:
+                sources[year] = {
+                    "corp_code": corp_code, "corp_name": row.get("corp_name") or corp_code,
+                    "report_nm": row.get("report_nm"), "bsns_year": year,
+                    "rcept_no": row.get("rcept_no"), "section_title": "재무제표",
+                    "source_table": source_table,
+                }
+    for row in rows:
+        year = int(row["연도"]) if row.get("연도") is not None else None
+        row["source"] = sources.get(year) or _uncitable_annual_source(
+            str(corp_code), None, year, "재무제표", source_table,
+        )
+    if any(not row["source"].get("rcept_no") for row in rows):
+        quality = dict(result.get("data_quality") or {})
+        if quality.get("status") == "usable":
+            quality["status"] = "limited"
+            quality["limitations"] = list(quality.get("limitations") or []) + [
+                "일부 연도는 동일 사업연도 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다."
+            ]
+            result["data_quality"] = quality
+    return result
 
 
 def get_financial_snapshot(
@@ -463,13 +510,14 @@ def get_financial_snapshot(
     cols = [c for c in _ANNUAL_FIELDS if c in df.columns]
     rows = _df_to_records(df[cols].sort_values(["연도", "분기"]))
 
-    return {
+    return _attach_annual_sources({
         "corp_code": corp_code,
         "fs_div": fs_div,
         "unit": "억원",
         "rows": rows,
         "row_count": len(rows),
-    }
+        "data_quality": {"status": "usable" if rows else "missing", "source": "financials"},
+    }, source_table="financials")
 
 
 _INVESTOR_EVENT_PRESETS = {
@@ -628,21 +676,25 @@ def get_investor_signals(
     latest_cfo_ni = _as_float(latest.get("CFO_NI"))
 
     quality_checks = {
-        "positive_avg_roe": avg_roe is not None and avg_roe >= 10,
-        "positive_avg_op_margin": avg_op_margin is not None and avg_op_margin > 0,
-        "positive_revenue_growth": avg_revenue_growth is not None and avg_revenue_growth > 0,
-        "debt_ratio_under_100": latest_debt_ratio is not None and latest_debt_ratio <= 100,
-        "positive_latest_fcf": latest_fcf is not None and latest_fcf > 0,
-        "cfo_covers_net_income": latest_cfo_ni is not None and latest_cfo_ni >= 0.8,
+        "positive_avg_roe": evaluate_investor_check(name="평균 ROE", value=avg_roe, predicate=lambda value: value >= 10, meaning="수익성 지속성을 확인합니다."),
+        "positive_avg_op_margin": evaluate_investor_check(name="평균 영업이익률", value=avg_op_margin, predicate=lambda value: value > 0, meaning="영업 수익성을 확인합니다."),
+        "positive_revenue_growth": evaluate_investor_check(name="평균 매출성장률", value=avg_revenue_growth, predicate=lambda value: value > 0, meaning="매출 성장 지속성을 확인합니다."),
+        "debt_ratio_under_100": evaluate_investor_check(name="부채비율", value=latest_debt_ratio, predicate=lambda value: value <= 100, meaning="재무 레버리지를 확인합니다."),
+        "positive_latest_fcf": evaluate_investor_check(name="잉여현금흐름", value=latest_fcf, predicate=lambda value: value > 0, meaning="현금전환을 확인합니다."),
+        "cfo_covers_net_income": evaluate_investor_check(name="현금흐름/순이익", value=latest_cfo_ni, predicate=lambda value: value >= 0.8, meaning="이익의 현금 뒷받침을 확인합니다."),
     }
-    passed = sum(1 for passed in quality_checks.values() if passed)
+    evaluated_count = sum(check["status"] in {"pass", "fail"} for check in quality_checks.values())
+    unknown_count = sum(check["status"] == "unknown" for check in quality_checks.values())
+    passed = sum(check["status"] == "pass" for check in quality_checks.values())
+    required_cash_checks = ("positive_latest_fcf", "cfo_covers_net_income")
+    cash_checks_evaluated = all(quality_checks[key]["status"] != "unknown" for key in required_cash_checks)
 
     risk_summary = _queries.get_risk_summary(corp_code)
     risk_score, risk_verdict, risk_factors = _risk_score_from_summary(risk_summary)
     events, event_counts = _recent_investor_events(corp_code, window_days, event_limit)
 
     takeaways = []
-    if passed >= 4:
+    if passed >= 4 and cash_checks_evaluated and all(quality_checks[key]["status"] == "pass" for key in required_cash_checks):
         takeaways.append("quality_profile_supportive")
     elif rows:
         takeaways.append("quality_profile_mixed")
@@ -672,6 +724,9 @@ def get_investor_signals(
             "checks": quality_checks,
             "passed_checks": passed,
             "total_checks": len(quality_checks),
+            "evaluated_count": evaluated_count,
+            "unknown_count": unknown_count,
+            "coverage_status": "usable" if unknown_count == 0 else "limited",
             "latest_year": latest.get("연도"),
         },
         "accounting_risk": {

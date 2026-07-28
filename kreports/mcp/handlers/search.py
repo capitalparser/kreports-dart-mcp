@@ -5,9 +5,11 @@ import re
 
 from kreports.analysis.peer_benchmarks import (
     compare_to_industry,
-    compare_to_industry_multi,
     get_industry_audit_landscape,
-    select_peer_group,
+)
+from kreports.analysis.investor_peer_evidence import (
+    compare_to_industry_multi_with_evidence,
+    select_peer_group_with_evidence,
 )
 from kreports.analysis.financial_analysis import _annual_report_source
 from kreports.analysis.search_adapter import search_dataset
@@ -37,7 +39,7 @@ def handle_compare_to_industry(args: CompareToIndustryInput) -> dict:
 
 
 def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
-    return compare_to_industry_multi(
+    return compare_to_industry_multi_with_evidence(
         company=resolve_company(args.company),
         metrics=args.metrics,
         years_back=args.years_back,
@@ -50,7 +52,7 @@ def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
 
 
 def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
-    result = select_peer_group(
+    result = select_peer_group_with_evidence(
         company=resolve_company(args.company),
         criteria=args.criteria,
         peer_limit=args.peer_limit,
