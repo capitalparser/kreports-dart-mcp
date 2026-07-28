@@ -82,6 +82,20 @@ def test_note_enrichment_labels_report_and_nested_note_reference_for_citation():
     assert result["confirmed_facts"][0]["source"]["section_title"] == "주석 2 · 1 재무제표 작성기준"
 
 
+def test_note_enrichment_normalizes_unpunctuated_nested_note_title_for_citation():
+    """Leaving a numeric subtitle ungrouped makes real Samsung note citations ambiguous."""
+    raw = _matched_note_result()
+    raw["query"]["keyword"] = "재무제표"
+    record = raw["companies"][0]["records"][0]
+    record["note_no"] = "2"
+    record["note_title"] = "1 재무제표 작성기준"
+    record["match_excerpts"] = ["재무제표는 한국채택국제회계기준에 따라 작성합니다."]
+
+    result = _enrich_accounting_note_search(raw)
+
+    assert result["confirmed_facts"][0]["note_reference"] == "주석 2 · 1 재무제표 작성기준"
+
+
 def test_note_enrichment_marks_empty_cache_missing_without_claiming_filing_absence():
     """Replacing cache-absence wording with a filing-absence claim must fail this contract."""
     result = _enrich_accounting_note_search({

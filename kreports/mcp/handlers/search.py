@@ -154,7 +154,7 @@ def _note_reference(record: dict) -> str:
     note_no = str(record.get("note_no") or "").strip()
     note_title = str(record.get("note_title") or "").strip()
     prefix = f"주석 {note_no}" if note_no else "주석"
-    nested_title = re.match(r"^([0-9]+)\s*[.)]\s*(.+)$", note_title)
+    nested_title = re.match(r"^([0-9]+)(?:\s*[.)]\s*|\s+)(.+)$", note_title)
     if note_no and nested_title:
         return f"{prefix} · {nested_title.group(1)} {nested_title.group(2)}"
     return f"{prefix} {note_title}".strip()
