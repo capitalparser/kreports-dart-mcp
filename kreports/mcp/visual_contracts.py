@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kreports.analysis.evidence import evidence_reference_fields
+
 
 PACK_VERSION = "visualization_pack.v1"
 MAX_TEXT = 2_000
@@ -322,11 +324,16 @@ class SourceSpecV1(BaseModel):
     @model_validator(mode="after")
     def _canonical_url(self) -> SourceSpecV1:
         if self.url is not None:
-            expected = (
-                "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
-                f"{self.rcept_no}"
-            )
-            if self.rcept_no is None or self.url != expected:
+            reference = evidence_reference_fields({
+                "source_label": self.label,
+                "source_url": self.url,
+                "rcept_no": self.rcept_no,
+            })
+            if (
+                reference is None
+                or reference.get("source_url") != self.url
+                or reference.get("rcept_no") != self.rcept_no
+            ):
                 raise ValueError("source URL is not canonical")
         return self
 
@@ -995,13 +1002,17 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
     for source in (raw.get("sources") or [])[:32]:
         if not isinstance(source, dict):
             continue
-        receipt = str(source.get("rcept_no") or "")
-        if not re.fullmatch(r"[0-9]{14}", receipt, re.ASCII):
+        reference = evidence_reference_fields({
+            "source_label": source.get("label"),
+            "source_url": source.get("url"),
+            "rcept_no": source.get("rcept_no"),
+        })
+        if not reference:
             continue
         sources.append({
-            "label": _safe_text(source.get("label") or "DART 공시"),
-            "rcept_no": receipt,
-            "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}",
+            "label": _safe_text(reference.get("source_label") or "공개 출처"),
+            "rcept_no": reference.get("rcept_no"),
+            "url": reference.get("source_url"),
         })
     quality_keys = {
         "status",

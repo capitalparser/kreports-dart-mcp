@@ -387,6 +387,30 @@ def _audit_effort_row_evidence(
     return complete_years, cited_years, sources, distinct_year_receipts
 
 
+def _requested_year_effort_sources(
+    rows: list[dict[str, Any]],
+    requested_year: int,
+) -> list[dict[str, Any]]:
+    sources = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            row_year = int(row.get("year"))
+        except (TypeError, ValueError):
+            continue
+        if row_year != requested_year:
+            continue
+        for key in ("financial_source", "audit_source"):
+            raw_source = row.get(key)
+            if not _source_matches_year(raw_source, requested_year):
+                continue
+            source = _source_ref(raw_source)
+            if source and source not in sources:
+                sources.append(source)
+    return sources
+
+
 def build_acceptance_evidence(
     *,
     legacy_payload: dict[str, Any],
@@ -471,11 +495,20 @@ def build_acceptance_evidence(
         if not distinct_year_receipts:
             blockers.append("audit_effort_distinct_year_receipts_missing")
         supplied_sources = supplied.get("sources") or []
-        effort_sources = (
-            supplied_sources
-            if supplied.get("applicability") == "not_applicable"
-            else row_sources
-        )
+        effort_source_years: list[int | None] = []
+        if supplied.get("applicability") == "not_applicable":
+            verified_sources = _requested_year_effort_sources(
+                audit_effort_rows,
+                year,
+            )
+            effort_sources = verified_sources or supplied_sources
+            effort_source_years = (
+                [year] * len(verified_sources)
+                if verified_sources
+                else [None] * len(supplied_sources)
+            )
+        else:
+            effort_sources = row_sources
         effort_section = _section(
             status="usable" if valid else "limited",
             requirement=_REQUIREMENTS["audit_effort"], coverage=coverage,
@@ -483,7 +516,7 @@ def build_acceptance_evidence(
             applicability=supplied.get("applicability"),
             not_applicable_basis=supplied.get("not_applicable_basis"),
             requested_year=year,
-            source_years=[],
+            source_years=effort_source_years,
         )
 
     risk_summary = (
@@ -557,18 +590,30 @@ def build_acceptance_evidence(
     history_section = _history_section(history_payload, year)
 
     policy = result.get("policy_summary") if isinstance(result.get("policy_summary"), dict) else {}
-    policy_source = _source_ref(policy.get("source"))
+    raw_policy_source = policy.get("source")
+    policy_source = _source_ref(raw_policy_source)
+    current_policy_source = (
+        policy_source
+        if _source_matches_year(raw_policy_source, year)
+        else None
+    )
     policy_applicability = policy.get("applicability") or "applicable"
     policy_blockers = []
     if policy_applicability == "applicable":
         if not (policy.get("subject_policy_count") or 0):
             policy_blockers.append("current_period_policy_missing")
-        if not policy_source:
-            policy_blockers.append("policy_filing_source_missing")
+        if not current_policy_source:
+            policy_blockers.append("policy_current_year_source_missing")
+    policy_section_source = (
+        policy_source
+        if policy_applicability == "not_applicable"
+        else current_policy_source
+    )
     policy_section = _section(
         status="usable" if not policy_blockers else "limited", requirement=_REQUIREMENTS["accounting_policy"],
-        coverage={"subject_policy_count": policy.get("subject_policy_count") or 0, "filing_source": bool(policy_source)},
-        blockers=policy_blockers, sources=[policy_source] if policy_source else [],
+        coverage={"subject_policy_count": policy.get("subject_policy_count") or 0, "filing_source": bool(current_policy_source)},
+        blockers=policy_blockers,
+        sources=[policy_section_source] if policy_section_source else [],
         applicability=policy_applicability,
         not_applicable_basis=policy.get("not_applicable_basis"),
         requested_year=year,
@@ -576,33 +621,52 @@ def build_acceptance_evidence(
             policy.get("source", {}).get("bsns_year")
             if isinstance(policy.get("source"), dict)
             else None
-        ] if policy_source else [],
+        ] if policy_section_source else [],
     )
 
     kam = result.get("kam_summary") if isinstance(result.get("kam_summary"), dict) else {}
-    kam_source = _source_ref(kam.get("source"))
+    raw_kam_source = kam.get("source")
+    kam_source = _source_ref(raw_kam_source)
+    current_kam_source = (
+        kam_source
+        if _source_matches_year(raw_kam_source, year)
+        else None
+    )
     kam_applicability = kam.get("applicability") or "applicable"
     kam_blockers = []
     if kam_applicability == "applicable":
-        if not kam_source:
-            kam_blockers.append("kam_current_filing_source_missing")
+        if not current_kam_source:
+            kam_blockers.append("kam_current_year_source_missing")
         if kam.get("semantic_complete") is not True:
             kam_blockers.append("kam_semantic_completion_missing")
+    kam_section_source = (
+        kam_source
+        if kam_applicability == "not_applicable"
+        else current_kam_source
+    )
     kam_section = _section(
         status="usable" if not kam_blockers else "limited", requirement=_REQUIREMENTS["kam"],
-        coverage={"current_filing_source": bool(kam_source), "semantic_complete": kam.get("semantic_complete") is True, "row_count": len(kam.get("subject_sections") or [])},
-        blockers=kam_blockers, sources=[kam_source] if kam_source else [], applicability=kam_applicability,
+        coverage={"current_filing_source": bool(current_kam_source), "semantic_complete": kam.get("semantic_complete") is True, "row_count": len(kam.get("subject_sections") or [])},
+        blockers=kam_blockers,
+        sources=[kam_section_source] if kam_section_source else [],
+        applicability=kam_applicability,
         not_applicable_basis=kam.get("not_applicable_basis"),
         requested_year=year,
         source_years=[
             kam.get("source", {}).get("bsns_year")
             if isinstance(kam.get("source"), dict)
             else None
-        ] if kam_source else [],
+        ] if kam_section_source else [],
     )
 
     matters = result.get("audit_report_matter_summary") if isinstance(result.get("audit_report_matter_summary"), dict) else {}
-    matter_source = _source_ref(matters.get("source"))
+    raw_matter_source = matters.get("source")
+    matter_source = _source_ref(raw_matter_source)
+    current_matter_source = (
+        matter_source
+        if _source_matches_year(raw_matter_source, year)
+        else None
+    )
     matter_applicability = matters.get("applicability") or "applicable"
     matter_counts = matters.get("matter_counts") if isinstance(matters.get("matter_counts"), dict) else {}
     zero_classified = bool(matter_counts) and all(
@@ -611,21 +675,28 @@ def build_acceptance_evidence(
     )
     matter_blockers = []
     if matter_applicability == "applicable":
-        if not matter_source:
-            matter_blockers.append("audit_report_source_missing")
+        if not current_matter_source:
+            matter_blockers.append("audit_report_current_year_source_missing")
         if zero_classified and matters.get("classification_complete") is not True:
             matter_blockers.append("zero_matter_classification_incomplete")
+    matter_section_source = (
+        matter_source
+        if matter_applicability == "not_applicable"
+        else current_matter_source
+    )
     matter_section = _section(
         status="usable" if not matter_blockers else "limited", requirement=_REQUIREMENTS["audit_report_matters"],
-        coverage={"current_audit_report_source": bool(matter_source), "classification_complete": matters.get("classification_complete") is True},
-        blockers=matter_blockers, sources=[matter_source] if matter_source else [], applicability=matter_applicability,
+        coverage={"current_audit_report_source": bool(current_matter_source), "classification_complete": matters.get("classification_complete") is True},
+        blockers=matter_blockers,
+        sources=[matter_section_source] if matter_section_source else [],
+        applicability=matter_applicability,
         not_applicable_basis=matters.get("not_applicable_basis"),
         requested_year=year,
         source_years=[
             matters.get("source", {}).get("bsns_year")
             if isinstance(matters.get("source"), dict)
             else None
-        ] if matter_source else [],
+        ] if matter_section_source else [],
     )
 
     section_statuses = {
@@ -730,6 +801,7 @@ def build_audit_acceptance_pack(
         if isinstance(legacy.get("peer_group"), dict)
         else {}
     )
+    legacy_peer_count = legacy_peer_group.get("peer_count")
     selected_peers = (
         selected_cohort.get("peers")
         if isinstance(selected_cohort.get("peers"), list)
@@ -767,7 +839,7 @@ def build_audit_acceptance_pack(
     cohort_identity_verified = (
         bool(selected_peers)
         and legacy_identity_peers is not None
-        and legacy_peer_group.get("peer_count") == selected_cohort.get("peer_count")
+        and legacy_peer_count == selected_cohort.get("peer_count")
         and legacy_peer_group.get("selection_policy")
         == selected_cohort.get("selection_policy")
         and str(legacy_subject.get("corp_code") or "")
@@ -784,6 +856,8 @@ def build_audit_acceptance_pack(
         ]
     )
     legacy_peer_group["selected_peers"] = selected_peers
+    legacy_peer_group["legacy_peer_count"] = legacy_peer_count
+    legacy_peer_group["peer_count"] = len(selected_peers)
     legacy_peer_group["cohort_identity_verified"] = cohort_identity_verified
     if selected_cohort.get("source") and not legacy_peer_group.get("source"):
         legacy_peer_group["source"] = selected_cohort["source"]

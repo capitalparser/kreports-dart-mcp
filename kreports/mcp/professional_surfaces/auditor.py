@@ -210,13 +210,14 @@ def _acceptance_pack(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(result.get("peer_group"), dict)
         else {}
     )
+    displayed_peers = (
+        peer_group.get("selected_peers")
+        if isinstance(peer_group.get("selected_peers"), list)
+        else peer_group.get("sample_peers")
+    )
     peer_rows = _public_peer_rows(
-        (
-            peer_group.get("selected_peers")
-            if isinstance(peer_group.get("selected_peers"), list)
-            else peer_group.get("sample_peers")
-        ),
-        peer_count=peer_group.get("peer_count"),
+        displayed_peers,
+        peer_count=len(displayed_peers) if isinstance(displayed_peers, list) else 0,
     )
     if peer_rows:
         pack["tables"].append(_table(

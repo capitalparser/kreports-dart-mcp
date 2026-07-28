@@ -12,7 +12,7 @@ import math
 import re
 from typing import Any
 
-from kreports.analysis.evidence import parent_rcept_no
+from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
 from kreports.mcp.contracts import build_answer_envelope
 from kreports.mcp.professional_surfaces import PACK_BUILDERS as PROFESSIONAL_PACK_BUILDERS
 
@@ -269,12 +269,31 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
     meta = result.get("_meta")
     if isinstance(meta, dict):
         add(_source_from_rcept_no(meta.get("source_rcept_no")))
+    def add_reference(source: object) -> None:
+        if not isinstance(source, dict):
+            return
+        reference = evidence_reference_fields({
+            **source,
+            "source_label": source.get("source_label") or source.get("label"),
+            "source_url": source.get("source_url") or source.get("url"),
+        })
+        if not reference:
+            return
+        receipt_source = _source_from_rcept_no(
+            reference.get("rcept_no"),
+            label=reference.get("source_label"),
+        )
+        add(receipt_source or {
+            "label": reference["source_label"],
+            "url": reference["source_url"],
+        })
+
     for fact in result.get("confirmed_facts") or []:
         if not isinstance(fact, dict):
             continue
-        source = fact.get("source")
-        if isinstance(source, dict):
-            add(_source_from_rcept_no(source.get("rcept_no"), label=source.get("report_nm") or source.get("section_title")))
+        add_reference(fact.get("source"))
+    for source in result.get("sources") or []:
+        add_reference(source)
     for event in result.get("events") or []:
         if isinstance(event, dict):
             add(_source_from_rcept_no(event.get("rcept_no"), label=event.get("event_title") or event.get("report_nm")))
