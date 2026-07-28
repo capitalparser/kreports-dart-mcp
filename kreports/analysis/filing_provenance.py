@@ -44,6 +44,7 @@ def annual_filing_source(
     *,
     source_table: str,
     fs_div: str | None = None,
+    _fact_verified: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve the latest valid same-company, same-year annual filing.
 
@@ -75,9 +76,15 @@ def annual_filing_source(
     fact_query = query_template.format(fs_div_clause=fs_div_clause)
     annual_year_pattern = f"%사업보고서 ({normalized_year}.%"
     with _engine_module.engine.connect() as conn:
-        fact_row = conn.execute(text(fact_query), params).mappings().first()
-        if not fact_row:
-            return None
+        if _fact_verified:
+            # Callers that already obtained the exact bounded fact row can
+            # preserve this helper's receipt-validation contract without an
+            # otherwise duplicate source-table query.
+            fact_row: dict[str, Any] = {"fs_div": fs_div}
+        else:
+            fact_row = conn.execute(text(fact_query), params).mappings().first()
+            if not fact_row:
+                return None
         disclosure_rows = conn.execute(
             text("""
                 SELECT rcept_no, corp_code, corp_name, report_nm

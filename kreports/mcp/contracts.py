@@ -377,6 +377,13 @@ def _has_audit_hours_proxy_result(result: dict[str, Any]) -> bool:
     )
 
 
+def _has_audit_effort_input_result(result: dict[str, Any]) -> bool:
+    return _has_result_rows(result, "rows") and any(
+        isinstance(row, dict) and row.get("input_status") in {"usable", "limited"}
+        for row in result.get("rows") or []
+    )
+
+
 def _has_dcf_model_result(result: dict[str, Any]) -> bool:
     return (
         _has_result_rows(result, "actuals")
@@ -457,6 +464,7 @@ _TOOL_PURPOSE_PREDICATES: dict[str, ToolPurposePredicate] = {
     ),
     "compare_to_industry_multi": _has_industry_multi_result,
     "compare_peer_audit_fees": _has_audit_fee_result,
+    "prepare_standard_audit_hours_inputs": _has_audit_effort_input_result,
     "compare_peer_risk_profile": _has_risk_profile_result,
     "compare_peer_accounting_policies": _has_peer_policy_result,
     "compare_peer_kam_topics": _has_kam_topic_result,

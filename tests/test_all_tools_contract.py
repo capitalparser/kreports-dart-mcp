@@ -21,6 +21,7 @@ EXPECTED_TOOL_NAMES = (
     "select_peer_group",
     "compare_to_industry_multi",
     "compare_peer_audit_fees",
+    "prepare_standard_audit_hours_inputs",
     "compare_peer_risk_profile",
     "compare_peer_accounting_policies",
     "compare_peer_kam_topics",
@@ -80,7 +81,7 @@ def _fixture_arguments(tool_name, model) -> dict:
     return values
 
 
-def test_all_tool_contract_is_derived_from_catalog_and_covers_all_32_tools(
+def test_all_tool_contract_is_derived_from_catalog_and_covers_all_33_tools(
     temp_engine,
 ):
     from kreports.release_artifact import (
@@ -90,13 +91,13 @@ def test_all_tool_contract_is_derived_from_catalog_and_covers_all_32_tools(
 
     result = run_all_tool_contract()
 
-    assert result == {"passed": True, "checks": 32}
+    assert result == {"passed": True, "checks": 33}
     assert FROZEN_TOOL_WIRE_SHA256 == (
-        "055f54993bf45f2e4a1388642871d09c1e2f45fc0b5fde1e83228bb910b38339"
+        "98df19f2f41c3c787fa8509583092b0cba2ba819e96cd5cd20ce048be60ed6e4"
     )
 
 
-def test_all_32_catalog_tools_have_strict_inputs_and_answer_envelopes(
+def test_all_33_catalog_tools_have_strict_inputs_and_answer_envelopes(
     temp_engine,
 ):
     from sqlalchemy.orm import Session
@@ -190,7 +191,7 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
             {
                 "tool_contract": {
                     "version": "1.0",
-                    "tool_count": 32,
+                    "tool_count": 33,
                 }
             }
         ),

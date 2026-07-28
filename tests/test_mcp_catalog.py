@@ -25,6 +25,7 @@ EXPECTED_TOOL_NAMES = [
     "select_peer_group",
     "compare_to_industry_multi",
     "compare_peer_audit_fees",
+    "prepare_standard_audit_hours_inputs",
     "compare_peer_risk_profile",
     "compare_peer_accounting_policies",
     "compare_peer_kam_topics",
@@ -45,7 +46,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "055f54993bf45f2e4a1388642871d09c1e2f45fc0b5fde1e83228bb910b38339"
+EXPECTED_INTERFACE_SHA256 = "98df19f2f41c3c787fa8509583092b0cba2ba819e96cd5cd20ce048be60ed6e4"
 
 
 MINIMAL_ARGUMENTS = {
@@ -65,6 +66,7 @@ MINIMAL_ARGUMENTS = {
     "select_peer_group": {"company": "__task7_no_such_company__"},
     "compare_to_industry_multi": {"company": "__task7_no_such_company__"},
     "compare_peer_audit_fees": {"company": "__task7_no_such_company__"},
+    "prepare_standard_audit_hours_inputs": {"company": "__task7_no_such_company__"},
     "compare_peer_risk_profile": {"company": "__task7_no_such_company__"},
     "compare_peer_accounting_policies": {"company": "__task7_no_such_company__"},
     "compare_peer_kam_topics": {"company": "__task7_no_such_company__"},
@@ -96,7 +98,7 @@ def test_catalog_is_complete_ordered_and_immutable():
 
     assert list(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
     assert [tool.name for tool in list_mcp_tools()] == EXPECTED_TOOL_NAMES
-    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 32
+    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 33
     assert all(
         spec.input_model.model_config.get("extra") == "forbid"
         for spec in TOOL_CATALOG.values()
@@ -105,7 +107,7 @@ def test_catalog_is_complete_ordered_and_immutable():
         TOOL_CATALOG["search_company"].name = "changed"
 
 
-def test_generated_tool_interface_keeps_the_approved_32_tool_snapshot_hash():
+def test_generated_tool_interface_keeps_the_approved_33_tool_snapshot_hash():
     from kreports.mcp.dispatch import list_mcp_tools
 
     snapshot = []

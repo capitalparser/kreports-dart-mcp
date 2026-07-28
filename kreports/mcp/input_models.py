@@ -1,4 +1,4 @@
-"""Strict typed arguments for the 32 public MCP tools."""
+"""Strict typed arguments for the 33 public MCP tools."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
@@ -182,6 +182,14 @@ class ComparePeerAuditFeesInput(ToolInput):
     peer_limit: int = Field(30, ge=1, le=200)
     fs_strategy: FsStrategy = "auto"
     size_bucket_decade: float | None = Field(None, ge=0.5, le=3.0)
+
+
+class PrepareStandardAuditHoursInputsInput(ToolInput):
+    company: str = Field(description="corp_code / 종목코드 / 회사명")
+    year: Year = 2025
+    fs_strategy: FsStrategy = Field(
+        "auto", description="auto면 CFS 우선, 없으면 OFS 한 기준으로 최근 3개년을 준비한다.",
+    )
 
 
 class ComparePeerRiskProfileInput(ToolInput):

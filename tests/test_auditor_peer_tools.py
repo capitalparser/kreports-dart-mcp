@@ -27,7 +27,19 @@ from kreports.db.models import (
     KamItem,
     SourceDocument,
 )
+from kreports.db.engine import get_session
 from kreports.mcp.tools import call_tool
+
+
+def test_prepare_standard_audit_hours_inputs_mcp_dispatch(temp_engine):
+    """The public handler preserves the non-calculation audit-effort contract."""
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+
+    out = json.loads(call_tool("prepare_standard_audit_hours_inputs", {"company": "005930"}))
+
+    assert out["_meta"]["tool"] == "prepare_standard_audit_hours_inputs"
+    assert out["standard_audit_hours_assessment"] == "not_assessed"
 
 
 def test_compare_peer_audit_fees_real_db_shape():
