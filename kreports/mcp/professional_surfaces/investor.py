@@ -325,6 +325,99 @@ def _investor_signals_pack(result: dict[str, Any]) -> dict[str, Any]:
     return pack
 
 
+def _dcf_candidates_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _build_dcf_pack
+
+    pack = _build_dcf_pack(result)
+    blockers = [
+        blocker for blocker in result.get("valuation_blockers") or []
+        if isinstance(blocker, dict)
+    ]
+    if blockers:
+        pack["tables"].append(_table(
+            "valuation_blockers",
+            "가치평가 준비도 차단 요인",
+            [
+                ("field", "필수 입력", None), ("kind", "차단 유형", None),
+                ("impact", "영향", None), ("owner", "담당", None),
+                ("next_action", "다음 조치", None),
+            ], blockers,
+        ))
+    pack["summary"]["status"] = str(
+        result.get("valuation_readiness") or "blocked"
+    )
+    return pack
+
+
+def _dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _build_dcf_model_pack
+
+    return _build_dcf_model_pack(result)
+
+
+def _quality_of_earnings_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _build_quality_pack
+
+    pack = _build_quality_pack(result)
+    summary = result.get("audit_matter_summary") or {}
+    groups = [
+        {
+            "year": group.get("year"),
+            "matter_type": group.get("matter_type"),
+            "severity": group.get("severity"),
+            "section_count": group.get("section_count"),
+            "rcept_no": (group.get("source") or {}).get("rcept_no"),
+        }
+        for group in summary.get("groups") or []
+        if isinstance(group, dict)
+    ]
+    if groups:
+        pack["tables"].append(_table(
+            "audit_matter_groups",
+            "감사보고서 matter 수신처별 집계",
+            [
+                ("year", "사업연도", None), ("matter_type", "matter 유형", None),
+                ("severity", "강도", None), ("section_count", "문단 수", "건"),
+                ("rcept_no", "감사보고서 접수번호", None),
+            ], groups,
+        ))
+        known = {str(source.get("rcept_no") or "") for source in pack["sources"]}
+        for group in groups:
+            receipt = str(group.get("rcept_no") or "")
+            if not receipt or receipt in known:
+                continue
+            known.add(receipt)
+            pack["sources"].append({
+                "label": "감사보고서 matter",
+                "rcept_no": receipt,
+                "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}",
+            })
+    return pack
+
+
+def _render_dcf_candidates(result: dict[str, Any]) -> str:
+    return "\n".join([
+        f"DCF 입력 후보 상태: {result.get('candidate_status') or _status(result)}",
+        f"가치평가 준비도: {result.get('valuation_readiness') or 'blocked'}",
+    ])
+
+
+def _render_dcf_model(result: dict[str, Any]) -> str:
+    if result.get("enterprise_value") is None:
+        return "산출 불가: 필수 입력 또는 공시 실제값이 부족하여 기업가치를 계산하지 않았습니다."
+    from kreports.mcp.renderers import _render_dcf_model_pack
+
+    return _render_dcf_model_pack(result)
+
+
+def _render_quality_of_earnings(result: dict[str, Any]) -> str:
+    summary = result.get("audit_matter_summary") or {}
+    return (
+        f"감사보고서 matter: 고유 접수번호 {summary.get('unique_receipt_count', 0)}건, "
+        f"문단 {summary.get('section_count', 0)}건입니다."
+    )
+
+
 def _disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _build_disclosure_events_pack
 
@@ -407,6 +500,9 @@ PACK_BUILDERS: dict[str, PackBuilder] = {
     "compare_to_industry_multi": _peer_benchmark_pack,
     "get_investor_signals": _investor_signals_pack,
     "search_disclosure_events": _disclosure_events_pack,
+    "get_dcf_input_candidates": _dcf_candidates_pack,
+    "build_dcf_model_pack": _dcf_model_pack,
+    "get_quality_of_earnings_pack": _quality_of_earnings_pack,
 }
 DETAIL_RENDERERS: dict[str, DetailRenderer] = {
     "get_financial_snapshot": _render_financial_snapshot,
@@ -414,4 +510,7 @@ DETAIL_RENDERERS: dict[str, DetailRenderer] = {
     "compare_to_industry_multi": _render_peer_benchmark,
     "get_investor_signals": _render_investor_signals,
     "search_disclosure_events": _render_disclosure_events,
+    "get_dcf_input_candidates": _render_dcf_candidates,
+    "build_dcf_model_pack": _render_dcf_model,
+    "get_quality_of_earnings_pack": _render_quality_of_earnings,
 }

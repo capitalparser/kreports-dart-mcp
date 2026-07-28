@@ -1599,6 +1599,18 @@ def dcf_result_to_dict(result: DcfValuationResult) -> dict[str, Any]:
         ),
         "formula": "equity_value = enterprise_value - debt + cash",
     }
+    calculation_status = (
+        "calculated" if payload["enterprise_value"] is not None else "unavailable"
+    )
+    payload["calculation_status"] = calculation_status
+    payload["domain_verdict"] = (
+        "reviewable_model"
+        if calculation_status == "calculated"
+        and result.confidence == "complete_equity"
+        else "partial_model"
+        if calculation_status == "calculated"
+        else "calculation_unavailable"
+    )
     payload["formulas"] = {
         "ufcf": UFCF_FORMULA,
         "terminal_value": TERMINAL_FORMULA,

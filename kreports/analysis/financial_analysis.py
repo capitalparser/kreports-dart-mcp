@@ -991,6 +991,9 @@ def build_dcf_model_pack(
             "error": "DCF 읽기 전용 소스를 사용할 수 없습니다.",
             "error_code": "dcf_source_unavailable",
             "company": str(company)[:MAX_COMPANY_LENGTH],
+            "enterprise_value": None,
+            "calculation_status": "unavailable",
+            "domain_verdict": "calculation_unavailable",
             "data_quality": {
                 "status": "missing",
                 "source": "financial_facts_compact",
@@ -1032,6 +1035,22 @@ def build_dcf_model_pack(
     )
     payload = dcf_result_to_dict(result)
     payload["subject"] = subject
+    source_account_fields = {
+        "revenue", "operating_profit", "depreciation_amortization",
+        "purchase_ppe", "purchase_intangible_assets", "trade_receivables",
+        "inventories", "trade_payables", "cash_and_equivalents",
+        "interest_bearing_debt",
+    }
+    payload["missing_accounts"] = [
+        {
+            "field": field,
+            "year": scenario.base_year,
+            "fs_div": scenario.fs_div,
+            "basis": "requested_dcf_source_actual",
+        }
+        for field in result.missing_inputs
+        if field in source_account_fields
+    ]
     payload["data_quality"] = {
         "status": (
             "usable"
@@ -1057,6 +1076,7 @@ def build_dcf_model_pack(
             else "unavailable"
         ),
         "missing_fields": list(result.missing_inputs),
+        "missing_accounts": list(payload["missing_accounts"]),
         "limitations": list(result.limitations),
     }
     if source.facts:

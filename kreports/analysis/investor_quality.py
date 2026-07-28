@@ -5,6 +5,7 @@ from statistics import pstdev
 
 from sqlalchemy import bindparam, text
 
+from kreports.analysis.evidence import dart_filing_url, parent_rcept_no
 from kreports.db.engine import engine
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS, metric_output_key
 
@@ -43,6 +44,66 @@ def _financial_series(
             item = by_year.setdefault(int(row["bsns_year"]), {"bsns_year": int(row["bsns_year"])})
             item[metric_output_key(row["metric_key"])] = row["amount"]
     return [by_year[year] for year in sorted(by_year)]
+
+
+def _normalized_excerpt(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _audit_matter_summary(company: str, start_year: int, end_year: int) -> dict:
+    """Group audit-report matters by filing receipt, not by latest financial filing."""
+    empty = {
+        "unique_receipt_count": 0,
+        "section_count": 0,
+        "dedupe_basis": "parent_rcept_no + matter_type + normalized_excerpt",
+        "groups": [],
+    }
+    if not company:
+        return empty
+    stmt = text("""
+        SELECT rcept_no, bsns_year, matter_type, severity_hint, matter_text
+        FROM audit_matter_items
+        WHERE corp_code=:corp_code
+          AND bsns_year BETWEEN :start_year AND :end_year
+        ORDER BY bsns_year, rcept_no, matter_type, section_ordinal
+    """)
+    try:
+        with engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(stmt, {
+                "corp_code": company,
+                "start_year": int(start_year),
+                "end_year": int(end_year),
+            }).mappings()]
+    except Exception:
+        return empty
+    grouped: dict[tuple[str | None, str, str], dict] = {}
+    for row in rows:
+        receipt = parent_rcept_no(str(row.get("rcept_no") or ""))
+        excerpt = _normalized_excerpt(str(row.get("matter_text") or ""))
+        key = (receipt, str(row.get("matter_type") or ""), excerpt)
+        group = grouped.setdefault(key, {
+            "year": row.get("bsns_year"),
+            "matter_type": row.get("matter_type"),
+            "severity": row.get("severity_hint"),
+            "excerpt": str(row.get("matter_text") or "")[:500],
+            "section_count": 0,
+            "source": {
+                "rcept_no": receipt,
+                "url": dart_filing_url(receipt),
+                "source_type": "audit_report",
+            },
+        })
+        group["section_count"] += 1
+    groups = list(grouped.values())
+    return {
+        "unique_receipt_count": len({
+            group["source"]["rcept_no"] for group in groups
+            if group["source"]["rcept_no"] is not None
+        }),
+        "section_count": len(rows),
+        "dedupe_basis": "parent_rcept_no + matter_type + normalized_excerpt",
+        "groups": groups,
+    }
 
 
 def _audit_matter_flags(company: str, start_year: int, end_year: int) -> list[dict]:
@@ -139,6 +200,7 @@ def quality_of_earnings_pack(
             "value": margin_volatility,
             "meaning": "영업이익률 변동성이 커서 정상화 마진 판단에 주의가 필요합니다.",
         })
+    matter_summary = _audit_matter_summary(company, start_year, end_year)
     matter_flags = _audit_matter_flags(company, start_year, end_year)
     if any(row.get("severity_hint") in ("high", "warning") for row in matter_flags):
         signals.append({
@@ -165,6 +227,7 @@ def quality_of_earnings_pack(
         },
         "evidence": evidence,
         "audit_matter_flags": matter_flags,
+        "audit_matter_summary": matter_summary,
         "data_quality": {
             "status": "usable" if len(series) >= 3 else "limited",
             "source": "financial_facts_compact",
