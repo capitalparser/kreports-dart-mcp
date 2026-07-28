@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from sqlalchemy import event
 
 from kreports.db.models import AuditFee, Company, Disclosure, Financial
@@ -115,6 +116,91 @@ def test_prepare_standard_audit_hours_inputs_uses_one_financial_statement_basis(
     assert [row["total_assets"] for row in result["rows"]] == [100_000_000_000, 90_000_000_000, 80_000_000_000]
 
 
+@pytest.mark.parametrize(
+    ("complete_basis", "partial_basis", "expected_basis"),
+    [
+        ("OFS", "CFS", "OFS"),
+        ("CFS", "OFS", "CFS"),
+    ],
+)
+def test_prepare_standard_audit_hours_inputs_auto_uses_maximal_three_year_coverage(
+    temp_engine,
+    complete_basis,
+    partial_basis,
+    expected_basis,
+):
+    """Auto must prefer coherent coverage and use CFS only as a tie-breaker."""
+    from kreports.db.engine import get_session
+
+    _seed_years(temp_engine, fs_div=complete_basis, include_ofs=complete_basis == "CFS")
+    with get_session() as session:
+        if complete_basis == "OFS":
+            for year in (2025, 2024):
+                session.add(Financial(
+                    corp_code="00126380",
+                    year=year,
+                    quarter=4,
+                    fs_div=partial_basis,
+                    total_assets=50_000_000_000,
+                    revenue=30_000_000_000,
+                ))
+        else:
+            session.query(Financial).filter(
+                Financial.fs_div == partial_basis,
+                Financial.year.in_((2024, 2023)),
+            ).delete(synchronize_session=False)
+
+    result = _prepare("00126380", fs_strategy="auto")
+
+    assert result["fs_div_used"] == expected_basis
+    assert [row["fs_div"] for row in result["rows"]] == [expected_basis] * 3
+    assert [row["input_status"] for row in result["rows"]] == ["usable"] * 3
+
+
+@pytest.mark.parametrize(
+    "receipt_case",
+    ["wrong_company", "wrong_year", "nonexistent", "malformed"],
+)
+def test_prepare_standard_audit_hours_inputs_rejects_unproven_audit_receipts(
+    temp_engine,
+    receipt_case,
+):
+    """An audit receipt must resolve to the subject's annual report for that year."""
+    from kreports.db.engine import get_session
+
+    _seed_years(temp_engine)
+    replacement = {
+        "wrong_year": "20250318000002",
+        "nonexistent": "20990318000002",
+        "malformed": "not-a-dart-receipt",
+    }.get(receipt_case)
+    with get_session() as session:
+        if receipt_case == "wrong_company":
+            replacement = "20260319000002"
+            session.add(Company(corp_code="00999999", corp_name="다른회사"))
+            session.add(Disclosure(
+                rcept_no=replacement,
+                corp_code="00999999",
+                corp_name="다른회사",
+                disc_date=date(2026, 3, 19),
+                disc_type="A",
+                report_nm="사업보고서 (2025.12)",
+                flr_nm="다른회사",
+            ))
+        row = session.query(AuditFee).filter_by(
+            corp_code="00126380",
+            bsns_year=2025,
+        ).one()
+        row.source_rcept_no = replacement
+
+    result = _prepare("00126380")
+    current = result["rows"][0]
+
+    assert current["audit_source"] is None
+    assert current["input_status"] == "limited"
+    assert "uncitable_audit_source" in current["provenance_gaps"]
+
+
 def test_prepare_standard_audit_hours_inputs_never_combines_actual_fee_and_contract_hours(temp_engine):
     """Typed observations from different bases cannot become one apparent observation."""
     _seed_years(temp_engine, actual_and_contract=True)
@@ -174,7 +260,12 @@ def test_prepare_standard_audit_hours_inputs_public_surface_starts_with_non_calc
     result = legacy_result("prepare_standard_audit_hours_inputs", {"company": "005930"})
 
     assert result["domain_verdict"] == "not_assessed"
-    assert "표준감사시간 결론: 산정하지 않음" in result["answer"]
+    assert result["answer"].splitlines()[:4] == [
+        "판정:",
+        "- usable",
+        "",
+        "표준감사시간 결론: 산정하지 않음",
+    ]
     table = result["answer_pack"]["tables"][0]
     assert [column["label"] for column in table["columns"]] == [
         "연도", "FS", "총자산(억원)", "매출(억원)", "감사보수(백만원)",

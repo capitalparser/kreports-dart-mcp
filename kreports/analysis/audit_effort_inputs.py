@@ -11,7 +11,7 @@ from sqlalchemy import inspect, text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis.evidence import parent_rcept_no
-from kreports.analysis.filing_provenance import annual_filing_source
+from kreports.analysis.filing_provenance import annual_filing_sources
 
 
 OPTIONAL_AUDIT_COLUMNS = (
@@ -67,6 +67,53 @@ def _quality_status(rows: list[dict[str, Any]]) -> str:
     return "usable"
 
 
+def _audit_source_index(
+    conn,
+    *,
+    corp_code: str,
+    years: list[int],
+) -> dict[tuple[int, str], dict[str, Any]]:
+    """Resolve subject annual-report receipts once for all audit rows."""
+    params: dict[str, Any] = {
+        "corp_code": corp_code,
+        "row_limit": len(years) * 16,
+    }
+    year_clauses = []
+    for index, candidate_year in enumerate(years):
+        params[f"annual_year_pattern_{index}"] = (
+            f"%사업보고서 ({candidate_year}.%"
+        )
+        year_clauses.append(
+            f"report_nm LIKE :annual_year_pattern_{index}"
+        )
+    rows = conn.execute(text(f"""
+        SELECT rcept_no, corp_code, corp_name, report_nm
+        FROM disclosures
+        WHERE corp_code=:corp_code
+          AND ({" OR ".join(year_clauses)})
+        ORDER BY disc_date DESC, rcept_no DESC
+        LIMIT :row_limit
+    """), params).mappings().all()
+
+    sources: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in rows:
+        receipt = parent_rcept_no(row.get("rcept_no"))
+        report_name = str(row.get("report_nm") or "")
+        if not receipt:
+            continue
+        for candidate_year in years:
+            if f"사업보고서 ({candidate_year}." not in report_name:
+                continue
+            source = _source_for_receipt({
+                **dict(row),
+                "bsns_year": candidate_year,
+            }, section_title="감사보수·감사시간", source_table="audit_fees")
+            if source:
+                sources[(candidate_year, receipt)] = source
+            break
+    return sources
+
+
 def prepare_standard_audit_hours_inputs(
     company: str,
     *,
@@ -107,6 +154,11 @@ def prepare_standard_audit_hours_inputs(
     with _engine_module.engine.connect() as conn:
         financials = [dict(row) for row in conn.execute(financial_sql, params).mappings()]
         audits = [dict(row) for row in conn.execute(audit_sql, params).mappings()]
+        audit_sources = (
+            _audit_source_index(conn, corp_code=company, years=years)
+            if any(parent_rcept_no(row.get("source_rcept_no")) for row in audits)
+            else {}
+        )
         if not financials:
             subject_row = conn.execute(text("""
                 SELECT corp_code, corp_name, stock_code, market, induty_code
@@ -115,26 +167,28 @@ def prepare_standard_audit_hours_inputs(
         else:
             subject_row = None
 
-    available_fs = {row["fs_div"] for row in financials}
+    coverage_by_fs = {
+        candidate_fs: len({
+            row["year"]
+            for row in financials
+            if row["fs_div"] == candidate_fs
+        })
+        for candidate_fs in ("CFS", "OFS")
+    }
     fs_div_used = (
         fs_strategy if fs_strategy != "auto"
-        else "CFS" if "CFS" in available_fs else "OFS" if "OFS" in available_fs else "CFS"
+        else max(("CFS", "OFS"), key=lambda item: (coverage_by_fs[item], item == "CFS"))
     )
     finance_by_year = {
         row["year"]: row for row in financials if row["fs_div"] == fs_div_used
     }
     audit_by_year = {row["bsns_year"]: row for row in audits}
-    annual_by_year = {
-        candidate_year: annual_filing_source(
-            company,
-            candidate_year,
-            source_table="financials",
-            fs_div=fs_div_used,
-            _fact_verified=True,
-        )
-        for candidate_year in years
-        if candidate_year in finance_by_year
-    }
+    annual_by_year = annual_filing_sources(
+        company,
+        years,
+        source_table="financials",
+        fs_div=fs_div_used,
+    )
     subject_source = financials[0] if financials else dict(subject_row or {})
     subject = {
         "corp_code": company,
@@ -151,11 +205,12 @@ def prepare_standard_audit_hours_inputs(
         financial_source = None
         if financial:
             financial_source = annual_by_year.get(candidate_year)
-        audit_source = _source_for_receipt({
-            "rcept_no": audit.get("source_rcept_no"), "corp_code": company,
-            "corp_name": subject["corp_name"], "bsns_year": candidate_year,
-            "report_nm": audit.get("source_period") or "감사보수·감사시간 공시",
-        }, section_title="감사보수·감사시간", source_table="audit_fees") if audit else None
+        audit_receipt = parent_rcept_no(audit.get("source_rcept_no"))
+        audit_source = (
+            audit_sources.get((candidate_year, audit_receipt))
+            if audit_receipt
+            else None
+        )
         missing_fields = [
             field for field, value in (
                 ("total_assets", financial.get("total_assets")),

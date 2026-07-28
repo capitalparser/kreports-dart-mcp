@@ -786,12 +786,24 @@ def test_section_statuses_are_preserved_across_envelope_pack_and_visualization()
     assert normalized["answer_pack"]["data_quality"]["section_statuses"] == expected
 
 
-def test_empty_professional_surface_registries_import_without_claiming_routes():
+def test_audit_effort_surface_registry_claims_only_implemented_routes():
     from kreports.mcp.professional_surfaces import (
+        CONCLUSION_OVERRIDES,
         DETAIL_RENDERERS,
         PACK_BUILDERS,
     )
     from kreports.mcp.professional_surfaces import audit_effort, auditor, investor
 
-    assert PACK_BUILDERS == DETAIL_RENDERERS == {}
-    assert audit_effort.PACK_BUILDERS == auditor.PACK_BUILDERS == investor.PACK_BUILDERS == {}
+    assert set(PACK_BUILDERS) == {
+        "prepare_standard_audit_hours_inputs",
+        "compare_peer_audit_fees",
+        "estimate_audit_hours_proxy",
+    }
+    assert set(DETAIL_RENDERERS) == {"prepare_standard_audit_hours_inputs"}
+    assert CONCLUSION_OVERRIDES == {
+        "prepare_standard_audit_hours_inputs": "표준감사시간 결론: 산정하지 않음",
+    }
+    assert PACK_BUILDERS == audit_effort.PACK_BUILDERS
+    assert DETAIL_RENDERERS == audit_effort.DETAIL_RENDERERS
+    assert auditor.PACK_BUILDERS == auditor.DETAIL_RENDERERS == {}
+    assert investor.PACK_BUILDERS == investor.DETAIL_RENDERERS == {}

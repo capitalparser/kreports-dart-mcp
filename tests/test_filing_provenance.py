@@ -172,3 +172,37 @@ def test_annual_filing_source_skips_invalid_newer_receipts_for_latest_valid_rece
 
     assert source is not None
     assert source["rcept_no"] == "20260301002820"
+
+
+def test_annual_filing_sources_require_matching_fact_identity_and_basis(temp_engine):
+    """Batch provenance cannot cite a filing without the requested fact basis."""
+    from kreports.analysis.filing_provenance import annual_filing_sources
+    from kreports.db.engine import get_session
+    from kreports.db.models import Financial
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.add(Financial(
+            corp_code="00126380",
+            year=2025,
+            quarter=4,
+            fs_div="OFS",
+            total_assets=100,
+            revenue=50,
+        ))
+        session.add(Disclosure(
+            rcept_no="20260301002820",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2026, 3, 1),
+            disc_type="A",
+            report_nm="사업보고서 (2025.12)",
+            flr_nm="삼성전자",
+        ))
+
+    assert annual_filing_sources(
+        "00126380",
+        [2025],
+        source_table="financials",
+        fs_div="CFS",
+    ) == {}

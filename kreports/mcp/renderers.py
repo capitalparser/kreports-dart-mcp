@@ -13,6 +13,9 @@ from kreports.mcp.contracts import (
     public_domain_verdict_label,
 )
 from kreports.mcp.professional_surfaces import DETAIL_RENDERERS as PROFESSIONAL_DETAIL_RENDERERS
+from kreports.mcp.professional_surfaces import (
+    CONCLUSION_OVERRIDES as PROFESSIONAL_CONCLUSION_OVERRIDES,
+)
 
 
 _PUBLIC_SOURCE_LABELS = {
@@ -1029,11 +1032,19 @@ def _render_generic(tool_name: str, result: dict) -> str:
 
 def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | None = None) -> str:
     """Render the stable V1 prose sections from an AnswerEnvelopeV1."""
-    lines = [
-        "판정:", f"- {envelope.verdict}", "", "업무 결론:",
-        f"- {public_domain_verdict_label(envelope.tool_name, envelope.domain_verdict)}", "",
-        "확인된 내용 (공시에서 확인되는 내용):",
-    ]
+    conclusion_override = PROFESSIONAL_CONCLUSION_OVERRIDES.get(
+        envelope.tool_name,
+    )
+    lines = ["판정:", f"- {envelope.verdict}", ""]
+    if conclusion_override:
+        lines.extend([conclusion_override, ""])
+    else:
+        lines.extend([
+            "업무 결론:",
+            f"- {public_domain_verdict_label(envelope.tool_name, envelope.domain_verdict)}",
+            "",
+        ])
+    lines.append("확인된 내용 (공시에서 확인되는 내용):")
     if envelope.confirmed_facts:
         for fact in _dedupe_confirmed_facts_for_render(envelope.confirmed_facts)[:6]:
             statement = str(fact.get("statement") or "").strip()
