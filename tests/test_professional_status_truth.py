@@ -71,6 +71,59 @@ def test_registered_business_records_keep_a_usable_status():
     assert out["answer_pack"]["summary"]["status"] == "usable"
 
 
+@pytest.mark.parametrize("payload", [
+    {"items": ["x"]},
+    {"inputs": {"debug": "x"}},
+    {"results": {"debug": "x"}},
+    {"assumptions": ["x"]},
+])
+def test_generic_payload_keys_cannot_keep_unknown_or_unrelated_tool_usable(payload):
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("get_business_overview", {
+        **payload,
+        "data_quality": {"status": "usable"},
+    })
+    envelope = build_answer_envelope("get_business_overview", out)
+
+    assert out["quality_status"] == "missing"
+    assert out["data_quality"]["status"] == envelope.verdict == "missing"
+    assert out["answer_pack"]["status"] == "missing"
+    assert "missing" in read_resource(out["answer_pack"]["resource_uri"])["text"]
+
+
+def test_other_tools_registered_key_cannot_be_used_by_this_tool():
+    out = enrich_answer_response("get_business_overview", {
+        "candidate_assumptions": {"revenue_growth": {"value": 0.1}},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "missing"
+
+
+@pytest.mark.parametrize(("tool_name", "payload"), [
+    ("get_subsidiary_auditors", {"subsidiaries": [{"name": "B"}]}),
+    ("get_quality_of_earnings_pack", {"metrics": {"cash_conversion": 0.9}}),
+    ("get_dcf_input_candidates", {"candidate_assumptions": {"wacc": {"value": 0.1}}}),
+    ("search_dataset", {"companies": [{"corp_name": "A", "records": [{"year": 2025}]}]}),
+])
+def test_tool_registered_purpose_payloads_remain_usable(tool_name, payload):
+    out = enrich_answer_response(tool_name, {
+        **payload,
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "usable"
+
+
+def test_purpose_registry_covers_the_public_tool_catalog_exactly():
+    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.contracts import _TOOL_PURPOSE_FIELDS
+
+    assert set(_TOOL_PURPOSE_FIELDS) == set(TOOL_CATALOG)
+
+
 @pytest.mark.parametrize("renderer_result", [None, ""])
 def test_renderer_empty_result_replaces_injected_raw_answer(renderer_result, monkeypatch):
     import kreports.mcp.renderers as renderers

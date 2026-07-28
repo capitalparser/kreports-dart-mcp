@@ -12,19 +12,42 @@ _CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
 _QUALITY_STATUSES = _CANONICAL_STATUSES
 _ADAPTER_VERSION = "legacy-result-adapter"
 
-_AFFIRMATIVE_LIST_FIELDS = {
-    "confirmed_facts", "evidence", "rows", "records", "history", "sections",
-    "events", "items", "companies", "subsidiaries", "signals", "changed_items",
-    "historical_actuals", "forecast_rows", "cash_flows", "assumptions",
-}
-_AFFIRMATIVE_MAPPING_FIELDS = {
-    "subject_metrics", "benchmarks", "candidate_assumptions", "results",
-    "consolidated_totals", "financials", "metrics", "inputs", "assumptions",
-    "cohort_metadata", "qsc_criterion", "score_breakdown", "items",
-}
-_AFFIRMATIVE_COUNT_FIELDS = {
-    "count", "total", "total_records", "total_companies", "section_count",
-    "peer_count", "item_count", "total_events",
+# Each public catalog tool has its own result-shape evidence.  Generic field
+# names (notably items/results/inputs/assumptions) are deliberately scoped to
+# the tools that actually produce them, rather than trusted globally.
+_TOOL_PURPOSE_FIELDS: dict[str, dict[str, frozenset[str]]] = {
+    "search_company": {"lists": frozenset({"results"}), "counts": frozenset({"count"})},
+    "get_financial_snapshot": {"lists": frozenset({"rows"}), "counts": frozenset({"row_count"})},
+    "score_going_concern": {"lists": frozenset({"factors"}), "maps": frozenset({"scorecard"})},
+    "detect_restatement": {"lists": frozenset({"restatements"}), "counts": frozenset({"count"})},
+    "get_accounting_policy": {"maps": frozenset({"items"}), "counts": frozenset({"item_count"})},
+    "get_audit_history": {"lists": frozenset({"history"}), "counts": frozenset({"count"})},
+    "get_subsidiary_auditors": {"lists": frozenset({"subsidiaries"}), "maps": frozenset({"consolidated_totals"}), "counts": frozenset({"count", "total"})},
+    "compare_to_industry": {"lists": frozenset({"peers"}), "maps": frozenset({"distribution", "subject_metric"})},
+    "get_business_overview": {"lists": frozenset({"insights"}), "maps": frozenset({"sections"})},
+    "get_investor_signals": {"lists": frozenset({"recent_events"}), "maps": frozenset({"quality_snapshot", "accounting_risk", "event_counts"})},
+    "select_peer_group": {"lists": frozenset({"peers"}), "maps": frozenset({"selection_policy"}), "counts": frozenset({"returned_peer_count"})},
+    "compare_to_industry_multi": {"maps": frozenset({"results", "cohort_metadata"}), "counts": frozenset({"n_peers"})},
+    "compare_peer_audit_fees": {"maps": frozenset({"subject_metrics", "benchmarks"}), "counts": frozenset({"peer_count"})},
+    "compare_peer_risk_profile": {"maps": frozenset({"subject_metrics", "benchmarks"}), "counts": frozenset({"peer_count"})},
+    "compare_peer_accounting_policies": {"maps": frozenset({"subject_items", "peer_coverage"}), "counts": frozenset({"peer_count", "peers_with_policy"})},
+    "compare_peer_kam_topics": {"maps": frozenset({"topic_counts", "audit_report_events", "audit_report_sections"}), "counts": frozenset({"peer_count"})},
+    "compare_peer_audit_report_matters": {"maps": frozenset({"matter_counts"}), "counts": frozenset({"peer_count"})},
+    "search_dataset": {"lists": frozenset({"companies"}), "counts": frozenset({"total_records", "total_companies"})},
+    "fetch_disclosure_on_demand": {"maps": frozenset({"document", "summary"})},
+    "search_audit_report_matters": {"lists": frozenset({"companies"}), "counts": frozenset({"total_companies", "total_sections"})},
+    "search_audit_procedures": {"lists": frozenset({"companies"}), "counts": frozenset({"total_companies", "total_procedures"})},
+    "compare_peer_audit_procedures": {"maps": frozenset({"procedure_counts", "subject_procedures"}), "counts": frozenset({"peer_count"})},
+    "get_kam_lifecycle": {"lists": frozenset({"events"}), "counts": frozenset({"event_count"})},
+    "get_accounting_policy_changes": {"lists": frozenset({"changed_items"}), "counts": frozenset({"change_count"})},
+    "get_quality_of_earnings_pack": {"lists": frozenset({"evidence", "signals", "audit_matter_flags"}), "maps": frozenset({"metrics"})},
+    "get_dcf_input_candidates": {"lists": frozenset({"historical_actuals"}), "maps": frozenset({"candidate_assumptions"})},
+    "search_disclosure_events": {"lists": frozenset({"events"}), "counts": frozenset({"total_events"})},
+    "get_audit_report_sections": {"lists": frozenset({"sections"}), "counts": frozenset({"section_count"})},
+    "estimate_audit_hours_proxy": {"lists": frozenset({"complexity_factors"}), "maps": frozenset({"complexity_components"})},
+    "build_audit_acceptance_pack": {"lists": frozenset({"acceptance_signals"}), "maps": frozenset({"fee_benchmark", "risk_profile", "hours_proxy"})},
+    "get_industry_audit_landscape": {"lists": frozenset({"auditor_market", "opinion_distribution"}), "maps": frozenset({"subject_auditor"})},
+    "build_dcf_model_pack": {"lists": frozenset({"historical_actuals", "forecast"}), "maps": frozenset({"valuation", "sensitivity"})},
 }
 
 DOMAIN_VERDICT_ALLOWLISTS = {
@@ -173,25 +196,31 @@ def _covered_years(result: dict[str, Any], quality: dict[str, Any]) -> list[int]
     return years
 
 
-def _has_partial_payload(result: dict[str, Any]) -> bool:
+def _has_partial_payload(tool_name: str, result: dict[str, Any]) -> bool:
     """Return whether registered business fields contain affirmative data."""
-    if result.get("has_data") is True:
+    fields = _TOOL_PURPOSE_FIELDS.get(tool_name)
+    if fields is None:
+        return False
+    # Facts are a dedicated channel: an uncitable fact remains an affirmative
+    # but limited payload below, while only a validated source can retain
+    # usable status.
+    if any(isinstance(fact, dict) for fact in result.get("confirmed_facts") or []):
         return True
-    for key in _AFFIRMATIVE_LIST_FIELDS:
+    for key in fields.get("lists", frozenset()):
         if isinstance(result.get(key), list) and result[key]:
             return True
-    for key in _AFFIRMATIVE_COUNT_FIELDS:
+    for key in fields.get("counts", frozenset()):
         value = result.get(key)
         if isinstance(value, (int, float)) and value > 0:
             return True
-    for key in _AFFIRMATIVE_MAPPING_FIELDS:
+    for key in fields.get("maps", frozenset()):
         value = result.get(key)
         if isinstance(value, dict) and value:
             return True
     return False
 
 
-def _data_quality(result: dict[str, Any]) -> DataQualityV1:
+def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
     raw_quality = result.get("data_quality")
     quality = raw_quality if isinstance(raw_quality, dict) else {}
     is_error = "error" in result
@@ -200,14 +229,14 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
     elif quality.get("status") is not None:
         status = str(quality["status"])
     else:
-        status = "limited" if _has_partial_payload(result) else "missing"
+        status = "limited" if _has_partial_payload(tool_name, result) else "missing"
     if status not in _QUALITY_STATUSES:
         raise ValueError(f"unsupported data quality status: {status}")
 
     # An upstream quality claim alone is not evidence.  Empty legacy payloads
     # have neither purpose-bearing inputs nor public facts, so availability is
     # genuinely missing before presentation layers build an availability pack.
-    if status == "usable" and not _has_partial_payload(result):
+    if status == "usable" and not _has_partial_payload(tool_name, result):
         status = "missing"
 
     confirmed_facts = [
@@ -286,7 +315,7 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     if not isinstance(result, dict):
         raise TypeError("result must be a dict")
     normalized = dict(result)
-    quality = _data_quality(normalized)
+    quality = _data_quality(tool_name, normalized)
     raw_verdict = str(
         normalized.get("domain_verdict")
         or normalized.get("verdict")
@@ -356,7 +385,7 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         raise TypeError("result must be a dict")
 
     normalized = normalize_answer_result(tool_name, result)
-    quality = _data_quality(normalized)
+    quality = _data_quality(tool_name, normalized)
     warnings = list(quality.limitations)
     if quality.status == "missing" and not warnings:
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
