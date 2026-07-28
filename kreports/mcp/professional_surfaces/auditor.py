@@ -25,6 +25,31 @@ _PEER_REASON_LABELS = {
     "asset_size_bucket": "자산규모 구간",
     "audit_fee_available": "감사보수 확인",
 }
+_COVERAGE_LABELS = {
+    "selection_basis": "선정기준",
+    "included_peers": "포함 Peer 수",
+    "requested_years": "요청연도 수",
+    "complete_years": "완전연도 수",
+    "cited_years": "인용연도 수",
+    "row_count": "입력행 수",
+    "subject_metric_count": "대상 지표 수",
+    "peer_metric_count": "Peer 지표 수",
+    "current_year_rows": "당기 행 수",
+    "prior_year_rows": "전기 행 수",
+    "subject_policy_count": "대상 회계정책 수",
+    "filing_source": "공시 출처",
+    "current_filing_source": "당기 공시 출처",
+    "semantic_complete": "의미 완결",
+    "current_audit_report_source": "당기 감사보고서 출처",
+    "classification_complete": "분류 완결",
+}
+
+
+def _public_coverage(coverage: dict[str, Any]) -> str:
+    return ", ".join(
+        f"{_COVERAGE_LABELS.get(key, '기타 coverage')}={value}"
+        for key, value in coverage.items()
+    ) or "-"
 
 
 def _public_metric_rows(rows: object) -> list[dict[str, Any]]:
@@ -116,9 +141,7 @@ def _acceptance_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
             "review_area": _SECTION_LABELS[section_key],
             "status": section.get("status") or "limited",
             "confirmed_facts": facts,
-            "coverage": ", ".join(
-                f"{key}={value}" for key, value in coverage.items()
-            ) or "-",
+            "coverage": _public_coverage(coverage),
             "rcept_no": receipt or "-",
             "next_check": (
                 "공시 근거와 최소 coverage를 추가 확인하세요."
@@ -188,7 +211,11 @@ def _acceptance_pack(result: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     peer_rows = _public_peer_rows(
-        peer_group.get("sample_peers"),
+        (
+            peer_group.get("selected_peers")
+            if isinstance(peer_group.get("selected_peers"), list)
+            else peer_group.get("sample_peers")
+        ),
         peer_count=peer_group.get("peer_count"),
     )
     if peer_rows:

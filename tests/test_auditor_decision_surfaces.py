@@ -275,6 +275,35 @@ def test_effort_rows_cannot_reuse_one_year_provenance_for_three_requested_years(
     assert section["coverage"]["cited_years"] == 1
 
 
+def test_effort_rows_require_distinct_normalized_receipts_for_each_requested_year():
+    from kreports.analysis.auditor_decisions import build_acceptance_evidence
+
+    rows = _effort_rows()
+    for row in rows:
+        year = row["year"]
+        shared_attachment = f"fee-note:20260310002820:{year}"
+        row["financial_source"] = {
+            **_source(year),
+            "rcept_no": shared_attachment,
+        }
+        row["audit_source"] = {
+            **_source(year),
+            "rcept_no": shared_attachment,
+            "section_title": "감사보수·감사시간",
+            "source_table": "audit_fees",
+        }
+
+    out = build_acceptance_evidence(
+        legacy_payload=_acceptance_payload(),
+        audit_effort_section=_usable_effort(),
+        audit_effort_rows=rows,
+    )
+
+    section = out["data_quality"]["section_statuses"]["audit_effort"]
+    assert section["status"] == "limited"
+    assert "audit_effort_distinct_year_receipts_missing" in section["blockers"]
+
+
 def test_financial_risk_requires_receipt_linked_source_and_confirmed_fact():
     from kreports.analysis.auditor_decisions import build_acceptance_evidence
 
@@ -316,6 +345,50 @@ def test_financial_risk_fact_must_cite_the_same_requested_year_filing():
     section = out["data_quality"]["section_statuses"]["financial_risk"]
     assert section["status"] == "limited"
     assert "financial_risk_confirmed_fact_missing" in section["blockers"]
+
+
+def test_financial_risk_fact_requires_a_nonempty_material_statement():
+    from kreports.analysis.auditor_decisions import build_acceptance_evidence
+
+    payload = _acceptance_payload()
+    payload["risk_summary"]["confirmed_facts"][0]["statement"] = "   "
+
+    out = build_acceptance_evidence(
+        legacy_payload=payload,
+        audit_effort_section=_usable_effort(),
+        audit_effort_rows=_effort_rows(),
+    )
+
+    section = out["data_quality"]["section_statuses"]["financial_risk"]
+    assert section["status"] == "limited"
+    assert "financial_risk_confirmed_fact_missing" in section["blockers"]
+
+
+def test_accepted_section_sources_and_risk_facts_are_promoted_to_top_level_resources():
+    from kreports.analysis.auditor_decisions import build_acceptance_evidence
+
+    result = build_acceptance_evidence(
+        legacy_payload=_acceptance_payload(),
+        audit_effort_section=_usable_effort(),
+        audit_effort_rows=_effort_rows(),
+    )
+    out = enrich_answer_response("build_audit_acceptance_pack", result)
+
+    assert any(
+        fact.get("statement") == "요청 연도 재무위험 지표가 공시에서 확인됩니다."
+        for fact in result["confirmed_facts"]
+    )
+    section_receipts = {
+        source["rcept_no"]
+        for section in result["data_quality"]["section_statuses"].values()
+        if section["status"] == "usable"
+        for source in section["sources"]
+        if source.get("rcept_no")
+    }
+    assert section_receipts <= {
+        source["rcept_no"] for source in result["sources"]
+    }
+    assert out["answer_pack"]["sources"]
 
 
 @pytest.mark.parametrize(
@@ -387,7 +460,44 @@ def test_every_legacy_section_accepts_not_applicable_only_with_basis_and_source(
     assert section["sources"][0]["rcept_no"] == "20260310002820"
 
 
-def test_audit_effort_not_applicable_requires_its_own_basis_and_source():
+@pytest.mark.parametrize(
+    ("section_key", "payload_key"),
+    [
+        ("peer_group", "peer_group"),
+        ("financial_risk", "risk_summary"),
+        ("audit_history", "audit_history"),
+        ("accounting_policy", "policy_summary"),
+        ("kam", "kam_summary"),
+        ("audit_report_matters", "audit_report_matter_summary"),
+    ],
+)
+def test_not_applicable_source_must_match_requested_business_year(
+    section_key,
+    payload_key,
+):
+    from kreports.analysis.auditor_decisions import build_acceptance_evidence
+
+    payload = _acceptance_payload()
+    payload[payload_key].update({
+        "applicability": "not_applicable",
+        "not_applicable_basis": "공시에서 해당 없음이 확인됩니다.",
+        "source": _source(2024),
+    })
+    if payload_key == "audit_history":
+        payload[payload_key]["history"] = []
+
+    out = build_acceptance_evidence(
+        legacy_payload=payload,
+        audit_effort_section=_usable_effort(),
+        audit_effort_rows=_effort_rows(),
+    )
+
+    section = out["data_quality"]["section_statuses"][section_key]
+    assert section["status"] == "limited"
+    assert "not_applicable_requested_year_source_missing" in section["blockers"]
+
+
+def test_audit_effort_not_applicable_without_year_bearing_source_is_limited():
     from kreports.analysis.auditor_decisions import build_acceptance_evidence
 
     source = {
@@ -410,8 +520,165 @@ def test_audit_effort_not_applicable_requires_its_own_basis_and_source():
     )
 
     effort = out["data_quality"]["section_statuses"]["audit_effort"]
-    assert effort["status"] == "usable"
-    assert effort["blockers"] == []
+    assert effort["status"] == "limited"
+    assert "not_applicable_requested_year_source_missing" in effort["blockers"]
+
+
+def test_acceptance_coverage_uses_only_public_korean_labels():
+    from kreports.analysis.auditor_decisions import build_acceptance_evidence
+
+    result = build_acceptance_evidence(
+        legacy_payload=_acceptance_payload(),
+        audit_effort_section=_usable_effort(),
+        audit_effort_rows=_effort_rows(),
+    )
+    out = enrich_answer_response("build_audit_acceptance_pack", result)
+    serialized_tables = str(out["answer_pack"]["tables"])
+
+    for internal_key in (
+        "requested_years",
+        "semantic_complete",
+        "subject_metric_count",
+        "current_audit_report_source",
+    ):
+        assert internal_key not in out["answer"]
+        assert internal_key not in serialized_tables
+    assert "요청연도 수" in out["answer"]
+    assert "의미 완결" in out["answer"]
+
+
+def test_real_acceptance_wrapper_chain_binds_risk_and_renders_all_selected_peers(
+    monkeypatch,
+):
+    from kreports.analysis import auditor_decisions
+
+    peers = [
+        {
+            "corp_code": f"00{i:06d}",
+            "corp_name": f"Peer {i}",
+            "stock_code": f"{i:06d}",
+            "include_reasons": ["same_ksic_prefix"],
+        }
+        for i in range(1, 13)
+    ]
+    selected_cohort = {
+        "subject": {"corp_code": "00126380", "corp_name": "삼성전자"},
+        "peer_count": 12,
+        "peers": peers,
+        "selection_policy": {
+            "requested_year": 2025,
+            "resolved_year": 2025,
+            "fs_div_used": "CFS",
+        },
+    }
+    legacy = _acceptance_payload()
+    legacy["peer_group"] = {
+        "peer_count": 12,
+        "sample_peers": peers[:10],
+        "selection_policy": selected_cohort["selection_policy"],
+    }
+    metrics = legacy["risk_summary"]["subject_metrics"]
+    benchmarks = legacy["risk_summary"]["benchmarks"]
+
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_select_peer_group",
+        lambda **_: selected_cohort,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_build_audit_acceptance_pack",
+        lambda **_: legacy,
+    )
+
+    def risk_from_bound_cohort(**kwargs):
+        assert kwargs["_peer_group"] is selected_cohort
+        return {
+            "subject": selected_cohort["subject"],
+            "subject_metrics": metrics,
+            "benchmarks": benchmarks,
+            "disclosure_event_counts": {"subject": {"total_disclosures": 1}},
+        }
+
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_risk_profile",
+        risk_from_bound_cohort,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "annual_filing_source",
+        lambda *_args, **_kwargs: _source(),
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "get_audit_history",
+        lambda *_: legacy["audit_history"],
+    )
+
+    result = auditor_decisions.build_audit_acceptance_pack(
+        "005930",
+        year=2025,
+        peer_limit=12,
+    )
+    out = enrich_answer_response("build_audit_acceptance_pack", result)
+    peer_table = next(
+        table
+        for table in out["answer_pack"]["tables"]
+        if table["id"] == "audit_acceptance_peer_group"
+    )
+
+    assert result["peer_group"]["cohort_identity_verified"] is False
+    assert "peer_cohort_identity_mismatch" in (
+        result["data_quality"]["section_statuses"]["peer_group"]["blockers"]
+    )
+    assert len(result["peer_group"]["selected_peers"]) == 12
+    assert len(peer_table["rows"]) == 12
+
+
+def test_acceptance_wrapper_fails_closed_when_legacy_cohort_identity_differs(
+    monkeypatch,
+):
+    from kreports.analysis import auditor_decisions
+
+    selected = {
+        "subject": {"corp_code": "00126380", "corp_name": "삼성전자"},
+        "peer_count": 5,
+        "peers": [
+            {"corp_code": f"00{i:06d}", "corp_name": f"Peer {i}"}
+            for i in range(1, 6)
+        ],
+        "selection_policy": {"requested_year": 2025, "fs_div_used": "CFS"},
+    }
+    legacy = _acceptance_payload()
+    legacy["peer_group"]["sample_peers"][0]["corp_code"] = "00999999"
+    legacy["peer_group"]["peer_count"] = 5
+    legacy["peer_group"]["selection_policy"] = selected["selection_policy"]
+    monkeypatch.setattr(
+        auditor_decisions, "_legacy_select_peer_group", lambda **_: selected,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_build_audit_acceptance_pack",
+        lambda **_: legacy,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_risk_profile",
+        lambda **_: {"error": "risk intentionally unavailable"},
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "get_audit_history",
+        lambda *_: legacy["audit_history"],
+    )
+
+    result = auditor_decisions.build_audit_acceptance_pack("005930", year=2025)
+    peer_section = result["data_quality"]["section_statuses"]["peer_group"]
+
+    assert result["peer_group"]["cohort_identity_verified"] is False
+    assert peer_section["status"] == "limited"
+    assert "peer_cohort_identity_mismatch" in peer_section["blockers"]
 
 
 def test_public_handler_accepts_real_sample_peers_shape_and_keeps_detail_tables(monkeypatch):
