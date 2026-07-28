@@ -776,7 +776,7 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.renderers import render_answer
 
-    if "error" not in enriched:
+    if "error" not in enriched or tool_name == "compare_to_industry_multi":
         answer_pack = build_answer_pack(tool_name, enriched)
         if answer_pack:
             enriched["answer_pack"] = answer_pack

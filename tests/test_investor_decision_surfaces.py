@@ -592,6 +592,69 @@ def test_peer_canonical_normalization_publicizes_promoted_coverage_and_error_cod
     assert "전체 비교군 확인 필요" in enriched["answer"]
 
 
+def test_peer_error_pack_resource_and_enriched_dispatch_match_canonical_error():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.renderers import render_answer
+    from kreports.mcp.resources import read_resource
+    from kreports.mcp.tools import _attach_meta
+
+    raw = {
+        "subject": {"corp_name": "대상"},
+        "error": "Identity_Query_Unavailable:OperationalError",
+    }
+    before = deepcopy(raw)
+
+    envelope = build_answer_envelope("compare_to_industry_multi", raw)
+    answer = render_answer("compare_to_industry_multi", raw)
+    direct_pack = build_answer_pack("compare_to_industry_multi", raw)
+    enriched = _attach_meta("compare_to_industry_multi", raw)
+
+    assert raw == before
+    assert raw["error"] == "Identity_Query_Unavailable:OperationalError"
+    assert enriched["error"] == raw["error"]
+    assert envelope.verdict == "error"
+    assert direct_pack is not None
+    assert enriched["answer_pack"] is not None
+    assert direct_pack["summary"]["status"] == "error"
+    assert direct_pack["data_quality"]["status"] == "error"
+    assert [table["id"] for table in direct_pack["tables"]] == ["availability"]
+    assert direct_pack["tables"][0]["rows"] == [{"status": "error"}]
+    assert not direct_pack["charts"]
+    assert direct_pack["limitations"] == envelope.data_quality.limitations
+    assert enriched["answer_pack"]["limitations"] == envelope.data_quality.limitations
+
+    direct_resource = read_resource(direct_pack["resource_uri"])["text"]
+    enriched_resource = read_resource(
+        enriched["answer_pack"]["resource_uri"]
+    )["text"]
+    public_surfaces = (
+        answer,
+        str(direct_pack),
+        direct_resource,
+        enriched["answer"],
+        str(enriched["answer_pack"]),
+        enriched_resource,
+    )
+    for public_surface in public_surfaces:
+        assert "Identity_Query_Unavailable" not in public_surface
+        assert "OperationalError" not in public_surface
+        assert "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다." in public_surface
+    assert direct_resource == enriched_resource
+
+
+def test_non_peer_error_results_still_do_not_build_answer_packs():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import enrich_answer_response
+
+    raw = {"error": "Identity_Query_Unavailable:OperationalError"}
+
+    assert build_answer_pack("search_disclosure_events", raw) is None
+    assert "answer_pack" not in enrich_answer_response(
+        "search_disclosure_events", raw,
+    )
+
+
 def test_non_peer_canonical_normalization_preserves_raw_coverage_note():
     from kreports.mcp.contracts import normalize_answer_result
 

@@ -55,7 +55,9 @@ def _is_numeric_measure(value: Any) -> bool:
 
 def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] | None:
     """Return a visual answer pack for known tool outputs."""
-    if not isinstance(result, dict) or "error" in result:
+    if not isinstance(result, dict):
+        return None
+    if "error" in result and tool_name != "compare_to_industry_multi":
         return None
     if tool_name == "compare_to_industry_multi":
         from kreports.mcp.professional_surfaces.investor import (
@@ -74,6 +76,31 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     normalized_quality = dict(result.get("data_quality") or {})
     normalized_quality.update(envelope.data_quality.model_dump())
     normalized_result["data_quality"] = normalized_quality
+
+    # Peer-comparison errors still need an inspectable public availability
+    # resource.  The canonical envelope supplies the localized limitation;
+    # the raw structured error remains only on the programmatic result.
+    if envelope.data_quality.status == "error":
+        raw_pack = _base_pack(
+            "데이터 가용성",
+            normalized_result,
+            status="error",
+        )
+        raw_pack["tables"] = [{
+            "id": "availability",
+            "title": "데이터 가용성",
+            "columns": [{"field": "status", "label": "상태"}],
+            "rows": [{"status": "error"}],
+            "status": "error",
+        }]
+        raw_pack["limitations"] = list(envelope.data_quality.limitations)
+        from kreports.mcp.visual_contracts import build_visualization_pack
+
+        return build_visualization_pack(raw_pack).model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_none=True,
+        )
 
     # A canonical cache-missing result may still carry a cited fact, subject,
     # selection policy, or cohort descriptor from a legacy handler.  None is a
