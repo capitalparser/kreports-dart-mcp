@@ -25,11 +25,14 @@ _KAM_LIFECYCLE_LABELS = {
     "repeated_stable": "반복·문구 안정",
 }
 _MACHINE_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*", re.ASCII)
+_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])", re.ASCII)
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])", re.ASCII)
 
 
 def _canonical_enum_key(text: str) -> str:
-    return _CAMEL_BOUNDARY.sub("_", text).replace("-", "_").replace(
+    tokenized = _ACRONYM_BOUNDARY.sub("_", text)
+    tokenized = _CAMEL_BOUNDARY.sub("_", tokenized)
+    return tokenized.replace("-", "_").replace(
         ".",
         "_",
     ).casefold()
@@ -40,9 +43,12 @@ def _is_machine_enum(text: str) -> bool:
         return False
     return (
         any(separator in text for separator in "_.-")
-        or text.islower()
-        or text.isupper()
+        or _ACRONYM_BOUNDARY.search(text) is not None
         or _CAMEL_BOUNDARY.search(text) is not None
+        or (
+            any(character.isdigit() for character in text)
+            and any(character.isalpha() for character in text)
+        )
     )
 
 

@@ -124,17 +124,47 @@ def test_public_kam_lifecycle_maps_topic_and_state_labels_everywhere():
 
 
 @pytest.mark.parametrize(
-    ("raw_topic", "raw_status"),
+    ("topic", "expected_topic", "status", "expected_status"),
     [
-        (" IT_SYSTEM_CONVERSION ", " NEWLY_REPEATED "),
-        ("it-system-conversion", "newly-repeated"),
-        ("itSystemConversion", "newlyRepeated"),
-        ("it.system.conversion", "newly.repeated"),
+        ("ITSystem", "기타 핵심감사사항", "NEWLYRepeated", "상태 미분류"),
+        ("KAMLifecycle", "기타 핵심감사사항", "NEWLYRepeated", "상태 미분류"),
+        ("REVENUERecognition", "수익인식", "NEWLYRepeated", "상태 미분류"),
+        ("materiality", "materiality", "stable", "stable"),
+        ("중요성", "중요성", "후속 검토", "후속 검토"),
+    ],
+)
+def test_auditor_public_tokenization_distinguishes_machine_and_reader_labels(
+    topic,
+    expected_topic,
+    status,
+    expected_status,
+):
+    from kreports.mcp.auditor_public import (
+        public_kam_lifecycle_label,
+        public_kam_topic_label,
+    )
+
+    assert public_kam_topic_label(topic) == expected_topic
+    assert public_kam_lifecycle_label(status) == expected_status
+
+
+@pytest.mark.parametrize(
+    ("raw_topic", "raw_status", "expected_topic", "expected_status"),
+    [
+        (" IT_SYSTEM_CONVERSION ", " NEWLY_REPEATED ", "기타 핵심감사사항", "상태 미분류"),
+        ("it-system-conversion", "newly-repeated", "기타 핵심감사사항", "상태 미분류"),
+        ("itSystemConversion", "newlyRepeated", "기타 핵심감사사항", "상태 미분류"),
+        ("it.system.conversion", "newly.repeated", "기타 핵심감사사항", "상태 미분류"),
+        ("ITSystem", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
+        ("KAMLifecycle", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
+        ("REVENUERecognition", "NEWLYRepeated", "수익인식", "상태 미분류"),
     ],
 )
 def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values(
     raw_topic,
     raw_status,
+    expected_topic,
+    expected_status,
 ):
     from kreports.mcp.contracts import enrich_answer_response
     from kreports.mcp.resources import read_resource
@@ -156,6 +186,12 @@ def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values(
                 "status": "Follow up review",
                 "title": "Reader-facing text",
             },
+            {
+                "year": 2023,
+                "topic": "materiality",
+                "status": "stable",
+                "title": "Single-word reader labels",
+            },
         ],
         "data_quality": {"status": "usable"},
     }
@@ -168,12 +204,14 @@ def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values(
     assert payload == original
     assert out["events"][0] == {
         "year": 2025,
-        "topic": "기타 핵심감사사항",
-        "status": "상태 미분류",
+        "topic": expected_topic,
+        "status": expected_status,
         "title": "정보시스템 전환",
     }
     assert out["events"][1]["topic"] == "Information system conversion"
     assert out["events"][1]["status"] == "Follow up review"
+    assert out["events"][2]["topic"] == "materiality"
+    assert out["events"][2]["status"] == "stable"
     assert repeated["events"] == out["events"]
     resource_text = read_resource(out["answer_pack"]["resource_uri"])["text"]
     for public_text in (
@@ -183,8 +221,8 @@ def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values(
         str(out["answer_pack"]["tables"]),
         resource_text,
     ):
-        assert "기타 핵심감사사항" in public_text
-        assert "상태 미분류" in public_text
+        assert expected_topic in public_text
+        assert expected_status in public_text
         assert raw_topic.strip() not in public_text
         assert raw_status.strip() not in public_text
 

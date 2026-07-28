@@ -1189,34 +1189,48 @@ def test_published_visual_resource_is_fetchable_through_actual_mcp_read_path():
 
 
 @pytest.mark.parametrize(
-    ("raw_topic", "raw_status"),
+    ("raw_topic", "raw_status", "expected_topic", "expected_status"),
     [
-        (" IT_SYSTEM_CONVERSION ", " NEWLY_REPEATED "),
-        ("it-system-conversion", "newly-repeated"),
-        ("itSystemConversion", "newlyRepeated"),
-        ("it.system.conversion", "newly.repeated"),
+        (" IT_SYSTEM_CONVERSION ", " NEWLY_REPEATED ", "기타 핵심감사사항", "상태 미분류"),
+        ("it-system-conversion", "newly-repeated", "기타 핵심감사사항", "상태 미분류"),
+        ("itSystemConversion", "newlyRepeated", "기타 핵심감사사항", "상태 미분류"),
+        ("it.system.conversion", "newly.repeated", "기타 핵심감사사항", "상태 미분류"),
+        ("ITSystem", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
+        ("KAMLifecycle", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
+        ("REVENUERecognition", "NEWLYRepeated", "수익인식", "상태 미분류"),
     ],
 )
 def test_raw_kam_lifecycle_visual_fallback_maps_public_labels(
     raw_topic,
     raw_status,
+    expected_topic,
+    expected_status,
 ):
     pack = build_visualization_pack({
         "_visual_family": "kam_lifecycle",
         "entity_name": "A",
-        "events": [{
-            "year": 2025,
-            "topic": raw_topic,
-            "status": raw_status,
-        }],
+        "events": [
+            {
+                "year": 2025,
+                "topic": raw_topic,
+                "status": raw_status,
+            },
+            {
+                "year": 2024,
+                "topic": "materiality",
+                "status": "stable",
+            },
+        ],
     })
 
     row = pack.tables[0].rows[0]
-    assert row["topic"] == "기타 핵심감사사항"
-    assert row["status"] == "상태 미분류"
+    assert row["topic"] == expected_topic
+    assert row["status"] == expected_status
+    assert pack.tables[0].rows[1]["topic"] == "materiality"
+    assert pack.tables[0].rows[1]["status"] == "stable"
     html = render_visualization_html(pack)
-    assert "기타 핵심감사사항" in html
-    assert "상태 미분류" in html
+    assert expected_topic in html
+    assert expected_status in html
     assert raw_topic.strip() not in html
     assert raw_status.strip() not in html
 
