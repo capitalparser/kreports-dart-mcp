@@ -247,6 +247,38 @@ def test_prepare_standard_audit_hours_inputs_uses_at_most_five_bounded_queries(t
     assert len(statements) <= 5
 
 
+def test_prepare_standard_audit_hours_inputs_keeps_every_year_under_correction_volume(temp_engine):
+    """Unrelated corrections cannot hide exact audit receipts or older financial sources."""
+    from kreports.db.engine import get_session
+
+    _seed_years(temp_engine)
+    with get_session() as session:
+        for index in range(1, 65):
+            session.add(Disclosure(
+                rcept_no=f"2026{index:010d}",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2026, 4, 1),
+                disc_type="A",
+                report_nm="사업보고서 (2025.12) [정정]",
+                flr_nm="삼성전자",
+            ))
+
+    result = _prepare("00126380")
+
+    assert [row["input_status"] for row in result["rows"]] == ["usable"] * 3
+    assert [row["audit_source"]["rcept_no"] for row in result["rows"]] == [
+        "20260318000002",
+        "20250318000002",
+        "20240318000002",
+    ]
+    assert [row["financial_source"]["rcept_no"] for row in result["rows"]] == [
+        "20260000000064",
+        "20250318000002",
+        "20240318000002",
+    ]
+
+
 def test_prepare_standard_audit_hours_inputs_public_surface_starts_with_non_calculation_conclusion(temp_engine):
     """The MCP result must lead with preparation, never an invented standard-hours value."""
     from kreports.mcp.dispatch import legacy_result

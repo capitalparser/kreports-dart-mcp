@@ -206,3 +206,56 @@ def test_annual_filing_sources_require_matching_fact_identity_and_basis(temp_eng
         source_table="financials",
         fs_div="CFS",
     ) == {}
+
+
+def test_annual_filing_sources_rank_each_year_without_duplicate_fact_starvation(temp_engine):
+    """High-volume corrections for one year cannot consume older-year provenance."""
+    from kreports.analysis.filing_provenance import annual_filing_sources
+    from kreports.db.engine import get_session
+
+    years = (2025, 2024, 2023)
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        for year in years:
+            for index in range(3):
+                session.add(FinancialFactCompact(
+                    corp_code="00126380",
+                    bsns_year=year,
+                    fs_div="CFS",
+                    metric_key=f"metric_{index}",
+                    metric_name=f"지표 {index}",
+                    amount=100 + index,
+                    source_account_id=f"account_{index}",
+                    source_account_nm=f"계정 {index}",
+                ))
+            session.add(Disclosure(
+                rcept_no=f"{year + 1}0301000001",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(year + 1, 3, 1),
+                disc_type="A",
+                report_nm=f"사업보고서 ({year}.12)",
+                flr_nm="삼성전자",
+            ))
+        for index in range(1, 65):
+            session.add(Disclosure(
+                rcept_no=f"2026{index:010d}",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2026, 3, 20),
+                disc_type="A",
+                report_nm="사업보고서 (2025.12) [정정]",
+                flr_nm="삼성전자",
+            ))
+
+    sources = annual_filing_sources(
+        "00126380",
+        years,
+        source_table="financial_facts_compact",
+        fs_div="CFS",
+    )
+
+    assert list(sources) == [2025, 2024, 2023]
+    assert sources[2025]["rcept_no"] == "20260000000064"
+    assert sources[2024]["rcept_no"] == "20250301000001"
+    assert sources[2023]["rcept_no"] == "20240301000001"
