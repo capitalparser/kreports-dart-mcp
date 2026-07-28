@@ -378,6 +378,7 @@ class VisualizationPackV1(BaseModel):
 
     kind: Literal["answer_pack"] = "answer_pack"
     version: Literal["visualization_pack.v1"] = PACK_VERSION
+    tool_name: Literal["build_dcf_model_pack"] | None = None
     summary: SummarySpecV1 = Field(default_factory=lambda: SummarySpecV1(
         title="시각화",
         status="usable",
@@ -580,6 +581,32 @@ class VisualizationPackV1(BaseModel):
             table.status != "usable" for table in self.tables
         ):
             raise ValueError("table status contradicts usable pack status")
+        if (
+            self.status == "missing"
+            and self.tool_name == "build_dcf_model_pack"
+        ):
+            allowed_dcf_tables = {
+                "dcf_actuals",
+                "dcf_assumptions",
+                "dcf_missing_accounts",
+            }
+            if (
+                any(
+                    table.id not in allowed_dcf_tables
+                    for table in self.tables
+                )
+                or self.charts
+                or self.diagrams
+                or self.timelines
+                or self.sources
+            ):
+                raise ValueError(
+                    "missing DCF remediation pack contains non-remediation facts"
+                )
+        elif self.status == "missing" and any(
+            table.rows for table in self.tables
+        ):
+            raise ValueError("missing table cannot carry fact rows")
         for chart in self.charts:
             table = tables[chart.data_ref]
             if table.status in {"missing", "error"} or not table.rows:
@@ -747,7 +774,12 @@ def _infer_unit(label: str, key: str) -> str | None:
     return None
 
 
-def _canonical_table(raw: dict[str, Any], *, pack_status: str) -> dict[str, Any]:
+def _canonical_table(
+    raw: dict[str, Any],
+    *,
+    pack_status: str,
+    allow_missing_rows: bool = False,
+) -> dict[str, Any]:
     columns = []
     seen: set[str] = set()
     for raw_column in (raw.get("columns") or [])[:MAX_COLUMNS]:
@@ -779,7 +811,13 @@ def _canonical_table(raw: dict[str, Any], *, pack_status: str) -> dict[str, Any]
         }
         if row and any(_contains_fact(value) for value in row.values()):
             rows.append(row)
-    status = pack_status if rows else "missing"
+    status = (
+        "limited"
+        if rows and pack_status == "missing" and allow_missing_rows
+        else pack_status
+        if rows
+        else "missing"
+    )
     note = raw.get("note")
     if not rows and not note:
         note = "확인 가능한 데이터가 없습니다."
@@ -817,6 +855,10 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
         ),
         None,
     )
+    missing_dcf_remediation = (
+        status == "missing"
+        and raw.get("tool_name") == "build_dcf_model_pack"
+    )
     limitations = [
         _safe_text(item)
         for item in [
@@ -827,7 +869,11 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
     ]
     warnings = [_safe_text(item) for item in (raw.get("warnings") or [])[:64] if item]
     tables = [
-        _canonical_table(table, pack_status=status)
+        _canonical_table(
+            table,
+            pack_status=status,
+            allow_missing_rows=missing_dcf_remediation,
+        )
         for table in (raw.get("tables") or [])[:16]
         if isinstance(table, dict) and _ID.fullmatch(str(table.get("id") or ""))
     ]
@@ -846,12 +892,19 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
                         if _ID.fullmatch(str(key)) and key not in keys:
                             keys.append(key)
             if keys and _ID.fullmatch(data_ref):
-                table = _canonical_table({
-                    "id": data_ref,
-                    "title": raw_chart.get("title") or data_ref,
-                    "columns": [{"field": key, "label": key} for key in keys],
-                    "rows": raw_rows,
-                }, pack_status=status)
+                table = _canonical_table(
+                    {
+                        "id": data_ref,
+                        "title": raw_chart.get("title") or data_ref,
+                        "columns": [
+                            {"field": key, "label": key}
+                            for key in keys
+                        ],
+                        "rows": raw_rows,
+                    },
+                    pack_status=status,
+                    allow_missing_rows=missing_dcf_remediation,
+                )
                 tables.append(table)
                 table_ids.add(data_ref)
         table = next((item for item in tables if item["id"] == data_ref), None)
@@ -960,7 +1013,13 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
                 "title": _safe_text(raw_timeline.get("title") or raw_timeline.get("id")),
                 "table_ref": table_ref,
             })
-    if not tables or not any(table["rows"] for table in tables):
+    if (
+        not tables
+        or (
+            not any(table["rows"] for table in tables)
+            and not missing_dcf_remediation
+        )
+    ):
         tables = [{
             "id": "availability",
             "title": "데이터 가용성",
@@ -1038,6 +1097,11 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
     }
     safe_quality["status"] = status
     return VisualizationPackV1.model_validate({
+        "tool_name": (
+            "build_dcf_model_pack"
+            if missing_dcf_remediation
+            else None
+        ),
         "summary": {
             "title": _safe_text(summary.get("title") or "시각화"),
             "status": _safe_text(status),

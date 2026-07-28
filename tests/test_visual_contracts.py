@@ -1401,6 +1401,132 @@ def test_pack_rejects_incoherent_summary_quality_and_table_statuses():
         })
 
 
+def test_missing_dcf_pack_may_carry_only_bounded_remediation_rows():
+    pack = build_visualization_pack({
+        "kind": "answer_pack",
+        "tool_name": "build_dcf_model_pack",
+        "summary": {
+            "title": "DCF 산출 불가",
+            "status": "unavailable",
+            "subject": "A",
+        },
+        "tables": [{
+            "id": "dcf_assumptions",
+            "title": "명시적 분석가 가정",
+            "columns": [
+                {"field": "key", "label": "가정"},
+                {"field": "value", "label": "값", "unit": "ratio"},
+                {"field": "basis", "label": "근거"},
+            ],
+            "rows": [{
+                "key": "wacc",
+                "value": 0.09,
+                "basis": "analyst_input",
+            }],
+        }, {
+            "id": "dcf_missing_accounts",
+            "title": "누락 공시 실제값",
+            "columns": [
+                {"field": "field", "label": "계정"},
+                {"field": "year", "label": "사업연도"},
+                {"field": "fs_div", "label": "재무제표"},
+            ],
+            "rows": [{
+                "field": "revenue",
+                "year": 2024,
+                "fs_div": "OFS",
+            }],
+        }],
+        "charts": [],
+        "diagrams": [],
+        "timelines": [],
+        "sources": [],
+        "data_quality": {"status": "missing"},
+        "status": "missing",
+        "limitations": ["기업가치 계산 입력이 부족합니다."],
+    })
+
+    assert pack.tool_name == "build_dcf_model_pack"
+    assert pack.status == "missing"
+    assert pack.summary.status == "missing"
+    assert pack.summary.domain_status == "unavailable"
+    assert pack.data_quality.status == "missing"
+    assert {table.status for table in pack.tables} == {"limited"}
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        (
+            {"tool_name": "another_tool"},
+            "missing table cannot carry fact rows",
+        ),
+        (
+            {
+                "tool_name": "build_dcf_model_pack",
+                "tables": [_table(
+                    id="dcf_valuation_bridge",
+                    status="limited",
+                )],
+            },
+            "DCF remediation",
+        ),
+        (
+            {
+                "tool_name": "build_dcf_model_pack",
+                "tables": [_table(
+                    id="dcf_valuation_bridge",
+                    rows=[],
+                    status="missing",
+                )],
+            },
+            "DCF remediation",
+        ),
+        (
+            {
+                "tool_name": "build_dcf_model_pack",
+                "sources": [{
+                    "label": "stale",
+                    "rcept_no": "20250101000001",
+                    "url": (
+                        "https://dart.fss.or.kr/dsaf001/main.do?"
+                        "rcpNo=20250101000001"
+                    ),
+                }],
+            },
+            "DCF remediation",
+        ),
+    ],
+)
+def test_missing_dcf_remediation_exception_does_not_relax_other_facts(
+    override,
+    message,
+):
+    raw = {
+        "kind": "answer_pack",
+        "summary": {
+            "title": "DCF 산출 불가",
+            "status": "unavailable",
+            "subject": "A",
+        },
+        "tables": [_table(
+            id="dcf_missing_accounts",
+            status="limited",
+        )],
+        "charts": [],
+        "diagrams": [],
+        "timelines": [],
+        "sources": [],
+        "data_quality": {"status": "missing"},
+        "status": "missing",
+        "limitations": ["기업가치 계산 입력이 부족합니다."],
+        **override,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        build_visualization_pack(raw)
+
+
 def test_ratio_units_and_quality_metadata_have_markdown_html_fact_parity():
     pack = build_visualization_pack({
         "kind": "answer_pack",

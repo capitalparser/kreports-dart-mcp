@@ -433,7 +433,11 @@ def _render_quality_of_earnings(result: dict[str, Any]) -> str:
     lines = [
         f"판정: {status}",
         f"감사보고서 matter: 고유 접수번호 {summary.get('unique_receipt_count', 0)}건, "
-        f"문단 {summary.get('section_count', 0)}건입니다."
+        f"문단 {summary.get('section_count', 0)}건입니다.",
+        (
+            "중복 제거 기준: "
+            f"{summary.get('dedupe_basis') or '확인 불가'}"
+        ),
     ]
     for group in summary.get("groups") or []:
         if not isinstance(group, dict):

@@ -983,6 +983,27 @@ def build_dcf_model_pack(
     )
     from kreports.semantic.metrics import DCF_MODEL_METRICS
 
+    assumption_inputs = (
+        ("revenue_growth", revenue_growth),
+        ("operating_margin", operating_margin),
+        ("tax_rate", tax_rate),
+        ("da_to_revenue", da_to_revenue),
+        ("capex_to_revenue", capex_to_revenue),
+        ("nwc_to_revenue", nwc_to_revenue),
+        ("wacc", wacc),
+        ("terminal_growth", terminal_growth),
+    )
+    explicit_assumptions = [
+        {
+            "key": key,
+            "value": value,
+            "unit": "ratio",
+            "basis": "analyst_input",
+        }
+        for key, value in assumption_inputs
+        if value is not None
+    ]
+
     def missing_account_rows(fields: tuple[str, ...]) -> list[dict]:
         return [
             {
@@ -1011,7 +1032,7 @@ def build_dcf_model_pack(
             "calculation_status": "unavailable",
             "domain_verdict": "calculation_unavailable",
             "actuals": [],
-            "assumptions": [],
+            "assumptions": explicit_assumptions,
             "missing_inputs": list(unavailable.missing_metrics),
             "missing_accounts": missing_account_rows(
                 unavailable.missing_metrics,
@@ -1038,7 +1059,7 @@ def build_dcf_model_pack(
             "calculation_status": "unavailable",
             "domain_verdict": "calculation_unavailable",
             "actuals": [],
-            "assumptions": [],
+            "assumptions": explicit_assumptions,
             "missing_inputs": list(DCF_MODEL_METRICS),
             "missing_accounts": missing_account_rows(DCF_MODEL_METRICS),
             "data_quality": {

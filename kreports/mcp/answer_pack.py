@@ -571,6 +571,8 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
     )
 
     if calculation_status == "unavailable":
+        pack["tool_name"] = "build_dcf_model_pack"
+        pack["sources"] = []
         missing_accounts = _safe_dcf_rows(result.get("missing_accounts"), limit=20)
         pack["tables"].extend([
             _table(
@@ -603,14 +605,6 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
                     ("fs_div", "재무제표"), ("basis", "확인 기준"),
                 ], missing_accounts,
             ))
-        if actuals or assumptions or missing_accounts:
-            # The model result is unavailable, but these rows are still
-            # inspectable evidence about supplied assumptions and exact
-            # remediation targets. A missing visualization status cannot carry
-            # rows, so the pack is limited while its domain status remains
-            # unavailable and the underlying answer envelope remains missing.
-            pack["data_quality"]["status"] = "limited"
-            pack["status"] = "limited"
         pack["limitations"] = [
             *pack.get("limitations", []),
             "기업가치 계산에 필요한 입력 또는 공시 실제값이 부족하여 가치 브리지와 민감도를 제공하지 않습니다.",

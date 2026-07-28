@@ -8,7 +8,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from kreports.analysis.evidence import evidence_reference_fields
+from kreports.analysis.evidence import (
+    evidence_reference_fields,
+    parent_rcept_no,
+)
 
 
 _CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
@@ -20,6 +23,30 @@ _DCF_MODEL_TOOL = "build_dcf_model_pack"
 _DCF_ERROR_LIMITATION = (
     "DCF 계산에 필요한 회사 식별, 공시 실제값 또는 입력을 확인하지 못했습니다."
 )
+_QOE_TOOL = "get_quality_of_earnings_pack"
+_DCF_ASSUMPTION_KEYS = {
+    "revenue_growth",
+    "operating_margin",
+    "tax_rate",
+    "da_to_revenue",
+    "capex_to_revenue",
+    "nwc_to_revenue",
+    "wacc",
+    "terminal_growth",
+}
+_DCF_MISSING_FIELDS = {
+    *_DCF_ASSUMPTION_KEYS,
+    "revenue",
+    "operating_profit",
+    "depreciation_amortization",
+    "purchase_ppe",
+    "purchase_intangible_assets",
+    "trade_receivables",
+    "inventories",
+    "trade_payables",
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+}
 
 ToolPurposePredicate = Callable[[dict[str, Any]], bool]
 
@@ -509,7 +536,11 @@ def _has_tool_purpose_result(tool_name: str, result: dict[str, Any]) -> bool:
 
 def _canonicalize_dcf_model_result(result: dict[str, Any]) -> dict[str, Any]:
     """Make enterprise-value availability authoritative over stale presentation."""
-    normalized = dict(result)
+    normalized = (
+        _quarantine_dcf_error_result(result)
+        if "error" in result
+        else dict(result)
+    )
     if "enterprise_value" not in normalized or normalized["enterprise_value"] is not None:
         return normalized
     normalized["enterprise_value"] = None
@@ -529,6 +560,161 @@ def _canonicalize_dcf_model_result(result: dict[str, Any]) -> dict[str, Any]:
         "formulas",
         "tables",
         "charts",
+    ):
+        normalized.pop(field, None)
+    return normalized
+
+
+def _safe_dcf_error_assumptions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in value[:8]:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "")
+        if key not in _DCF_ASSUMPTION_KEYS:
+            continue
+        assumption_value = raw.get("value")
+        rows.append({
+            "key": key,
+            "value": assumption_value
+            if assumption_value is None or _is_numeric_measure(assumption_value)
+            else None,
+            "unit": "ratio",
+            "basis": "analyst_input",
+        })
+    return rows
+
+
+def _safe_dcf_missing_accounts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in value[:20]:
+        if not isinstance(raw, dict):
+            continue
+        field = str(raw.get("field") or "")
+        try:
+            year = int(raw.get("year"))
+        except (TypeError, ValueError):
+            continue
+        fs_div = str(raw.get("fs_div") or "")
+        if (
+            field not in _DCF_MISSING_FIELDS
+            or not 1900 <= year <= 2100
+            or fs_div not in {"CFS", "OFS"}
+        ):
+            continue
+        rows.append({
+            "field": field,
+            "year": year,
+            "fs_div": fs_div,
+            "basis": "requested_dcf_source_actual",
+        })
+    return rows
+
+
+def _quarantine_dcf_error_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep only DCF error fields that are safe for public remediation."""
+    raw_quality = result.get("data_quality")
+    quality = raw_quality if isinstance(raw_quality, dict) else {}
+    normalized = {
+        key: result[key]
+        for key in (
+            "error",
+            "error_code",
+            "company",
+            "base_year",
+            "fs_div",
+            "enterprise_value",
+            "equity_value",
+            "calculation_status",
+            "domain_verdict",
+        )
+        if key in result
+    }
+    normalized.update({
+        "enterprise_value": None,
+        "equity_value": None,
+        "calculation_status": "unavailable",
+        "domain_verdict": "calculation_unavailable",
+    })
+    normalized["actuals"] = []
+    normalized["assumptions"] = _safe_dcf_error_assumptions(
+        result.get("assumptions")
+    )
+    normalized["missing_inputs"] = [
+        field
+        for field in _string_list(result.get("missing_inputs"))
+        if field in _DCF_MISSING_FIELDS
+    ]
+    normalized["missing_accounts"] = _safe_dcf_missing_accounts(
+        result.get("missing_accounts")
+    )
+    normalized["data_quality"] = {
+        "source": "financial_facts_compact",
+        "status": "missing",
+        "covered_years": _covered_years(result, quality),
+        "missing_fields": [
+            field
+            for field in _string_list(quality.get("missing_fields"))
+            if field in _DCF_MISSING_FIELDS
+        ],
+    }
+    return normalized
+
+
+def _canonicalize_qoe_matter_evidence(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind QoE filing evidence to its deduplicated audit-matter groups."""
+    normalized = dict(result)
+    summary = result.get("audit_matter_summary")
+    groups = (
+        summary.get("groups")
+        if isinstance(summary, dict)
+        else None
+    )
+    if not isinstance(groups, list) or not groups:
+        return normalized
+    facts: list[dict[str, Any]] = []
+    for group in groups[:32]:
+        if not isinstance(group, dict):
+            continue
+        source = group.get("source")
+        receipt = parent_rcept_no(
+            str(source.get("rcept_no") or "")
+            if isinstance(source, dict)
+            else ""
+        )
+        if not receipt:
+            continue
+        facts.append({
+            "statement": (
+                f"{group.get('year')}년 {group.get('matter_type')} "
+                f"감사보고서 matter를 접수번호 {receipt}에서 확인했습니다."
+            ),
+            "source": {
+                "rcept_no": receipt,
+                "report_nm": "감사보고서",
+                "section_title": str(
+                    group.get("matter_type") or "감사보고서 matter"
+                ),
+                "source_table": "audit_matter_items",
+            },
+            "excerpt": str(group.get("excerpt") or "")[:500],
+        })
+    if facts:
+        normalized["confirmed_facts"] = facts
+    else:
+        normalized.pop("confirmed_facts", None)
+    for field in (
+        "rcept_no",
+        "parent_rcept_no",
+        "_meta",
+        "history",
+        "events",
     ):
         normalized.pop(field, None)
     return normalized
@@ -674,6 +860,8 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     normalized = (
         _canonicalize_dcf_model_result(result)
         if tool_name == _DCF_MODEL_TOOL
+        else _canonicalize_qoe_matter_evidence(result)
+        if tool_name == _QOE_TOOL
         else dict(result)
     )
     quality = _data_quality(tool_name, normalized)
@@ -800,6 +988,8 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         tool_name == _PEER_COMPARISON_TOOL
         and quality.status == "error"
     )
+    dcf_error = tool_name == _DCF_MODEL_TOOL and "error" in normalized
+    quarantined_error = peer_error or dcf_error
     warnings = list(quality.limitations)
     if quality.status == "missing" and not warnings:
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
@@ -807,21 +997,27 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         tool_name=tool_name,
         verdict=quality.status,
         domain_verdict=normalized["domain_verdict"],
-        answer="" if peer_error else str(normalized.get("answer") or ""),
+        answer=(
+            "" if quarantined_error
+            else str(normalized.get("answer") or "")
+        ),
         confirmed_facts=(
-            [] if peer_error
+            [] if quarantined_error
             else [
                 fact for fact in normalized.get("confirmed_facts") or []
                 if isinstance(fact, dict)
             ]
         ),
-        analysis=[] if peer_error else _analysis(normalized),
-        evidence=[] if peer_error else _evidence(normalized),
+        analysis=[] if quarantined_error else _analysis(normalized),
+        evidence=[] if quarantined_error else _evidence(normalized),
         data_quality=quality,
         warnings=warnings,
-        next_checks=[] if peer_error else _string_list(normalized.get("next_checks")),
+        next_checks=(
+            [] if quarantined_error
+            else _string_list(normalized.get("next_checks"))
+        ),
         answer_pack=(
-            None if peer_error
+            None if quarantined_error
             else normalized.get("answer_pack")
             if isinstance(normalized.get("answer_pack"), dict)
             else None

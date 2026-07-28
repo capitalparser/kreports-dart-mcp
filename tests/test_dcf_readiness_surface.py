@@ -333,6 +333,190 @@ def test_dcf_source_error_keeps_safe_readiness_pack_and_quarantines_exception():
         assert "identity_query_unavailable" not in public
 
 
+def test_missing_dcf_status_is_identical_across_every_public_surface():
+    """A remediation table must not silently upgrade a missing model to limited."""
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        enrich_answer_response,
+        normalize_answer_result,
+    )
+    from kreports.mcp.renderers import render_answer
+    from kreports.mcp.resources import read_resource
+
+    raw = {
+        "error": "OperationalError: private database path",
+        "error_code": "dcf_source_unavailable",
+        "company": "00126380",
+        "base_year": 2024,
+        "fs_div": "OFS",
+        "enterprise_value": None,
+        "equity_value": None,
+        "calculation_status": "unavailable",
+        "domain_verdict": "calculation_unavailable",
+        "actuals": [],
+        "assumptions": [{
+            "key": "wacc", "value": 0.09, "unit": "ratio",
+            "basis": "analyst_input",
+        }],
+        "missing_inputs": ["revenue"],
+        "missing_accounts": [{
+            "field": "revenue", "year": 2024, "fs_div": "OFS",
+            "basis": "requested_dcf_source_actual",
+        }],
+        "data_quality": {
+            "status": "missing",
+            "source": "financial_facts_compact",
+        },
+    }
+    before = deepcopy(raw)
+
+    normalized = normalize_answer_result("build_dcf_model_pack", raw)
+    envelope = build_answer_envelope("build_dcf_model_pack", raw)
+    pack = build_answer_pack("build_dcf_model_pack", raw)
+    enriched = enrich_answer_response("build_dcf_model_pack", raw)
+    answer = render_answer("build_dcf_model_pack", raw)
+
+    assert raw == before
+    assert pack is not None
+    assert normalized["data_quality"]["status"] == "missing"
+    assert normalized["quality_status"] == "missing"
+    assert envelope.verdict == "missing"
+    assert envelope.data_quality.status == "missing"
+    for public_pack in (pack, enriched["answer_pack"]):
+        assert public_pack["status"] == "missing"
+        assert public_pack["summary"]["status"] == "missing"
+        assert public_pack["summary"]["domain_status"] == "unavailable"
+        assert public_pack["data_quality"]["status"] == "missing"
+        assert {table["id"] for table in public_pack["tables"]} <= {
+            "dcf_actuals",
+            "dcf_assumptions",
+            "dcf_missing_accounts",
+        }
+        assert not public_pack["charts"]
+        assert not public_pack["diagrams"]
+        assert not public_pack["timelines"]
+        assert not public_pack["sources"]
+        resource = read_resource(public_pack["resource_uri"])["text"]
+        assert "시각화 데이터 상태: missing" in resource
+    for public_answer in (answer, enriched["answer"]):
+        assert "산출 불가:" in public_answer
+        assert "- 상태: missing" in public_answer
+
+
+def test_unavailable_dcf_error_quarantines_stale_evidence_at_public_boundary():
+    """A top-level source error must not reuse facts from an earlier DCF result."""
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        enrich_answer_response,
+        normalize_answer_result,
+    )
+    from kreports.mcp.renderers import render_answer
+    from kreports.mcp.resources import read_resource
+
+    stale_receipt = "20250101009999"
+    stale_tokens = {
+        "STALE_FACT",
+        "STALE_ANALYSIS",
+        "STALE_NEXT_CHECK",
+        "STALE_RESULT",
+    }
+    raw = {
+        "error": "OperationalError: SELECT private_secret FROM hidden_table",
+        "error_code": "dcf_source_unavailable",
+        "company": "00126380",
+        "base_year": 2024,
+        "fs_div": "OFS",
+        "actuals": [{"metric_key": "revenue", "amount": "STALE_RESULT"}],
+        "assumptions": [{
+            "key": "wacc", "value": 0.09, "unit": "ratio",
+            "basis": "analyst_input",
+        }],
+        "missing_inputs": ["revenue"],
+        "missing_accounts": [{
+            "field": "revenue", "year": 2024, "fs_div": "OFS",
+            "basis": "requested_dcf_source_actual",
+        }],
+        "confirmed_facts": [{
+            "statement": "STALE_FACT",
+            "source": {"rcept_no": stale_receipt},
+        }],
+        "analysis": [{"statement": "STALE_ANALYSIS"}],
+        "next_checks": ["STALE_NEXT_CHECK"],
+        "rcept_no": stale_receipt,
+        "parent_rcept_no": stale_receipt,
+        "_meta": {"source_rcept_no": stale_receipt},
+        "results": [{"value": "STALE_RESULT"}],
+        "events": [{"rcept_no": stale_receipt}],
+        "history": [{"rcept_no": stale_receipt}],
+        "data_quality": {
+            "status": "missing",
+            "source": "OperationalError:hidden_source",
+            "limitations": ["OperationalError:hidden_table"],
+        },
+    }
+    before = deepcopy(raw)
+
+    normalized = normalize_answer_result("build_dcf_model_pack", raw)
+    envelope = build_answer_envelope("build_dcf_model_pack", raw)
+    pack = build_answer_pack("build_dcf_model_pack", raw)
+    enriched = enrich_answer_response("build_dcf_model_pack", raw)
+    answer = render_answer("build_dcf_model_pack", raw)
+
+    assert raw == before
+    assert normalized["error"] == raw["error"]
+    assert normalized["enterprise_value"] is None
+    assert normalized["equity_value"] is None
+    assert normalized["calculation_status"] == "unavailable"
+    assert normalized["domain_verdict"] == "calculation_unavailable"
+    assert normalized["actuals"] == []
+    for field in (
+        "confirmed_facts",
+        "analysis",
+        "next_checks",
+        "rcept_no",
+        "parent_rcept_no",
+        "_meta",
+        "results",
+        "events",
+        "history",
+    ):
+        assert field not in normalized
+    assert envelope.confirmed_facts == []
+    assert envelope.analysis == []
+    assert envelope.evidence == []
+    assert envelope.next_checks == []
+    assert pack is not None
+    public = (
+        str(envelope.model_dump())
+        + str(pack)
+        + answer
+        + enriched["answer"]
+        + str(enriched["answer_pack"])
+        + read_resource(pack["resource_uri"])["text"]
+    )
+    for stale in {*stale_tokens, stale_receipt}:
+        assert stale not in public
+    for diagnostic in (
+        "OperationalError",
+        "private_secret",
+        "hidden_table",
+        "hidden_source",
+    ):
+        assert diagnostic not in public
+    assert any(
+        table["id"] == "dcf_assumptions"
+        and table["rows"][0]["key"] == "wacc"
+        for table in pack["tables"]
+    )
+    assert any(
+        table["id"] == "dcf_missing_accounts"
+        for table in pack["tables"]
+    )
+    assert not pack["sources"]
+
+
 def test_exact_company_resolution_error_has_canonical_dcf_availability_pack(
     temp_engine,
 ):
@@ -342,7 +526,9 @@ def test_exact_company_resolution_error_has_canonical_dcf_availability_pack(
     from kreports.mcp.contracts import enrich_answer_response
     from kreports.mcp.resources import read_resource
 
-    result = build_dcf_model_pack("없는 회사", 2024, fs_div="OFS")
+    result = build_dcf_model_pack(
+        "없는 회사", 2024, fs_div="OFS", wacc=0.09,
+    )
     direct_pack = build_answer_pack("build_dcf_model_pack", result)
     enriched = enrich_answer_response("build_dcf_model_pack", result)
 
@@ -352,6 +538,12 @@ def test_exact_company_resolution_error_has_canonical_dcf_availability_pack(
     assert result["base_year"] == 2024
     assert result["fs_div"] == "OFS"
     assert result["missing_accounts"]
+    assert result["assumptions"] == [{
+        "key": "wacc",
+        "value": 0.09,
+        "unit": "ratio",
+        "basis": "analyst_input",
+    }]
     assert all(
         row["year"] == 2024 and row["fs_div"] == "OFS"
         for row in result["missing_accounts"]
@@ -416,7 +608,10 @@ def test_qoe_matters_survive_missing_financial_series_across_public_surfaces(
     """Audit-report evidence is independently useful when financial facts are absent."""
     from kreports.analysis import investor_quality
     from kreports.db.engine import get_session
-    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        enrich_answer_response,
+    )
     from kreports.mcp.resources import read_resource
 
     monkeypatch.setattr(investor_quality, "engine", temp_engine)
@@ -440,10 +635,26 @@ def test_qoe_matters_survive_missing_financial_series_across_public_surfaces(
     result = investor_quality.quality_of_earnings_pack(
         "001", start_year=2024, end_year=2024,
     )
+    stale_receipt = "20241231009999"
+    result["confirmed_facts"] = [{
+        "statement": "latest financial substitution",
+        "source": {
+            "rcept_no": stale_receipt,
+            "source_table": "financial_facts_compact",
+        },
+    }]
+    result["_meta"] = {"source_rcept_no": stale_receipt}
+    result["history"] = [{"rcept_no": stale_receipt}]
+    result["events"] = [{"rcept_no": stale_receipt}]
+    before = deepcopy(result)
+    envelope = build_answer_envelope(
+        "get_quality_of_earnings_pack", result,
+    )
     enriched = enrich_answer_response("get_quality_of_earnings_pack", result)
     pack = enriched["answer_pack"]
     resource = read_resource(pack["resource_uri"])["text"]
 
+    assert result == before
     assert result["metrics"]["years"] == 0
     assert result["data_quality"]["status"] == "limited"
     assert result["audit_matter_summary"]["unique_receipt_count"] == 1
@@ -458,8 +669,29 @@ def test_qoe_matters_survive_missing_financial_series_across_public_surfaces(
         "dedupe_basis": "parent_rcept_no + matter_type + normalized_excerpt",
     }]
     assert "20250318001234" in enriched["answer"]
+    assert (
+        "parent_rcept_no + matter_type + normalized_excerpt"
+        in enriched["answer"]
+    )
+    assert (
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250318001234"
+        in enriched["answer"]
+    )
     assert "20250318001234" in resource
     assert "latest financial" not in enriched["answer"].casefold()
+    assert stale_receipt not in enriched["answer"]
+    assert stale_receipt not in resource
+    assert [item.rcept_no for item in envelope.evidence] == [
+        "20250318001234",
+    ]
+    assert {
+        fact["source"]["rcept_no"]
+        for fact in envelope.confirmed_facts
+    } == {"20250318001234"}
+    assert (
+        "연결 가능한 공시 접수번호가 현재 결과에 포함되지 않았습니다."
+        not in enriched["answer"]
+    )
     assert {source["rcept_no"] for source in pack["sources"]} == {
         "20250318001234",
     }
