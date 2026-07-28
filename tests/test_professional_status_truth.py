@@ -581,6 +581,82 @@ def test_missing_normalization_rebuilds_a_stale_answer_pack_across_layers():
     assert "usable" not in resource["text"]
 
 
+def _stale_usable_dcf_pack():
+    """Build a real, structurally valid pack that a legacy result can inherit."""
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_dcf_input_candidates", {
+        "candidate_assumptions": {"revenue_growth": {"value": 0.085}},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert pack is not None
+    assert pack["summary"]["status"] == "usable"
+    return pack
+
+
+def _missing_legacy_dcf_result_with_stale_pack():
+    return {
+        "confirmed_facts": [{
+            "statement": "DCF 할인율 후보는 8.5%입니다.",
+            "source": {"rcept_no": "20250301000001"},
+            "tool_name": "get_dcf_input_candidates",
+        }],
+        "answer_pack": _stale_usable_dcf_pack(),
+        "data_quality": {"status": "usable"},
+    }
+
+
+def test_direct_envelope_discards_stale_usable_pack_after_missing_normalization():
+    """Retaining the legacy pack here would expose a usable resource as missing."""
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        normalize_answer_result,
+    )
+
+    normalized = normalize_answer_result(
+        "get_business_overview",
+        _missing_legacy_dcf_result_with_stale_pack(),
+    )
+    envelope = build_answer_envelope("get_business_overview", normalized)
+
+    assert normalized["quality_status"] == "missing"
+    assert envelope.verdict == "missing"
+    assert envelope.answer_pack is None
+
+
+def test_direct_renderer_cannot_append_stale_usable_table_after_missing_normalization():
+    """Passing raw legacy data to the renderer must not bypass normalization."""
+    from kreports.mcp.renderers import render_answer
+
+    rendered = render_answer(
+        "get_dcf_input_candidates",
+        _missing_legacy_dcf_result_with_stale_pack(),
+    )
+
+    assert rendered is not None
+    assert "판정:\n- missing" in rendered
+    assert "시각화 데이터 상태: missing" in rendered
+    assert "시각화 데이터 상태: usable" not in rendered
+
+
+def test_direct_renderer_builds_usable_table_from_a_genuinely_usable_result():
+    """Dropping stale packs must not suppress the canonical usable visual path."""
+    from kreports.mcp.contracts import normalize_answer_result
+    from kreports.mcp.renderers import render_answer
+
+    normalized = normalize_answer_result("get_dcf_input_candidates", {
+        "candidate_assumptions": {"revenue_growth": {"value": 0.085}},
+        "data_quality": {"status": "usable"},
+    })
+    rendered = render_answer("get_dcf_input_candidates", normalized)
+
+    assert normalized["quality_status"] == "usable"
+    assert rendered is not None
+    assert "판정:\n- usable" in rendered
+    assert "시각화 대체 표" in rendered
+
+
 def test_nonempty_limited_result_never_becomes_missing_availability_pack():
     out = enrich_answer_response("compare_peer_risk_profile", {
         "subject": {"corp_name": "A"},

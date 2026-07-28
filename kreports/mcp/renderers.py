@@ -9,6 +9,7 @@ from kreports.analysis.evidence import parent_rcept_no, source_line
 from kreports.mcp.contracts import (
     AnswerEnvelopeV1,
     build_answer_envelope,
+    normalize_answer_result,
     public_domain_verdict_label,
 )
 from kreports.mcp.professional_surfaces import DETAIL_RENDERERS as PROFESSIONAL_DETAIL_RENDERERS
@@ -1147,6 +1148,10 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     """Return Korean narrative text for a structured tool result."""
     if not isinstance(result, dict):
         return None
+    # Direct callers bypass enrich_answer_response(), so establish the same
+    # canonical state before this renderer or its visual-table helper reads
+    # any legacy presentation fields.
+    result = normalize_answer_result(tool_name, result)
     envelope = build_answer_envelope(tool_name, result)
     presentation_envelope = (
         _note_search_presentation_envelope(envelope)
