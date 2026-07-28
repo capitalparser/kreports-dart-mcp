@@ -89,3 +89,19 @@ def test_accounting_note_revenue_search_ranks_recognition_evidence_before_generi
 
     assert record["match_excerpts"][0] == recognition
     assert record["body_excerpt"] == recognition
+
+
+def test_accounting_note_revenue_search_weights_sale_evidence_above_generic_recognition(temp_engine):
+    """Catches a generic recognition mention winning a flat-score source-order tie."""
+    del temp_engine
+    generic = "수익과 비용은 발생주의에 따라 인식한다."
+    sale_revenue = "재화의 판매로 인한 수익은 인도 시점에 회계처리한다."
+    _add_note(body=f"{generic} {sale_revenue}")
+
+    record = _first_record(search_dataset(
+        dataset="accounting_note_chapters",
+        keyword="수익",
+    ))
+
+    assert record["match_excerpts"][0] == sale_revenue
+    assert record["body_excerpt"] == sale_revenue

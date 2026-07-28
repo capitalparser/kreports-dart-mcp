@@ -14,31 +14,47 @@ from kreports.storage.raw_documents import RawDocumentStore
 _ACCOUNTING_NOTE_TOPIC_HINTS = (
     (
         ("수익", "매출", "revenue"),
-        ("고객과의 계약", "수행의무", "통제", "재화", "용역", "변동대가", "매출장려", "인식"),
+        (
+            ("고객과의 계약", 5), ("수행의무", 5), ("통제", 4), ("재화", 4),
+            ("용역", 4), ("변동대가", 5), ("매출장려", 5), ("인식", 1),
+        ),
     ),
     (
         ("재고", "inventory"),
-        ("평균법", "선입선출", "순실현가능가치", "원가", "평가손실", "매출원가"),
+        (
+            ("순실현가능가치", 5), ("평균법", 4), ("선입선출", 4), ("평가손실", 3),
+            ("매출원가", 2), ("원가", 1),
+        ),
     ),
     (
         ("충당", "provision"),
-        ("충당부채", "현재의무", "과거사건", "자원의 유출", "최선의 추정", "할인"),
+        (
+            ("충당부채", 5), ("현재의무", 5), ("과거사건", 4), ("자원의 유출", 4),
+            ("최선의 추정", 4), ("할인", 1),
+        ),
     ),
     (
         ("추정", "estimate"),
-        ("불확실성", "가정", "판단", "민감도", "추정"),
+        (("불확실성", 4), ("민감도", 4), ("가정", 2), ("판단", 2), ("추정", 1)),
     ),
     (
         ("손상", "impairment"),
-        ("회수가능액", "현금창출단위", "사용가치", "공정가치", "손상차손"),
+        (
+            ("회수가능액", 5), ("현금창출단위", 5), ("사용가치", 4), ("손상차손", 4),
+            ("공정가치", 2),
+        ),
     ),
     (
         ("우발", "contingenc"),
-        ("우발부채", "우발자산", "가능성", "현재의무", "소송", "공시"),
+        (
+            ("우발부채", 5), ("우발자산", 5), ("현재의무", 4), ("소송", 4),
+            ("가능성", 1), ("공시", 1),
+        ),
     ),
 )
 
-def _accounting_note_topic_hints(keyword: str) -> tuple[str, ...]:
+
+def _accounting_note_topic_hints(keyword: str) -> tuple[tuple[str, int], ...]:
     normalized_keyword = keyword.lower()
     for triggers, hints in _ACCOUNTING_NOTE_TOPIC_HINTS:
         if any(trigger in normalized_keyword for trigger in triggers):
@@ -85,7 +101,7 @@ def _keyword_centered_excerpts(
         excerpt = normalized_body[window_start:window_end].strip()
         if excerpt and excerpt not in seen:
             seen.add(excerpt)
-            topic_score = sum(hint in excerpt for hint in topic_hints)
+            topic_score = sum(weight for hint, weight in topic_hints if hint in excerpt)
             candidates.append((topic_score, match_start, excerpt))
         match_start = normalized_body.find(normalized_keyword, match_end)
     candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
