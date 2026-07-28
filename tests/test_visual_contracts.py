@@ -1188,6 +1188,27 @@ def test_published_visual_resource_is_fetchable_through_actual_mcp_read_path():
         read_resource(unknown)
 
 
+def test_raw_kam_lifecycle_visual_fallback_maps_public_labels():
+    pack = build_visualization_pack({
+        "_visual_family": "kam_lifecycle",
+        "entity_name": "A",
+        "events": [{
+            "year": 2025,
+            "topic": "revenue_recognition",
+            "status": "new",
+        }],
+    })
+
+    row = pack.tables[0].rows[0]
+    assert row["topic"] == "수익인식"
+    assert row["status"] == "신규"
+    html = render_visualization_html(pack)
+    assert "수익인식" in html
+    assert "신규" in html
+    assert "revenue_recognition" not in html
+    assert ">new<" not in html
+
+
 def test_visual_resource_lru_eviction_and_restart_are_stable_fail_closed():
     from kreports.mcp import resources
     from kreports.mcp.answer_pack import build_answer_pack

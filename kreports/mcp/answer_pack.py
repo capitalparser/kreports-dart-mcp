@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
+from kreports.mcp.auditor_public import public_kam_lifecycle_events
 from kreports.mcp.contracts import build_answer_envelope
 from kreports.mcp.professional_surfaces import PACK_BUILDERS as PROFESSIONAL_PACK_BUILDERS
 
@@ -776,10 +777,7 @@ def _build_audit_fee_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
 
 def _build_kam_lifecycle_pack(result: dict[str, Any]) -> dict[str, Any]:
     pack = _base_pack(f"{_subject_label(result)} KAM lifecycle", result)
-    rows = [
-        event for event in (result.get("events") or [])
-        if isinstance(event, dict)
-    ]
+    rows = public_kam_lifecycle_events(result.get("events"))
     if rows:
         pack["tables"].append(_table(
             "kam_lifecycle",

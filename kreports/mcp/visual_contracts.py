@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kreports.analysis.evidence import evidence_reference_fields
+from kreports.mcp.auditor_public import public_kam_lifecycle_events
 
 
 PACK_VERSION = "visualization_pack.v1"
@@ -1295,7 +1296,7 @@ def _raw_family_pack(result: dict[str, Any]) -> dict[str, Any]:
             "encodings": {"x": {"field": "year"}, "y": {"field": "audit_fee_m"}},
         })
     elif family == "kam_lifecycle":
-        rows = result.get("events") or []
+        rows = public_kam_lifecycle_events(result.get("events"))
         pack["tables"].append({
             "id": "kam_lifecycle", "title": "KAM 생애주기",
             "columns": [

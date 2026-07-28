@@ -2,6 +2,10 @@ from collections.abc import Callable
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no
+from kreports.mcp.auditor_public import (
+    public_kam_lifecycle_label,
+    public_kam_topic_label,
+)
 
 PackBuilder = Callable[[dict[str, Any]], dict[str, Any] | None]
 DetailRenderer = Callable[[dict[str, Any]], str]
@@ -26,20 +30,6 @@ _PEER_REASON_LABELS = {
     "same_ksic_prefix": "동일 업종 분류",
     "asset_size_bucket": "자산규모 구간",
     "audit_fee_available": "감사보수 확인",
-}
-_KAM_TOPIC_LABELS = {
-    "revenue": "수익인식",
-    "revenue_recognition": "수익인식",
-    "inventory": "재고자산",
-    "impairment": "손상평가",
-    "fair_value": "공정가치",
-    "provision": "충당부채 및 우발사항",
-    "provisions": "충당부채 및 우발사항",
-    "going_concern": "계속기업",
-    "consolidation": "연결범위",
-    "tax": "법인세",
-    "development_cost": "개발비",
-    "unknown": "미분류",
 }
 _MATTER_CATEGORY_LABELS = {
     "other_matter": "기타사항",
@@ -318,11 +308,12 @@ def _kam_rows(rows: object) -> list[dict[str, Any]]:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            topic = str(item.get("topic") or "unknown")
             table_rows.append({
                 "year": section.get("bsns_year") or section.get("year"),
-                "topic": _KAM_TOPIC_LABELS.get(topic, "기타 핵심감사사항"),
-                "lifecycle": item.get("lifecycle") or section.get("lifecycle") or "미분류",
+                "topic": public_kam_topic_label(item.get("topic")),
+                "lifecycle": public_kam_lifecycle_label(
+                    item.get("lifecycle") or section.get("lifecycle"),
+                ),
                 "reason_available": "확보" if item.get("reason_available") else "미확보",
                 "procedure_available": "확보" if item.get("procedure_available") else "미확보",
                 "rcept_no": parent_rcept_no(

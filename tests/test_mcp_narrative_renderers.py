@@ -1,3 +1,5 @@
+import json
+
 from kreports.mcp.renderers import render_answer, render_audit_matter_search
 
 
@@ -83,6 +85,39 @@ def test_public_matter_surfaces_replace_category_enum_keys_with_korean_labels():
     ])
     assert "기타사항" in public_text
     assert "other_matter" not in public_text
+
+
+def test_public_kam_lifecycle_maps_topic_and_state_labels_everywhere():
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "start_year": 2024,
+        "end_year": 2025,
+        "events": [{
+            "year": 2025,
+            "topic": "revenue_recognition",
+            "status": "new",
+            "title": "수익인식",
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["events"][0]["topic"] == "수익인식"
+    assert out["events"][0]["status"] == "신규"
+    public_envelope = json.dumps(out, ensure_ascii=False)
+    resource_text = read_resource(out["answer_pack"]["resource_uri"])["text"]
+    for public_text in (
+        public_envelope,
+        out["answer"],
+        str(out["answer_pack"]["tables"]),
+        resource_text,
+    ):
+        assert "수익인식" in public_text
+        assert "신규" in public_text
+        assert "revenue_recognition" not in public_text
+        assert '"new"' not in public_text
 
 
 def test_render_new_tools_have_answers():
@@ -395,7 +430,7 @@ def test_render_answer_adds_the_same_canonical_visual_table_for_plain_clients():
     })
 
     assert "| 연도 | 주제 | 상태 |" in text
-    assert "| 2024 | 수익인식 | new |" in text
+    assert "| 2024 | 수익인식 | 신규 |" in text
 
 
 def test_render_answer_escapes_markdown_structure_from_visual_cells():

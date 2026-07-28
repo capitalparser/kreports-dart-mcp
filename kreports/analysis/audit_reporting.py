@@ -847,8 +847,8 @@ def _kam_semantic_items(row: dict) -> list[dict]:
             "ordinal": 1,
             "title": row.get("section_title"),
             "topic": topics[0],
-            "reason_available": analysis.get("has_reason_hint") is True,
-            "procedure_available": analysis.get("has_procedure_hint") is True,
+            "reason_available": False,
+            "procedure_available": False,
             "rcept_no": receipt,
             "segmentation_status": "single_item_body",
         }]
@@ -892,6 +892,11 @@ def _kam_semantic_coverage(
         for item in _kam_semantic_items(row)
     ]
     total = len(items)
+    item_population_proven = bool(items) and all(
+        item.get("segmentation_status") == "stored_item"
+        and item.get("quality_status") == "full_body"
+        for item in items
+    )
     topic_available = sum(bool(item.get("topic")) for item in items)
     reason_available = sum(item.get("reason_available") is True for item in items)
     procedure_available = sum(
@@ -900,7 +905,8 @@ def _kam_semantic_coverage(
     )
     source_available = sum(
         parent_rcept_no(str(item.get("rcept_no") or "")) is not None
-        and item.get("quality_status", "full_body") == "full_body"
+        and item.get("segmentation_status") == "stored_item"
+        and item.get("quality_status") == "full_body"
         for item in items
     )
 
@@ -917,11 +923,21 @@ def _kam_semantic_coverage(
     source_coverage = coverage(source_available)
     return {
         "timeline_status": "usable" if total else "missing",
-        "semantic_complete": semantic_source_allowed and bool(total) and all(
-            item["status"] == "usable"
-            for item in (topic_coverage, reason_coverage, procedure_coverage, source_coverage)
+        "semantic_complete": (
+            semantic_source_allowed
+            and item_population_proven
+            and all(
+                item["status"] == "usable"
+                for item in (
+                    topic_coverage,
+                    reason_coverage,
+                    procedure_coverage,
+                    source_coverage,
+                )
+            )
         ),
         "semantic_source_eligible": semantic_source_allowed,
+        "item_population_proven": item_population_proven,
         "topic_coverage": topic_coverage,
         "reason_coverage": reason_coverage,
         "procedure_coverage": procedure_coverage,

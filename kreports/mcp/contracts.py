@@ -611,6 +611,12 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     normalized_quality.update(quality.model_dump())
     normalized["data_quality"] = normalized_quality
     normalized["quality_status"] = quality.status
+    if tool_name == "get_kam_lifecycle":
+        from kreports.mcp.auditor_public import public_kam_lifecycle_events
+
+        normalized["events"] = public_kam_lifecycle_events(
+            normalized.get("events"),
+        )
     # Legacy packs have no binding to the current tool input or evidence.
     # Treat them as untrusted presentation data and rebuild a public pack only
     # after normalization from the current canonical result.

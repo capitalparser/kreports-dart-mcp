@@ -136,7 +136,7 @@ def test_kam_semantic_complete_requires_every_current_item_and_receipt_linked_so
 
     assert out["data_quality"]["semantic_complete"] is False
     assert out["data_quality"]["source_coverage"] == {
-        "available": 1,
+        "available": 0,
         "total": 2,
         "status": "limited",
     }
@@ -299,6 +299,102 @@ def test_two_item_kam_body_uses_each_material_item_as_coverage_denominator(
     }
 
 
+def test_body_fallback_without_persisted_item_population_never_completes(
+    temp_engine,
+):
+    from kreports.analysis.audit_reporting import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        _add_company(session)
+        session.add(ReportSection(
+            rcept_no="20260311000015",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "수익인식은 거래조건 판단 때문에 핵심감사사항으로 결정했습니다. "
+                "우리는 문서검사를 수행하였습니다. "
+                "신규 플랫폼 고객보상 산정도 별도의 핵심감사사항으로 결정했습니다."
+            ),
+            body_hash="unproved-item-population",
+            body_length=92,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["sections"][0]["kam_analysis"]["topics"] == ["revenue"]
+    assert out["data_quality"]["semantic_complete"] is False
+    assert out["data_quality"]["item_population_proven"] is False
+    assert out["data_quality"]["source_coverage"] == {
+        "available": 0,
+        "total": 1,
+        "status": "limited",
+    }
+
+
+def test_persisted_full_body_single_kam_item_can_complete_semantics(temp_engine):
+    from kreports.analysis.audit_reporting import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    receipt = "20260311000016"
+    with get_session() as session:
+        _add_company(session)
+        session.add(ReportSection(
+            rcept_no=receipt,
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "수익인식은 거래조건 판단 때문에 핵심감사사항으로 결정했습니다. "
+                "우리는 문서검사를 수행하였습니다."
+            ),
+            body_hash="proved-single-item",
+            body_length=60,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add(KamItem(
+            rcept_no=receipt,
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=1,
+            title="수익인식",
+            normalized_topic="revenue",
+            reason_text="거래조건 판단이 중요합니다.",
+            audit_response_text="문서검사를 수행하였습니다.",
+            related_note_references_json="[]",
+            full_body_hash="3" * 40,
+            full_body_length=60,
+            source_basis="source_documents.full_body",
+            quality_status="full_body",
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["data_quality"]["item_population_proven"] is True
+    assert out["data_quality"]["semantic_complete"] is True
+    for field in (
+        "topic_coverage",
+        "reason_coverage",
+        "procedure_coverage",
+        "source_coverage",
+    ):
+        assert out["data_quality"][field] == {
+            "available": 1,
+            "total": 1,
+            "status": "usable",
+        }
+
+
 def test_unrelated_receipt_procedure_cannot_complete_kam_semantics(temp_engine):
     from kreports.analysis.audit_reporting import get_audit_report_sections
     from kreports.db.engine import get_session
@@ -396,6 +492,6 @@ def test_attachment_receipt_is_canonicalized_to_public_parent(temp_engine):
 
     out = get_audit_report_sections("000001", year=2025, section_key="kam")
 
-    assert out["data_quality"]["source_coverage"]["available"] == 1
+    assert out["data_quality"]["source_coverage"]["available"] == 0
     assert out["sections"][0]["rcept_no"] == "20260311000010"
     assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000010"

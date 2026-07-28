@@ -6,6 +6,10 @@ import re
 from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no, source_line
+from kreports.mcp.auditor_public import (
+    public_kam_lifecycle_events,
+    public_kam_topic_label,
+)
 from kreports.mcp.contracts import (
     AnswerEnvelopeV1,
     build_answer_envelope,
@@ -375,20 +379,6 @@ def _hierarchy_closed_group_rows(
     return visible
 
 
-_PUBLIC_KAM_TOPIC_LABELS = {
-    "revenue": "수익인식",
-    "revenue_recognition": "수익인식",
-    "inventory": "재고자산",
-    "impairment": "손상평가",
-    "fair_value": "공정가치",
-    "provision": "충당부채 및 우발사항",
-    "provisions": "충당부채 및 우발사항",
-    "going_concern": "계속기업",
-    "consolidation": "연결범위",
-    "tax": "법인세",
-    "development_cost": "개발비",
-    "unknown": "미분류",
-}
 _PUBLIC_MATTER_LABELS = {
     "other_matter": "기타사항",
     "basis_for_opinion": "의견근거",
@@ -404,10 +394,7 @@ _PUBLIC_MATTER_LABELS = {
 
 
 def _public_kam_topic(value: object) -> str:
-    return _PUBLIC_KAM_TOPIC_LABELS.get(
-        str(value or ""),
-        "기타 핵심감사사항",
-    )
+    return public_kam_topic_label(value)
 
 
 def _public_matter_label(value: object) -> str:
@@ -624,8 +611,11 @@ def _render_audit_procedures(result: dict) -> str:
 
 def _render_kam_lifecycle(result: dict) -> str:
     subject = _subject_label(result)
-    events = result.get("events") or []
-    changed = [event for event in events if event.get("status") == "repeated_changed"]
+    events = public_kam_lifecycle_events(result.get("events"))
+    changed = [
+        event for event in events
+        if event.get("status") == "반복·문구 변경"
+    ]
     lines = [
         f"판정: {_status(result)}",
         "",
