@@ -90,6 +90,28 @@ def _annual_financial_source(
     )
 
 
+def _downgrade_unproven_financial_data_quality(result: dict, source: dict) -> dict:
+    """Keep directly returned financial-pack status honest about filing provenance."""
+    if source.get("rcept_no"):
+        return {}
+    data_quality = result.get("data_quality")
+    if not isinstance(data_quality, dict) or data_quality.get("status") != "usable":
+        return {}
+    limitation = source.get("provenance_gap") or (
+        "로컬 구조화 재무 데이터는 있으나 동일 회사·사업연도 사업보고서 접수번호를 확인하지 못했습니다."
+    )
+    limitations = list(data_quality.get("limitations") or [])
+    if limitation not in limitations:
+        limitations.append(limitation)
+    return {
+        "data_quality": {
+            **data_quality,
+            "status": "limited",
+            "limitations": limitations,
+        },
+    }
+
+
 def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: str) -> dict:
     """Build confirmed facts and next checks for investor financial tools."""
     corp_code = str(result.get("company") or (subject or {}).get("corp_code") or "")
@@ -155,7 +177,12 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
             "사업보고서 사업부문·수주·시장위험 문단을 이용해 과거 중앙값이 미래 추정에 적합한지 검토하세요.",
         ])
 
-    return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
+    return {
+        "confirmed_facts": _dedupe_confirmed_facts(facts),
+        "analysis": analysis,
+        "next_checks": next_checks,
+        **_downgrade_unproven_financial_data_quality(result, source),
+    }
 
 
 def _disclosure_event_evidence(result: dict) -> dict:
@@ -983,12 +1010,12 @@ def build_dcf_model_pack(
                 f"{scenario.base_year}년 DCF source actuals를 "
                 "로컬 구조화 재무 데이터에서 조회했습니다."
             ),
-            "source": _annual_report_source(
+            "source": _annual_financial_source(
                 corp_code,
                 subject,
                 scenario.base_year,
-                section_title="재무제표",
                 source_table="financial_facts_compact",
+                fs_div=fs_div,
             ),
             "excerpt": (
                 "source_actuals="

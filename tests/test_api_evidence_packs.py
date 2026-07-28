@@ -147,6 +147,8 @@ def test_annual_financial_evidence_does_not_cite_a_different_fiscal_year(temp_en
     assert source["provenance_status"] == "requested_annual_report_not_cached"
     assert "2022" in source["provenance_gap"]
     assert "20260318001234" not in str(out["confirmed_facts"])
+    assert out["data_quality"]["status"] == "limited"
+    assert source["provenance_gap"] in out["data_quality"]["limitations"]
 
 
 def test_annual_financial_evidence_cites_matching_non_december_fiscal_year(temp_engine, monkeypatch):

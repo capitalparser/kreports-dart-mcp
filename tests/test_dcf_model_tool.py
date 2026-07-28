@@ -1,3 +1,5 @@
+from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -501,6 +503,72 @@ def test_dcf_facade_marks_enterprise_only_or_source_partial_as_limited(
     assert result["data_quality"]["status"] == "limited"
     assert result["data_quality"]["enterprise_completion"] == "complete"
     assert result["data_quality"]["equity_completion"] == "partial"
+
+
+def test_dcf_model_pack_keeps_the_requested_fs_basis_in_annual_provenance(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.analysis import dcf_source, financial_analysis
+    from kreports.analysis.dcf_source import DcfSourceResult
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Disclosure, FinancialFactCompact
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00126380",
+                corp_name="정확회사",
+                stock_code="005930",
+                market="KOSPI",
+            ),
+            Disclosure(
+                rcept_no="20250318001234",
+                corp_code="00126380",
+                corp_name="정확회사",
+                disc_date=date(2025, 3, 18),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12)",
+                flr_nm="정확회사",
+            ),
+        ])
+        for basis in ("CFS", "OFS"):
+            session.add(FinancialFactCompact(
+                corp_code="00126380",
+                bsns_year=2024,
+                fs_div=basis,
+                metric_key="revenue",
+                metric_name="매출액",
+                amount=100,
+                source_account_id="ifrs-full_Revenue",
+                source_account_nm="매출액",
+            ))
+
+    def fake_source(_corp_code, _year, basis):
+        return DcfSourceResult(
+            status="usable",
+            facts=tuple(replace(fact, fs_div=basis) for fact in _facts_for_facade()),
+            missing_metrics=(),
+            limitations=(),
+        )
+
+    monkeypatch.setattr(dcf_source, "load_dcf_actuals", fake_source)
+    assumptions = {
+        "revenue_growth": 0.1,
+        "operating_margin": 0.1,
+        "tax_rate": 0.2,
+        "da_to_revenue": 0.05,
+        "capex_to_revenue": 0.04,
+        "nwc_to_revenue": 0.2,
+        "wacc": 0.1,
+        "terminal_growth": 0.03,
+    }
+
+    cfs = financial_analysis.build_dcf_model_pack("005930", 2024, fs_div="CFS", **assumptions)
+    ofs = financial_analysis.build_dcf_model_pack("005930", 2024, fs_div="OFS", **assumptions)
+
+    assert cfs["confirmed_facts"][0]["source"]["fs_div"] == "CFS"
+    assert ofs["confirmed_facts"][0]["source"]["fs_div"] == "OFS"
 
 
 def _facts_for_facade():
