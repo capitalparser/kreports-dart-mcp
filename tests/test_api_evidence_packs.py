@@ -1,6 +1,14 @@
 from datetime import date, datetime
 
-from kreports.db.models import AuditProcedureItem, Company, Disclosure, DisclosureEvent, ReportSection
+from kreports.db.models import (
+    AuditProcedureItem,
+    Company,
+    Disclosure,
+    DisclosureEvent,
+    FinancialFact,
+    FinancialFactCompact,
+    ReportSection,
+)
 
 
 def _seed_company_and_business_report(session):
@@ -13,6 +21,33 @@ def _seed_company_and_business_report(session):
         disc_type="A",
         report_nm="사업보고서 (2024.12)",
         flr_nm="A",
+    ))
+    _add_compact_fact(session, 2024)
+
+
+def _add_compact_fact(session, year: int) -> None:
+    session.add(FinancialFactCompact(
+        corp_code="001",
+        bsns_year=year,
+        fs_div="CFS",
+        metric_key="revenue",
+        metric_name="매출액",
+        amount=100,
+        source_account_id="ifrs-full_Revenue",
+        source_account_nm="매출액",
+    ))
+
+
+def _add_annual_financial_fact(session, year: int) -> None:
+    session.add(FinancialFact(
+        corp_code="001",
+        bsns_year=year,
+        reprt_code="11011",
+        fs_div="CFS",
+        sj_div="IS",
+        account_id="ifrs-full_Revenue",
+        account_nm="매출액",
+        thstrm_amount=100,
     ))
 
 
@@ -99,6 +134,7 @@ def test_annual_financial_evidence_does_not_cite_a_different_fiscal_year(temp_en
     })
     with get_session() as session:
         session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        _add_compact_fact(session, 2022)
         session.add(Disclosure(
             rcept_no="20260318001234", corp_code="001", corp_name="A",
             disc_date=date(2026, 3, 18), disc_type="A", report_nm="사업보고서 (2025.12)", flr_nm="A",
@@ -125,6 +161,7 @@ def test_annual_financial_evidence_cites_matching_non_december_fiscal_year(temp_
     })
     with get_session() as session:
         session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        _add_compact_fact(session, 2022)
         session.add(Disclosure(
             rcept_no="20230318001234", corp_code="001", corp_name="A",
             disc_date=date(2023, 3, 18), disc_type="A", report_nm="사업보고서 (2022.03)", flr_nm="A",
@@ -191,6 +228,7 @@ def test_investor_signals_api_adds_confirmed_facts(temp_engine, monkeypatch):
     ], {"capital_raise": 1}))
     with get_session() as session:
         _seed_company_and_business_report(session)
+        _add_annual_financial_fact(session, 2024)
 
     out = get_investor_signals("000001", years=1, window_days=365)
 

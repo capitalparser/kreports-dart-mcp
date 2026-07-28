@@ -11,6 +11,7 @@ import kreports.db.engine as _engine_module
 from kreports.db.engine import get_session
 from kreports.db.models import Disclosure
 from kreports.analysis import queries as _queries
+from kreports.analysis.filing_provenance import annual_filing_source
 
 from kreports.analysis._shared import _as_float, _avg, _clean_dict, _dedupe_confirmed_facts, _df_to_records, _has_db_table, _pct, _ratio
 from kreports.analysis.company_profile import get_company_summary, resolve_company_identifier, resolve_corp_code
@@ -24,45 +25,36 @@ def _annual_report_source(
     section_title: str,
     source_table: str,
 ) -> dict:
-    """Source descriptor for annual structured data, bound to the requested year.
+    """Backward-compatible non-citable source descriptor for old MCP callers."""
+    source = (
+        annual_filing_source(corp_code, int(year), source_table=source_table)
+        if year
+        else None
+    )
+    if source:
+        source["section_title"] = section_title
+        return source
+    return _uncitable_annual_source(corp_code, subject, year, section_title, source_table)
 
-    A financial fact may still be locally confirmed when the filing cache is
-    incomplete, but it must never borrow a receipt number from a different
-    fiscal year merely to make the fact look citable.
-    """
-    report_nm = None
-    rcept_no = None
-    params: dict[str, Any] = {"corp_code": corp_code}
-    where = "corp_code=:corp_code AND report_nm LIKE '%사업보고서%'"
-    if year:
-        where += " AND report_nm LIKE :year_pattern"
-        # Fiscal year ends need not be December.  DART annual report titles
-        # carry the fiscal year as ``사업보고서 (YYYY.MM)``.
-        params["year_pattern"] = f"%사업보고서 ({int(year)}.%"
-    with _engine_module.engine.connect() as conn:
-        row = conn.execute(
-            text(f"""
-                SELECT rcept_no, report_nm
-                FROM disclosures
-                WHERE {where}
-                ORDER BY disc_date DESC, rcept_no DESC
-                LIMIT 1
-            """),
-            params,
-        ).mappings().first()
-    if row:
-        rcept_no = row.get("rcept_no")
-        report_nm = row.get("report_nm")
+
+def _uncitable_annual_source(
+    corp_code: str,
+    subject: dict | None,
+    year: int | None,
+    section_title: str,
+    source_table: str,
+) -> dict:
+    """Describe a missing provenance link without manufacturing a citation."""
     source = {
         "corp_code": corp_code,
         "corp_name": (subject or {}).get("corp_name") or corp_code,
-        "report_nm": report_nm or "DART 연간 재무 데이터",
+        "report_nm": "DART 연간 재무 데이터",
         "bsns_year": year,
-        "rcept_no": rcept_no,
+        "rcept_no": None,
         "section_title": section_title,
         "source_table": source_table,
     }
-    if year and not rcept_no:
+    if year:
         source.update({
             "provenance_status": "requested_annual_report_not_cached",
             "provenance_gap": (
@@ -73,17 +65,42 @@ def _annual_report_source(
     return source
 
 
+def _annual_financial_source(
+    corp_code: str,
+    subject: dict | None,
+    year: int | None,
+    *,
+    source_table: str,
+    fs_div: str | None,
+) -> dict:
+    """Return a proven annual source or an explicit, uncitable provenance gap."""
+    source = (
+        annual_filing_source(corp_code, int(year), source_table=source_table, fs_div=fs_div)
+        if year
+        else None
+    )
+    if source:
+        return source
+    return _uncitable_annual_source(
+        corp_code,
+        subject,
+        year,
+        "재무제표",
+        source_table,
+    )
+
+
 def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: str) -> dict:
     """Build confirmed facts and next checks for investor financial tools."""
     corp_code = str(result.get("company") or (subject or {}).get("corp_code") or "")
     start_year = result.get("start_year")
     end_year = result.get("end_year")
-    source = _annual_report_source(
+    source = _annual_financial_source(
         corp_code,
         subject,
         int(end_year) if end_year else None,
-        section_title="재무제표",
         source_table="financial_facts_compact",
+        fs_div=result.get("fs_div"),
     )
     facts: list[dict] = []
     analysis: list[dict] = []
@@ -187,12 +204,12 @@ def _investor_signal_evidence(
                 f"{latest_year}년 연간 재무 스냅샷 기준 ROE={latest.get('ROE')}, "
                 f"영업이익률={latest.get('영업이익률')}, FCF={latest.get('FCF')}가 확인됩니다."
             ),
-            "source": _annual_report_source(
+            "source": _annual_financial_source(
                 corp_code,
                 subject,
                 int(latest_year) if latest_year else None,
-                section_title="재무제표",
                 source_table="financial_facts",
+                fs_div=latest.get("구분"),
             ),
             "excerpt": f"latest_snapshot={latest}",
         })
