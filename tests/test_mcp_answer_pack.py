@@ -5,7 +5,7 @@ import pytest
 from kreports.mcp.tools import _attach_meta
 
 
-def test_peer_answer_pack_surfaces_typed_cohort_denominators_conditionally():
+def test_peer_answer_pack_omits_cohort_metadata_without_metric_results():
     from kreports.mcp.answer_pack import build_answer_pack
 
     pack = build_answer_pack(
@@ -25,22 +25,8 @@ def test_peer_answer_pack_surfaces_typed_cohort_denominators_conditionally():
         },
     )
 
-    table = next(
-        table for table in pack["tables"] if table["id"] == "peer_cohort_metadata"
-    )
-    assert table["rows"] == [
-        {
-            "profile": "investor",
-            "requested_year": 2024,
-            "fs_div": "CFS",
-            "total_candidates": 20,
-            "eligible_count": 8,
-            "selected_count": 5,
-            "exclusion_reason": "year_unavailable",
-            "exclusion_count": 4,
-            "exclusion_scope": "common_eligibility",
-        }
-    ]
+    assert pack["summary"]["status"] == "missing"
+    assert [table["id"] for table in pack["tables"]] == ["availability"]
 
 
 def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():

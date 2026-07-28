@@ -1,6 +1,8 @@
 """Versioned professional answer contract for legacy MCP tool results."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -12,43 +14,7 @@ _CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
 _QUALITY_STATUSES = _CANONICAL_STATUSES
 _ADAPTER_VERSION = "legacy-result-adapter"
 
-# Each public catalog tool has its own result-shape evidence.  Generic field
-# names (notably items/results/inputs/assumptions) are deliberately scoped to
-# the tools that actually produce them, rather than trusted globally.
-_TOOL_PURPOSE_FIELDS: dict[str, dict[str, frozenset[str]]] = {
-    "search_company": {"lists": frozenset({"results"}), "counts": frozenset({"count"})},
-    "get_financial_snapshot": {"lists": frozenset({"rows"}), "counts": frozenset({"row_count"})},
-    "score_going_concern": {"lists": frozenset({"factors"}), "maps": frozenset({"scorecard"})},
-    "detect_restatement": {"lists": frozenset({"restatements"}), "counts": frozenset({"count"})},
-    "get_accounting_policy": {"maps": frozenset({"items"}), "counts": frozenset({"item_count"})},
-    "get_audit_history": {"lists": frozenset({"history"}), "counts": frozenset({"count"})},
-    "get_subsidiary_auditors": {"lists": frozenset({"subsidiaries"}), "maps": frozenset({"consolidated_totals"}), "counts": frozenset({"count", "total"})},
-    "compare_to_industry": {"lists": frozenset({"peers"}), "maps": frozenset({"distribution", "subject_metric"})},
-    "get_business_overview": {"lists": frozenset({"insights"}), "maps": frozenset({"sections"})},
-    "get_investor_signals": {"lists": frozenset({"recent_events"}), "maps": frozenset({"quality_snapshot", "accounting_risk", "event_counts"})},
-    "select_peer_group": {"lists": frozenset({"peers"}), "maps": frozenset({"selection_policy"}), "counts": frozenset({"returned_peer_count"})},
-    "compare_to_industry_multi": {"maps": frozenset({"results", "cohort_metadata"}), "counts": frozenset({"n_peers"})},
-    "compare_peer_audit_fees": {"maps": frozenset({"subject_metrics", "benchmarks"}), "counts": frozenset({"peer_count"})},
-    "compare_peer_risk_profile": {"maps": frozenset({"subject_metrics", "benchmarks"}), "counts": frozenset({"peer_count"})},
-    "compare_peer_accounting_policies": {"maps": frozenset({"subject_items", "peer_coverage"}), "counts": frozenset({"peer_count", "peers_with_policy"})},
-    "compare_peer_kam_topics": {"maps": frozenset({"topic_counts", "audit_report_events", "audit_report_sections"}), "counts": frozenset({"peer_count"})},
-    "compare_peer_audit_report_matters": {"maps": frozenset({"matter_counts"}), "counts": frozenset({"peer_count"})},
-    "search_dataset": {"lists": frozenset({"companies"}), "counts": frozenset({"total_records", "total_companies"})},
-    "fetch_disclosure_on_demand": {"maps": frozenset({"document", "summary"})},
-    "search_audit_report_matters": {"lists": frozenset({"companies"}), "counts": frozenset({"total_companies", "total_sections"})},
-    "search_audit_procedures": {"lists": frozenset({"companies"}), "counts": frozenset({"total_companies", "total_procedures"})},
-    "compare_peer_audit_procedures": {"maps": frozenset({"procedure_counts", "subject_procedures"}), "counts": frozenset({"peer_count"})},
-    "get_kam_lifecycle": {"lists": frozenset({"events"}), "counts": frozenset({"event_count"})},
-    "get_accounting_policy_changes": {"lists": frozenset({"changed_items"}), "counts": frozenset({"change_count"})},
-    "get_quality_of_earnings_pack": {"lists": frozenset({"evidence", "signals", "audit_matter_flags"}), "maps": frozenset({"metrics"})},
-    "get_dcf_input_candidates": {"lists": frozenset({"historical_actuals"}), "maps": frozenset({"candidate_assumptions"})},
-    "search_disclosure_events": {"lists": frozenset({"events"}), "counts": frozenset({"total_events"})},
-    "get_audit_report_sections": {"lists": frozenset({"sections"}), "counts": frozenset({"section_count"})},
-    "estimate_audit_hours_proxy": {"lists": frozenset({"complexity_factors"}), "maps": frozenset({"complexity_components"})},
-    "build_audit_acceptance_pack": {"lists": frozenset({"acceptance_signals"}), "maps": frozenset({"fee_benchmark", "risk_profile", "hours_proxy"})},
-    "get_industry_audit_landscape": {"lists": frozenset({"auditor_market", "opinion_distribution"}), "maps": frozenset({"subject_auditor"})},
-    "build_dcf_model_pack": {"lists": frozenset({"historical_actuals", "forecast"}), "maps": frozenset({"valuation", "sensitivity"})},
-}
+ToolPurposePredicate = Callable[[dict[str, Any]], bool]
 
 DOMAIN_VERDICT_ALLOWLISTS = {
     "get_quality_of_earnings_pack": {"stable", "monitor"},
@@ -196,28 +162,302 @@ def _covered_years(result: dict[str, Any], quality: dict[str, Any]) -> list[int]
     return years
 
 
-def _has_partial_payload(tool_name: str, result: dict[str, Any]) -> bool:
-    """Return whether registered business fields contain affirmative data."""
-    fields = _TOOL_PURPOSE_FIELDS.get(tool_name)
-    if fields is None:
+def _positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _is_numeric_measure(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
         return False
-    # Facts are a dedicated channel: an uncitable fact remains an affirmative
-    # but limited payload below, while only a validated source can retain
-    # usable status.
-    if any(isinstance(fact, dict) for fact in result.get("confirmed_facts") or []):
+    try:
+        return Decimal(str(value)).is_finite()
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _has_result_rows(result: dict[str, Any], key: str) -> bool:
+    """Whether a handler returned at least one non-empty result record."""
+    value = result.get(key)
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and bool(item)
+        for item in value
+    )
+
+
+def _has_positive_count(result: dict[str, Any], *keys: str) -> bool:
+    return any(_positive_number(result.get(key)) for key in keys)
+
+
+def _has_quantile_rows(result: dict[str, Any], key: str) -> bool:
+    """Peer benchmark output is evidence only when a metric has observations."""
+    values = result.get(key)
+    return isinstance(values, dict) and any(
+        isinstance(metric, dict) and _positive_number(metric.get("n"))
+        for metric in values.values()
+    )
+
+
+def _has_nested_count(result: dict[str, Any], key: str, *count_keys: str) -> bool:
+    value = result.get(key)
+    if not isinstance(value, dict):
+        return False
+    return any(_positive_number(value.get(count_key)) for count_key in count_keys)
+
+
+def _has_business_sections(result: dict[str, Any]) -> bool:
+    sections = result.get("sections")
+    return isinstance(sections, dict) and any(
+        isinstance(section, dict)
+        and isinstance(section.get("body_text"), str)
+        and bool(section["body_text"].strip())
+        for section in sections.values()
+    )
+
+
+def _has_investor_signal_result(result: dict[str, Any]) -> bool:
+    if _has_result_rows(result, "recent_events"):
         return True
-    for key in fields.get("lists", frozenset()):
-        if isinstance(result.get(key), list) and result[key]:
-            return True
-    for key in fields.get("counts", frozenset()):
-        value = result.get(key)
-        if isinstance(value, (int, float)) and value > 0:
-            return True
-    for key in fields.get("maps", frozenset()):
-        value = result.get(key)
-        if isinstance(value, dict) and value:
-            return True
-    return False
+    snapshot = result.get("quality_snapshot")
+    # A financial snapshot's concrete reporting year is itself sufficient
+    # evidence that this tool reached current-domain data, including a year
+    # whose risk checks all happened to fail.
+    return isinstance(snapshot, dict) and isinstance(snapshot.get("latest_year"), int)
+
+
+def _has_audit_fee_result(result: dict[str, Any]) -> bool:
+    if _has_quantile_rows(result, "benchmarks"):
+        return True
+    subject_metrics = result.get("subject_metrics")
+    return isinstance(subject_metrics, dict) and any(
+        _is_numeric_measure(subject_metrics.get(key))
+        for key in (
+            "audit_fee_m",
+            "audit_hours",
+            "non_audit_fee_m",
+            "nas_ratio",
+            "actual_fee_m",
+            "actual_hours",
+            "contract_fee_m",
+            "contract_hours",
+        )
+    )
+
+
+def _has_risk_profile_result(result: dict[str, Any]) -> bool:
+    if _has_quantile_rows(result, "benchmarks"):
+        return True
+    events = result.get("disclosure_event_counts")
+    if not isinstance(events, dict):
+        return False
+    subject_events = events.get("subject")
+    peer_events = events.get("peers")
+    return (
+        isinstance(subject_events, dict)
+        and _positive_number(subject_events.get("total_disclosures"))
+    ) or (
+        isinstance(peer_events, dict)
+        and any(
+            isinstance(value, dict)
+            and _positive_number(value.get("total_disclosures"))
+            for value in peer_events.values()
+        )
+    )
+
+
+def _has_policy_item_result(result: dict[str, Any]) -> bool:
+    items = result.get("items")
+    return isinstance(items, dict) and any(
+        isinstance(item, str) and bool(item.strip())
+        or isinstance(item, dict) and any(
+            isinstance(item.get(key), str) and bool(item[key].strip())
+            for key in ("heading", "body")
+        )
+        for item in items.values()
+    )
+
+
+def _has_peer_policy_result(result: dict[str, Any]) -> bool:
+    return _has_positive_count(result, "subject_policy_count", "peers_with_policy")
+
+
+def _has_kam_topic_result(result: dict[str, Any]) -> bool:
+    return (
+        _has_result_rows(result, "subject_sections")
+        or _has_nested_count(result, "audit_report_events", "total_events")
+        or _has_nested_count(result, "audit_report_sections", "total_sections", "kam_body_count")
+    )
+
+
+def _has_audit_matter_result(result: dict[str, Any]) -> bool:
+    if _has_result_rows(result, "subject_matters"):
+        return True
+    matters = result.get("matter_counts")
+    return isinstance(matters, dict) and any(
+        isinstance(value, dict) and _positive_number(value.get("total_sections"))
+        for value in matters.values()
+    )
+
+
+def _has_audit_procedure_result(result: dict[str, Any]) -> bool:
+    return _has_positive_count(result, "companies_with_procedures") or any(
+        isinstance(counts, dict) and any(
+            _positive_number(value)
+            for value in counts.values()
+        )
+        for counts in (
+            result.get("subject_procedure_type_counts"),
+            result.get("peer_procedure_type_counts"),
+            result.get("subject_method_counts"),
+            result.get("peer_method_counts"),
+            result.get("peer_kam_topic_counts"),
+        )
+    )
+
+
+def _has_quality_of_earnings_result(result: dict[str, Any]) -> bool:
+    if (
+        _has_result_rows(result, "evidence")
+        or _has_result_rows(result, "signals")
+        or _has_result_rows(result, "audit_matter_flags")
+    ):
+        return True
+    metrics = result.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    return (
+        _positive_number(metrics.get("years"))
+        or _is_numeric_measure(metrics.get("margin_volatility"))
+        or any(isinstance(metrics.get(key), list) and bool(metrics[key]) for key in (
+            "low_cash_conversion_years",
+            "negative_ocf_years",
+        ))
+    )
+
+
+def _has_audit_hours_proxy_result(result: dict[str, Any]) -> bool:
+    if _has_result_rows(result, "drivers"):
+        return True
+    subject_metrics = result.get("subject_metrics")
+    return isinstance(subject_metrics, dict) and any(
+        _is_numeric_measure(subject_metrics.get(key))
+        for key in ("audit_hours", "audit_fee_m", "total_assets", "beneish_m_score")
+    )
+
+
+def _has_dcf_model_result(result: dict[str, Any]) -> bool:
+    return (
+        _has_result_rows(result, "actuals")
+        or _has_result_rows(result, "projections")
+        or _has_nested_count(result, "valuation_bridge", "enterprise_value", "equity_value")
+    )
+
+
+def _has_dcf_candidate_result(result: dict[str, Any]) -> bool:
+    if _has_result_rows(result, "historical_actuals"):
+        return True
+    assumptions = result.get("candidate_assumptions")
+    return isinstance(assumptions, dict) and any(
+        isinstance(value, dict)
+        and any(
+            isinstance(value.get(key), (int, float))
+            and not isinstance(value.get(key), bool)
+            for key in ("value", "low", "high", "median")
+        )
+        for value in assumptions.values()
+    )
+
+
+def _has_audit_acceptance_result(result: dict[str, Any]) -> bool:
+    fee_summary = result.get("audit_fee_summary")
+    risk_summary = result.get("risk_summary")
+    if isinstance(fee_summary, dict) and _has_quantile_rows(fee_summary, "benchmarks"):
+        return True
+    if isinstance(risk_summary, dict) and _has_quantile_rows(risk_summary, "benchmarks"):
+        return True
+    policy_summary = result.get("policy_summary")
+    return isinstance(policy_summary, dict) and any(
+        _positive_number(policy_summary.get(key))
+        for key in ("subject_policy_count", "peers_with_policy")
+    )
+
+
+def _has_disclosure_document(result: dict[str, Any]) -> bool:
+    document = result.get("document")
+    if isinstance(document, dict) and any(
+        isinstance(document.get(key), str) and bool(document[key].strip())
+        for key in ("body", "body_text", "content", "xml")
+    ):
+        return True
+    return (
+        _positive_number(result.get("body_length"))
+        or isinstance(result.get("body_excerpt"), str)
+        and bool(result["body_excerpt"].strip())
+    )
+
+
+# Each predicate is bound to a real handler result shape and explicitly rejects
+# its no-data shape.  Configuration, subject metadata, selection policy, and
+# cohort descriptors never establish answer usability.
+_TOOL_PURPOSE_PREDICATES: dict[str, ToolPurposePredicate] = {
+    "search_company": lambda result: _has_result_rows(result, "results"),
+    "get_financial_snapshot": lambda result: _has_result_rows(result, "rows"),
+    "score_going_concern": lambda result: (
+        result.get("has_data") is True
+        and isinstance(result.get("score"), (int, float))
+        and not isinstance(result.get("score"), bool)
+        and isinstance(result.get("grade"), str)
+        and result["grade"].strip() not in {"", "-"}
+    ),
+    "detect_restatement": lambda result: _has_result_rows(result, "restatements"),
+    "get_accounting_policy": _has_policy_item_result,
+    "get_audit_history": lambda result: _has_result_rows(result, "history"),
+    "get_subsidiary_auditors": lambda result: _has_result_rows(result, "subsidiaries"),
+    "compare_to_industry": lambda result: (
+        _has_result_rows(result, "peers")
+        or _has_positive_count(result, "n")
+    ),
+    "get_business_overview": _has_business_sections,
+    "get_investor_signals": _has_investor_signal_result,
+    "select_peer_group": lambda result: (
+        _has_result_rows(result, "peers")
+        or _has_positive_count(result, "returned_peer_count")
+    ),
+    "compare_to_industry_multi": lambda result: isinstance(result.get("results"), dict) and bool(result["results"]),
+    "compare_peer_audit_fees": _has_audit_fee_result,
+    "compare_peer_risk_profile": _has_risk_profile_result,
+    "compare_peer_accounting_policies": _has_peer_policy_result,
+    "compare_peer_kam_topics": _has_kam_topic_result,
+    "compare_peer_audit_report_matters": _has_audit_matter_result,
+    "search_dataset": lambda result: _has_result_rows(result, "companies"),
+    "fetch_disclosure_on_demand": _has_disclosure_document,
+    "search_audit_report_matters": lambda result: _has_result_rows(result, "companies"),
+    "search_audit_procedures": lambda result: _has_result_rows(result, "companies"),
+    "compare_peer_audit_procedures": _has_audit_procedure_result,
+    "get_kam_lifecycle": lambda result: _has_result_rows(result, "events"),
+    "get_accounting_policy_changes": lambda result: (
+        _has_result_rows(result, "changes")
+        or _has_result_rows(result, "changed_items")
+    ),
+    "get_quality_of_earnings_pack": _has_quality_of_earnings_result,
+    "get_dcf_input_candidates": _has_dcf_candidate_result,
+    "search_disclosure_events": lambda result: _has_result_rows(result, "events"),
+    "get_audit_report_sections": lambda result: _has_result_rows(result, "sections"),
+    "estimate_audit_hours_proxy": _has_audit_hours_proxy_result,
+    "build_audit_acceptance_pack": _has_audit_acceptance_result,
+    "get_industry_audit_landscape": lambda result: (
+        _has_result_rows(result, "auditor_market_share")
+        or isinstance(result.get("subject_auditor"), dict)
+        and isinstance(result["subject_auditor"].get("auditor_nm"), str)
+        and bool(result["subject_auditor"]["auditor_nm"].strip())
+    ),
+    "build_dcf_model_pack": _has_dcf_model_result,
+}
+
+
+def _has_tool_purpose_result(tool_name: str, result: dict[str, Any]) -> bool:
+    """Return whether the current tool produced affirmative domain output."""
+    predicate = _TOOL_PURPOSE_PREDICATES.get(tool_name)
+    return bool(predicate and predicate(result))
 
 
 def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
@@ -229,14 +469,14 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
     elif quality.get("status") is not None:
         status = str(quality["status"])
     else:
-        status = "limited" if _has_partial_payload(tool_name, result) else "missing"
+        status = "limited" if _has_tool_purpose_result(tool_name, result) else "missing"
     if status not in _QUALITY_STATUSES:
         raise ValueError(f"unsupported data quality status: {status}")
 
-    # An upstream quality claim alone is not evidence.  Empty legacy payloads
-    # have neither purpose-bearing inputs nor public facts, so availability is
-    # genuinely missing before presentation layers build an availability pack.
-    if status == "usable" and not _has_partial_payload(tool_name, result):
+    # An upstream quality claim and cited facts alone are not purpose evidence.
+    # The current tool must independently return its own audited domain result
+    # before a public surface can say usable.
+    if status == "usable" and not _has_tool_purpose_result(tool_name, result):
         status = "missing"
 
     confirmed_facts = [

@@ -68,6 +68,25 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     normalized_quality.update(envelope.data_quality.model_dump())
     normalized_result["data_quality"] = normalized_quality
 
+    # A canonical cache-missing result may still carry a cited fact, subject,
+    # selection policy, or cohort descriptor from a legacy handler.  None is a
+    # current-tool result row, so it must render as the same empty availability
+    # pack rather than attaching fact rows to a missing-status table.
+    if envelope.data_quality.status == "missing":
+        raw_pack = _base_pack(
+            "데이터 가용성",
+            normalized_result,
+            status="missing",
+        )
+        raw_pack["limitations"] = list(envelope.data_quality.limitations)
+        from kreports.mcp.visual_contracts import build_visualization_pack
+
+        return build_visualization_pack(raw_pack).model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_none=True,
+        )
+
     builders = {
         "get_dcf_input_candidates": _build_dcf_pack,
         "build_dcf_model_pack": _build_dcf_model_pack,

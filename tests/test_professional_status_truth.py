@@ -104,8 +104,8 @@ def test_other_tools_registered_key_cannot_be_used_by_this_tool():
 
 @pytest.mark.parametrize(("tool_name", "payload"), [
     ("get_subsidiary_auditors", {"subsidiaries": [{"name": "B"}]}),
-    ("get_quality_of_earnings_pack", {"metrics": {"cash_conversion": 0.9}}),
-    ("get_dcf_input_candidates", {"candidate_assumptions": {"wacc": {"value": 0.1}}}),
+    ("get_quality_of_earnings_pack", {"metrics": {"years": 3}}),
+    ("get_dcf_input_candidates", {"candidate_assumptions": {"revenue_growth": {"value": 0.1}}}),
     ("search_dataset", {"companies": [{"corp_name": "A", "records": [{"year": 2025}]}]}),
 ])
 def test_tool_registered_purpose_payloads_remain_usable(tool_name, payload):
@@ -119,9 +119,9 @@ def test_tool_registered_purpose_payloads_remain_usable(tool_name, payload):
 
 def test_purpose_registry_covers_the_public_tool_catalog_exactly():
     from kreports.mcp.catalog import TOOL_CATALOG
-    from kreports.mcp.contracts import _TOOL_PURPOSE_FIELDS
+    from kreports.mcp.contracts import _TOOL_PURPOSE_PREDICATES
 
-    assert set(_TOOL_PURPOSE_FIELDS) == set(TOOL_CATALOG)
+    assert set(_TOOL_PURPOSE_PREDICATES) == set(TOOL_CATALOG)
 
 
 @pytest.mark.parametrize("renderer_result", [None, ""])
@@ -189,6 +189,9 @@ def test_enrichment_replaces_injected_professional_verdict_prose():
             "answer": f"기존 결론: {injected}",
             "verdict": injected,
             "data_quality": {"status": "usable"},
+            "sections": {
+                "business_overview": {"body_text": "공시된 사업 개요입니다."},
+            },
             "confirmed_facts": [{
                 "statement": "공시로 확인된 사실",
                 "source": {"rcept_no": "20250301000001"},
@@ -199,21 +202,111 @@ def test_enrichment_replaces_injected_professional_verdict_prose():
         assert "판정:\n- usable" in out["answer"]
 
 
-def test_cited_complete_result_stays_usable_and_uncited_fact_is_limited():
+def test_business_overview_result_stays_usable_when_its_sections_are_present():
     cited = enrich_answer_response("get_business_overview", {
+        "sections": {
+            "business_overview": {
+                "title": "사업 개요",
+                "body_text": "반도체 설계와 판매를 수행합니다.",
+            },
+        },
         "confirmed_facts": [{
             "statement": "공시로 확인된 사실",
             "source": {"rcept_no": "20250301000001"},
         }],
         "data_quality": {"status": "usable"},
     })
-    uncited = enrich_answer_response("get_business_overview", {
-        "confirmed_facts": [{"statement": "근거 없는 사실"}],
+
+    assert cited["quality_status"] == "usable"
+
+
+def test_cited_cross_tool_fact_cannot_make_business_overview_usable():
+    """Re-allowing generic confirmed_facts would make this usable again."""
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("get_business_overview", {
+        "confirmed_facts": [{
+            "statement": "DCF 할인율 후보는 8.5%입니다.",
+            "source": {"rcept_no": "20250301000001"},
+            "tool_name": "get_dcf_input_candidates",
+        }],
+        "data_quality": {"status": "usable"},
+    })
+    envelope = build_answer_envelope("get_business_overview", out)
+    resource = read_resource(out["answer_pack"]["resource_uri"])
+
+    assert out["quality_status"] == out["data_quality"]["status"] == "missing"
+    assert envelope.verdict == out["answer_pack"]["summary"]["status"] == "missing"
+    assert "missing" in resource["text"]
+
+
+def test_peer_selection_metadata_without_returned_peers_is_missing():
+    """Treating selection_policy as a result would make this usable again."""
+    out = enrich_answer_response("select_peer_group", {
+        "selection_policy": {
+            "criteria": ["industry"],
+            "matched_prefix_len": 3,
+        },
+        "peers": [],
+        "returned_peer_count": 0,
         "data_quality": {"status": "usable"},
     })
 
-    assert cited["quality_status"] == "usable"
-    assert uncited["quality_status"] == "limited"
+    assert out["quality_status"] == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+
+
+def test_multi_industry_cohort_metadata_without_results_is_missing():
+    """Treating cohort_metadata as a result would make this usable again."""
+    out = enrich_answer_response("compare_to_industry_multi", {
+        "cohort_metadata": {
+            "profile": "investor",
+            "selected_count": 0,
+        },
+        "n_peers": 0,
+        "results": {},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+
+
+@pytest.mark.parametrize(("tool_name", "payload"), [
+    (
+        "compare_peer_audit_fees",
+        {
+            "subject_metrics": {"corp_code": "00000001"},
+            "benchmarks": {
+                "audit_fee_m": {"n": 0, "p50": None},
+            },
+            "peer_count": 0,
+        },
+    ),
+    (
+        "get_investor_signals",
+        {
+            "quality_snapshot": {
+                "latest_year": None,
+                "avg_roe": None,
+                "passed_checks": 0,
+            },
+            "accounting_risk": {"score": 0, "factors": []},
+            "event_counts": {"capital_raise": 0},
+            "recent_events": [],
+        },
+    ),
+])
+def test_auditor_and_investor_no_data_shapes_cannot_keep_usable(tool_name, payload):
+    """A metadata-shaped no-data response is not a purpose result."""
+    out = enrich_answer_response(tool_name, {
+        **payload,
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
 
 
 def test_nonempty_limited_result_never_becomes_missing_availability_pack():

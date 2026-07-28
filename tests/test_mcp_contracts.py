@@ -146,6 +146,7 @@ def test_usable_quality_is_limited_when_confirmed_facts_have_no_resolvable_evide
     from kreports.mcp.contracts import build_answer_envelope
 
     envelope = build_answer_envelope("get_quality_of_earnings_pack", {
+        "metrics": {"years": 3},
         "confirmed_facts": [{
             "statement": "2022년 재무 수치가 계산되었습니다.",
             "source": {
@@ -165,6 +166,7 @@ def test_explicit_non_dart_source_url_keeps_usable_quality():
     from kreports.mcp.contracts import build_answer_envelope
 
     envelope = build_answer_envelope("get_quality_of_earnings_pack", {
+        "metrics": {"years": 3},
         "confirmed_facts": [{
             "statement": "외부 검증 사실입니다.",
             "source": {"source_label": "공식 통계", "source_url": "https://example.com/source"},
@@ -181,6 +183,7 @@ def test_unsafe_explicit_source_url_is_not_rendered_and_downgrades_quality():
     from kreports.mcp.renderers import render_answer
 
     result = {
+        "metrics": {"years": 3},
         "confirmed_facts": [{
             "statement": "검증되지 않은 링크입니다.",
             "source": {"source_url": "javascript:alert(1)"},
@@ -199,6 +202,7 @@ def test_usable_quality_is_limited_when_any_confirmed_fact_lacks_evidence():
     from kreports.mcp.contracts import build_answer_envelope
 
     envelope = build_answer_envelope("get_quality_of_earnings_pack", {
+        "metrics": {"years": 3},
         "confirmed_facts": [
             {"statement": "인용된 사실", "source": {"rcept_no": "20250301000001"}},
             {
