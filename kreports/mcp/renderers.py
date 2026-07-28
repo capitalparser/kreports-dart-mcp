@@ -100,7 +100,7 @@ def _render_search_dataset(result: dict) -> str:
     lines = [
         f"판정: {status}",
         "",
-        f"{subject} 조건으로 {dataset_label}을 조회한 결과, 회사 {total_companies}개와 근거 레코드 {total_records}건이 확인됩니다.",
+        f"{subject} 조건으로 {dataset_label}에서 조회한 결과, 회사 {total_companies}개와 근거 레코드 {total_records}건이 확인됩니다.",
     ]
     year = query.get("year")
     if year:
@@ -1191,4 +1191,5 @@ def _append_visual_table(
     ):
         return narrative
     table_markdown = render_visualization_markdown(pack, mermaid=False)
-    return f"{narrative}\n\n시각화 대체 표:\n\n{table_markdown}"
+    heading = "표 형태 결과" if tool_name == "search_dataset" else "시각화 대체 표"
+    return f"{narrative}\n\n{heading}:\n\n{table_markdown}"

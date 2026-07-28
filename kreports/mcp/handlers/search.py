@@ -154,6 +154,9 @@ def _note_reference(record: dict) -> str:
     note_no = str(record.get("note_no") or "").strip()
     note_title = str(record.get("note_title") or "").strip()
     prefix = f"주석 {note_no}" if note_no else "주석"
+    nested_title = re.match(r"^([0-9]+)\s*[.)]\s*(.+)$", note_title)
+    if note_no and nested_title:
+        return f"{prefix} · {nested_title.group(1)} {nested_title.group(2)}"
     return f"{prefix} {note_title}".strip()
 
 
@@ -184,7 +187,7 @@ def _enrich_accounting_note_search(result: dict) -> dict:
                     continue
                 seen_passages.add(passage_key)
                 facts.append({
-                    "statement": f"{note_reference}에 {topic} 관련 문구가 기재되어 있습니다.",
+                    "statement": f"{note_reference}: {passage}",
                     "excerpt": passage,
                     "topic": topic,
                     "year": record.get("year") or query.get("year"),
@@ -194,6 +197,7 @@ def _enrich_accounting_note_search(result: dict) -> dict:
                         "corp_code": corp_code,
                         "corp_name": corp_name,
                         "rcept_no": raw_receipt,
+                        "report_nm": "사업보고서",
                         "source_table": "accounting_note_chapters",
                         "section_title": note_reference,
                     },
@@ -205,10 +209,7 @@ def _enrich_accounting_note_search(result: dict) -> dict:
     )
     if not matched_row_count:
         status = "missing"
-        coverage_note = (
-            "현재 로컬 캐시에서 요청 조건에 맞는 회계주석 근거를 찾지 못했습니다. "
-            "이는 원 공시 부재를 뜻하지 않습니다."
-        )
+        coverage_note = "로컬 캐시에 일치하는 회계주석 근거가 없습니다."
     elif facts and valid_fact_count == len(facts):
         status = "usable"
         coverage_note = "반환된 발췌문과 14자리 DART 접수번호를 함께 확인했습니다."
@@ -235,11 +236,18 @@ def _enrich_accounting_note_search(result: dict) -> dict:
         "perspective": "auditor",
         "basis": "반환된 회계주석 발췌문과 요청 키워드",
     }] if facts else []
-    enriched["next_checks"] = [
-        "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
-        "주요 회계추정 입력과 근거를 검토하세요.",
-        "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
-    ]
+    enriched["next_checks"] = (
+        [
+            "원 공시의 해당 주석 전문을 직접 확인하세요.",
+            "필요하면 최신 수집본으로 로컬 캐시를 보완한 뒤 다시 조회하세요.",
+        ]
+        if status == "missing"
+        else [
+            "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
+            "주요 회계추정 입력과 근거를 검토하세요.",
+            "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
+        ]
+    )
     enriched["data_quality"] = data_quality
     return enriched
 

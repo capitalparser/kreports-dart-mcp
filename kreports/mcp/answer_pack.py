@@ -1327,7 +1327,11 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
             "year": fact.get("year"),
             "fs_div": fact.get("fs_div"),
             "note_reference": fact.get("note_reference") or source.get("section_title") or "주석",
-            "confirmed_statement": fact.get("statement") or "공시 주석 문구가 확인되었습니다.",
+            "confirmed_statement": (
+                f"{fact.get('note_reference') or source.get('section_title') or '주석'}에서 "
+                f"{fact.get('topic') or (result.get('query') or {}).get('keyword') or '요청'} "
+                "관련 주석 문구가 확인되었습니다."
+            ),
             "matched_excerpt": fact.get("excerpt") or "발췌문 미확보",
             "audit_implication": audit_implication,
             "rcept_no": parent_rcept_no(str(source.get("rcept_no") or "")) or "미확보",
