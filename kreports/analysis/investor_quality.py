@@ -136,19 +136,9 @@ def quality_of_earnings_pack(
     fs_div: str = "CFS",
 ) -> dict:
     """Return investor-facing quality-of-earnings signals."""
+    matter_summary = _audit_matter_summary(company, start_year, end_year)
+    matter_flags = _audit_matter_flags(company, start_year, end_year)
     series = _financial_series(company, start_year, end_year, fs_div=fs_div)
-    if not series:
-        return {
-            "company": company,
-            "start_year": int(start_year),
-            "end_year": int(end_year),
-            "fs_div": fs_div,
-            "verdict": "insufficient_data",
-            "signals": [],
-            "evidence": [],
-            "data_quality": {"status": "missing", "source": "financial_facts_compact"},
-            "limitations": ["No compact annual financial facts are available for the requested range."],
-        }
 
     evidence: list[dict] = []
     signals: list[dict] = []
@@ -200,8 +190,6 @@ def quality_of_earnings_pack(
             "value": margin_volatility,
             "meaning": "영업이익률 변동성이 커서 정상화 마진 판단에 주의가 필요합니다.",
         })
-    matter_summary = _audit_matter_summary(company, start_year, end_year)
-    matter_flags = _audit_matter_flags(company, start_year, end_year)
     if any(row.get("severity_hint") in ("high", "warning") for row in matter_flags):
         signals.append({
             "signal": "audit_matter_present",
@@ -210,7 +198,29 @@ def quality_of_earnings_pack(
             "meaning": "감사보고서 강조사항/계속기업/기타사항 문단이 확인됩니다.",
         })
 
-    verdict = "monitor" if signals else "stable"
+    verdict = (
+        "monitor"
+        if signals
+        else "stable"
+        if series
+        else "insufficient_data"
+    )
+    quality_status = (
+        "usable"
+        if len(series) >= 3
+        else "limited"
+        if series or matter_summary["section_count"]
+        else "missing"
+    )
+    limitations = [
+        "This is a DART-based screening pack, not an investment recommendation.",
+        "One-off gains/losses require note-level review when compact facts do not expose them separately.",
+    ]
+    if not series:
+        limitations.insert(
+            0,
+            "요청 기간의 compact 연간 재무 실제값은 없지만 감사보고서 matter는 독립적으로 표시합니다.",
+        )
     return {
         "company": company,
         "start_year": int(start_year),
@@ -229,12 +239,13 @@ def quality_of_earnings_pack(
         "audit_matter_flags": matter_flags,
         "audit_matter_summary": matter_summary,
         "data_quality": {
-            "status": "usable" if len(series) >= 3 else "limited",
-            "source": "financial_facts_compact",
+            "status": quality_status,
+            "source": (
+                "financial_facts_compact + audit_matter_items"
+                if matter_summary["section_count"]
+                else "financial_facts_compact"
+            ),
             "year_count": len(series),
         },
-        "limitations": [
-            "This is a DART-based screening pack, not an investment recommendation.",
-            "One-off gains/losses require note-level review when compact facts do not expose them separately.",
-        ],
+        "limitations": limitations,
     }

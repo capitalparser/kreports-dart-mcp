@@ -50,7 +50,15 @@ def test_dcf_input_candidates_marks_missing_operating_profit_as_incomplete(monke
 
     out = dcf_input_candidates("001", start_year=2022, end_year=2024)
 
-    assert out["data_quality"]["status"] == "incomplete_core_metrics"
-    assert out["data_quality"]["readiness"] == "partial"
+    assert out["candidate_status"] == "limited"
+    assert out["valuation_readiness"] == "blocked"
+    assert out["data_quality"]["status"] == "limited"
+    assert out["data_quality"]["candidate_status"] == "limited"
+    assert out["data_quality"]["valuation_readiness"] == "blocked"
     assert "operating_profit" in out["missing_inputs"]
+    assert any(
+        blocker["field"] == "operating_profit"
+        and blocker["kind"] == "source_fact_missing"
+        for blocker in out["valuation_blockers"]
+    )
     assert out["candidate_assumptions"]["operating_margin"]["value"] is None

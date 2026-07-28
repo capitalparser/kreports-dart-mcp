@@ -14,7 +14,10 @@ from typing import Any
 
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
 from kreports.mcp.auditor_public import public_kam_lifecycle_events
-from kreports.mcp.contracts import build_answer_envelope
+from kreports.mcp.contracts import (
+    build_answer_envelope,
+    normalize_answer_result,
+)
 from kreports.mcp.professional_surfaces import PACK_BUILDERS as PROFESSIONAL_PACK_BUILDERS
 
 
@@ -57,8 +60,16 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     """Return a visual answer pack for known tool outputs."""
     if not isinstance(result, dict):
         return None
-    if "error" in result and tool_name != "compare_to_industry_multi":
+    if (
+        "error" in result
+        and tool_name not in {
+            "compare_to_industry_multi",
+            "build_dcf_model_pack",
+        }
+    ):
         return None
+    if tool_name == "build_dcf_model_pack":
+        result = normalize_answer_result(tool_name, result)
     if tool_name == "compare_to_industry_multi":
         from kreports.mcp.professional_surfaces.investor import (
             publicize_peer_result_limitations,
@@ -67,11 +78,6 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         result = publicize_peer_result_limitations(result)
 
     envelope = build_answer_envelope(tool_name, result)
-    if (
-        tool_name == "build_dcf_model_pack"
-        and envelope.data_quality.status == "missing"
-    ):
-        return None
     normalized_result = dict(result)
     normalized_quality = dict(result.get("data_quality") or {})
     normalized_quality.update(envelope.data_quality.model_dump())
@@ -80,7 +86,10 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     # Peer-comparison errors still need an inspectable public availability
     # resource.  The canonical envelope supplies the localized limitation;
     # the raw structured error remains only on the programmatic result.
-    if envelope.data_quality.status == "error":
+    if (
+        envelope.data_quality.status == "error"
+        and tool_name != "build_dcf_model_pack"
+    ):
         error_result = (
             {"data_quality": envelope.data_quality.model_dump()}
             if tool_name == "compare_to_industry_multi"
@@ -111,7 +120,10 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     # selection policy, or cohort descriptor from a legacy handler.  None is a
     # current-tool result row, so it must render as the same empty availability
     # pack rather than attaching fact rows to a missing-status table.
-    if envelope.data_quality.status == "missing":
+    if (
+        envelope.data_quality.status == "missing"
+        and tool_name != "build_dcf_model_pack"
+    ):
         raw_pack = _base_pack(
             "데이터 가용성",
             normalized_result,
@@ -532,9 +544,11 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         str(pack["summary"]["status"]),
         depth=0,
     )
-    calculation_status = str(result.get("calculation_status") or (
-        "calculated" if result.get("enterprise_value") is not None else "unavailable"
-    ))
+    calculation_status = (
+        "calculated"
+        if result.get("enterprise_value") is not None
+        else "unavailable"
+    )
     # The visual contract derives a domain status from a non-canonical summary
     # status while preserving data_quality.status as the canonical availability.
     pack["summary"]["status"] = calculation_status
@@ -589,6 +603,14 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
                     ("fs_div", "재무제표"), ("basis", "확인 기준"),
                 ], missing_accounts,
             ))
+        if actuals or assumptions or missing_accounts:
+            # The model result is unavailable, but these rows are still
+            # inspectable evidence about supplied assumptions and exact
+            # remediation targets. A missing visualization status cannot carry
+            # rows, so the pack is limited while its domain status remains
+            # unavailable and the underlying answer envelope remains missing.
+            pack["data_quality"]["status"] = "limited"
+            pack["status"] = "limited"
         pack["limitations"] = [
             *pack.get("limitations", []),
             "기업가치 계산에 필요한 입력 또는 공시 실제값이 부족하여 가치 브리지와 민감도를 제공하지 않습니다.",

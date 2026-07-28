@@ -133,17 +133,18 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
         metrics = result.get("metrics") or {}
         evidence_rows = result.get("evidence") or []
         latest = evidence_rows[-1] if evidence_rows else {}
-        facts.append({
-            "statement": (
-                f"{start_year}~{end_year}년 {result.get('fs_div') or 'CFS'} 기준 "
-                f"{metrics.get('years') or len(evidence_rows)}개년 이익의 질 지표가 계산되었습니다."
-            ),
-            "source": source,
-            "excerpt": (
-                f"최근연도 {latest.get('year') or end_year}: revenue={latest.get('revenue')}, "
-                f"operating_cf={latest.get('operating_cf')}, cash_conversion={latest.get('cash_conversion')}"
-            ),
-        })
+        if evidence_rows:
+            facts.append({
+                "statement": (
+                    f"{start_year}~{end_year}년 {result.get('fs_div') or 'CFS'} 기준 "
+                    f"{metrics.get('years') or len(evidence_rows)}개년 이익의 질 지표가 계산되었습니다."
+                ),
+                "source": source,
+                "excerpt": (
+                    f"최근연도 {latest.get('year') or end_year}: revenue={latest.get('revenue')}, "
+                    f"operating_cf={latest.get('operating_cf')}, cash_conversion={latest.get('cash_conversion')}"
+                ),
+            })
         analysis.append({
             "perspective": "investor",
             "statement": "이익의 질 점검은 보고이익이 영업현금흐름과 반복 가능한 영업성과로 뒷받침되는지 보는 1차 필터입니다.",
@@ -980,6 +981,18 @@ def build_dcf_model_pack(
         DcfSourceUnavailable,
         dcf_source_failure,
     )
+    from kreports.semantic.metrics import DCF_MODEL_METRICS
+
+    def missing_account_rows(fields: tuple[str, ...]) -> list[dict]:
+        return [
+            {
+                "field": field,
+                "year": int(base_year),
+                "fs_div": fs_div,
+                "basis": "requested_dcf_source_actual",
+            }
+            for field in fields
+        ]
 
     try:
         corp_code, subject, resolution_error = _resolve_dcf_company_exact(
@@ -991,9 +1004,18 @@ def build_dcf_model_pack(
             "error": "DCF 읽기 전용 소스를 사용할 수 없습니다.",
             "error_code": "dcf_source_unavailable",
             "company": str(company)[:MAX_COMPANY_LENGTH],
+            "base_year": int(base_year),
+            "fs_div": fs_div,
             "enterprise_value": None,
+            "equity_value": None,
             "calculation_status": "unavailable",
             "domain_verdict": "calculation_unavailable",
+            "actuals": [],
+            "assumptions": [],
+            "missing_inputs": list(unavailable.missing_metrics),
+            "missing_accounts": missing_account_rows(
+                unavailable.missing_metrics,
+            ),
             "data_quality": {
                 "status": "missing",
                 "source": "financial_facts_compact",
@@ -1006,8 +1028,28 @@ def build_dcf_model_pack(
     if resolution_error or corp_code is None or subject is None:
         return {
             "error": resolution_error or "정확한 기업 식별에 실패했습니다.",
+            "error_code": "dcf_company_resolution_unavailable",
             "company": str(company)[:MAX_COMPANY_LENGTH],
+            "base_year": int(base_year),
+            "fs_div": fs_div,
             "match_policy": "exact_identifier_or_unique_normalized_exact_name",
+            "enterprise_value": None,
+            "equity_value": None,
+            "calculation_status": "unavailable",
+            "domain_verdict": "calculation_unavailable",
+            "actuals": [],
+            "assumptions": [],
+            "missing_inputs": list(DCF_MODEL_METRICS),
+            "missing_accounts": missing_account_rows(DCF_MODEL_METRICS),
+            "data_quality": {
+                "status": "missing",
+                "source": "financial_facts_compact",
+                "covered_years": [],
+                "missing_fields": list(DCF_MODEL_METRICS),
+                "limitations": [
+                    "요청한 회사 식별자를 정확히 확인하지 못했습니다."
+                ],
+            },
         }
     scenario = DcfScenarioInput(
         company=corp_code,

@@ -1239,16 +1239,23 @@ def render_answer(tool_name: str, result: Any) -> str | None:
                     + ": " + str(blocker.get("next_action") or "추가 확인이 필요합니다.")
                 )
         candidate_opening = "\n".join(lines)
-    if (
+    dcf_unavailable = (
         tool_name == "build_dcf_model_pack"
         and "enterprise_value" in result
         and result.get("enterprise_value") is None
-    ):
-        return (
+    )
+    dcf_opening = (
+        (
             "산출 불가: 필수 입력 또는 공시 실제값이 부족하여 기업가치를 계산하지 않았습니다.\n\n"
             "누락 입력: "
-            + ", ".join(str(value) for value in result.get("missing_inputs") or [])
+            + ", ".join(
+                str(value)
+                for value in result.get("missing_inputs") or []
+            )
         )
+        if dcf_unavailable
+        else None
+    )
     envelope = build_answer_envelope(tool_name, result)
     presentation_envelope = (
         _note_search_presentation_envelope(envelope)
@@ -1263,6 +1270,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     detail: str | None = None
     if envelope.data_quality.status in {"missing", "error"}:
         rendered = _render_professional_envelope(presentation_envelope)
+        if dcf_opening:
+            rendered = dcf_opening + "\n\n" + rendered
         return _append_visual_table(tool_name, result, rendered)
     if tool_name in PROFESSIONAL_DETAIL_RENDERERS:
         detail = PROFESSIONAL_DETAIL_RENDERERS[tool_name](legacy_result)
@@ -1306,6 +1315,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     )
     if candidate_opening:
         rendered = candidate_opening + "\n\n" + rendered
+    if dcf_opening:
+        rendered = dcf_opening + "\n\n" + rendered
     return _append_visual_table(tool_name, result, rendered)
 
 

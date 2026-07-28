@@ -1,6 +1,7 @@
 """DCF input candidates from DART-derived historical facts."""
 from __future__ import annotations
 
+import math
 from statistics import median
 
 from kreports.analysis.investor_quality import _financial_series, _safe_div
@@ -14,7 +15,11 @@ def _growth(current: int | float | None, previous: int | float | None) -> float 
 
 
 def _median(values: list[float | None]) -> float | None:
-    clean = [float(v) for v in values if v is not None]
+    clean = [
+        float(v)
+        for v in values
+        if v is not None and math.isfinite(float(v))
+    ]
     return round(median(clean), 4) if clean else None
 
 
@@ -43,6 +48,24 @@ def _sum_optional(*values: int | float | None) -> int | float | None:
     return sum(clean)
 
 
+def _source_blocker(
+    field: str,
+    *,
+    fs_div: str,
+    impact: str,
+) -> dict[str, str]:
+    return _valuation_blocker(
+        field,
+        kind="source_fact_missing",
+        impact=impact,
+        owner="filing_data",
+        next_action=(
+            f"요청 기간 {fs_div} 재무제표에서 {field} 실제값과 "
+            "사업연도별 출처를 확인하세요."
+        ),
+    )
+
+
 def dcf_input_candidates(
     company: str,
     *,
@@ -55,6 +78,19 @@ def dcf_input_candidates(
         company, start_year, end_year, fs_div=fs_div, metric_keys=DCF_SUPPORT_METRICS,
     )
     if not series:
+        source_blockers = [
+            _source_blocker(
+                field,
+                fs_div=fs_div,
+                impact="과거 실적 기반 DCF 입력 후보 산정 불가",
+            )
+            for field in (
+                *DCF_REQUIRED_METRICS,
+                "tax_rate",
+                "capex",
+                "working_capital_delta",
+            )
+        ]
         return {
             "company": company,
             "start_year": int(start_year),
@@ -65,22 +101,7 @@ def dcf_input_candidates(
             "candidate_status": "missing",
             "valuation_readiness": "blocked",
             "valuation_blockers": [
-                _valuation_blocker(
-                    "financial_facts_compact",
-                    kind="source_fact_missing",
-                    impact="과거 실적 기반 DCF 입력 후보 산정 불가",
-                    owner="filing_data",
-                    next_action=(
-                        f"요청 기간 {fs_div} 재무제표의 공시 실제값과 사업연도별 출처를 확인하세요."
-                    ),
-                ),
-                _valuation_blocker(
-                    "working_capital_delta",
-                    kind="source_fact_missing",
-                    impact="운전자본 증감에 따른 UFCF 계산 불가",
-                    owner="filing_data",
-                    next_action="기준연도 CFS 운전자본 관련 계정의 전년 대비 증감을 확인하세요.",
-                ),
+                *source_blockers,
                 _valuation_blocker(
                     "wacc",
                     kind="analyst_input_missing",
@@ -119,7 +140,17 @@ def dcf_input_candidates(
         revenue_growth = _growth(revenue, previous_revenue)
         operating_margin = _safe_div(op, revenue)
         cash_conversion = _safe_div(ocf, ni)
-        tax_rate = _safe_div(tax_expense, (ni + tax_expense) if ni is not None and tax_expense is not None else None)
+        raw_tax_rate = _safe_div(
+            tax_expense,
+            (ni + tax_expense)
+            if ni is not None and tax_expense is not None
+            else None,
+        )
+        tax_nonfinite = (
+            raw_tax_rate is not None
+            and not math.isfinite(float(raw_tax_rate))
+        )
+        tax_rate = None if tax_nonfinite else raw_tax_rate
         capex_to_revenue = _safe_div(capex, revenue)
         actuals.append({
             "year": row["bsns_year"],
@@ -127,7 +158,12 @@ def dcf_input_candidates(
             "operating_profit": op,
             "net_income": ni,
             "operating_cf": ocf,
-            "tax_expense": tax_expense,
+            "tax_expense": (
+                tax_expense
+                if tax_expense is None
+                or math.isfinite(float(tax_expense))
+                else None
+            ),
             "capex": capex,
             "revenue_growth": revenue_growth,
             "operating_margin": operating_margin,
@@ -138,12 +174,22 @@ def dcf_input_candidates(
         revenue_growths.append(revenue_growth)
         operating_margins.append(operating_margin)
         cash_conversions.append(cash_conversion)
-        tax_outlier = tax_rate is not None and (tax_rate < 0 or tax_rate > 1)
-        tax_observations.append({
+        tax_outlier = tax_nonfinite or (
+            tax_rate is not None and (tax_rate < 0 or tax_rate > 1)
+        )
+        tax_observation = {
             "year": row["bsns_year"],
             "value": tax_rate,
             "outlier": tax_outlier,
-        })
+        }
+        if tax_nonfinite:
+            tax_observation.update({
+                "exclusion_reason": "nonfinite",
+                "raw_value_marker": "nonfinite",
+            })
+        elif tax_outlier:
+            tax_observation["exclusion_reason"] = "outside_range"
+        tax_observations.append(tax_observation)
         if tax_rate is not None and not tax_outlier:
             tax_rates.append(tax_rate)
         capex_to_revenues.append(capex_to_revenue)
@@ -161,7 +207,7 @@ def dcf_input_candidates(
     missing_inputs.extend(["working_capital_delta", "wacc", "terminal_growth"])
 
     missing_core_metrics = [
-        METRIC_OUTPUT_ALIASES.get(metric, metric)
+        metric
         for metric in DCF_REQUIRED_METRICS
         if all(row.get(METRIC_OUTPUT_ALIASES.get(metric, metric)) is None for row in series)
     ]
@@ -176,14 +222,10 @@ def dcf_input_candidates(
 
     valuation_blockers: list[dict[str, str]] = []
     for field in missing_core_metrics:
-        valuation_blockers.append(_valuation_blocker(
+        valuation_blockers.append(_source_blocker(
             field,
-            kind="source_fact_missing",
+            fs_div=fs_div,
             impact="과거 실적 기반 DCF 입력 후보 산정 불가",
-            owner="filing_data",
-            next_action=(
-                f"요청 기간 {fs_div} 재무제표에서 {field} 실제값과 사업연도별 출처를 확인하세요."
-            ),
         ))
     if "working_capital_delta" in missing_inputs:
         valuation_blockers.append(_valuation_blocker(

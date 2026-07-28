@@ -16,6 +16,10 @@ _QUALITY_STATUSES = _CANONICAL_STATUSES
 _ADAPTER_VERSION = "legacy-result-adapter"
 _PEER_COMPARISON_TOOL = "compare_to_industry_multi"
 _PEER_ERROR_LIMITATION = "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
+_DCF_MODEL_TOOL = "build_dcf_model_pack"
+_DCF_ERROR_LIMITATION = (
+    "DCF 계산에 필요한 회사 식별, 공시 실제값 또는 입력을 확인하지 못했습니다."
+)
 
 ToolPurposePredicate = Callable[[dict[str, Any]], bool]
 
@@ -503,6 +507,33 @@ def _has_tool_purpose_result(tool_name: str, result: dict[str, Any]) -> bool:
     return bool(predicate and predicate(result))
 
 
+def _canonicalize_dcf_model_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Make enterprise-value availability authoritative over stale presentation."""
+    normalized = dict(result)
+    if "enterprise_value" not in normalized or normalized["enterprise_value"] is not None:
+        return normalized
+    normalized["enterprise_value"] = None
+    normalized["equity_value"] = None
+    normalized["calculation_status"] = "unavailable"
+    normalized["domain_verdict"] = "calculation_unavailable"
+    for field in (
+        "valuation_bridge",
+        "sensitivity",
+        "projections",
+        "forecast_period_present_value",
+        "terminal_value",
+        "terminal_value_present_value",
+        "cash",
+        "debt",
+        "net_debt",
+        "formulas",
+        "tables",
+        "charts",
+    ):
+        normalized.pop(field, None)
+    return normalized
+
+
 def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
     # A peer-comparison handler error is an opaque implementation diagnostic,
     # not presentation data.  Establish a complete public quality contract
@@ -515,6 +546,25 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
             dataset_version=_ADAPTER_VERSION,
             schema_version=_ADAPTER_VERSION,
             limitations=[_PEER_ERROR_LIMITATION],
+        )
+    if tool_name == _DCF_MODEL_TOOL and "error" in result:
+        raw_quality = result.get("data_quality")
+        quality = raw_quality if isinstance(raw_quality, dict) else {}
+        unavailable_error = result.get("error_code") in {
+            "dcf_source_unavailable",
+            "dcf_company_resolution_unavailable",
+        }
+        return DataQualityV1(
+            status="missing" if unavailable_error else "error",
+            dataset_version=str(
+                quality.get("dataset_version") or _ADAPTER_VERSION
+            ),
+            schema_version=str(
+                quality.get("schema_version") or _ADAPTER_VERSION
+            ),
+            covered_years=_covered_years(result, quality),
+            missing_fields=_string_list(quality.get("missing_fields")),
+            limitations=[_DCF_ERROR_LIMITATION],
         )
 
     raw_quality = result.get("data_quality")
@@ -621,7 +671,11 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     """Attach one canonical quality status before pack or prose rendering."""
     if not isinstance(result, dict):
         raise TypeError("result must be a dict")
-    normalized = dict(result)
+    normalized = (
+        _canonicalize_dcf_model_result(result)
+        if tool_name == _DCF_MODEL_TOOL
+        else dict(result)
+    )
     quality = _data_quality(tool_name, normalized)
     peer_error = (
         tool_name == _PEER_COMPARISON_TOOL
@@ -822,7 +876,13 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.renderers import render_answer
 
-    if "error" not in enriched or tool_name == "compare_to_industry_multi":
+    if (
+        "error" not in enriched
+        or tool_name in {
+            _PEER_COMPARISON_TOOL,
+            _DCF_MODEL_TOOL,
+        }
+    ):
         answer_pack = build_answer_pack(tool_name, enriched)
         if answer_pack:
             enriched["answer_pack"] = answer_pack

@@ -360,6 +360,23 @@ def _quality_of_earnings_pack(result: dict[str, Any]) -> dict[str, Any]:
 
     pack = _build_quality_pack(result)
     summary = result.get("audit_matter_summary") or {}
+    if summary:
+        pack["tables"].append(_table(
+            "audit_matter_summary",
+            "감사보고서 matter 집계 기준",
+            [
+                ("unique_receipt_count", "고유 접수번호 수", "건"),
+                ("section_count", "원 문단 수", "건"),
+                ("dedupe_basis", "중복 제거 기준", None),
+            ],
+            [{
+                "unique_receipt_count": summary.get(
+                    "unique_receipt_count", 0,
+                ),
+                "section_count": summary.get("section_count", 0),
+                "dedupe_basis": summary.get("dedupe_basis"),
+            }],
+        ))
     groups = [
         {
             "year": group.get("year"),
@@ -412,10 +429,24 @@ def _render_dcf_model(result: dict[str, Any]) -> str:
 
 def _render_quality_of_earnings(result: dict[str, Any]) -> str:
     summary = result.get("audit_matter_summary") or {}
-    return (
+    status = (result.get("data_quality") or {}).get("status") or "limited"
+    lines = [
+        f"판정: {status}",
         f"감사보고서 matter: 고유 접수번호 {summary.get('unique_receipt_count', 0)}건, "
         f"문단 {summary.get('section_count', 0)}건입니다."
-    )
+    ]
+    for group in summary.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        receipt = str((group.get("source") or {}).get("rcept_no") or "")
+        if not receipt:
+            continue
+        lines.append(
+            f"- {group.get('year')}년 {group.get('matter_type')}: "
+            f"감사보고서 접수번호 {receipt} "
+            f"(https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt})"
+        )
+    return "\n".join(lines)
 
 
 def _disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:

@@ -1,4 +1,5 @@
 from copy import deepcopy
+import math
 
 from kreports.db.models import AuditMatterItem
 
@@ -107,7 +108,15 @@ def test_missing_candidate_history_has_source_and_analyst_readiness_blockers(mon
     assert result["candidate_status"] == "missing"
     assert result["valuation_readiness"] == "blocked"
     assert [blocker["field"] for blocker in result["valuation_blockers"]] == [
-        "financial_facts_compact", "working_capital_delta", "wacc", "terminal_growth",
+        "revenue",
+        "operating_profit",
+        "profit_loss",
+        "operating_cash_flow",
+        "tax_rate",
+        "capex",
+        "working_capital_delta",
+        "wacc",
+        "terminal_growth",
     ]
 
 
@@ -192,6 +201,304 @@ def test_enriched_dcf_candidate_keeps_public_readiness_and_input_immutable():
     assert out["answer"].startswith("DCF 입력 후보 상태: usable\n가치평가 준비도: blocked")
     assert out["answer_pack"]["summary"]["domain_status"] == "blocked"
     assert any(table["id"] == "valuation_blockers" for table in out["answer_pack"]["tables"])
+
+
+def test_enterprise_value_none_overrides_stale_calculated_public_fields():
+    """A caller-supplied status must not resurrect a valuation with no EV."""
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import enrich_answer_response, normalize_answer_result
+    from kreports.mcp.renderers import render_answer
+    from kreports.mcp.resources import read_resource
+
+    stale_value = "999999999"
+    raw = {
+        "subject": {"corp_name": "A"},
+        "status": "partial_model",
+        "enterprise_value": None,
+        "equity_value": stale_value,
+        "calculation_status": "calculated",
+        "domain_verdict": "reviewable_model",
+        "actuals": [{
+            "metric_key": "revenue", "amount": "100", "unit": "KRW",
+            "year": 2024, "fs_div": "CFS",
+        }],
+        "assumptions": [{
+            "key": "wacc", "value": None, "unit": "ratio",
+            "basis": "analyst_input",
+        }],
+        "missing_inputs": ["cash_and_equivalents"],
+        "missing_accounts": [{
+            "field": "cash_and_equivalents", "year": 2024,
+            "fs_div": "CFS", "basis": "requested_dcf_source_actual",
+        }],
+        "valuation_bridge": {
+            "enterprise_value": stale_value,
+            "equity_value": stale_value,
+        },
+        "sensitivity": [{
+            "wacc": "0.10", "terminal_growth": "0.03",
+            "status": "valid", "enterprise_value": stale_value,
+        }],
+        "tables": [{
+            "id": "dcf_valuation_bridge",
+            "rows": [{"enterprise_value": stale_value}],
+        }],
+        "charts": [{
+            "id": "dcf_sensitivity_matrix",
+            "rows": [{"enterprise_value": stale_value}],
+        }],
+        "data_quality": {"status": "limited"},
+    }
+    before = deepcopy(raw)
+
+    normalized = normalize_answer_result("build_dcf_model_pack", raw)
+    direct_pack = build_answer_pack("build_dcf_model_pack", raw)
+    direct_answer = render_answer("build_dcf_model_pack", raw)
+    enriched = enrich_answer_response("build_dcf_model_pack", raw)
+
+    assert raw == before
+    assert normalized["calculation_status"] == "unavailable"
+    assert normalized["domain_verdict"] == "calculation_unavailable"
+    assert "valuation_bridge" not in normalized
+    assert "sensitivity" not in normalized
+    assert "tables" not in normalized
+    assert "charts" not in normalized
+    assert normalized["equity_value"] is None
+    assert direct_pack is not None
+    assert enriched["answer_pack"] is not None
+    for pack in (direct_pack, enriched["answer_pack"]):
+        assert pack["summary"]["domain_status"] == "unavailable"
+        assert {table["id"] for table in pack["tables"]}.isdisjoint({
+            "dcf_valuation_bridge", "dcf_sensitivity",
+        })
+        assert not pack["charts"]
+        resource = read_resource(pack["resource_uri"])["text"]
+        assert stale_value not in resource
+        assert "누락 공시 실제값" in resource
+    assert direct_answer.startswith("산출 불가:")
+    assert enriched["answer"].startswith("산출 불가:")
+    assert "누락 공시 실제값" in direct_answer
+    assert stale_value not in str(direct_pack)
+    assert stale_value not in str(enriched)
+
+
+def test_dcf_source_error_keeps_safe_readiness_pack_and_quarantines_exception():
+    """A source error still needs a DCF-scoped public pack, not raw diagnostics."""
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.renderers import render_answer
+    from kreports.mcp.resources import read_resource
+
+    raw = {
+        "error": "OperationalError: SELECT secret_column FROM internal_table",
+        "error_code": "dcf_source_unavailable",
+        "company": "00126380",
+        "base_year": 2024,
+        "fs_div": "OFS",
+        "enterprise_value": None,
+        "calculation_status": "unavailable",
+        "domain_verdict": "calculation_unavailable",
+        "actuals": [],
+        "assumptions": [{
+            "key": "wacc", "value": None, "unit": "ratio",
+            "basis": "analyst_input",
+        }],
+        "missing_inputs": ["revenue"],
+        "missing_accounts": [{
+            "field": "revenue", "year": 2024, "fs_div": "OFS",
+            "basis": "requested_dcf_source_actual",
+        }],
+        "data_quality": {
+            "status": "missing",
+            "source": "financial_facts_compact",
+            "limitations": ["identity_query_unavailable:OperationalError"],
+        },
+    }
+
+    direct_pack = build_answer_pack("build_dcf_model_pack", raw)
+    enriched = enrich_answer_response("build_dcf_model_pack", raw)
+    direct_answer = render_answer("build_dcf_model_pack", raw)
+
+    assert direct_pack is not None
+    assert enriched["answer_pack"] is not None
+    for answer in (direct_answer, enriched["answer"]):
+        assert answer.startswith("산출 불가:")
+        assert "누락 공시 실제값" in answer
+    for pack in (direct_pack, enriched["answer_pack"]):
+        assert any(table["id"] == "dcf_missing_accounts" for table in pack["tables"])
+        public = str(pack) + read_resource(pack["resource_uri"])["text"]
+        assert "OperationalError" not in public
+        assert "secret_column" not in public
+        assert "internal_table" not in public
+        assert "identity_query_unavailable" not in public
+
+
+def test_exact_company_resolution_error_has_canonical_dcf_availability_pack(
+    temp_engine,
+):
+    """Resolution failure has known year/FS context even without a company match."""
+    from kreports.analysis.financial_analysis import build_dcf_model_pack
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.resources import read_resource
+
+    result = build_dcf_model_pack("없는 회사", 2024, fs_div="OFS")
+    direct_pack = build_answer_pack("build_dcf_model_pack", result)
+    enriched = enrich_answer_response("build_dcf_model_pack", result)
+
+    assert result["enterprise_value"] is None
+    assert result["calculation_status"] == "unavailable"
+    assert result["domain_verdict"] == "calculation_unavailable"
+    assert result["base_year"] == 2024
+    assert result["fs_div"] == "OFS"
+    assert result["missing_accounts"]
+    assert all(
+        row["year"] == 2024 and row["fs_div"] == "OFS"
+        for row in result["missing_accounts"]
+    )
+    assert direct_pack is not None
+    assert enriched["answer_pack"] is not None
+    assert enriched["answer"].startswith("산출 불가:")
+    resource = read_resource(enriched["answer_pack"]["resource_uri"])["text"]
+    assert "누락 공시 실제값" in resource
+    assert "OFS" in resource
+
+
+def test_nonfinite_tax_observations_are_finite_safe_and_block_readiness(monkeypatch):
+    """NaN observations must be visible as exclusions, never median inputs."""
+    from kreports.analysis import dcf_inputs
+
+    monkeypatch.setattr(dcf_inputs, "_financial_series", lambda *_args, **_kwargs: [
+        {
+            "bsns_year": year, "revenue": 100 + year, "operating_profit": 10,
+            "net_income": 8, "operating_cf": 9, "tax_expense": float("nan"),
+            "purchase_ppe": 4, "purchase_intangible_assets": 1,
+        }
+        for year in range(2021, 2026)
+    ])
+
+    result = dcf_inputs.dcf_input_candidates("001", start_year=2021, end_year=2025)
+    tax = result["candidate_assumptions"]["tax_rate"]
+
+    assert result["candidate_status"] == "limited"
+    assert tax["value"] is None
+    assert tax["included_observation_count"] == 0
+    assert tax["excluded_observation_count"] == 5
+    assert all(observation == {
+        "year": year,
+        "value": None,
+        "outlier": True,
+        "exclusion_reason": "nonfinite",
+        "raw_value_marker": "nonfinite",
+    } for year, observation in zip(range(2021, 2026), tax["observations"]))
+    assert any(
+        blocker["field"] == "tax_rate"
+        and blocker["kind"] == "source_fact_missing"
+        for blocker in result["valuation_blockers"]
+    )
+    def assert_finite_safe(value: object) -> None:
+        if isinstance(value, float):
+            assert math.isfinite(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                assert_finite_safe(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_finite_safe(nested)
+
+    assert_finite_safe(result)
+
+
+def test_qoe_matters_survive_missing_financial_series_across_public_surfaces(
+    temp_engine,
+    monkeypatch,
+):
+    """Audit-report evidence is independently useful when financial facts are absent."""
+    from kreports.analysis import investor_quality
+    from kreports.db.engine import get_session
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.resources import read_resource
+
+    monkeypatch.setattr(investor_quality, "engine", temp_engine)
+    monkeypatch.setattr(
+        investor_quality,
+        "_financial_series",
+        lambda *_args, **_kwargs: [],
+    )
+    with get_session() as session:
+        session.add(AuditMatterItem(
+            rcept_no="20250318001234-01",
+            corp_code="001",
+            bsns_year=2024,
+            matter_type="going_concern",
+            matter_text="계속기업 관련 중요한 불확실성",
+            severity_hint="high",
+            source_type="audit_report",
+            section_ordinal=0,
+        ))
+
+    result = investor_quality.quality_of_earnings_pack(
+        "001", start_year=2024, end_year=2024,
+    )
+    enriched = enrich_answer_response("get_quality_of_earnings_pack", result)
+    pack = enriched["answer_pack"]
+    resource = read_resource(pack["resource_uri"])["text"]
+
+    assert result["metrics"]["years"] == 0
+    assert result["data_quality"]["status"] == "limited"
+    assert result["audit_matter_summary"]["unique_receipt_count"] == 1
+    assert result["audit_matter_summary"]["section_count"] == 1
+    summary = next(
+        table for table in pack["tables"]
+        if table["id"] == "audit_matter_summary"
+    )
+    assert summary["rows"] == [{
+        "unique_receipt_count": 1,
+        "section_count": 1,
+        "dedupe_basis": "parent_rcept_no + matter_type + normalized_excerpt",
+    }]
+    assert "20250318001234" in enriched["answer"]
+    assert "20250318001234" in resource
+    assert "latest financial" not in enriched["answer"].casefold()
+    assert {source["rcept_no"] for source in pack["sources"]} == {
+        "20250318001234",
+    }
+
+
+def test_empty_dcf_history_has_one_exact_blocker_per_required_input(monkeypatch):
+    """An aggregate cache blocker hides the exact remediation work."""
+    from kreports.analysis import dcf_inputs
+
+    monkeypatch.setattr(dcf_inputs, "_financial_series", lambda *_args, **_kwargs: [])
+
+    result = dcf_inputs.dcf_input_candidates(
+        "001", start_year=2021, end_year=2025,
+    )
+    blockers = result["valuation_blockers"]
+
+    assert [blocker["field"] for blocker in blockers] == [
+        "revenue",
+        "operating_profit",
+        "profit_loss",
+        "operating_cash_flow",
+        "tax_rate",
+        "capex",
+        "working_capital_delta",
+        "wacc",
+        "terminal_growth",
+    ]
+    assert all(
+        blocker["kind"] == "source_fact_missing"
+        for blocker in blockers[:-2]
+    )
+    assert all(
+        blocker["kind"] == "analyst_input_missing"
+        for blocker in blockers[-2:]
+    )
+    assert not any(
+        blocker["field"] == "financial_facts_compact"
+        for blocker in blockers
+    )
 
 
 def test_unavailable_model_reports_missing_accounts_with_requested_year_and_basis(
