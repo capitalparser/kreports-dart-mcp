@@ -14,6 +14,7 @@ from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no
 from kreports.mcp.contracts import build_answer_envelope
+from kreports.mcp.professional_surfaces import PACK_BUILDERS as PROFESSIONAL_PACK_BUILDERS
 
 
 PACK_VERSION = "answer_pack.v1"
@@ -79,6 +80,7 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         "search_disclosure_events": _build_disclosure_events_pack,
         "search_audit_procedures": _build_audit_procedure_pack,
         "compare_to_industry_multi": _build_peer_benchmark_pack,
+        **PROFESSIONAL_PACK_BUILDERS,
     }
     if (
         tool_name == "search_dataset"

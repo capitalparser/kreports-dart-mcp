@@ -28,6 +28,13 @@
 Hosted and self-hosted modes share domain semantics. Only collector mode may
 mutate the database or persist raw filing content.
 
+## Professional Response Semantics
+
+Professional MCP responses separate source-backed facts and audit or investor
+interpretation. Their public data-quality status is one of `usable`, `limited`,
+`missing`, or `error`; cache absence does not establish that a source filing is
+absent.
+
 ## Current Scope
 
 collector/backfill 실행 근거, HTTP MCP 안정화, 캐시/패키지 사용 경로를 Harness 상태판에 남겨야 합니다. 운영 확인은 배포 완료가 아니라 반복 실행 근거가 있다는 의미입니다.

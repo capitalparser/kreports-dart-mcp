@@ -8,8 +8,42 @@ from pydantic import BaseModel, ConfigDict, Field
 from kreports.analysis.evidence import evidence_reference_fields
 
 
-_QUALITY_STATUSES = {"usable", "limited", "missing", "error"}
+_CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
+_QUALITY_STATUSES = _CANONICAL_STATUSES
 _ADAPTER_VERSION = "legacy-result-adapter"
+
+DOMAIN_VERDICT_ALLOWLISTS = {
+    "get_quality_of_earnings_pack": {"stable", "monitor"},
+    "get_dcf_input_candidates": {"screen_grade", "partial", "blocked"},
+    "build_dcf_model_pack": {
+        "reviewable_model",
+        "partial_model",
+        "calculation_unavailable",
+    },
+    "prepare_standard_audit_hours_inputs": {"not_assessed"},
+}
+
+
+class SectionSourceV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source_label: str
+    source_url: str
+    rcept_no: str | None = None
+
+
+class SectionStatusV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    status: Literal["usable", "limited", "missing", "error"]
+    required: bool
+    applicability: Literal["applicable", "not_applicable", "unknown"]
+    coverage: dict[str, int | float | str | None] = Field(
+        default_factory=dict, max_length=32,
+    )
+    blockers: list[str] = Field(default_factory=list, max_length=64)
+    sources: list[SectionSourceV1] = Field(default_factory=list, max_length=64)
+    not_applicable_basis: str | None = None
 
 
 class DataQualityV1(BaseModel):
@@ -22,6 +56,7 @@ class DataQualityV1(BaseModel):
     covered_years: list[int] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    section_statuses: dict[str, SectionStatusV1] = Field(default_factory=dict)
 
 
 class EvidenceRefV1(BaseModel):
@@ -47,7 +82,8 @@ class AnswerEnvelopeV1(BaseModel):
 
     schema_version: Literal["1.0"] = "1.0"
     tool_name: str
-    verdict: str
+    verdict: Literal["usable", "limited", "missing", "error"]
+    domain_verdict: str | None = None
     answer: str
     confirmed_facts: list[dict[str, Any]
     ]
@@ -151,6 +187,29 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
         error_message = str(result["error"]).strip()
         limitations.insert(0, error_message or "도구 처리 중 오류가 발생했습니다. 원인 확인이 필요합니다.")
 
+    raw_section_statuses = quality.get("section_statuses")
+    section_statuses: dict[str, SectionStatusV1] = {}
+    if isinstance(raw_section_statuses, dict):
+        if len(raw_section_statuses) > 32:
+            status = "limited" if status != "error" else status
+            limitations.append("섹션 상태가 허용된 개수를 초과해 전체 상태를 제한으로 표시합니다.")
+        else:
+            for section_name, raw_section in raw_section_statuses.items():
+                if not isinstance(section_name, str) or not section_name.strip():
+                    status = "limited" if status != "error" else status
+                    limitations.append("이름 없는 섹션 상태를 해석할 수 없어 전체 상태를 제한으로 표시합니다.")
+                    continue
+                try:
+                    section_statuses[section_name] = SectionStatusV1.model_validate(raw_section)
+                except (TypeError, ValueError):
+                    status = "limited" if status != "error" else status
+                    limitations.append(
+                        f"섹션 상태 '{section_name}' 형식을 해석할 수 없어 전체 상태를 제한으로 표시합니다."
+                    )
+    elif raw_section_statuses is not None:
+        status = "limited" if status != "error" else status
+        limitations.append("섹션 상태 형식을 해석할 수 없어 전체 상태를 제한으로 표시합니다.")
+
     grade = quality.get("grade")
     return DataQualityV1(
         status=status,
@@ -160,7 +219,31 @@ def _data_quality(result: dict[str, Any]) -> DataQualityV1:
         covered_years=_covered_years(result, quality),
         missing_fields=_string_list(quality.get("missing_fields")),
         limitations=list(dict.fromkeys(limitations)),
+        section_statuses=section_statuses,
     )
+
+
+def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Attach one canonical quality status before pack or prose rendering."""
+    if not isinstance(result, dict):
+        raise TypeError("result must be a dict")
+    normalized = dict(result)
+    quality = _data_quality(normalized)
+    raw_verdict = str(
+        normalized.get("domain_verdict")
+        or normalized.get("verdict")
+        or ""
+    ).strip()
+    allowed = DOMAIN_VERDICT_ALLOWLISTS.get(tool_name, set())
+    normalized["domain_verdict"] = raw_verdict if raw_verdict in allowed else None
+    # Keep additive legacy metadata (for example the local source label) but
+    # replace every typed quality field with the canonical validated value.
+    raw_quality = normalized.get("data_quality")
+    normalized_quality = dict(raw_quality) if isinstance(raw_quality, dict) else {}
+    normalized_quality.update(quality.model_dump())
+    normalized["data_quality"] = normalized_quality
+    normalized["quality_status"] = quality.status
+    return normalized
 
 
 def _analysis(result: dict[str, Any]) -> list[AnalysisItemV1]:
@@ -214,21 +297,23 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
     if not isinstance(result, dict):
         raise TypeError("result must be a dict")
 
-    quality = _data_quality(result)
+    normalized = normalize_answer_result(tool_name, result)
+    quality = _data_quality(normalized)
     warnings = list(quality.limitations)
     if quality.status == "missing" and not warnings:
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
     return AnswerEnvelopeV1(
         tool_name=tool_name,
-        verdict=(str(result.get("verdict") or quality.status) if quality.status == "usable" else quality.status),
-        answer=str(result.get("answer") or ""),
-        confirmed_facts=[fact for fact in result.get("confirmed_facts") or [] if isinstance(fact, dict)],
-        analysis=_analysis(result),
-        evidence=_evidence(result),
+        verdict=quality.status,
+        domain_verdict=normalized["domain_verdict"],
+        answer=str(normalized.get("answer") or ""),
+        confirmed_facts=[fact for fact in normalized.get("confirmed_facts") or [] if isinstance(fact, dict)],
+        analysis=_analysis(normalized),
+        evidence=_evidence(normalized),
         data_quality=quality,
         warnings=warnings,
-        next_checks=_string_list(result.get("next_checks")),
-        answer_pack=result.get("answer_pack") if isinstance(result.get("answer_pack"), dict) else None,
+        next_checks=_string_list(normalized.get("next_checks")),
+        answer_pack=normalized.get("answer_pack") if isinstance(normalized.get("answer_pack"), dict) else None,
     )
 
 
@@ -247,6 +332,7 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
                 **raw_quality,
                 "status": normalized_status,
             }
+    enriched = normalize_answer_result(tool_name, enriched)
     # Local imports avoid an import cycle: answer_pack and renderers consume this module.
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.renderers import render_answer

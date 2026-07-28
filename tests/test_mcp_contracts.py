@@ -102,15 +102,16 @@ def test_non_usable_quality_overrides_optimistic_legacy_verdict(status, legacy_v
     assert envelope.verdict == status
 
 
-def test_usable_quality_preserves_domain_verdict():
+def test_usable_quality_separates_allowlisted_domain_verdict():
     from kreports.mcp.contracts import build_answer_envelope
 
-    envelope = build_answer_envelope("get_business_overview", {
+    envelope = build_answer_envelope("get_quality_of_earnings_pack", {
         "verdict": "stable",
         "data_quality": {"status": "usable"},
     })
 
-    assert envelope.verdict == "stable"
+    assert envelope.verdict == "usable"
+    assert envelope.domain_verdict == "stable"
 
 
 def test_usable_quality_is_limited_when_confirmed_facts_have_no_resolvable_evidence():

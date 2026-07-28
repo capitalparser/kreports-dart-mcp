@@ -342,6 +342,7 @@ class VisualDataQualityV1(BaseModel):
     covered_years: list[int] = Field(default_factory=list, max_length=32)
     missing_fields: list[str] = Field(default_factory=list, max_length=64)
     limitations: list[str] = Field(default_factory=list, max_length=64)
+    section_statuses: dict[str, dict[str, Any]] = Field(default_factory=dict)
     coverage_note: str | None = None
     interpretation: str | None = None
 
@@ -960,7 +961,11 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
             "status": "missing",
             "note": "확인 가능한 데이터가 없습니다.",
         }]
-        status = "missing"
+        # A supplied canonical non-usable status describes the response even
+        # when its availability table has no fact rows.  Only an otherwise
+        # usable empty response becomes missing.
+        if status == "usable":
+            status = "missing"
         limitations.append("로컬 캐시에 확인 가능한 데이터가 없습니다.")
         charts = []
         diagrams = []
@@ -1007,11 +1012,15 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
         "covered_years",
         "missing_fields",
         "limitations",
+        "section_statuses",
         "coverage_note",
         "interpretation",
     }
     safe_quality = {
-        key: _safe_value(value)
+        # Contracts already validate typed section statuses.  They are copied
+        # verbatim so the visualization resource remains traceable to the
+        # response envelope rather than silently rewriting source references.
+        key: (value if key == "section_statuses" else _safe_value(value))
         for key, value in quality.items()
         if key in quality_keys
     }

@@ -7,6 +7,7 @@ from typing import Any
 
 from kreports.analysis.evidence import parent_rcept_no, source_line
 from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
+from kreports.mcp.professional_surfaces import DETAIL_RENDERERS as PROFESSIONAL_DETAIL_RENDERERS
 
 
 _PUBLIC_SOURCE_LABELS = {
@@ -1023,7 +1024,11 @@ def _render_generic(tool_name: str, result: dict) -> str:
 
 def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | None = None) -> str:
     """Render the stable V1 prose sections from an AnswerEnvelopeV1."""
-    lines = ["판정:", f"- {envelope.verdict}", "", "확인된 내용 (공시에서 확인되는 내용):"]
+    lines = [
+        "판정:", f"- {envelope.verdict}", "", "업무 결론:",
+        f"- {envelope.domain_verdict or '별도 결론 없음'}", "",
+        "확인된 내용 (공시에서 확인되는 내용):",
+    ]
     if envelope.confirmed_facts:
         for fact in _dedupe_confirmed_facts_for_render(envelope.confirmed_facts)[:6]:
             statement = str(fact.get("statement") or "").strip()
@@ -1153,7 +1158,9 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     if envelope.data_quality.status in {"missing", "error"}:
         rendered = _render_professional_envelope(presentation_envelope)
         return _append_visual_table(tool_name, result, rendered)
-    if tool_name == "search_company":
+    if tool_name in PROFESSIONAL_DETAIL_RENDERERS:
+        detail = PROFESSIONAL_DETAIL_RENDERERS[tool_name](legacy_result)
+    elif tool_name == "search_company":
         detail = _render_company_search(legacy_result)
     elif tool_name == "score_going_concern":
         detail = _render_going_concern(legacy_result)
