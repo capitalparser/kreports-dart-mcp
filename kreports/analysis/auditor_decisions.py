@@ -647,9 +647,16 @@ def build_acceptance_evidence(
         if kam_applicability == "not_applicable"
         else current_kam_source
     )
+    # KAM rows establish only timeline existence.  The legacy producer must
+    # provide semantic_complete explicitly after checking every current-period
+    # item and its receipt-linked source; this wrapper must never infer it from
+    # a row count or a non-empty subject_sections list.
     kam_section = _section(
         status="usable" if not kam_blockers else "limited", requirement=_REQUIREMENTS["kam"],
-        coverage={"current_filing_source": bool(current_kam_source), "semantic_complete": kam.get("semantic_complete") is True, "row_count": len(kam.get("subject_sections") or [])},
+        coverage={
+            "current_filing_source": bool(current_kam_source),
+            "semantic_complete": kam.get("semantic_complete") is True,
+        },
         blockers=kam_blockers,
         sources=[kam_section_source] if kam_section_source else [],
         applicability=kam_applicability,

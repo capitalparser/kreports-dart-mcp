@@ -186,6 +186,42 @@ def test_compare_peer_audit_report_matters_shape():
     assert "emphasis" in out["matter_counts"]
     assert "going_concern" in out["matter_counts"]
     assert "subject_matters" in out
+
+
+def test_peer_matter_counts_keep_boilerplate_as_evidence_without_acceptance_signal(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import ReportSection
+
+    with get_session() as session:
+        session.add(Company(corp_code="subject", stock_code="000001", corp_name="대상", market="KOSPI"))
+        session.add(Company(corp_code="peer", stock_code="000002", corp_name="피어", market="KOSPI"))
+        session.add(ReportSection(
+            rcept_no="20260311000005",
+            corp_code="subject",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="other_matter",
+            section_title="기타사항",
+            body_text="감사인의 책임과 지배기구와의 커뮤니케이션 사항을 설명합니다.",
+            body_hash="matter-boilerplate",
+            body_length=30,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = compare_peer_audit_report_matters(
+        "subject",
+        year=2025,
+        _peer_group={
+            "subject": {"corp_code": "subject", "corp_name": "대상"},
+            "peers": [{"corp_code": "peer", "corp_name": "피어"}],
+            "selection_policy": {"requested_year": 2025},
+        },
+    )
+
+    assert out["matter_counts"]["other_matter"]["subject_count"] == 1
+    assert out["matter_counts"]["other_matter"]["subject_signal_count"] == 0
+    assert out["subject_matters"][0]["acceptance_signal"] is False
     assert "data_quality" in out
 
 

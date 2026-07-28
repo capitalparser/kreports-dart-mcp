@@ -261,6 +261,117 @@ def _acceptance_pack(result: dict[str, Any]) -> dict[str, Any]:
     return pack
 
 
+def _kam_coverage_rows(quality: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for key, label in (
+        ("topic_coverage", "KAM 주제"),
+        ("reason_coverage", "선정 이유"),
+        ("procedure_coverage", "감사절차"),
+        ("source_coverage", "접수번호 연결 출처"),
+    ):
+        coverage = quality.get(key) if isinstance(quality.get(key), dict) else {}
+        rows.append({
+            "coverage_item": label,
+            "available": coverage.get("available", 0),
+            "total": coverage.get("total", 0),
+            "status": coverage.get("status", "missing"),
+        })
+    return rows
+
+
+def _kam_rows(rows: object) -> list[dict[str, Any]]:
+    table_rows = []
+    for section in rows if isinstance(rows, list) else []:
+        if not isinstance(section, dict) or section.get("section_key") != "kam":
+            continue
+        analysis = section.get("kam_analysis") if isinstance(section.get("kam_analysis"), dict) else {}
+        table_rows.append({
+            "year": section.get("bsns_year") or section.get("year"),
+            "topic": ", ".join(analysis.get("topics") or []) or "미분류",
+            "lifecycle": section.get("lifecycle") or "미분류",
+            "reason_available": "확보" if analysis.get("has_reason_hint") else "미확보",
+            "procedure_available": "확보" if analysis.get("has_procedure_hint") else "미확보",
+            "rcept_no": section.get("rcept_no") or "-",
+        })
+    return table_rows
+
+
+def _audit_report_sections_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
+
+    pack = _base_pack(f"{_subject_label(result)} 감사보고서 섹션", result)
+    kam_rows = _kam_rows(result.get("sections"))
+    if kam_rows:
+        pack["tables"].append(_table(
+            "audit_report_kam_items", "KAM 의미 근거",
+            [("year", "연도"), ("topic", "KAM 주제"), ("lifecycle", "반복/신규"),
+             ("reason_available", "선정 이유 확보"), ("procedure_available", "감사절차 확보"),
+             ("rcept_no", "접수번호")],
+            kam_rows,
+        ))
+    if kam_rows or result.get("section_key") == "kam":
+        quality = result.get("data_quality") if isinstance(result.get("data_quality"), dict) else {}
+        pack["tables"].append(_table(
+            "audit_report_kam_coverage", "KAM semantic coverage",
+            [("coverage_item", "coverage 항목"), ("available", "확보 건수"),
+             ("total", "전체 건수"), ("status", "상태")],
+            _kam_coverage_rows(quality),
+        ))
+    return pack
+
+
+def _peer_kam_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
+
+    pack = _base_pack(f"{_subject_label(result)} Peer KAM", result)
+    rows = _kam_rows(result.get("subject_sections"))
+    quality = result.get("audit_report_sections") if isinstance(result.get("audit_report_sections"), dict) else {}
+    if rows:
+        pack["tables"].append(_table(
+            "peer_kam_subject_items", "대상회사 KAM 의미 근거",
+            [("year", "연도"), ("topic", "KAM 주제"), ("lifecycle", "반복/신규"),
+             ("reason_available", "선정 이유 확보"), ("procedure_available", "감사절차 확보"),
+             ("rcept_no", "접수번호")],
+            rows,
+        ))
+    pack["tables"].append(_table(
+        "peer_kam_coverage", "KAM semantic coverage",
+        [("coverage_item", "coverage 항목"), ("available", "확보 건수"),
+         ("total", "전체 건수"), ("status", "상태")],
+        _kam_coverage_rows(quality),
+    ))
+    return pack
+
+
+def _matter_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
+
+    pack = _base_pack(f"{_subject_label(result)} 감사보고서 사항", result)
+    rows = []
+    matter_sections = result.get("subject_matters")
+    if not isinstance(matter_sections, list):
+        matter_sections = [
+            {**section, "corp_name": company.get("corp_name") or company.get("corp_code")}
+            for company in result.get("companies") or []
+            if isinstance(company, dict)
+            for section in company.get("sections") or []
+            if isinstance(section, dict)
+        ]
+    for section in matter_sections:
+        if isinstance(section, dict):
+            rows.append({
+                "category": section.get("matter_category") or section.get("section_key"),
+                "signal": "검토 신호" if section.get("acceptance_signal") else "근거 보존 (신호 아님)",
+                "rcept_no": section.get("rcept_no") or "-",
+            })
+    if rows:
+        pack["tables"].append(_table(
+            "audit_report_matters", "감사보고서 사항 분류",
+            [("category", "분류"), ("signal", "수임 검토 신호"), ("rcept_no", "접수번호")], rows,
+        ))
+    return pack
+
+
 def _history_detail(result: dict[str, Any]) -> str:
     rows = [row for row in (result.get("history") or []) if isinstance(row, dict)]
     lines = ["감사인 이력:"]
@@ -307,6 +418,10 @@ PACK_BUILDERS: dict[str, PackBuilder] = {
     "get_audit_history": _history_pack,
     "compare_peer_risk_profile": _risk_pack,
     "build_audit_acceptance_pack": _acceptance_pack,
+    "get_audit_report_sections": _audit_report_sections_pack,
+    "search_audit_report_matters": _matter_pack,
+    "compare_peer_audit_report_matters": _matter_pack,
+    "compare_peer_kam_topics": _peer_kam_pack,
 }
 DETAIL_RENDERERS: dict[str, DetailRenderer] = {
     "get_audit_history": _history_detail,

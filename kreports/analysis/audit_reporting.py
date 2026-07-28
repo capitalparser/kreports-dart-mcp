@@ -526,6 +526,42 @@ def _audit_section_source(
     }
 
 
+SECTION_GUIDANCE = {
+    "audit_opinion": (
+        "감사의견 문구와 대상 재무제표 범위를 원문에서 확인해야 합니다.",
+        "의견 유형, 계속기업 문단, 강조사항을 각각 분리해 확인하세요.",
+    ),
+    "basis_for_opinion": (
+        "의견근거 문단은 감사기준 준수와 독립성 진술을 확인하는 근거입니다.",
+        "실제 의견 결론과 함께 읽고 KAM 또는 기타사항으로 재분류하지 마세요.",
+    ),
+    "kam": (
+        "KAM 선정 이유와 수행 감사절차를 구분해 확인해야 합니다.",
+        "관련 주석, 금액, 경영진 추정 및 절차 대응을 대조하세요.",
+    ),
+    "emphasis": (
+        "강조사항은 의견 변형 여부와 강조 대상 주석을 함께 확인해야 합니다.",
+        "강조 대상 주석과 후속 공시를 확인하세요.",
+    ),
+    "going_concern": (
+        "계속기업 문단은 중요한 불확실성의 성격과 공시 적정성을 확인해야 합니다.",
+        "현금흐름 전망, 차입약정, 자금조달 계획을 확인하세요.",
+    ),
+}
+
+
+def audit_section_guidance(section_key: str) -> tuple[list[dict], list[str]]:
+    """Return section-specific auditor interpretation and follow-up checks."""
+    analysis, next_check = SECTION_GUIDANCE.get(
+        section_key,
+        (
+            "감사보고서 해당 문단의 성격과 원문 근거를 확인해야 합니다.",
+            "문단 제목, 접수번호 및 인접 문단을 함께 확인하세요.",
+        ),
+    )
+    return [{"perspective": "auditor", "statement": analysis}], [next_check]
+
+
 def _audit_report_sections_evidence(result: dict) -> dict:
     subject = result.get("subject") if isinstance(result.get("subject"), dict) else None
     facts: list[dict] = []
@@ -544,14 +580,19 @@ def _audit_report_sections_evidence(result: dict) -> dict:
             ),
             "excerpt": excerpt,
         })
-    analysis = [{
-        "perspective": "auditor",
-        "statement": "감사보고서 본문 섹션은 감사위험 식별, KAM 선정 이유, 감사절차 대응을 확인하는 1차 증거입니다.",
-    }]
-    next_checks = [
-        "KAM 본문에서는 선정 이유와 수행한 감사절차가 모두 추출되었는지 확인하세요.",
-        "사업보고서 주석의 회계정책·추정 문단과 감사보고서 KAM 대응절차를 대조하세요.",
-    ]
+    analysis: list[dict] = []
+    next_checks: list[str] = []
+    seen_statements: set[str] = set()
+    for section in result.get("sections") or []:
+        section_analysis, section_checks = audit_section_guidance(
+            str(section.get("section_key") or ""),
+        )
+        for item in section_analysis:
+            statement = item["statement"]
+            if statement not in seen_statements:
+                analysis.append(item)
+                seen_statements.add(statement)
+        next_checks.extend(check for check in section_checks if check not in next_checks)
     return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
@@ -784,6 +825,65 @@ def _kam_hint_coverage(rows: list[dict]) -> dict:
             "with_procedure_hint": with_procedure,
             "coverage_pct": round(with_procedure * 100.0 / total, 1) if total else 0.0,
         },
+    }
+
+
+def _coverage_status(*, available: int, total: int) -> str:
+    if total == 0:
+        return "missing"
+    return "usable" if available == total else "limited"
+
+
+def _kam_semantic_coverage(rows: list[dict]) -> dict:
+    """Measure KAM meaning separately from mere timeline/row existence."""
+    kam_rows = [row for row in rows if row.get("section_key") == "kam"]
+    total = len(kam_rows)
+    topic_available = sum(bool((row.get("kam_analysis") or {}).get("topics")) for row in kam_rows)
+    reason_available = sum(bool((row.get("kam_analysis") or {}).get("has_reason_hint")) for row in kam_rows)
+    procedure_available = sum(
+        bool((row.get("kam_analysis") or {}).get("has_procedure_hint"))
+        for row in kam_rows
+    )
+    source_available = sum(bool(str(row.get("rcept_no") or "").strip()) for row in kam_rows)
+
+    def coverage(available: int) -> dict:
+        return {
+            "available": available,
+            "total": total,
+            "status": _coverage_status(available=available, total=total),
+        }
+
+    topic_coverage = coverage(topic_available)
+    reason_coverage = coverage(reason_available)
+    procedure_coverage = coverage(procedure_available)
+    source_coverage = coverage(source_available)
+    return {
+        "timeline_status": "usable" if total else "missing",
+        "semantic_complete": bool(total) and all(
+            item["status"] == "usable"
+            for item in (topic_coverage, reason_coverage, procedure_coverage, source_coverage)
+        ),
+        "topic_coverage": topic_coverage,
+        "reason_coverage": reason_coverage,
+        "procedure_coverage": procedure_coverage,
+        "source_coverage": source_coverage,
+    }
+
+
+_AUDIT_OPINION_CONCLUSIONS = ("적정의견", "한정의견", "부적정의견", "의견거절")
+
+
+def _audit_opinion_coverage(rows: list[dict]) -> dict:
+    opinion_rows = [row for row in rows if row.get("section_key") == "audit_opinion"]
+    total = len(opinion_rows)
+    available = sum(
+        any(conclusion in str(row.get("body_excerpt") or "") for conclusion in _AUDIT_OPINION_CONCLUSIONS)
+        for row in opinion_rows
+    )
+    return {
+        "available": available,
+        "total": total,
+        "status": _coverage_status(available=available, total=total),
     }
 
 
@@ -1155,8 +1255,14 @@ def get_audit_report_sections(
             "business_report is summary coverage only."
         )
     kam_hint_coverage = _kam_hint_coverage(rows)
+    kam_semantics = _kam_semantic_coverage(rows)
+    opinion_coverage = _audit_opinion_coverage(rows)
+    semantic_limited = (
+        (any(row.get("section_key") == "kam" for row in rows) and not kam_semantics["semantic_complete"])
+        or (any(row.get("section_key") == "audit_opinion" for row in rows) and opinion_coverage["status"] != "usable")
+    )
     section_quality = {
-        "status": "usable" if rows else "missing",
+        "status": "limited" if rows and semantic_limited else "usable" if rows else "missing",
         "source": row_source,
         "requested_year": year,
         "requested_source_type": source_type,
@@ -1164,6 +1270,8 @@ def get_audit_report_sections(
         "section_count": len(rows),
         "kam_reason_coverage": kam_hint_coverage["reason"],
         "kam_procedure_coverage": kam_hint_coverage["procedure"],
+        **kam_semantics,
+        "opinion_conclusion_coverage": opinion_coverage,
         "available_audit_report_years": sorted(set(
             _cached_years_for_sections(corp_code, "audit_report", section_key)
             + _evidence_years_for_sections(corp_code, "audit_report", section_key)
@@ -1208,6 +1316,15 @@ _AUDIT_MATTER_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+_MATTER_BOILERPLATE_PHRASES = (
+    "감사인의 책임",
+    "지배기구와의 커뮤니케이션",
+    "감사기준 준수",
+    "독립성 진술",
+    "독립성 요구사항",
+)
+
+
 def _classify_audit_matter(text_value: str, section_key: str | None = None) -> dict:
     body = text_value or ""
     topics = [
@@ -1221,7 +1338,23 @@ def _classify_audit_matter(text_value: str, section_key: str | None = None) -> d
         severity = "warning"
     else:
         severity = "info"
-    return {"topic_tags": topics, "severity_hint": severity}
+    classified_source = section_key if section_key in _AUDIT_MATTER_KEYS else None
+    non_boilerplate = bool(body.strip()) and not any(
+        phrase in body for phrase in _MATTER_BOILERPLATE_PHRASES
+    )
+    # A basis paragraph establishes auditing-standard compliance, not a matter
+    # signal; never infer a modified opinion from it.
+    acceptance_signal = bool(
+        classified_source in {"other_matter", "emphasis", "going_concern"}
+        and non_boilerplate
+    )
+    return {
+        "matter_category": classified_source,
+        "topic_tags": topics,
+        "severity_hint": severity,
+        "non_boilerplate": non_boilerplate,
+        "acceptance_signal": acceptance_signal,
+    }
 
 
 def search_audit_report_matters(
@@ -1385,10 +1518,10 @@ def search_audit_report_matters(
             "section_title": row.get("section_title"),
             "body_length": row.get("body_length"),
         }
+        body = _display_text(row.get("body_text"))
+        section.update(_classify_audit_matter(body, row["section_key"]))
         if include_excerpt:
-            body = _display_text(row.get("body_text"))
             section["body_excerpt"] = body[:1200]
-            section.update(_classify_audit_matter(body, row["section_key"]))
         item["sections"].append(section)
 
     company_rows = list(companies.values())
@@ -1442,6 +1575,42 @@ def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025
         return {"error": "company not found", "company": company}
     result = kam_lifecycle_for_company(corp_code, start_year=start_year, end_year=end_year)
     result["subject"] = subject
+    current_events = [
+        event for event in (result.get("events") or [])
+        if isinstance(event, dict) and event.get("year") == end_year
+    ]
+    total = len(current_events)
+
+    def coverage(available: int) -> dict:
+        return {
+            "available": available,
+            "total": total,
+            "status": _coverage_status(available=available, total=total),
+        }
+
+    topic_coverage = coverage(sum(
+        bool(event.get("topic")) and event.get("topic") != "unknown"
+        for event in current_events
+    ))
+    reason_coverage = coverage(sum(bool(event.get("has_reason_hint")) for event in current_events))
+    procedure_coverage = coverage(sum(bool(event.get("has_procedure_hint")) for event in current_events))
+    source_coverage = coverage(sum(bool(event.get("rcept_no")) for event in current_events))
+    semantic_complete = bool(total) and all(
+        item["status"] == "usable"
+        for item in (topic_coverage, reason_coverage, procedure_coverage, source_coverage)
+    )
+    quality = result.get("data_quality") if isinstance(result.get("data_quality"), dict) else {}
+    timeline_status = quality.get("status") or "missing"
+    result["data_quality"] = {
+        **quality,
+        "status": "limited" if timeline_status == "usable" and not semantic_complete else timeline_status,
+        "timeline_status": timeline_status,
+        "semantic_complete": semantic_complete,
+        "topic_coverage": topic_coverage,
+        "reason_coverage": reason_coverage,
+        "procedure_coverage": procedure_coverage,
+        "source_coverage": source_coverage,
+    }
     return _clean_dict(result)
 
 
@@ -1959,4 +2128,5 @@ full_body_kam_procedure_rows = _full_body_kam_procedure_rows
 evidence_report_section_rows = _evidence_report_section_rows
 evidence_years_for_sections = _evidence_years_for_sections
 kam_hint_coverage = _kam_hint_coverage
+kam_semantic_coverage = _kam_semantic_coverage
 topic_hits = _topic_hits
