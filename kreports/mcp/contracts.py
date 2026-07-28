@@ -603,21 +603,10 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     normalized_quality.update(quality.model_dump())
     normalized["data_quality"] = normalized_quality
     normalized["quality_status"] = quality.status
-    # A legacy handler may carry a pack built for an earlier result.  It is
-    # presentation data, never status authority: discard it unless every
-    # status surface already agrees with the canonical quality decision.
-    pack = normalized.get("answer_pack")
-    summary = pack.get("summary") if isinstance(pack, dict) else None
-    pack_quality = pack.get("data_quality") if isinstance(pack, dict) else None
-    if not (
-        isinstance(pack, dict)
-        and pack.get("status") == quality.status
-        and isinstance(summary, dict)
-        and summary.get("status") == quality.status
-        and isinstance(pack_quality, dict)
-        and pack_quality.get("status") == quality.status
-    ):
-        normalized.pop("answer_pack", None)
+    # Legacy packs have no binding to the current tool input or evidence.
+    # Treat them as untrusted presentation data and rebuild a public pack only
+    # after normalization from the current canonical result.
+    normalized.pop("answer_pack", None)
     return normalized
 
 

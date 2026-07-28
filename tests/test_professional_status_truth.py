@@ -571,8 +571,7 @@ def test_missing_normalization_rebuilds_a_stale_answer_pack_across_layers():
     assert normalized["quality_status"] == normalized["data_quality"]["status"] == "missing"
     assert out["quality_status"] == out["data_quality"]["status"] == "missing"
     assert envelope.verdict == envelope.data_quality.status == "missing"
-    assert envelope.answer_pack["status"] == "missing"
-    assert envelope.answer_pack["summary"]["status"] == "missing"
+    assert envelope.answer_pack is None
     assert out["answer_pack"]["status"] == "missing"
     assert out["answer_pack"]["summary"]["status"] == "missing"
     assert out["answer_pack"]["data_quality"]["status"] == "missing"
@@ -581,8 +580,10 @@ def test_missing_normalization_rebuilds_a_stale_answer_pack_across_layers():
     assert "usable" not in resource["text"]
 
 
-def _stale_usable_dcf_pack():
+def _stale_dcf_pack(*, status="usable"):
     """Build a real, structurally valid pack that a legacy result can inherit."""
+    from copy import deepcopy
+
     from kreports.mcp.answer_pack import build_answer_pack
 
     pack = build_answer_pack("get_dcf_input_candidates", {
@@ -591,8 +592,15 @@ def _stale_usable_dcf_pack():
     })
 
     assert pack is not None
-    assert pack["summary"]["status"] == "usable"
+    pack = deepcopy(pack)
+    pack["status"] = status
+    pack["summary"]["status"] = status
+    pack["data_quality"]["status"] = status
     return pack
+
+
+def _stale_usable_dcf_pack():
+    return _stale_dcf_pack()
 
 
 def _missing_legacy_dcf_result_with_stale_pack():
@@ -655,6 +663,51 @@ def test_direct_renderer_builds_usable_table_from_a_genuinely_usable_result():
     assert rendered is not None
     assert "판정:\n- usable" in rendered
     assert "시각화 대체 표" in rendered
+
+
+@pytest.mark.parametrize("status", ["limited", "error"])
+def test_direct_envelope_discards_same_status_stale_pack_for_limited_and_error(status):
+    """Matching status fields cannot prove an inherited pack's provenance."""
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        normalize_answer_result,
+    )
+
+    normalized = normalize_answer_result("get_business_overview", {
+        "sections": {
+            "business_overview": {"body_text": "현재 사업 개요"},
+        },
+        "answer_pack": _stale_dcf_pack(status=status),
+        "data_quality": {"status": status},
+    })
+    envelope = build_answer_envelope("get_business_overview", normalized)
+
+    assert normalized["quality_status"] == status
+    assert "answer_pack" not in normalized
+    assert envelope.verdict == status
+    assert envelope.answer_pack is None
+
+
+def test_direct_renderer_discards_same_status_cross_tool_stale_pack():
+    """A current usable status cannot authorize a prior DCF table or source."""
+    from kreports.mcp.contracts import normalize_answer_result
+    from kreports.mcp.renderers import render_answer
+
+    raw = {
+        "subject": {"corp_name": "현재 연결실체"},
+        "subsidiaries": [{"name": "현재 자회사", "qsc_status": "undetermined"}],
+        "answer_pack": _stale_usable_dcf_pack(),
+        "data_quality": {"status": "usable"},
+    }
+    normalized = normalize_answer_result("get_subsidiary_auditors", raw)
+    rendered = render_answer("get_subsidiary_auditors", raw)
+
+    assert normalized["quality_status"] == "usable"
+    assert "answer_pack" not in normalized
+    assert rendered is not None
+    assert "판정:\n- usable" in rendered
+    assert "매출 성장률" not in rendered
+    assert "현재 자회사" in rendered
 
 
 def test_nonempty_limited_result_never_becomes_missing_availability_pack():
