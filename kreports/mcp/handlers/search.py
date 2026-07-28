@@ -132,6 +132,34 @@ def _note_audit_implication(topic: str) -> str:
     )
 
 
+def _note_next_checks(topic: str) -> list[str]:
+    """Return conservative, topic-specific audit follow-up prompts."""
+    normalized = topic.casefold()
+    if any(hint in normalized for hint in ("수익", "revenue")):
+        return [
+            "수행의무, 통제이전 또는 기간귀속 판단이 계약 조건과 일치하는지 확인하세요.",
+            "변동대가와 매출차감의 추정·제한 및 기간별 반영 근거를 확인하세요.",
+            "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
+        ]
+    if any(hint in normalized for hint in ("재고", "inventory")):
+        return [
+            "재고 실사와 수량 확인 결과가 기말 잔액 및 이동 내역과 일치하는지 확인하세요.",
+            "원가, 순실현가능가치 및 진부화 평가에 사용한 가정과 근거를 검토하세요.",
+            "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
+        ]
+    if any(hint in normalized for hint in ("충당", "provision")):
+        return [
+            "현재의무 완전성과 미인식 의무의 존재 여부를 관련 계약 및 법률 자문과 대조하세요.",
+            "과거 보증청구, 최선추정 또는 사후실적이 충당부채 측정 근거와 일치하는지 확인하세요.",
+            "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
+        ]
+    return [
+        "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
+        "주요 회계추정 입력과 근거를 검토하세요.",
+        "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
+    ]
+
+
 def _note_passages(record: dict, *, keyword: str) -> list[str]:
     raw_passages = record.get("match_excerpts")
     if not isinstance(raw_passages, list) or not raw_passages:
@@ -242,11 +270,7 @@ def _enrich_accounting_note_search(result: dict) -> dict:
             "필요하면 최신 수집본으로 로컬 캐시를 보완한 뒤 다시 조회하세요.",
         ]
         if status == "missing"
-        else [
-            "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
-            "주요 회계추정 입력과 근거를 검토하세요.",
-            "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
-        ]
+        else _note_next_checks(topic)
     )
     enriched["data_quality"] = data_quality
     return enriched

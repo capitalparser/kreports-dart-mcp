@@ -1,3 +1,5 @@
+import pytest
+
 from kreports.mcp.answer_pack import build_answer_pack
 from kreports.mcp.contracts import build_answer_envelope
 from kreports.mcp.handlers.search import _enrich_accounting_note_search
@@ -51,8 +53,8 @@ def test_note_enrichment_binds_keyword_passage_to_auditor_fact_and_dart_receipt(
     assert result["analysis"][0]["perspective"] == "auditor"
     assert "재고자산" in result["analysis"][0]["statement"]
     assert result["next_checks"] == [
-        "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
-        "주요 회계추정 입력과 근거를 검토하세요.",
+        "재고 실사와 수량 확인 결과가 기말 잔액 및 이동 내역과 일치하는지 확인하세요.",
+        "원가, 순실현가능가치 및 진부화 평가에 사용한 가정과 근거를 검토하세요.",
         "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
     ]
 
@@ -113,6 +115,58 @@ def test_note_enrichment_marks_empty_cache_missing_without_claiming_filing_absen
     assert result["next_checks"] == [
         "원 공시의 해당 주석 전문을 직접 확인하세요.",
         "필요하면 최신 수집본으로 로컬 캐시를 보완한 뒤 다시 조회하세요.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("topic", "excerpt", "required_groups"),
+    [
+        (
+            "수익",
+            "수익은 수행의무 이행에 따라 인식하며 변동대가를 추정합니다.",
+            (("수행의무", "통제이전", "기간귀속"), ("변동대가", "매출차감")),
+        ),
+        (
+            "재고자산",
+            "재고자산은 원가와 순실현가능가치 중 낮은 금액으로 측정합니다.",
+            (("실사", "수량"), ("원가", "순실현가능가치", "진부화")),
+        ),
+        (
+            "충당부채",
+            "충당부채는 현재의무와 최선추정액에 따라 인식합니다.",
+            (("의무 완전성",), ("과거 보증청구", "최선추정", "사후실적")),
+        ),
+    ],
+)
+def test_note_enrichment_tailors_audit_checks_to_topic(topic, excerpt, required_groups):
+    """Replacing topic-specific audit checks with generic review steps is a bug."""
+    raw = _matched_note_result()
+    raw["query"]["keyword"] = topic
+    record = raw["companies"][0]["records"][0]
+    record["note_title"] = topic
+    record["match_excerpts"] = [excerpt]
+
+    result = _enrich_accounting_note_search(raw)
+    rendered_checks = " ".join(result["next_checks"])
+
+    for alternatives in required_groups:
+        assert any(term in rendered_checks for term in alternatives)
+
+
+def test_note_enrichment_keeps_conservative_generic_checks_for_other_topics():
+    """Making unsupported topics look procedurally covered is a bug."""
+    raw = _matched_note_result()
+    raw["query"]["keyword"] = "리스"
+    record = raw["companies"][0]["records"][0]
+    record["note_title"] = "리스"
+    record["match_excerpts"] = ["리스부채는 유효이자율법으로 측정합니다."]
+
+    result = _enrich_accounting_note_search(raw)
+
+    assert result["next_checks"] == [
+        "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
+        "주요 회계추정 입력과 근거를 검토하세요.",
+        "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
     ]
 
 
