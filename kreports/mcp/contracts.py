@@ -12,6 +12,21 @@ _CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
 _QUALITY_STATUSES = _CANONICAL_STATUSES
 _ADAPTER_VERSION = "legacy-result-adapter"
 
+_AFFIRMATIVE_LIST_FIELDS = {
+    "confirmed_facts", "evidence", "rows", "records", "history", "sections",
+    "events", "items", "companies", "subsidiaries", "signals", "changed_items",
+    "historical_actuals", "forecast_rows", "cash_flows", "assumptions",
+}
+_AFFIRMATIVE_MAPPING_FIELDS = {
+    "subject_metrics", "benchmarks", "candidate_assumptions", "results",
+    "consolidated_totals", "financials", "metrics", "inputs", "assumptions",
+    "cohort_metadata", "qsc_criterion", "score_breakdown", "items",
+}
+_AFFIRMATIVE_COUNT_FIELDS = {
+    "count", "total", "total_records", "total_companies", "section_count",
+    "peer_count", "item_count", "total_events",
+}
+
 DOMAIN_VERDICT_ALLOWLISTS = {
     "get_quality_of_earnings_pack": {"stable", "monitor"},
     "get_dcf_input_candidates": {"screen_grade", "partial", "blocked"},
@@ -159,29 +174,19 @@ def _covered_years(result: dict[str, Any], quality: dict[str, Any]) -> list[int]
 
 
 def _has_partial_payload(result: dict[str, Any]) -> bool:
-    """Return whether an unqualified legacy response contains affirmative data."""
+    """Return whether registered business fields contain affirmative data."""
     if result.get("has_data") is True:
         return True
-    for key, value in result.items():
-        if key in {
-            "confirmed_facts", "evidence", "rows", "records", "history",
-            "sections", "events", "items",
-        }:
-            if isinstance(value, list) and value:
-                return True
-            continue
-        if key in {"analysis", "limitations", "warnings", "next_checks"}:
-            continue
-        if isinstance(value, list) and value:
+    for key in _AFFIRMATIVE_LIST_FIELDS:
+        if isinstance(result.get(key), list) and result[key]:
             return True
-    for key in ("count", "total", "total_records", "total_companies", "section_count", "peer_count"):
+    for key in _AFFIRMATIVE_COUNT_FIELDS:
         value = result.get(key)
         if isinstance(value, (int, float)) and value > 0:
             return True
-    for key, value in result.items():
-        if key in {"_meta", "data_quality", "answer", "answer_pack", "limitations", "warnings", "next_checks", "error"}:
-            continue
-        if isinstance(value, dict) and value and key not in {"subject", "company", "query"}:
+    for key in _AFFIRMATIVE_MAPPING_FIELDS:
+        value = result.get(key)
+        if isinstance(value, dict) and value:
             return True
     return False
 
@@ -370,6 +375,21 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
     )
 
 
+def _canonical_answer_fallback(tool_name: str, result: dict[str, Any]) -> str:
+    """Return safe Korean prose when a detail renderer cannot produce text."""
+    envelope = build_answer_envelope(tool_name, result)
+    return "\n".join([
+        "판정:",
+        f"- {envelope.verdict}",
+        "",
+        "업무 결론:",
+        f"- {public_domain_verdict_label(tool_name, envelope.domain_verdict)}",
+        "",
+        "확인된 내용:",
+        "- 구조화된 공시 근거와 데이터 한계를 확인하세요.",
+    ])
+
+
 def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
     """Apply the shared answer-pack and narrative behavior after metadata is attached."""
     enriched = dict(result)
@@ -386,6 +406,9 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
                 "status": normalized_status,
             }
     enriched = normalize_answer_result(tool_name, enriched)
+    # Do not let raw legacy prose survive a renderer-empty or renderer-failed
+    # path. The response answer is rebuilt below from canonical state only.
+    enriched.pop("answer", None)
     # Local imports avoid an import cycle: answer_pack and renderers consume this module.
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.renderers import render_answer
@@ -397,7 +420,13 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
     # The public professional answer is always regenerated from the normalized
     # envelope.  A legacy free-text answer remains in the raw input only and
     # cannot bypass verdict and evidence safeguards.
-    answer = render_answer(tool_name, enriched)
-    if answer:
-        enriched["answer"] = answer
+    try:
+        answer = render_answer(tool_name, enriched)
+    except Exception:
+        answer = None
+    enriched["answer"] = (
+        answer
+        if isinstance(answer, str) and answer.strip()
+        else _canonical_answer_fallback(tool_name, enriched)
+    )
     return enriched

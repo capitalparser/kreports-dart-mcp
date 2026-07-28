@@ -42,6 +42,76 @@ def test_analysis_without_public_facts_cannot_keep_upstream_usable_status():
     assert out["quality_status"] != "usable"
 
 
+def test_arbitrary_metadata_list_cannot_keep_upstream_usable_status():
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("get_business_overview", {
+        "labels": ["x"],
+        "data_quality": {"status": "usable"},
+    })
+    envelope = build_answer_envelope("get_business_overview", out)
+
+    assert out["quality_status"] == "missing"
+    assert out["data_quality"]["status"] == envelope.verdict == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+    assert out["answer_pack"]["data_quality"]["status"] == "missing"
+    resource = read_resource(out["answer_pack"]["resource_uri"])
+    assert "missing" in resource["text"]
+
+
+def test_registered_business_records_keep_a_usable_status():
+    out = enrich_answer_response("get_subsidiary_auditors", {
+        "subject": {"corp_name": "A"},
+        "subsidiaries": [{"name": "B", "qsc_status": "undetermined"}],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "usable"
+    assert out["answer_pack"]["summary"]["status"] == "usable"
+
+
+@pytest.mark.parametrize("renderer_result", [None, ""])
+def test_renderer_empty_result_replaces_injected_raw_answer(renderer_result, monkeypatch):
+    import kreports.mcp.renderers as renderers
+
+    monkeypatch.setattr(renderers, "render_answer", lambda *_args: renderer_result)
+    out = enrich_answer_response("get_business_overview", {
+        "answer": "기존 결론: 승인 및 매수, 적정 의견 확정",
+        "confirmed_facts": [{
+            "statement": "공시로 확인된 사실",
+            "source": {"rcept_no": "20250301000001"},
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["answer"].startswith("판정:")
+    assert "승인" not in out["answer"]
+    assert "매수" not in out["answer"]
+    assert "적정 의견" not in out["answer"]
+
+
+def test_renderer_failure_uses_nonempty_canonical_fallback(monkeypatch):
+    import kreports.mcp.renderers as renderers
+
+    def fail(*_args):
+        raise RuntimeError("renderer unavailable")
+
+    monkeypatch.setattr(renderers, "render_answer", fail)
+    out = enrich_answer_response("get_business_overview", {
+        "answer": "적정 의견 확정",
+        "confirmed_facts": [{
+            "statement": "공시로 확인된 사실",
+            "source": {"rcept_no": "20250301000001"},
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["answer"].startswith("판정:")
+    assert out["answer"].strip()
+    assert "적정 의견" not in out["answer"]
+
+
 @pytest.mark.parametrize(("tool_name", "verdict", "expected_label"), [
     ("get_dcf_input_candidates", "screen_grade", "입력 후보 선별 결과"),
     ("build_dcf_model_pack", "reviewable_model", "검토 가능한 모델"),
