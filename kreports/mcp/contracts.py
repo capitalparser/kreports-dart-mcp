@@ -579,6 +579,17 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
         limitations.append("섹션 상태 형식을 해석할 수 없어 전체 상태를 제한으로 표시합니다.")
 
     grade = quality.get("grade")
+    if tool_name == "compare_to_industry_multi":
+        # This is the canonical-limitation boundary.  coverage_note and error
+        # have already been promoted above, so sanitizing here cannot be
+        # bypassed by a later quality-normalization pass.
+        from kreports.mcp.professional_surfaces.investor import (
+            publicize_peer_result_limitations,
+        )
+
+        limitations = publicize_peer_result_limitations({
+            "data_quality": {"limitations": limitations},
+        })["data_quality"]["limitations"]
     return DataQualityV1(
         status=status,
         grade=grade if grade in {"A", "B", "C", "D"} else None,
@@ -597,6 +608,27 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
         raise TypeError("result must be a dict")
     normalized = dict(result)
     quality = _data_quality(tool_name, normalized)
+    public_quality: dict[str, Any] | None = None
+    if tool_name == "compare_to_industry_multi":
+        # _data_quality() synthesizes the canonical limitation list from every
+        # promotable field, including coverage_note and error.  Public peer
+        # localization must happen *after* that synthesis; doing it earlier
+        # lets those fields reintroduce internal diagnostic codes downstream.
+        from kreports.mcp.professional_surfaces.investor import (
+            publicize_peer_result_limitations,
+        )
+
+        public_result = publicize_peer_result_limitations({
+            "data_quality": {
+                **(
+                    normalized.get("data_quality")
+                    if isinstance(normalized.get("data_quality"), dict)
+                    else {}
+                ),
+                "limitations": quality.limitations,
+            },
+        })
+        public_quality = public_result["data_quality"]
     raw_verdict = str(
         normalized.get("domain_verdict")
         or normalized.get("verdict")
@@ -608,6 +640,8 @@ def normalize_answer_result(tool_name: str, result: dict[str, Any]) -> dict[str,
     # replace every typed quality field with the canonical validated value.
     raw_quality = normalized.get("data_quality")
     normalized_quality = dict(raw_quality) if isinstance(raw_quality, dict) else {}
+    if public_quality is not None and "coverage_note" in public_quality:
+        normalized_quality["coverage_note"] = public_quality["coverage_note"]
     normalized_quality.update(quality.model_dump())
     normalized["data_quality"] = normalized_quality
     normalized["quality_status"] = quality.status

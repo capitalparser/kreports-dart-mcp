@@ -1,6 +1,7 @@
 """Public investor decision surfaces retain evidence and uncertainty."""
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date
 import re
 
@@ -504,6 +505,110 @@ def test_missing_peer_pack_strips_machine_prefix_before_resource_rendering():
     for public_surface in (str(pack), resource["text"]):
         assert "전체 비교군 확인 필요" in public_surface
         assert "cohort_identity_incomplete" not in public_surface
+
+
+def test_peer_limitation_publication_handles_mixed_case_and_unspaced_prefixes():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.resources import render_visualization_resource
+
+    variants = [
+        "Identity_Query_Unavailable:OperationalError",
+        "cohort_identity_incomplete:전체 비교군 확인 필요",
+    ]
+    answer, pack, resource = _public_peer_limitations(variants)
+    direct_pack = build_answer_pack("compare_to_industry_multi", {
+        "subject": {"corp_name": "대상"},
+        "data_quality": {"status": "missing", "limitations": variants},
+    })
+
+    for public_surface in (
+        answer, str(pack), resource,
+        str(direct_pack), render_visualization_resource(direct_pack)["text"],
+    ):
+        assert "Identity_Query_Unavailable" not in public_surface
+        assert "identity_query_unavailable" not in public_surface
+        assert "OperationalError" not in public_surface
+        assert "cohort_identity_incomplete" not in public_surface
+        assert "전체 비교군 확인 필요" in public_surface
+        assert "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다." in public_surface
+
+
+def test_peer_canonical_normalization_publicizes_promoted_coverage_and_error_codes():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        enrich_answer_response,
+        normalize_answer_result,
+    )
+    from kreports.mcp.renderers import render_answer
+    from kreports.mcp.resources import read_resource
+
+    base = {
+        "subject": {"corp_name": "대상"},
+        "metrics": ["ROE"],
+        "results": {2024: {"ROE": {
+            "subject_value": 0.12, "percentile": 70, "p25": 0.05,
+            "p50": 0.10, "p75": 0.15, "n": 30, "unit": "ratio",
+        }}},
+        "data_quality": {
+            "status": "limited",
+            "coverage_note": "cohort_identity_incomplete:전체 비교군 확인 필요",
+        },
+    }
+    raw_with_error = {
+        **base,
+        "data_quality": {"status": "limited"},
+        "error": "identity_query_unavailable:OperationalError",
+    }
+
+    for raw, expected_limitation in (
+        (base, "전체 비교군 확인 필요"),
+        (raw_with_error, "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."),
+    ):
+        before = deepcopy(raw)
+        normalized = normalize_answer_result("compare_to_industry_multi", raw)
+        envelope = build_answer_envelope("compare_to_industry_multi", raw)
+        rendered = render_answer("compare_to_industry_multi", raw)
+
+        assert raw == before
+        assert normalized["data_quality"]["status"] == envelope.verdict
+        assert normalized["data_quality"]["limitations"] == envelope.data_quality.limitations
+        public_text = "\n".join([
+            str(normalized["data_quality"]), str(envelope.data_quality), rendered,
+        ])
+        assert "cohort_identity_incomplete" not in public_text
+        assert "identity_query_unavailable" not in public_text
+        assert "OperationalError" not in public_text
+        assert expected_limitation in public_text
+
+    direct_pack = build_answer_pack("compare_to_industry_multi", base)
+    enriched = enrich_answer_response("compare_to_industry_multi", base)
+    resource = read_resource(enriched["answer_pack"]["resource_uri"])
+    assert direct_pack["summary"]["status"] == "limited"
+    assert direct_pack["data_quality"]["limitations"] == enriched["data_quality"]["limitations"]
+    assert enriched["data_quality"]["status"] == "limited"
+    assert "cohort_identity_incomplete" not in str(enriched["answer_pack"])
+    assert "cohort_identity_incomplete" not in resource["text"]
+    assert "전체 비교군 확인 필요" in enriched["answer"]
+
+
+def test_non_peer_canonical_normalization_preserves_raw_coverage_note():
+    from kreports.mcp.contracts import normalize_answer_result
+
+    raw = {
+        "events": [{"event_title": "유상증자 결정"}],
+        "data_quality": {
+            "status": "limited",
+            "coverage_note": "identity_query_unavailable:OperationalError",
+        },
+    }
+
+    normalized = normalize_answer_result("search_disclosure_events", raw)
+
+    assert normalized["data_quality"]["coverage_note"] == raw["data_quality"]["coverage_note"]
+    assert normalized["data_quality"]["limitations"] == [
+        "identity_query_unavailable:OperationalError",
+    ]
 
 
 def test_public_peer_handler_does_not_digest_an_empty_cohort(temp_engine):

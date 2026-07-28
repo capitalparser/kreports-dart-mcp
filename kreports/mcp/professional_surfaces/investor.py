@@ -43,14 +43,20 @@ _PUBLIC_AGGREGATE_STATUS_LABELS = {
 }
 _MACHINE_CODE = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
 _MACHINE_LIMITATION = re.compile(
-    rf"^{_MACHINE_CODE}(?::[a-z0-9][a-z0-9_,.-]*)+$", re.ASCII
+    rf"^{_MACHINE_CODE}(?::[a-z0-9][a-z0-9_,.-]*)+$",
+    re.ASCII | re.IGNORECASE,
 )
-_MACHINE_CODE_ONLY = re.compile(rf"^{_MACHINE_CODE}$", re.ASCII)
+_MACHINE_CODE_ONLY = re.compile(rf"^{_MACHINE_CODE}$", re.ASCII | re.IGNORECASE)
 _MACHINE_PREFIX_WITH_SUFFIX = re.compile(
-    rf"^(?P<code>{_MACHINE_CODE}):[ \t]+(?P<suffix>.+)$", re.ASCII
+    rf"^(?P<code>{_MACHINE_CODE}):\s*(?P<suffix>.+)$",
+    re.ASCII | re.IGNORECASE,
 )
 _STRUCTURED_SUPPRESSION = re.compile(
     rf"^{_MACHINE_CODE}_suppressed(?::[A-Za-z0-9][A-Za-z0-9_,.-]*)+$",
+    re.ASCII | re.IGNORECASE,
+)
+_OPAQUE_MACHINE_SUFFIX = re.compile(
+    r"^(?:[a-z][a-z0-9_]*|[A-Z][A-Za-z0-9]*(?:Error|Exception))$",
     re.ASCII,
 )
 _PUBLIC_VISUALIZATION_LIMITATION = (
@@ -85,7 +91,11 @@ def _public_limitation(value: Any) -> str:
         suffix = match["suffix"].strip()
         if _STRUCTURED_SUPPRESSION.fullmatch(suffix):
             return _PUBLIC_VISUALIZATION_LIMITATION
-        if _MACHINE_LIMITATION.fullmatch(suffix) or _MACHINE_CODE_ONLY.fullmatch(suffix):
+        if (
+            _MACHINE_LIMITATION.fullmatch(suffix)
+            or _MACHINE_CODE_ONLY.fullmatch(suffix)
+            or _OPAQUE_MACHINE_SUFFIX.fullmatch(suffix)
+        ):
             return "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
         return suffix
     return text
@@ -113,6 +123,16 @@ def publicize_peer_result_limitations(result: dict[str, Any]) -> dict[str, Any]:
         public_result["data_quality"] = {
             **quality,
             "limitations": _public_limitations(quality.get("limitations")),
+            **(
+                {"coverage_note": _public_limitation(quality["coverage_note"])}
+                if quality.get("coverage_note") is not None
+                else {}
+            ),
+        }
+    elif isinstance(quality, dict) and quality.get("coverage_note") is not None:
+        public_result["data_quality"] = {
+            **quality,
+            "coverage_note": _public_limitation(quality["coverage_note"]),
         }
     return public_result
 
