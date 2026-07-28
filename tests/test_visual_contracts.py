@@ -1188,14 +1188,26 @@ def test_published_visual_resource_is_fetchable_through_actual_mcp_read_path():
         read_resource(unknown)
 
 
-def test_raw_kam_lifecycle_visual_fallback_maps_public_labels():
+@pytest.mark.parametrize(
+    ("raw_topic", "raw_status"),
+    [
+        (" IT_SYSTEM_CONVERSION ", " NEWLY_REPEATED "),
+        ("it-system-conversion", "newly-repeated"),
+        ("itSystemConversion", "newlyRepeated"),
+        ("it.system.conversion", "newly.repeated"),
+    ],
+)
+def test_raw_kam_lifecycle_visual_fallback_maps_public_labels(
+    raw_topic,
+    raw_status,
+):
     pack = build_visualization_pack({
         "_visual_family": "kam_lifecycle",
         "entity_name": "A",
         "events": [{
             "year": 2025,
-            "topic": "it_system_conversion",
-            "status": "newly_repeated",
+            "topic": raw_topic,
+            "status": raw_status,
         }],
     })
 
@@ -1205,8 +1217,8 @@ def test_raw_kam_lifecycle_visual_fallback_maps_public_labels():
     html = render_visualization_html(pack)
     assert "기타 핵심감사사항" in html
     assert "상태 미분류" in html
-    assert "it_system_conversion" not in html
-    assert "newly_repeated" not in html
+    assert raw_topic.strip() not in html
+    assert raw_status.strip() not in html
 
 
 def test_visual_resource_lru_eviction_and_restart_are_stable_fail_closed():

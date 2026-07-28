@@ -24,23 +24,44 @@ _KAM_LIFECYCLE_LABELS = {
     "repeated_changed": "반복·문구 변경",
     "repeated_stable": "반복·문구 안정",
 }
-_MACHINE_ENUM = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", re.ASCII)
+_MACHINE_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*", re.ASCII)
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])", re.ASCII)
+
+
+def _canonical_enum_key(text: str) -> str:
+    return _CAMEL_BOUNDARY.sub("_", text).replace("-", "_").replace(
+        ".",
+        "_",
+    ).casefold()
+
+
+def _is_machine_enum(text: str) -> bool:
+    if not _MACHINE_TOKEN.fullmatch(text):
+        return False
+    return (
+        any(separator in text for separator in "_.-")
+        or text.islower()
+        or text.isupper()
+        or _CAMEL_BOUNDARY.search(text) is not None
+    )
 
 
 def public_kam_topic_label(value: object) -> str:
     text = str(value or "").strip()
-    if text in _KAM_TOPIC_LABELS:
-        return _KAM_TOPIC_LABELS[text]
-    if _MACHINE_ENUM.fullmatch(text):
+    key = _canonical_enum_key(text)
+    if key in _KAM_TOPIC_LABELS:
+        return _KAM_TOPIC_LABELS[key]
+    if _is_machine_enum(text):
         return "기타 핵심감사사항"
     return text or "미분류"
 
 
 def public_kam_lifecycle_label(value: object) -> str:
     text = str(value or "").strip()
-    if text in _KAM_LIFECYCLE_LABELS:
-        return _KAM_LIFECYCLE_LABELS[text]
-    if _MACHINE_ENUM.fullmatch(text):
+    key = _canonical_enum_key(text)
+    if key in _KAM_LIFECYCLE_LABELS:
+        return _KAM_LIFECYCLE_LABELS[key]
+    if _is_machine_enum(text):
         return "상태 미분류"
     return text or "미분류"
 
