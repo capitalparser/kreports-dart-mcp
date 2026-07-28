@@ -415,6 +415,97 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
     assert "cohort" not in selection_enriched["answer"]
 
 
+def _public_peer_limitations(limitations: list[str]) -> tuple[str, dict, str]:
+    from kreports.mcp.resources import read_resource
+    from kreports.mcp.tools import _attach_meta
+
+    out = _attach_meta("compare_to_industry_multi", {
+        "subject": {"corp_name": "대상"},
+        "metrics": ["ROE"],
+        "results": {2024: {"ROE": {
+            "subject_value": 0.12,
+            "percentile": 70,
+            "p25": 0.05,
+            "p50": 0.10,
+            "p75": 0.15,
+            "n": 30,
+            "unit": "ratio",
+        }}},
+        "data_quality": {"status": "limited", "limitations": limitations},
+    })
+    pack = out["answer_pack"]
+    resource = read_resource(pack["resource_uri"])
+    return out["answer"], pack, resource["text"]
+
+
+def test_peer_limitation_localization_preserves_english_prose_across_public_surfaces():
+    prose = "Peer receipt provenance is unavailable."
+
+    answer, pack, resource = _public_peer_limitations([prose])
+
+    assert prose in answer
+    assert prose in str(pack)
+    assert prose in resource
+
+
+def test_peer_limitation_localization_strips_machine_prefix_across_public_surfaces():
+    limitation = "cohort_identity_incomplete: 전체 비교군 확인 필요"
+    nested_machine_code = "cohort_identity_incomplete: peer_identity_missing"
+
+    answer, pack, resource = _public_peer_limitations([
+        limitation,
+        nested_machine_code,
+    ])
+
+    for public_surface in (answer, str(pack), resource):
+        assert "전체 비교군 확인 필요" in public_surface
+        assert "cohort_identity_incomplete" not in public_surface
+        assert "peer_identity_missing" not in public_surface
+        assert "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다." in public_surface
+
+
+def test_peer_limitation_localization_does_not_expose_nested_machine_code_in_direct_answer():
+    from kreports.mcp.renderers import render_answer
+
+    answer = render_answer("compare_to_industry_multi", {
+        "subject": {"corp_name": "대상"},
+        "metrics": ["ROE"],
+        "results": {2024: {"ROE": {
+            "subject_value": 0.12,
+            "percentile": 70,
+            "p25": 0.05,
+            "p50": 0.10,
+            "p75": 0.15,
+            "n": 30,
+            "unit": "ratio",
+        }}},
+        "data_quality": {
+            "status": "limited",
+            "limitations": [
+                "cohort_identity_incomplete: peer_identity_missing",
+            ],
+        },
+    })
+
+    assert "peer_identity_missing" not in answer
+    assert "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다." in answer
+
+
+def test_missing_peer_pack_strips_machine_prefix_before_resource_rendering():
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.resources import render_visualization_resource
+
+    limitation = "cohort_identity_incomplete: 전체 비교군 확인 필요"
+    pack = build_answer_pack("compare_to_industry_multi", {
+        "data_quality": {"status": "missing", "limitations": [limitation]},
+    })
+    resource = render_visualization_resource(pack)
+
+    for public_surface in (str(pack), resource["text"]):
+        assert "전체 비교군 확인 필요" in public_surface
+        assert "cohort_identity_incomplete" not in public_surface
+
+
 def test_public_peer_handler_does_not_digest_an_empty_cohort(temp_engine):
     from kreports.mcp.handlers.search import handle_compare_to_industry_multi
     from kreports.mcp.input_models import CompareToIndustryMultiInput

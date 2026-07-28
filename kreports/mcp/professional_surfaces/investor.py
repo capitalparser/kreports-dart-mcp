@@ -41,10 +41,18 @@ _PUBLIC_AGGREGATE_STATUS_LABELS = {
     "withheld_empty_cohort": "비교군 없음으로 집계 보류",
     "withheld_incomplete_cohort": "전체 비교군 미확보로 집계 보류",
 }
+_MACHINE_CODE = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
 _MACHINE_LIMITATION = re.compile(
-    r"^[a-z][a-z0-9_]*(?::[a-z0-9_,.-]+)+$", re.ASCII
+    rf"^{_MACHINE_CODE}(?::[a-z0-9][a-z0-9_,.-]*)+$", re.ASCII
 )
-_HANGUL = re.compile(r"[가-힣]")
+_MACHINE_CODE_ONLY = re.compile(rf"^{_MACHINE_CODE}$", re.ASCII)
+_MACHINE_PREFIX_WITH_SUFFIX = re.compile(
+    rf"^(?P<code>{_MACHINE_CODE}):[ \t]+(?P<suffix>.+)$", re.ASCII
+)
+_STRUCTURED_SUPPRESSION = re.compile(
+    rf"^{_MACHINE_CODE}_suppressed(?::[A-Za-z0-9][A-Za-z0-9_,.-]*)+$",
+    re.ASCII,
+)
 _PUBLIC_VISUALIZATION_LIMITATION = (
     "표시 가능한 수치 또는 일관된 단위를 확보하지 못해 시각화를 제공하지 않습니다."
 )
@@ -69,12 +77,17 @@ def _public_aggregate_status_label(value: Any) -> str:
 def _public_limitation(value: Any) -> str:
     """Translate inherited machine limitations without exposing implementation codes."""
     text = str(value or "").strip()
-    if "_suppressed:" in text:
+    if _STRUCTURED_SUPPRESSION.fullmatch(text):
         return _PUBLIC_VISUALIZATION_LIMITATION
-    if _MACHINE_LIMITATION.fullmatch(text):
+    if _MACHINE_LIMITATION.fullmatch(text) or _MACHINE_CODE_ONLY.fullmatch(text):
         return "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
-    if not _HANGUL.search(text):
-        return "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
+    if match := _MACHINE_PREFIX_WITH_SUFFIX.fullmatch(text):
+        suffix = match["suffix"].strip()
+        if _STRUCTURED_SUPPRESSION.fullmatch(suffix):
+            return _PUBLIC_VISUALIZATION_LIMITATION
+        if _MACHINE_LIMITATION.fullmatch(suffix) or _MACHINE_CODE_ONLY.fullmatch(suffix):
+            return "세부 데이터 제한 사항이 있어 추가 확인이 필요합니다."
+        return suffix
     return text
 
 
@@ -86,6 +99,22 @@ def _public_limitations(values: Any) -> list[str]:
         for value in values
         if str(value or "").strip()
     ]
+
+
+def publicize_peer_result_limitations(result: dict[str, Any]) -> dict[str, Any]:
+    """Copy only peer-comparison display limitations into public wording."""
+    public_result = dict(result)
+    if "limitations" in public_result:
+        public_result["limitations"] = _public_limitations(
+            public_result.get("limitations")
+        )
+    quality = public_result.get("data_quality")
+    if isinstance(quality, dict) and "limitations" in quality:
+        public_result["data_quality"] = {
+            **quality,
+            "limitations": _public_limitations(quality.get("limitations")),
+        }
+    return public_result
 
 
 def _publicize_pack_limitations(pack: dict[str, Any]) -> dict[str, Any]:
@@ -178,12 +207,7 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
     # columns rather than replacing the peer pack with a narrower variant.
     from kreports.mcp.answer_pack import _build_peer_benchmark_pack
 
-    public_result = deepcopy(result)
-    public_quality = dict(public_result.get("data_quality") or {})
-    public_quality["limitations"] = _public_limitations(
-        public_quality.get("limitations")
-    )
-    public_result["data_quality"] = public_quality
+    public_result = deepcopy(publicize_peer_result_limitations(result))
     public_result["metrics"] = [
         _public_metric_label(metric)
         for metric in (result.get("metrics") or [])

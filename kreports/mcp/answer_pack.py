@@ -57,6 +57,12 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
     """Return a visual answer pack for known tool outputs."""
     if not isinstance(result, dict) or "error" in result:
         return None
+    if tool_name == "compare_to_industry_multi":
+        from kreports.mcp.professional_surfaces.investor import (
+            publicize_peer_result_limitations,
+        )
+
+        result = publicize_peer_result_limitations(result)
 
     envelope = build_answer_envelope(tool_name, result)
     if (

@@ -725,6 +725,12 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
                 **raw_quality,
                 "status": normalized_status,
             }
+    if tool_name == "compare_to_industry_multi":
+        from kreports.mcp.professional_surfaces.investor import (
+            publicize_peer_result_limitations,
+        )
+
+        enriched = publicize_peer_result_limitations(enriched)
     enriched = normalize_answer_result(tool_name, enriched)
     # Do not let raw legacy prose survive a renderer-empty or renderer-failed
     # path. The response answer is rebuilt below from canonical state only.

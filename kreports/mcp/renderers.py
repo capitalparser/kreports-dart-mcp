@@ -1207,6 +1207,12 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     """Return Korean narrative text for a structured tool result."""
     if not isinstance(result, dict):
         return None
+    if tool_name == "compare_to_industry_multi":
+        from kreports.mcp.professional_surfaces.investor import (
+            publicize_peer_result_limitations,
+        )
+
+        result = publicize_peer_result_limitations(result)
     # Direct callers bypass enrich_answer_response(), so establish the same
     # canonical state before this renderer or its visual-table helper reads
     # any legacy presentation fields.
