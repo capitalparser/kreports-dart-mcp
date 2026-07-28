@@ -708,3 +708,61 @@ def test_acceptance_pack_has_exactly_seven_public_review_rows_without_internal_s
     ]
     assert "kam_body" not in str(table)
     assert "audit_report_other_matter_paragraph_present" not in str(table)
+
+
+def test_acceptance_answer_pack_keeps_peer_and_metric_denominator_detail_with_public_labels():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    sections = {
+        key: {
+            "status": "usable", "required": True, "applicability": "applicable",
+            "coverage": {}, "blockers": [], "sources": [],
+        }
+        for key in (
+            "peer_group", "audit_effort", "financial_risk", "audit_history",
+            "accounting_policy", "kam", "audit_report_matters",
+        )
+    }
+    pack = build_answer_pack("build_audit_acceptance_pack", {
+        "subject": {"corp_name": "A"},
+        "peer_group": {
+            "peer_count": 6,
+            "sample_peers": [
+                {
+                    "corp_name": f"Peer {index}",
+                    "stock_code": f"00000{index}",
+                    "include_reasons": ["same_ksic_prefix", "audit_fee_available"],
+                }
+                for index in range(1, 7)
+            ],
+        },
+        "risk_summary": {
+            "metric_rows": [{
+                "metric": "receivables_to_revenue",
+                "peer_n": 6,
+                "p25": 0.1,
+                "p50": 0.2,
+                "p75": 0.3,
+                "subject_value": 0.25,
+                "limitation": None,
+            }],
+            "benchmarks": {"receivables_to_revenue": {"n": 6}},
+        },
+        "data_quality": {"status": "usable", "section_statuses": sections},
+    })
+
+    peer_table = next(
+        table for table in pack["tables"]
+        if table["id"] == "audit_acceptance_peer_group"
+    )
+    metric_table = next(
+        table for table in pack["tables"]
+        if table["id"] == "audit_acceptance_risk_metrics"
+    )
+    assert len(peer_table["rows"]) == 6
+    assert peer_table["rows"][0]["peer_n"] == 6
+    assert peer_table["rows"][0]["selection_basis"] == "동일 업종 분류, 감사보수 확인"
+    assert metric_table["rows"][0]["metric"] == "매출채권/매출"
+    assert metric_table["rows"][0]["peer_n"] == 6
+    assert "receivables_to_revenue" not in str(pack)
+    assert "same_ksic_prefix" not in str(pack)

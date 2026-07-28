@@ -260,3 +260,24 @@ def test_acceptance_narrative_uses_public_labels_without_approval_or_internal_si
     assert "audit_report_other_matter_paragraph_present" not in text
     assert "승인" not in text
     assert "거절" not in text
+
+
+def test_peer_risk_narrative_maps_internal_metric_keys_to_public_korean_labels():
+    text = render_answer("compare_peer_risk_profile", {
+        "subject": {"corp_name": "A"},
+        "metric_rows": [{
+            "metric": "receivables_to_revenue",
+            "peer_n": 6,
+            "p25": 0.1,
+            "p50": 0.2,
+            "p75": 0.3,
+            "subject_value": 0.25,
+            "limitation": None,
+        }],
+        "benchmarks": {"receivables_to_revenue": {"n": 6}},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert text is not None
+    assert "매출채권/매출" in text
+    assert "receivables_to_revenue" not in text

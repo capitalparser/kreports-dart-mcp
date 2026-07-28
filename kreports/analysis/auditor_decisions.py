@@ -80,6 +80,15 @@ def _receipt_source(receipt: object, *, label: str) -> dict[str, Any] | None:
     return _source_ref({"rcept_no": receipt, "source_label": label})
 
 
+def _source_matches_year(source: object, year: int) -> bool:
+    if not isinstance(source, dict):
+        return False
+    try:
+        return int(source.get("bsns_year")) == year
+    except (TypeError, ValueError):
+        return False
+
+
 def _section(
     *,
     status: str,
@@ -109,11 +118,15 @@ def _section(
         status = "limited"
         blockers = [*(blockers or []), "applicability_unknown"]
     if actual_applicability == "not_applicable":
-        if not not_applicable_basis or not clean_sources:
+        filing_sources = [
+            source for source in clean_sources if source.get("rcept_no")
+        ]
+        if not not_applicable_basis or not filing_sources:
             status = "limited"
             blockers = [*(blockers or []), "not_applicable_basis_or_source_missing"]
         else:
             status = "usable"
+            blockers = []
     return SectionStatusV1(
         status=status,
         required=requirement.required,
@@ -256,6 +269,9 @@ def _history_section(history_payload: dict[str, Any], year: int) -> dict[str, An
         _receipt_source(row.get("rcept_no"), label="감사인 이력 공시")
         for row in [*current, *prior] if row.get("rcept_no")
     ]
+    explicit_source = _source_ref(history_payload.get("source"))
+    if explicit_source:
+        sources.append(explicit_source)
     blockers = []
     if not current or not all(row.get("rcept_no") for row in current):
         blockers.append("current_year_audit_history_receipt_missing")
@@ -267,7 +283,45 @@ def _history_section(history_payload: dict[str, Any], year: int) -> dict[str, An
         coverage={"current_year_rows": len(current), "prior_year_rows": len(prior)},
         blockers=blockers,
         sources=[source for source in sources if source],
+        applicability=history_payload.get("applicability"),
+        not_applicable_basis=history_payload.get("not_applicable_basis"),
     )
+
+
+def _audit_effort_row_evidence(
+    rows: list[dict[str, Any]],
+    requested_years: set[int],
+) -> tuple[set[int], set[int], list[dict[str, Any]]]:
+    complete_years: set[int] = set()
+    cited_years: set[int] = set()
+    sources: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            row_year = int(row.get("year"))
+        except (TypeError, ValueError):
+            continue
+        if row_year not in requested_years or row.get("input_status") != "usable":
+            continue
+        raw_financial_source = row.get("financial_source")
+        raw_audit_source = row.get("audit_source")
+        financial_source = (
+            _source_ref(raw_financial_source)
+            if _source_matches_year(raw_financial_source, row_year)
+            else None
+        )
+        audit_source = (
+            _source_ref(raw_audit_source)
+            if _source_matches_year(raw_audit_source, row_year)
+            else None
+        )
+        if not financial_source or not audit_source:
+            continue
+        complete_years.add(row_year)
+        cited_years.add(row_year)
+        sources.extend([financial_source, audit_source])
+    return complete_years, cited_years, sources
 
 
 def build_acceptance_evidence(
@@ -280,8 +334,16 @@ def build_acceptance_evidence(
     result = dict(legacy_payload)
     year = int(result.get("year") or 0)
     peer_group = result.get("peer_group") if isinstance(result.get("peer_group"), dict) else {}
-    peers = peer_group.get("peers") if isinstance(peer_group.get("peers"), list) else []
+    sample_peers = peer_group.get("sample_peers")
+    peers = (
+        sample_peers
+        if isinstance(sample_peers, list)
+        else peer_group.get("peers")
+        if isinstance(peer_group.get("peers"), list)
+        else []
+    )
     selection = peer_group.get("selection_policy") if isinstance(peer_group.get("selection_policy"), dict) else {}
+    peer_source = _source_ref(peer_group.get("source"))
     peer_blockers = []
     if not selection or not any(value for value in selection.values()):
         peer_blockers.append("peer_selection_basis_missing")
@@ -292,6 +354,9 @@ def build_acceptance_evidence(
         requirement=_REQUIREMENTS["peer_group"],
         coverage={"selection_basis": bool(selection), "included_peers": len(peers)},
         blockers=peer_blockers,
+        sources=[peer_source] if peer_source else [],
+        applicability=peer_group.get("applicability"),
+        not_applicable_basis=peer_group.get("not_applicable_basis"),
     )
 
     if audit_effort_section is None:
@@ -302,28 +367,46 @@ def build_acceptance_evidence(
         )
     else:
         supplied = audit_effort_section.model_dump(mode="json")
-        coverage = dict(supplied.get("coverage") or {})
-        covered_years = {row.get("year") for row in audit_effort_rows if isinstance(row, dict) and row.get("year") is not None}
-        coverage.setdefault("requested_years", 3)
-        coverage.setdefault("complete_years", len(covered_years))
-        coverage.setdefault("cited_years", len(supplied.get("sources") or []))
+        requested_years = {year, year - 1, year - 2}
+        complete_years, cited_years, row_sources = _audit_effort_row_evidence(
+            audit_effort_rows,
+            requested_years,
+        )
+        coverage = {
+            "requested_years": len(requested_years),
+            "complete_years": len(complete_years),
+            "cited_years": len(cited_years),
+            "row_count": len(audit_effort_rows),
+        }
         blockers = list(supplied.get("blockers") or [])
         valid = (
             supplied.get("status") == "usable"
-            and coverage.get("complete_years", 0) >= 3
-            and coverage.get("cited_years", 0) >= 3
+            and complete_years == requested_years
+            and cited_years == requested_years
         )
         if not valid:
             blockers.append("audit_effort_three_year_cited_coverage_missing")
+        supplied_sources = supplied.get("sources") or []
+        effort_sources = (
+            supplied_sources
+            if supplied.get("applicability") == "not_applicable"
+            else row_sources
+        )
         effort_section = _section(
             status="usable" if valid else "limited",
             requirement=_REQUIREMENTS["audit_effort"], coverage=coverage,
-            blockers=blockers, sources=supplied.get("sources") or [],
+            blockers=blockers, sources=effort_sources,
             applicability=supplied.get("applicability"),
             not_applicable_basis=supplied.get("not_applicable_basis"),
         )
 
-    risk_summary = result.get("risk_summary") if isinstance(result.get("risk_summary"), dict) else {}
+    risk_summary = (
+        dict(result["risk_summary"])
+        if isinstance(result.get("risk_summary"), dict)
+        else {}
+    )
+    risk_summary.setdefault("metric_rows", _risk_metric_rows(risk_summary))
+    result["risk_summary"] = risk_summary
     risk_metrics = risk_summary.get("subject_metrics") if isinstance(risk_summary.get("subject_metrics"), dict) else {}
     benchmarks = risk_summary.get("benchmarks") if isinstance(risk_summary.get("benchmarks"), dict) else {}
     required_risk = {"receivables_to_revenue", "inventory_to_revenue", "op_cf_to_operating_profit", "accrual_ratio", "beneish_m_score"}
@@ -332,15 +415,46 @@ def build_acceptance_evidence(
         metric for metric in required_risk
         if not isinstance(benchmarks.get(metric), dict) or (benchmarks[metric].get("n") or 0) < 5
     )
+    raw_risk_source = risk_summary.get("source")
+    risk_source = (
+        _source_ref(raw_risk_source)
+        if _source_matches_year(raw_risk_source, year)
+        else None
+    )
+    cited_risk_facts = []
+    for fact in risk_summary.get("confirmed_facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        fact_source_payload = fact.get("source")
+        fact_source = (
+            _source_ref(fact_source_payload)
+            if _source_matches_year(fact_source_payload, year)
+            else None
+        )
+        if (
+            fact_source
+            and risk_source
+            and fact_source.get("rcept_no")
+            and fact_source.get("rcept_no") == risk_source.get("rcept_no")
+        ):
+            cited_risk_facts.append(fact)
+    risk_applicability = risk_summary.get("applicability") or "applicable"
     risk_blockers = []
-    if risk_missing_subject:
-        risk_blockers.append("required_subject_metrics_missing")
-    if risk_missing_peer:
-        risk_blockers.append("required_peer_metric_coverage_missing")
+    if risk_applicability == "applicable":
+        if risk_missing_subject:
+            risk_blockers.append("required_subject_metrics_missing")
+        if risk_missing_peer:
+            risk_blockers.append("required_peer_metric_coverage_missing")
+        if not risk_source or not risk_source.get("rcept_no"):
+            risk_blockers.append("financial_risk_filing_source_missing")
+        if not cited_risk_facts:
+            risk_blockers.append("financial_risk_confirmed_fact_missing")
     risk_section = _section(
         status="usable" if not risk_blockers else "limited", requirement=_REQUIREMENTS["financial_risk"],
         coverage={"subject_metric_count": len(required_risk) - len(risk_missing_subject), "peer_metric_count": len(required_risk) - len(risk_missing_peer)},
-        blockers=risk_blockers,
+        blockers=risk_blockers, sources=[risk_source] if risk_source else [],
+        applicability=risk_applicability,
+        not_applicable_basis=risk_summary.get("not_applicable_basis"),
     )
 
     history_payload = result.get("audit_history") if isinstance(result.get("audit_history"), dict) else {}
@@ -348,15 +462,19 @@ def build_acceptance_evidence(
 
     policy = result.get("policy_summary") if isinstance(result.get("policy_summary"), dict) else {}
     policy_source = _source_ref(policy.get("source"))
+    policy_applicability = policy.get("applicability") or "applicable"
     policy_blockers = []
-    if not (policy.get("subject_policy_count") or 0):
-        policy_blockers.append("current_period_policy_missing")
-    if not policy_source:
-        policy_blockers.append("policy_filing_source_missing")
+    if policy_applicability == "applicable":
+        if not (policy.get("subject_policy_count") or 0):
+            policy_blockers.append("current_period_policy_missing")
+        if not policy_source:
+            policy_blockers.append("policy_filing_source_missing")
     policy_section = _section(
         status="usable" if not policy_blockers else "limited", requirement=_REQUIREMENTS["accounting_policy"],
         coverage={"subject_policy_count": policy.get("subject_policy_count") or 0, "filing_source": bool(policy_source)},
         blockers=policy_blockers, sources=[policy_source] if policy_source else [],
+        applicability=policy_applicability,
+        not_applicable_basis=policy.get("not_applicable_basis"),
     )
 
     kam = result.get("kam_summary") if isinstance(result.get("kam_summary"), dict) else {}
@@ -444,6 +562,32 @@ def build_audit_acceptance_pack(
     subject = legacy.get("subject") if isinstance(legacy.get("subject"), dict) else {}
     corp_code = str(subject.get("corp_code") or company)
     history = get_audit_history(corp_code)
+    risk = compare_peer_risk_profile(
+        company=company,
+        year=year,
+        peer_limit=peer_limit,
+        fs_strategy=fs_strategy,
+    )
+    if isinstance(risk, dict) and "error" not in risk:
+        confirmed_facts = [
+            fact for fact in (risk.get("confirmed_facts") or [])
+            if isinstance(fact, dict)
+        ]
+        source = (
+            confirmed_facts[0].get("source")
+            if confirmed_facts
+            and isinstance(confirmed_facts[0].get("source"), dict)
+            else None
+        )
+        legacy["risk_summary"] = {
+            "subject_metrics": risk.get("subject_metrics"),
+            "benchmarks": risk.get("benchmarks"),
+            "metric_rows": risk.get("metric_rows"),
+            "disclosure_event_counts": risk.get("disclosure_event_counts"),
+            "source": source,
+            "confirmed_facts": confirmed_facts,
+            "data_quality": risk.get("data_quality"),
+        }
     return build_acceptance_evidence(
         legacy_payload={**legacy, "audit_history": history},
         audit_effort_section=None,
