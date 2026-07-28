@@ -80,12 +80,19 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         "search_audit_procedures": _build_audit_procedure_pack,
         "compare_to_industry_multi": _build_peer_benchmark_pack,
     }
-    builder = builders.get(tool_name)
-    raw_pack = (
-        _build_generic_pack(tool_name, normalized_result)
-        if builder is None
-        else builder(normalized_result)
-    )
+    if (
+        tool_name == "search_dataset"
+        and isinstance(normalized_result.get("query"), dict)
+        and normalized_result["query"].get("dataset") == "accounting_note_chapters"
+    ):
+        raw_pack = _build_accounting_note_evidence_pack(normalized_result)
+    else:
+        builder = builders.get(tool_name)
+        raw_pack = (
+            _build_generic_pack(tool_name, normalized_result)
+            if builder is None
+            else builder(normalized_result)
+        )
     if raw_pack is None:
         return None
     from kreports.mcp.visual_contracts import build_visualization_pack
@@ -1296,6 +1303,51 @@ def _build_generic_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any
             [("statement", "확인 내용"), ("source", "출처")],
             facts,
         ))
+    return pack
+
+
+def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, Any]:
+    """Build the compact table from handler-enriched note facts only."""
+    pack = _base_pack(f"{_subject_label(result)} 회계주석 근거", result)
+    audit_implication = next(
+        (
+            str(item.get("statement") or "")
+            for item in result.get("analysis") or []
+            if isinstance(item, dict) and item.get("perspective") == "auditor"
+        ),
+        "감사 관점의 스크리닝 근거를 확인하지 못했습니다.",
+    )
+    rows: list[dict[str, Any]] = []
+    for fact in result.get("confirmed_facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
+        rows.append({
+            "topic": fact.get("topic") or (result.get("query") or {}).get("keyword") or "회계주석",
+            "year": fact.get("year"),
+            "fs_div": fact.get("fs_div"),
+            "note_reference": fact.get("note_reference") or source.get("section_title") or "주석",
+            "confirmed_statement": fact.get("statement") or "공시 주석 문구가 확인되었습니다.",
+            "matched_excerpt": fact.get("excerpt") or "발췌문 미확보",
+            "audit_implication": audit_implication,
+            "rcept_no": parent_rcept_no(str(source.get("rcept_no") or "")) or "미확보",
+        })
+    pack["tables"].append(_table(
+        "accounting_note_evidence",
+        "회계주석 확인 근거",
+        [
+            ("topic", "주제"),
+            ("year", "연도"),
+            ("fs_div", "재무제표 기준"),
+            ("note_reference", "주석"),
+            ("confirmed_statement", "확인된 내용"),
+            ("matched_excerpt", "일치 발췌문"),
+            ("audit_implication", "감사 관점"),
+            ("rcept_no", "접수번호"),
+        ],
+        rows,
+        note="주석 발췌문은 스크리닝 근거이며 감사 결론이나 금액 검증을 대체하지 않습니다.",
+    ))
     return pack
 
 

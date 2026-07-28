@@ -1160,6 +1160,7 @@ def _append_visual_table(
         "compare_peer_audit_fees",
         "get_kam_lifecycle",
         "search_disclosure_events",
+        "search_dataset",
     }
     if tool_name not in visual_tools:
         return narrative
@@ -1185,5 +1186,9 @@ def _append_visual_table(
         if built is None:
             return narrative
         pack = VisualizationPackV1.model_validate(built)
+    if tool_name == "search_dataset" and not any(
+        table.id == "accounting_note_evidence" for table in pack.tables
+    ):
+        return narrative
     table_markdown = render_visualization_markdown(pack, mermaid=False)
     return f"{narrative}\n\n시각화 대체 표:\n\n{table_markdown}"

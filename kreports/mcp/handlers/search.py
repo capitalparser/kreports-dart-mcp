@@ -1,6 +1,8 @@
 """Dataset, peer-selection, industry, and on-demand retrieval handlers."""
 from __future__ import annotations
 
+import re
+
 from kreports.analysis.peer_benchmarks import (
     compare_to_industry,
     compare_to_industry_multi,
@@ -84,7 +86,162 @@ def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
 
 
 def handle_search_dataset(args: SearchDatasetInput) -> dict:
-    return search_dataset(**args.model_dump())
+    result = search_dataset(**args.model_dump())
+    if args.dataset == "accounting_note_chapters":
+        return _enrich_accounting_note_search(result)
+    return result
+
+
+_DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
+_NOTE_AUDIT_GUIDANCE = (
+    (
+        ("수익", "revenue"),
+        "수익 인식 정책 문구는 수행의무, 거래가격 및 기간귀속 판단의 적용 일관성을 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
+    ),
+    (
+        ("재고", "inventory"),
+        "재고자산 정책 문구는 평균법과 순실현가능가치 평가의 적용 일관성 및 기말 평가 추정을 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
+    ),
+    (
+        ("충당", "provision"),
+        "충당부채 정책 문구는 의무 발생 여부와 최선추정액 산정 근거를 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
+    ),
+    (
+        ("추정", "estimate"),
+        "회계추정 관련 문구는 주요 가정, 민감도 및 추정 변경의 근거를 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
+    ),
+    (
+        ("손상", "impairment"),
+        "손상 관련 문구는 손상징후, 현금흐름 추정 및 할인율 가정을 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
+    ),
+    (
+        ("우발", "contingen"),
+        "우발사항 관련 문구는 의무의 존재, 발생가능성 및 공시 충분성을 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
+    ),
+)
+
+
+def _note_audit_implication(topic: str) -> str:
+    normalized = topic.casefold()
+    for hints, guidance in _NOTE_AUDIT_GUIDANCE:
+        if any(hint.casefold() in normalized for hint in hints):
+            return guidance
+    return (
+        "주석 문구는 해당 회계정책 또는 공시 판단의 적용 근거를 원 공시와 대조할 "
+        "스크리닝 근거입니다. 이는 감사 결론이 아닙니다."
+    )
+
+
+def _note_passages(record: dict, *, keyword: str) -> list[str]:
+    raw_passages = record.get("match_excerpts")
+    if not isinstance(raw_passages, list) or not raw_passages:
+        raw_passages = [record.get("body_excerpt")]
+
+    passages: list[str] = []
+    seen: set[str] = set()
+    for raw_passage in raw_passages:
+        passage = " ".join(str(raw_passage or "").split())
+        if not passage or (keyword and keyword not in passage):
+            continue
+        if passage in seen:
+            continue
+        seen.add(passage)
+        passages.append(passage)
+    return passages
+
+
+def _note_reference(record: dict) -> str:
+    note_no = str(record.get("note_no") or "").strip()
+    note_title = str(record.get("note_title") or "").strip()
+    prefix = f"주석 {note_no}" if note_no else "주석"
+    return f"{prefix} {note_title}".strip()
+
+
+def _enrich_accounting_note_search(result: dict) -> dict:
+    """Turn cached note passages into fail-closed, filing-backed MCP evidence."""
+    enriched = dict(result)
+    query = enriched.get("query") if isinstance(enriched.get("query"), dict) else {}
+    keyword = str(query.get("keyword") or "").strip()
+    topic = keyword or "회계주석"
+    facts: list[dict] = []
+    matched_row_count = 0
+    seen_passages: set[tuple[str, str, str, str]] = set()
+
+    for company in enriched.get("companies") or []:
+        if not isinstance(company, dict):
+            continue
+        corp_code = str(company.get("corp_code") or "")
+        corp_name = company.get("corp_name") or corp_code or "대상 회사"
+        for record in company.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            matched_row_count += 1
+            note_reference = _note_reference(record)
+            raw_receipt = str(record.get("rcept_no") or "").strip()
+            for passage in _note_passages(record, keyword=keyword):
+                passage_key = (corp_code, raw_receipt, note_reference, passage)
+                if passage_key in seen_passages:
+                    continue
+                seen_passages.add(passage_key)
+                facts.append({
+                    "statement": f"{note_reference}에 {topic} 관련 문구가 기재되어 있습니다.",
+                    "excerpt": passage,
+                    "topic": topic,
+                    "year": record.get("year") or query.get("year"),
+                    "fs_div": record.get("fs_div") or query.get("fs_div"),
+                    "note_reference": note_reference,
+                    "source": {
+                        "corp_code": corp_code,
+                        "corp_name": corp_name,
+                        "rcept_no": raw_receipt,
+                        "source_table": "accounting_note_chapters",
+                        "section_title": note_reference,
+                    },
+                })
+
+    valid_fact_count = sum(
+        bool(_DART_RECEIPT_NO.fullmatch(str(fact["source"].get("rcept_no") or "")))
+        for fact in facts
+    )
+    if not matched_row_count:
+        status = "missing"
+        coverage_note = (
+            "현재 로컬 캐시에서 요청 조건에 맞는 회계주석 근거를 찾지 못했습니다. "
+            "이는 원 공시 부재를 뜻하지 않습니다."
+        )
+    elif facts and valid_fact_count == len(facts):
+        status = "usable"
+        coverage_note = "반환된 발췌문과 14자리 DART 접수번호를 함께 확인했습니다."
+    else:
+        status = "limited"
+        coverage_note = (
+            "일치 주석 행은 있으나 관련 발췌문 또는 14자리 DART 접수번호를 모두 "
+            "확인하지 못해 사용자용 근거로 완결되지 않았습니다."
+        )
+
+    data_quality = dict(enriched.get("data_quality") or {})
+    data_quality.update({
+        "status": status,
+        "source": "accounting_note_chapters",
+        "coverage_note": coverage_note,
+        "interpretation": (
+            "반환된 주석 발췌문은 로컬 캐시 기반의 스크리닝 근거이며, "
+            "중요 판단 전 원 공시 주석 전문을 확인해야 합니다."
+        ),
+    })
+    enriched["confirmed_facts"] = facts
+    enriched["analysis"] = [{
+        "statement": _note_audit_implication(topic),
+        "perspective": "auditor",
+        "basis": "반환된 회계주석 발췌문과 요청 키워드",
+    }] if facts else []
+    enriched["next_checks"] = [
+        "관련 잔액과 비교표시 금액을 원 공시와 대조하세요.",
+        "주요 회계추정 입력과 근거를 검토하세요.",
+        "해당 주석 전문과 관련 공시의 후속 변경사항을 검토하세요.",
+    ]
+    enriched["data_quality"] = data_quality
+    return enriched
 
 
 def handle_fetch_disclosure_on_demand(args: FetchDisclosureOnDemandInput) -> dict:
