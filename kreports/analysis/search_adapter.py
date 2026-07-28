@@ -11,6 +11,41 @@ from kreports.analysis.company_profile import get_company_summary, resolve_corp_
 from kreports.storage.raw_documents import RawDocumentStore
 
 
+_ACCOUNTING_NOTE_TOPIC_HINTS = (
+    (
+        ("수익", "매출", "revenue"),
+        ("고객과의 계약", "수행의무", "통제", "재화", "용역", "변동대가", "매출장려", "인식"),
+    ),
+    (
+        ("재고", "inventory"),
+        ("평균법", "선입선출", "순실현가능가치", "원가", "평가손실", "매출원가"),
+    ),
+    (
+        ("충당", "provision"),
+        ("충당부채", "현재의무", "과거사건", "자원의 유출", "최선의 추정", "할인"),
+    ),
+    (
+        ("추정", "estimate"),
+        ("불확실성", "가정", "판단", "민감도", "추정"),
+    ),
+    (
+        ("손상", "impairment"),
+        ("회수가능액", "현금창출단위", "사용가치", "공정가치", "손상차손"),
+    ),
+    (
+        ("우발", "contingenc"),
+        ("우발부채", "우발자산", "가능성", "현재의무", "소송", "공시"),
+    ),
+)
+
+def _accounting_note_topic_hints(keyword: str) -> tuple[str, ...]:
+    normalized_keyword = keyword.lower()
+    for triggers, hints in _ACCOUNTING_NOTE_TOPIC_HINTS:
+        if any(trigger in normalized_keyword for trigger in triggers):
+            return hints
+    return ()
+
+
 def _keyword_centered_excerpts(
     body: str,
     keyword: str,
@@ -24,10 +59,11 @@ def _keyword_centered_excerpts(
     if not normalized_body or not normalized_keyword or limit <= 0:
         return []
 
-    excerpts: list[str] = []
+    topic_hints = _accounting_note_topic_hints(normalized_keyword)
+    candidates: list[tuple[int, int, str]] = []
     seen: set[str] = set()
     match_start = normalized_body.find(normalized_keyword)
-    while match_start != -1 and len(excerpts) < limit:
+    while match_start != -1:
         match_end = match_start + len(normalized_keyword)
         window_start = max(0, match_start - context_chars)
         window_end = min(len(normalized_body), match_end + context_chars)
@@ -49,9 +85,11 @@ def _keyword_centered_excerpts(
         excerpt = normalized_body[window_start:window_end].strip()
         if excerpt and excerpt not in seen:
             seen.add(excerpt)
-            excerpts.append(excerpt)
+            topic_score = sum(hint in excerpt for hint in topic_hints)
+            candidates.append((topic_score, match_start, excerpt))
         match_start = normalized_body.find(normalized_keyword, match_end)
-    return excerpts
+    candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
+    return [excerpt for _, _, excerpt in candidates[:limit]]
 
 
 def _load_source_document_excerpt(row: dict, *, keyword: str | None, limit: int = 1200) -> tuple[bool, str]:
