@@ -241,6 +241,15 @@ def test_investor_signals_renderer_uses_user_facing_language():
         "has_data": True,
         "quality_snapshot": {"passed_checks": 4, "total_checks": 6, "latest_year": 2024},
         "accounting_risk": {"score": 20, "verdict": "watch"},
+        "recent_events": [{
+            "disc_date": "2025-01-15",
+            "rcept_no": "20250115000001",
+            "report_nm": "유상증자결정",
+            "flr_nm": "A",
+            "category": "capital_raise",
+            "label": "유상증자",
+            "stance": "dilution_watch",
+        }],
         "event_counts": {"capital_raise": 1},
         "takeaways": ["quality_profile_supportive"],
         "confirmed_facts": [{

@@ -273,6 +273,118 @@ def test_multi_industry_cohort_metadata_without_results_is_missing():
     assert out["answer_pack"]["summary"]["status"] == "missing"
 
 
+def test_multi_industry_zero_observation_stubs_are_missing_across_layers():
+    """A populated matrix without peer observations is not a benchmark result."""
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("compare_to_industry_multi", {
+        "subject": {"corp_code": "00000001", "corp_name": "A"},
+        "n_peers": 3,
+        "years": [2025],
+        "metrics": ["ROE", "부채비율"],
+        "results": {
+            2025: {
+                "ROE": {
+                    "p25": None,
+                    "p50": None,
+                    "p75": None,
+                    "n": 0,
+                    "subject_value": None,
+                    "percentile": None,
+                    "unit": "%",
+                },
+                "부채비율": {
+                    "p25": None,
+                    "p50": None,
+                    "p75": None,
+                    "n": 0,
+                    "subject_value": None,
+                    "percentile": None,
+                    "unit": "%",
+                },
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+    envelope = build_answer_envelope("compare_to_industry_multi", out)
+    resource = read_resource(out["answer_pack"]["resource_uri"])
+
+    assert out["quality_status"] == out["data_quality"]["status"] == "missing"
+    assert envelope.verdict == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+    assert "missing" in resource["text"]
+
+
+def test_multi_industry_observed_metric_remains_usable_without_outer_quantiles():
+    """One observed peer metric is enough when small samples omit P25/P75."""
+    out = enrich_answer_response("compare_to_industry_multi", {
+        "subject": {"corp_code": "00000001", "corp_name": "A"},
+        "n_peers": 1,
+        "years": [2025],
+        "metrics": ["ROE"],
+        "results": {
+            2025: {
+                "ROE": {
+                    "p25": None,
+                    "p50": 8.5,
+                    "p75": None,
+                    "n": 1,
+                    "subject_value": None,
+                    "percentile": None,
+                    "unit": "%",
+                },
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "usable"
+    assert out["answer_pack"]["summary"]["status"] == "usable"
+
+
+@pytest.mark.parametrize("count", [float("nan"), float("inf"), float("-inf")])
+def test_multi_industry_nonfinite_observation_counts_are_missing(count):
+    """A metric row needs a finite positive peer-observation count."""
+    from kreports.mcp.contracts import normalize_answer_result
+
+    out = normalize_answer_result("compare_to_industry_multi", {
+        "results": {
+            2025: {
+                "ROE": {
+                    "p25": None,
+                    "p50": None,
+                    "p75": None,
+                    "n": count,
+                    "subject_value": None,
+                    "percentile": None,
+                    "unit": "%",
+                },
+            },
+        },
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "missing"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1, True),
+        (10**1000, True),
+        (0, False),
+        (float("nan"), False),
+        (float("inf"), False),
+        (float("-inf"), False),
+    ],
+)
+def test_positive_counts_require_finite_positive_values(value, expected):
+    from kreports.mcp.contracts import _positive_number
+
+    assert _positive_number(value) is expected
+
+
 @pytest.mark.parametrize(("tool_name", "payload"), [
     (
         "compare_peer_audit_fees",
@@ -307,6 +419,166 @@ def test_auditor_and_investor_no_data_shapes_cannot_keep_usable(tool_name, paylo
 
     assert out["quality_status"] == "missing"
     assert out["answer_pack"]["summary"]["status"] == "missing"
+
+
+def test_investor_year_and_coverage_metadata_without_signals_is_missing():
+    """The real no-data shape must not promote a reporting-year marker."""
+    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("get_investor_signals", {
+        "has_data": True,
+        "unit": "억원",
+        "years": 5,
+        "window_days": 365,
+        "quality_snapshot": {
+            "avg_roe": None,
+            "avg_operating_margin": None,
+            "avg_revenue_growth": None,
+            "latest_debt_ratio": None,
+            "latest_fcf": None,
+            "latest_cfo_ni": None,
+            "checks": {
+                "positive_avg_roe": False,
+                "positive_avg_op_margin": False,
+                "positive_revenue_growth": False,
+                "debt_ratio_under_100": False,
+                "positive_latest_fcf": False,
+                "cfo_covers_net_income": False,
+            },
+            "passed_checks": 0,
+            "total_checks": 6,
+            "latest_year": 2025,
+        },
+        "accounting_risk": {
+            "score": 0,
+            "verdict": "clean",
+            "factors": [],
+            "raw_summary": {"has_data": False},
+        },
+        "recent_events": [],
+        "event_counts": {
+            "treasury_buy": 0,
+            "capital_raise": 0,
+            "convertible_bond": 0,
+            "merger_split": 0,
+            "major_contract": 0,
+            "litigation": 0,
+            "amendment": 0,
+        },
+        "takeaways": ["quality_profile_mixed"],
+        "data_quality": {"status": "usable"},
+    })
+    envelope = build_answer_envelope("get_investor_signals", out)
+    resource = read_resource(out["answer_pack"]["resource_uri"])
+
+    assert out["quality_status"] == out["data_quality"]["status"] == "missing"
+    assert envelope.verdict == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+    assert "missing" in resource["text"]
+
+
+def test_investor_finite_signal_measure_is_usable_without_year_metadata():
+    """An actual quality measure, unlike counts, is a purpose result."""
+    out = enrich_answer_response("get_investor_signals", {
+        "quality_snapshot": {
+            "avg_roe": 12.5,
+            "avg_operating_margin": None,
+            "avg_revenue_growth": None,
+            "latest_debt_ratio": None,
+            "latest_fcf": None,
+            "latest_cfo_ni": None,
+            "checks": {},
+            "passed_checks": 1,
+            "total_checks": 6,
+            "latest_year": None,
+        },
+        "accounting_risk": {
+            "score": 0,
+            "verdict": "clean",
+            "factors": [],
+            "raw_summary": {"has_data": False},
+        },
+        "recent_events": [],
+        "event_counts": {},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "usable"
+
+
+def test_investor_evidenced_risk_output_is_usable_without_year_metadata():
+    """A risk summary must carry its own positive source-data evidence."""
+    out = enrich_answer_response("get_investor_signals", {
+        "quality_snapshot": {
+            "avg_roe": None,
+            "avg_operating_margin": None,
+            "avg_revenue_growth": None,
+            "latest_debt_ratio": None,
+            "latest_fcf": None,
+            "latest_cfo_ni": None,
+            "checks": {},
+            "passed_checks": 0,
+            "total_checks": 6,
+            "latest_year": None,
+        },
+        "accounting_risk": {
+            "score": 0,
+            "verdict": "clean",
+            "factors": [],
+            "raw_summary": {"has_data": True},
+        },
+        "recent_events": [],
+        "event_counts": {},
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "usable"
+
+
+def test_missing_normalization_rebuilds_a_stale_answer_pack_across_layers():
+    """A prebuilt usable pack cannot outlive a missing canonical result."""
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        normalize_answer_result,
+    )
+    from kreports.mcp.resources import read_resource
+
+    stale_pack = build_answer_pack("get_dcf_input_candidates", {
+        "candidate_assumptions": {"revenue_growth": {"value": 0.085}},
+        "data_quality": {"status": "usable"},
+    })
+    assert stale_pack is not None
+    stale_uri = stale_pack["resource_uri"]
+    assert stale_pack["summary"]["status"] == "usable"
+    assert "usable" in read_resource(stale_uri)["text"]
+
+    raw = {
+        "confirmed_facts": [{
+            "statement": "DCF 할인율 후보는 8.5%입니다.",
+            "source": {"rcept_no": "20250301000001"},
+            "tool_name": "get_dcf_input_candidates",
+        }],
+        "answer_pack": stale_pack,
+        "data_quality": {"status": "usable"},
+    }
+    normalized = normalize_answer_result("get_business_overview", raw)
+    out = enrich_answer_response("get_business_overview", raw)
+    envelope = build_answer_envelope("get_business_overview", out)
+    resource = read_resource(out["answer_pack"]["resource_uri"])
+
+    assert normalized["quality_status"] == normalized["data_quality"]["status"] == "missing"
+    assert out["quality_status"] == out["data_quality"]["status"] == "missing"
+    assert envelope.verdict == envelope.data_quality.status == "missing"
+    assert envelope.answer_pack["status"] == "missing"
+    assert envelope.answer_pack["summary"]["status"] == "missing"
+    assert out["answer_pack"]["status"] == "missing"
+    assert out["answer_pack"]["summary"]["status"] == "missing"
+    assert out["answer_pack"]["data_quality"]["status"] == "missing"
+    assert out["answer_pack"]["resource_uri"] != stale_uri
+    assert "missing" in resource["text"]
+    assert "usable" not in resource["text"]
 
 
 def test_nonempty_limited_result_never_becomes_missing_availability_pack():

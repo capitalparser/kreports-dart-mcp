@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -163,7 +164,12 @@ def _covered_years(result: dict[str, Any], quality: dict[str, Any]) -> list[int]
 
 
 def _positive_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (isinstance(value, int) or math.isfinite(value))
+        and value > 0
+    )
 
 
 def _is_numeric_measure(value: Any) -> bool:
@@ -197,6 +203,18 @@ def _has_quantile_rows(result: dict[str, Any], key: str) -> bool:
     )
 
 
+def _has_industry_multi_result(result: dict[str, Any]) -> bool:
+    """A multi-year benchmark needs at least one observed peer metric."""
+    matrix = result.get("results")
+    return isinstance(matrix, dict) and any(
+        isinstance(metrics, dict) and any(
+            isinstance(cell, dict) and _positive_number(cell.get("n"))
+            for cell in metrics.values()
+        )
+        for metrics in matrix.values()
+    )
+
+
 def _has_nested_count(result: dict[str, Any], key: str, *count_keys: str) -> bool:
     value = result.get(key)
     if not isinstance(value, dict):
@@ -218,10 +236,25 @@ def _has_investor_signal_result(result: dict[str, Any]) -> bool:
     if _has_result_rows(result, "recent_events"):
         return True
     snapshot = result.get("quality_snapshot")
-    # A financial snapshot's concrete reporting year is itself sufficient
-    # evidence that this tool reached current-domain data, including a year
-    # whose risk checks all happened to fail.
-    return isinstance(snapshot, dict) and isinstance(snapshot.get("latest_year"), int)
+    if isinstance(snapshot, dict) and any(
+        _is_numeric_measure(snapshot.get(key))
+        for key in (
+            "avg_roe",
+            "avg_operating_margin",
+            "avg_revenue_growth",
+            "latest_debt_ratio",
+            "latest_fcf",
+            "latest_cfo_ni",
+        )
+    ):
+        return True
+    accounting_risk = result.get("accounting_risk")
+    raw_summary = (
+        accounting_risk.get("raw_summary")
+        if isinstance(accounting_risk, dict)
+        else None
+    )
+    return isinstance(raw_summary, dict) and raw_summary.get("has_data") is True
 
 
 def _has_audit_fee_result(result: dict[str, Any]) -> bool:
@@ -422,7 +455,7 @@ _TOOL_PURPOSE_PREDICATES: dict[str, ToolPurposePredicate] = {
         _has_result_rows(result, "peers")
         or _has_positive_count(result, "returned_peer_count")
     ),
-    "compare_to_industry_multi": lambda result: isinstance(result.get("results"), dict) and bool(result["results"]),
+    "compare_to_industry_multi": _has_industry_multi_result,
     "compare_peer_audit_fees": _has_audit_fee_result,
     "compare_peer_risk_profile": _has_risk_profile_result,
     "compare_peer_accounting_policies": _has_peer_policy_result,
@@ -678,11 +711,14 @@ def enrich_answer_response(tool_name: str, result: dict[str, Any]) -> dict[str, 
     # Do not let raw legacy prose survive a renderer-empty or renderer-failed
     # path. The response answer is rebuilt below from canonical state only.
     enriched.pop("answer", None)
+    # A handler-supplied pack can describe another tool's prior usable result.
+    # Discard it so every public pack is rebuilt from this normalized result.
+    enriched.pop("answer_pack", None)
     # Local imports avoid an import cycle: answer_pack and renderers consume this module.
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.renderers import render_answer
 
-    if "error" not in enriched and not enriched.get("answer_pack"):
+    if "error" not in enriched:
         answer_pack = build_answer_pack(tool_name, enriched)
         if answer_pack:
             enriched["answer_pack"] = answer_pack
