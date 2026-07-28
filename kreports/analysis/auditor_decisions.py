@@ -399,7 +399,10 @@ def _requested_year_effort_sources(
             row_year = int(row.get("year"))
         except (TypeError, ValueError):
             continue
-        if row_year != requested_year:
+        if (
+            row_year != requested_year
+            or row.get("input_status") != "not_applicable"
+        ):
             continue
         for key in ("financial_source", "audit_source"):
             raw_source = row.get(key)
@@ -742,22 +745,25 @@ def build_acceptance_evidence(
     for fact in cited_risk_facts:
         if fact not in promoted_facts:
             promoted_facts.append(fact)
-    cited_receipts = {
-        parent_rcept_no(str(fact["source"].get("rcept_no") or ""))
+    promoted_source_urls = {
+        reference["source_url"]
         for fact in promoted_facts
+        if isinstance(fact.get("source"), dict)
+        for reference in [_source_ref(fact["source"])]
+        if reference
     }
     for source in accepted_sources:
-        receipt = parent_rcept_no(str(source.get("rcept_no") or ""))
-        if not receipt or receipt in cited_receipts:
+        reference = _source_ref(source)
+        if not reference or reference["source_url"] in promoted_source_urls:
             continue
         promoted_facts.append({
             "statement": (
-                f"{source.get('source_label') or '검토영역'}의 공시 근거가 "
+                f"{reference.get('source_label') or '검토영역'}의 공시 근거가 "
                 "요청된 검토 매트릭스에 포함되었습니다."
             ),
-            "source": source,
+            "source": reference,
         })
-        cited_receipts.add(receipt)
+        promoted_source_urls.add(reference["source_url"])
     result["sources"] = accepted_sources
     result["confirmed_facts"] = promoted_facts
     result["acceptance_signals"] = [

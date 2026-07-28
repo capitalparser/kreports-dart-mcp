@@ -584,6 +584,28 @@ def test_answer_pack_normalizes_legacy_quality_through_the_v1_contract():
     assert pack["sources"][0]["url"].startswith("https://dart.fss.or.kr/")
 
 
+def test_answer_pack_rejects_arbitrary_top_level_url_from_another_tool():
+    """A safe URL is not evidence unless the current tool binds it to a fact."""
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.resources import read_resource
+
+    arbitrary_url = "https://example.com/unbound-reference"
+    arbitrary_label = "임의 상위 출처"
+    pack = build_answer_pack("get_kam_lifecycle", {
+        "subject": {"corp_name": "A"},
+        "events": [{"year": 2025, "topic": "수익인식", "status": "new"}],
+        "sources": [{
+            "source_label": arbitrary_label,
+            "source_url": arbitrary_url,
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert pack is not None
+    assert arbitrary_url not in {source["url"] for source in pack["sources"]}
+    assert arbitrary_label not in read_resource(pack["resource_uri"])["text"]
+
+
 def test_audit_procedure_answer_pack_exposes_links_with_sufficiency_warning():
     result = {
         "subject": {"corp_name": "A"},

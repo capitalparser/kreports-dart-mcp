@@ -552,6 +552,34 @@ def test_audit_effort_not_applicable_uses_requested_year_row_provenance():
     assert effort["sources"][0]["rcept_no"] == "20260310002820"
 
 
+def test_audit_effort_not_applicable_rejects_requested_year_usable_row_source():
+    """A usable audit-effort row cannot prove that audit effort is inapplicable."""
+    from kreports.analysis.auditor_decisions import build_acceptance_evidence
+
+    section = SectionStatusV1(
+        status="limited",
+        required=True,
+        applicability="not_applicable",
+        not_applicable_basis="요청 연도 공시에서 감사노력 입력 비적용이 확인됩니다.",
+        sources=[],
+    )
+
+    out = build_acceptance_evidence(
+        legacy_payload=_acceptance_payload(),
+        audit_effort_section=section,
+        audit_effort_rows=[{
+            "year": 2025,
+            "input_status": "usable",
+            "financial_source": _source(2025),
+        }],
+    )
+
+    effort = out["data_quality"]["section_statuses"]["audit_effort"]
+    assert effort["status"] == "limited"
+    assert effort["sources"] == []
+    assert "not_applicable_basis_or_source_missing" in effort["blockers"]
+
+
 @pytest.mark.parametrize(
     ("section_key", "payload_key", "blocker"),
     [
@@ -591,6 +619,7 @@ def test_applicable_current_period_sections_reject_wrong_year_sources(
 
 def test_url_only_accepted_source_reaches_answer_pack_resources():
     from kreports.analysis.auditor_decisions import build_acceptance_evidence
+    from kreports.mcp.resources import read_resource
 
     payload = _acceptance_payload()
     payload["policy_summary"]["source"] = {
@@ -606,10 +635,19 @@ def test_url_only_accepted_source_reaches_answer_pack_resources():
 
     out = enrich_answer_response("build_audit_acceptance_pack", result)
 
+    assert any(
+        fact.get("source", {}).get("source_url")
+        == "https://example.com/accounting-policy"
+        for fact in result["confirmed_facts"]
+        if isinstance(fact, dict)
+    )
     assert {
         "label": "외부 회계정책 기준서",
         "url": "https://example.com/accounting-policy",
     } in out["answer_pack"]["sources"]
+    assert "외부 회계정책 기준서" in read_resource(
+        out["answer_pack"]["resource_uri"]
+    )["text"]
 
 
 def test_acceptance_coverage_uses_only_public_korean_labels():
