@@ -360,7 +360,7 @@ def test_attach_meta_adds_peer_benchmark_pack():
     assert [
         (row["metric"], row["unit"]) for row in table["rows"]
     ] == [
-        ("ROE", "ratio"),
+        ("자기자본이익률(ROE)", "ratio"),
         ("영업이익률", "ratio"),
         ("감사보수", "KRW"),
     ]

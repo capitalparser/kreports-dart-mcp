@@ -1,10 +1,40 @@
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 
 PackBuilder = Callable[[dict[str, Any]], dict[str, Any] | None]
 DetailRenderer = Callable[[dict[str, Any]], str]
 
 _VERSION = "answer_pack.v1"
+_PUBLIC_METRIC_LABELS = {
+    "영업이익률": "영업이익률",
+    "순이익률": "순이익률",
+    "부채비율": "부채비율",
+    "ROE": "자기자본이익률(ROE)",
+    "ROA": "총자산이익률(ROA)",
+    "자기자본비율": "자기자본비율",
+    "매출성장률": "매출성장률",
+    "Beneish_M": "베니시 M 점수",
+    "감사보수": "감사보수",
+}
+_PUBLIC_EVENT_LABELS = {
+    "treasury_buy": "자기주식 취득",
+    "capital_raise": "유상증자",
+    "convertible_bond": "전환사채·신주인수권부사채·교환사채",
+    "merger_split": "합병·분할",
+    "major_contract": "대규모 계약",
+    "litigation": "소송·분쟁",
+    "amendment": "정정공시",
+    "control_change": "최대주주 변경",
+}
+
+
+def _public_metric_label(value: Any) -> str:
+    return _PUBLIC_METRIC_LABELS.get(str(value), "기타 재무지표")
+
+
+def _public_event_label(value: Any) -> str:
+    return _PUBLIC_EVENT_LABELS.get(str(value), "기타 공시 이벤트")
 
 
 def _status(result: dict[str, Any]) -> str:
@@ -76,7 +106,20 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
     # columns rather than replacing the peer pack with a narrower variant.
     from kreports.mcp.answer_pack import _build_peer_benchmark_pack
 
-    pack = _build_peer_benchmark_pack(result)
+    public_result = deepcopy(result)
+    public_result["metrics"] = [
+        _public_metric_label(metric)
+        for metric in (result.get("metrics") or [])
+    ]
+    public_result["results"] = {
+        year: {
+            _public_metric_label(metric): values
+            for metric, values in (metrics or {}).items()
+        }
+        for year, metrics in (result.get("results") or {}).items()
+    }
+    result = public_result
+    pack = _build_peer_benchmark_pack(public_result)
     for table in pack.get("tables") or []:
         if table.get("id") != "peer_metric_matrix":
             continue
@@ -122,7 +165,16 @@ def _investor_signals_pack(result: dict[str, Any]) -> dict[str, Any]:
 def _disclosure_events_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _build_disclosure_events_pack
 
-    pack = _build_disclosure_events_pack(result)
+    public_result = deepcopy(result)
+    public_result["events"] = [
+        {**event, "event_type": _public_event_label(event.get("event_type"))}
+        for event in (result.get("events") or []) if isinstance(event, dict)
+    ]
+    public_result["event_type_counts"] = {
+        _public_event_label(event_type): count
+        for event_type, count in (result.get("event_type_counts") or {}).items()
+    }
+    pack = _build_disclosure_events_pack(public_result)
     for table in pack.get("tables") or []:
         if table.get("id") == "disclosure_events":
             for column in table["columns"]:
@@ -165,7 +217,7 @@ def _render_peer_benchmark(result: dict[str, Any]) -> str:
     for year, metrics in (result.get("results") or {}).items():
         for metric, values in (metrics or {}).items():
             if isinstance(values, dict):
-                lines.append(f"| {year} | {metric} | {values.get('subject_value')} | {values.get('percentile')} | {values.get('p25')} | {values.get('p50')} | {values.get('p75')} | {values.get('metric_n', values.get('n'))} |")
+                lines.append(f"| {year} | {_public_metric_label(metric)} | {values.get('subject_value')} | {values.get('percentile')} | {values.get('p25')} | {values.get('p50')} | {values.get('p75')} | {values.get('metric_n', values.get('n'))} |")
     lines.extend(["", "표본/출처:", "- 지표 표본수, cohort 표본수, 누락/제외 수와 cohort 재현키는 answer_pack에서 확인할 수 있습니다.", "- peer 개별 식별자와 내부 계산키는 표시하지 않습니다."])
     return "\n".join(lines)
 
@@ -173,7 +225,7 @@ def _render_peer_benchmark(result: dict[str, Any]) -> str:
 def _render_disclosure_events(result: dict[str, Any]) -> str:
     lines = [f"판정: {_status(result)}", "", "캐시된 공시 제목·일자·접수번호로 만든 이벤트 목록입니다.", "- event_type은 KReports 스크리닝 분류이며, 지배구조 변경의 확정 정보가 아닙니다."]
     for event in (result.get("events") or [])[:5]:
-        lines.append(f"- {event.get('event_date')} {event.get('corp_name')}: KReports 스크리닝 분류 {event.get('event_type')} / {event.get('event_title')}")
+        lines.append(f"- {event.get('event_date')} {event.get('corp_name')}: KReports 스크리닝 분류 {_public_event_label(event.get('event_type'))} / {event.get('event_title')}")
     return "\n".join(lines)
 
 

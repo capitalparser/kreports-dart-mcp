@@ -786,7 +786,7 @@ def test_section_statuses_are_preserved_across_envelope_pack_and_visualization()
     assert normalized["answer_pack"]["data_quality"]["section_statuses"] == expected
 
 
-def test_audit_effort_surface_registry_claims_only_implemented_routes():
+def test_professional_surface_registries_combine_implemented_routes():
     from kreports.mcp.professional_surfaces import (
         CONCLUSION_OVERRIDES,
         DETAIL_RENDERERS,
@@ -794,16 +794,45 @@ def test_audit_effort_surface_registry_claims_only_implemented_routes():
     )
     from kreports.mcp.professional_surfaces import audit_effort, auditor, investor
 
-    assert set(PACK_BUILDERS) == {
+    expected_audit_effort_routes = {
         "prepare_standard_audit_hours_inputs",
         "compare_peer_audit_fees",
         "estimate_audit_hours_proxy",
     }
-    assert set(DETAIL_RENDERERS) == {"prepare_standard_audit_hours_inputs"}
+    expected_auditor_routes = {
+        "get_audit_history",
+        "compare_peer_risk_profile",
+        "build_audit_acceptance_pack",
+        "get_audit_report_sections",
+        "search_audit_report_matters",
+        "compare_peer_audit_report_matters",
+        "compare_peer_kam_topics",
+    }
+    expected_investor_routes = {
+        "get_financial_snapshot",
+        "select_peer_group",
+        "compare_to_industry_multi",
+        "get_investor_signals",
+        "search_disclosure_events",
+        "get_dcf_input_candidates",
+        "build_dcf_model_pack",
+        "get_quality_of_earnings_pack",
+    }
+    assert set(PACK_BUILDERS) == (
+        expected_audit_effort_routes
+        | expected_auditor_routes
+        | expected_investor_routes
+    )
+    assert set(DETAIL_RENDERERS) == {
+        "prepare_standard_audit_hours_inputs",
+        "get_audit_history",
+        "compare_peer_risk_profile",
+        "build_audit_acceptance_pack",
+        *expected_investor_routes,
+    }
     assert CONCLUSION_OVERRIDES == {
         "prepare_standard_audit_hours_inputs": "표준감사시간 결론: 산정하지 않음",
     }
-    assert PACK_BUILDERS == audit_effort.PACK_BUILDERS
-    assert DETAIL_RENDERERS == audit_effort.DETAIL_RENDERERS
-    assert auditor.PACK_BUILDERS == auditor.DETAIL_RENDERERS == {}
-    assert investor.PACK_BUILDERS == investor.DETAIL_RENDERERS == {}
+    assert audit_effort.PACK_BUILDERS.keys() == expected_audit_effort_routes
+    assert auditor.PACK_BUILDERS.keys() == expected_auditor_routes
+    assert investor.PACK_BUILDERS.keys() == expected_investor_routes

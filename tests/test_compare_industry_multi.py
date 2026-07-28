@@ -10,9 +10,32 @@ from __future__ import annotations
 from kreports.analysis.api import compare_to_industry, compare_to_industry_multi
 
 
-def test_compare_to_industry_samsung_legacy_shape():
+def _seed_comparison_fixture():
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        for index in range(7):
+            corp_code = f"{index + 1:08d}"
+            session.add(Company(
+                corp_code=corp_code, stock_code=f"{index + 1:06d}",
+                corp_name="Subject" if index == 0 else f"Peer {index}",
+                market="KOSPI", induty_code="26410",
+            ))
+            for year in range(2020, 2025):
+                session.add(Financial(
+                    corp_code=corp_code, year=year, quarter=4, fs_div="CFS",
+                    revenue=1_000 + index * 10, operating_profit=100 + index,
+                    net_income=80 + index, total_assets=2_000 + index * 20,
+                    total_debt=800 + index, total_equity=1_200 + index * 10,
+                    revenue_yoy=0.03, beneish_m_score=-2.2,
+                ))
+
+
+def test_compare_to_industry_samsung_legacy_shape(temp_engine):
     """기존 compare_to_industry 응답 키가 유지된다 (회귀)."""
-    out = compare_to_industry(company="005930", metric="영업이익률")
+    _seed_comparison_fixture()
+    out = compare_to_industry(company="00000001", metric="영업이익률")
     assert "induty_code" in out
     assert "match_prefix" in out
     assert "metric" in out
@@ -22,9 +45,10 @@ def test_compare_to_industry_samsung_legacy_shape():
     assert "peers" in out
 
 
-def test_compare_multi_samsung_default_8metrics_5years():
-    out = compare_to_industry_multi(company="005930")
-    assert out["subject"]["corp_name"] == "삼성전자"
+def test_compare_multi_samsung_default_8metrics_5years(temp_engine):
+    _seed_comparison_fixture()
+    out = compare_to_industry_multi(company="00000001")
+    assert out["subject"]["corp_name"] == "Subject"
     assert out["sector_group"] == "general"
     assert "matched_prefix_len" in out
     assert "confidence" in out
@@ -39,9 +63,10 @@ def test_compare_multi_samsung_default_8metrics_5years():
     assert "subject_value" in inner
 
 
-def test_compare_multi_explicit_metrics_and_years():
+def test_compare_multi_explicit_metrics_and_years(temp_engine):
+    _seed_comparison_fixture()
     out = compare_to_industry_multi(
-        company="005930", metrics=["ROE", "ROA"], years_back=3
+        company="00000001", metrics=["ROE", "ROA"], years_back=3
     )
     years = sorted(out["results"].keys())
     assert len(years) <= 3
@@ -49,11 +74,12 @@ def test_compare_multi_explicit_metrics_and_years():
     assert set(sample.keys()) == {"ROE", "ROA"}
 
 
-def test_compare_multi_unknown_company_returns_error():
+def test_compare_multi_unknown_company_returns_error(temp_engine):
     out = compare_to_industry_multi(company="존재하지않는회사명12345")
     assert "error" in out
 
 
-def test_compare_multi_invalid_metric_returns_error():
-    out = compare_to_industry_multi(company="005930", metrics=["BadMetric"])
+def test_compare_multi_invalid_metric_returns_error(temp_engine):
+    _seed_comparison_fixture()
+    out = compare_to_industry_multi(company="00000001", metrics=["BadMetric"])
     assert "error" in out
