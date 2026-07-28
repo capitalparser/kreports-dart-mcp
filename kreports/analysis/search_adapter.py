@@ -1,12 +1,58 @@
 """Explicit read-only adapter for bounded searches across cached datasets."""
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import bindparam, text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis._shared import _clean_dict, _display_text, _has_db_column
 from kreports.analysis.company_profile import get_company_summary, resolve_corp_code
 from kreports.storage.raw_documents import RawDocumentStore
+
+
+def _keyword_centered_excerpts(
+    body: str,
+    keyword: str,
+    *,
+    limit: int = 3,
+    context_chars: int = 320,
+) -> list[str]:
+    """Return normalized, de-duplicated windows centered on literal matches."""
+    normalized_body = re.sub(r"\s+", " ", _display_text(body)).strip()
+    normalized_keyword = re.sub(r"\s+", " ", _display_text(keyword)).strip()
+    if not normalized_body or not normalized_keyword or limit <= 0:
+        return []
+
+    excerpts: list[str] = []
+    seen: set[str] = set()
+    match_start = normalized_body.find(normalized_keyword)
+    while match_start != -1 and len(excerpts) < limit:
+        match_end = match_start + len(normalized_keyword)
+        window_start = max(0, match_start - context_chars)
+        window_end = min(len(normalized_body), match_end + context_chars)
+
+        left_boundary = max(
+            (normalized_body.rfind(mark, window_start, match_start) for mark in ".!?;:。！？；："),
+            default=-1,
+        )
+        if left_boundary >= window_start:
+            window_start = left_boundary + 1
+        right_boundaries = [
+            normalized_body.find(mark, match_end, window_end)
+            for mark in ".!?;:。！？；："
+        ]
+        right_boundary = min((index for index in right_boundaries if index >= 0), default=-1)
+        if right_boundary >= 0:
+            window_end = right_boundary + 1
+
+        excerpt = normalized_body[window_start:window_end].strip()
+        if excerpt and excerpt not in seen:
+            seen.add(excerpt)
+            excerpts.append(excerpt)
+        match_start = normalized_body.find(normalized_keyword, match_end)
+    return excerpts
+
 
 def _load_source_document_excerpt(row: dict, *, keyword: str | None, limit: int = 1200) -> tuple[bool, str]:
     """Return keyword match and excerpt without requiring inline raw_content.
@@ -353,7 +399,12 @@ def search_dataset(
         if "body" in row:
             body = _display_text(row.pop("body") or "")
             if include_excerpt:
-                row["body_excerpt"] = body[:1200]
+                if dataset == "accounting_note_chapters" and keyword:
+                    excerpts = _keyword_centered_excerpts(body, keyword)
+                    row["match_excerpts"] = excerpts
+                    row["body_excerpt"] = excerpts[0] if excerpts else ""
+                else:
+                    row["body_excerpt"] = body[:1200]
 
     companies = group_company_records(rows, limit=limit)
     return _clean_dict({
