@@ -153,6 +153,7 @@ def test_peer_enrichment_retains_selection_basis_and_coverage(monkeypatch):
 
 def test_peer_metric_rows_have_denominators_digest_and_provenance_limit(temp_engine):
     from kreports.analysis import investor_peer_evidence
+    from kreports.mcp.tools import _attach_meta
 
     _seed_public_peer_matrix(years=range(2024, 2025), peer_count=40)
     out = investor_peer_evidence.compare_to_industry_multi_with_evidence(
@@ -173,9 +174,14 @@ def test_peer_metric_rows_have_denominators_digest_and_provenance_limit(temp_eng
     assert metric["source"]["provenance_status"] == "requested_annual_report_not_cached"
     assert out["data_quality"]["status"] == "limited"
     assert any(
-        "subject_annual_source_missing" in limitation
+        "연간 재무값의 사업보고서 접수번호를 확인하지 못했습니다" in limitation
         for limitation in out["data_quality"]["limitations"]
     )
+    enriched = _attach_meta("compare_to_industry_multi", out)
+    assert enriched["data_quality"]["status"] == "limited"
+    assert enriched["confirmed_facts"] == []
+    assert "연간 재무값의 사업보고서 접수번호를 확인하지 못했습니다" in enriched["answer"]
+    assert "subject_annual_source_missing" not in enriched["answer"]
 
 
 def test_cached_event_is_screening_classification_not_confirmed_control_change():
@@ -230,9 +236,11 @@ def test_public_peer_handler_query_count_is_constant_as_matrix_grows(temp_engine
 
 
 def test_public_peer_handler_binds_digest_to_full_selected_cohort_and_fs_basis(temp_engine):
-    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.contracts import build_answer_envelope
     from kreports.mcp.handlers.search import handle_compare_to_industry_multi
     from kreports.mcp.input_models import CompareToIndustryMultiInput
+    from kreports.mcp.resources import read_resource
+    from kreports.mcp.tools import _attach_meta
 
     _seed_public_peer_matrix(years=range(2023, 2025), peer_count=7)
     _seed_subject_annual_disclosures(years=range(2023, 2025))
@@ -258,15 +266,36 @@ def test_public_peer_handler_binds_digest_to_full_selected_cohort_and_fs_basis(t
         2023: "20240101000001",
         2024: "20250101000002",
     }
-    pack = build_answer_pack("compare_to_industry_multi", out)
+    enriched = _attach_meta("compare_to_industry_multi", out)
+    envelope = build_answer_envelope("compare_to_industry_multi", enriched)
+    pack = enriched["answer_pack"]
+    resource = read_resource(pack["resource_uri"])
     matrix = next(table for table in pack["tables"] if table["id"] == "peer_metric_matrix")
     assert {row["year"]: row["source"] for row in matrix["rows"]} == {
         2023: "20240101000001",
         2024: "20250101000002",
     }
+    expected_receipts = {"20240101000001", "20250101000002"}
+    assert len(enriched["confirmed_facts"]) == 2
+    assert len(enriched["confirmed_facts"]) <= 5
+    assert {
+        fact["source"]["rcept_no"]
+        for fact in enriched["confirmed_facts"]
+    } == expected_receipts
+    assert {reference.rcept_no for reference in envelope.evidence} == expected_receipts
+    assert all(receipt in enriched["answer"] for receipt in expected_receipts)
+    assert all(receipt in resource["text"] for receipt in expected_receipts)
+    assert (
+        enriched["data_quality"]["status"]
+        == envelope.verdict
+        == pack["summary"]["status"]
+        == pack["data_quality"]["status"]
+        == "limited"
+    )
 
 
 def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_returned(temp_engine):
+    from kreports.mcp.contracts import build_answer_envelope
     from kreports.mcp.handlers.search import (
         handle_compare_to_industry_multi,
         handle_select_peer_group,
@@ -275,6 +304,8 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
         CompareToIndustryMultiInput,
         SelectPeerGroupInput,
     )
+    from kreports.mcp.resources import read_resource
+    from kreports.mcp.tools import _attach_meta
 
     _seed_public_peer_matrix(years=range(2024, 2025), peer_count=205)
     out = handle_compare_to_industry_multi(CompareToIndustryMultiInput(
@@ -299,7 +330,41 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
     assert metric["p50"] is None
     assert metric["p75"] is None
     assert out["data_quality"]["status"] == "limited"
-    assert any("cohort_identity_incomplete" in item for item in out["data_quality"]["limitations"])
+    assert any(
+        "전체 비교군 식별자를 확보하지 못했습니다" in item
+        for item in out["data_quality"]["limitations"]
+    )
+
+    enriched = _attach_meta("compare_to_industry_multi", out)
+    envelope = build_answer_envelope("compare_to_industry_multi", enriched)
+    pack = enriched["answer_pack"]
+    resource = read_resource(pack["resource_uri"])
+    matrix = next(table for table in pack["tables"] if table["id"] == "peer_metric_matrix")
+    matrix_row = matrix["rows"][0]
+    for field in ("n", "metric_n", "missing_n", "percentile", "p25", "p50", "p75"):
+        assert matrix_row.get(field) is None
+    assert matrix_row["aggregate_status"] == "전체 비교군 미확보로 집계 보류"
+    assert not pack["charts"]
+    public_rendered = "\n".join([enriched["answer"], str(pack), resource["text"]])
+    for internal_code in (
+        "cohort_identity_incomplete",
+        "subject_annual_source_missing",
+        "withheld_incomplete_cohort",
+    ):
+        assert internal_code not in public_rendered
+    visible_text = "\n".join([enriched["answer"], resource["text"]])
+    visible_labels = " ".join(column["label"] for column in matrix["columns"])
+    assert "Cohort" not in visible_text
+    assert "cohort" not in visible_text
+    assert "Cohort" not in visible_labels
+    assert "cohort" not in visible_labels
+    assert (
+        enriched["data_quality"]["status"]
+        == envelope.verdict
+        == pack["summary"]["status"]
+        == pack["data_quality"]["status"]
+        == "limited"
+    )
 
     selection = handle_select_peer_group(SelectPeerGroupInput(
         company="00000001", peer_limit=200, fs_strategy="CFS",
@@ -309,6 +374,19 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
     assert selection_provenance["identifier_count"] == 200
     assert selection_provenance["identity_status"] == "incomplete"
     assert selection_provenance["cohort_digest"] is None
+    selection_enriched = _attach_meta("select_peer_group", selection)
+    selection_resource = read_resource(
+        selection_enriched["answer_pack"]["resource_uri"]
+    )
+    selection_rendered = "\n".join([
+        selection_enriched["answer"],
+        str(selection_enriched["answer_pack"]),
+        selection_resource["text"],
+    ])
+    assert "전체 비교군 식별자를 확보하지 못했습니다" in selection_rendered
+    assert "cohort_identity_incomplete" not in selection_rendered
+    assert "Cohort" not in selection_enriched["answer"]
+    assert "cohort" not in selection_enriched["answer"]
 
 
 def test_public_peer_handler_does_not_digest_an_empty_cohort(temp_engine):

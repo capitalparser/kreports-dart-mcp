@@ -94,11 +94,15 @@ def select_peer_group_with_evidence(**kwargs: Any) -> dict[str, Any]:
         "subject_company": subject.get("corp_name"),
     }
     if cohort_n > 0 and not identity_complete:
+        result["cohort_provenance"]["issue_codes"] = [
+            "cohort_identity_incomplete"
+        ]
         result["data_quality"] = {
             "status": "limited",
             "source": "peer_benchmarks",
             "limitations": [
-                "cohort_identity_incomplete: 선택된 전체 cohort 식별자를 확보하지 못해 digest를 생성하지 않았습니다."
+                "전체 비교군 식별자를 확보하지 못했습니다. "
+                "비교군 재현키를 생성하지 않았습니다."
             ],
         }
     return result
@@ -322,20 +326,36 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
         results[year] = year_metrics
 
     limitations = []
+    issue_codes: list[str] = []
     if peer_count:
         limitations.append(
-            "Peer 개별 사업보고서 접수번호는 집계 결과에 보존되지 않아 cohort provenance는 정책·표본수·digest로 제한됩니다."
+            "비교기업 개별 사업보고서 접수번호는 집계 결과에 보존되지 않아 "
+            "비교군 출처 근거는 선정 정책·표본수·재현키로 제한됩니다."
         )
     if peer_count > 0 and not identity_complete:
+        issue_codes.append("cohort_identity_incomplete")
         limitations.append(
-            "cohort_identity_incomplete: 선택된 전체 cohort 식별자를 확보하지 못해 "
-            "digest와 peer 집계 통계·백분위를 생성하지 않았습니다."
+            "전체 비교군 식별자를 확보하지 못했습니다. "
+            "비교군 재현키와 집계 통계·백분위를 생성하지 않았습니다."
         )
     if any(not source.get("rcept_no") for source in annual_sources.values()):
+        issue_codes.append("subject_annual_source_missing")
         limitations.append(
-            "subject_annual_source_missing: 일부 연도 대상회사 재무값의 "
+            "일부 연도 대상회사 연간 재무값의 "
             "사업보고서 접수번호를 확인하지 못했습니다."
         )
+    confirmed_facts = [
+        {
+            "statement": (
+                f"{year}년 대상회사 연간 재무지표의 출처로 사업보고서 "
+                f"접수번호 {source['rcept_no']}를 확인했습니다."
+            ),
+            "source": source,
+            "excerpt": f"{year}년 {fs_div or '재무제표 구분 미확인'} 연간 재무지표",
+        }
+        for year, source in sorted(annual_sources.items())[-5:]
+        if source.get("rcept_no")
+    ]
     result = {
         "subject": subject,
         "sector_group": peer_benchmarks.classify_sector(subject.get("induty_code")).value,
@@ -352,6 +372,8 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
         "metrics": metrics,
         "results": results,
         "subject_annual_sources": annual_sources,
+        "confirmed_facts": confirmed_facts,
+        "issue_codes": issue_codes,
         "note": selected.get("note"),
         "data_quality": {
             "status": "limited" if peer_count else "missing",

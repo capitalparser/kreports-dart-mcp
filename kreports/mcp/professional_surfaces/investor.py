@@ -35,6 +35,11 @@ _PUBLIC_TAKEAWAY_LABELS = {
     "dilution_events_present": "희석 가능 자본조달 이벤트 확인",
     "shareholder_return_event_present": "주주환원 관련 이벤트 확인",
 }
+_PUBLIC_AGGREGATE_STATUS_LABELS = {
+    "available": "집계 가능",
+    "withheld_empty_cohort": "비교군 없음으로 집계 보류",
+    "withheld_incomplete_cohort": "전체 비교군 미확보로 집계 보류",
+}
 
 
 def _public_metric_label(value: Any) -> str:
@@ -47,6 +52,10 @@ def _public_event_label(value: Any) -> str:
 
 def _public_takeaway_label(value: Any) -> str:
     return _PUBLIC_TAKEAWAY_LABELS.get(str(value), "기타 관찰 포인트")
+
+
+def _public_aggregate_status_label(value: Any) -> str:
+    return _PUBLIC_AGGREGATE_STATUS_LABELS.get(str(value), "집계 상태 미확인")
 
 
 def _status(result: dict[str, Any]) -> str:
@@ -137,11 +146,11 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             continue
         fields = [
             ("fs_div", "FS", None), ("metric_n", "지표 표본수", "개"),
-            ("cohort_n", "Cohort 표본수", "개"), ("missing_n", "누락/제외", "개"),
+            ("cohort_n", "비교군 표본수", "개"), ("missing_n", "누락/제외", "개"),
             ("observed_n", "조회된 지표 관측수", "개"),
             ("selection_truncated_n", "선정 미조회 수", "개"),
             ("aggregate_status", "집계 상태", None),
-            ("cohort_digest", "Cohort 재현키", None),
+            ("cohort_digest", "비교군 재현키", None),
             ("source", "대상회사 연간 출처", None),
         ]
         existing = {column["field"] for column in table["columns"]}
@@ -157,7 +166,9 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             row["missing_n"] = metric_values.get("missing_n")
             row["observed_n"] = metric_values.get("observed_n")
             row["selection_truncated_n"] = metric_values.get("selection_truncated_n")
-            row["aggregate_status"] = metric_values.get("aggregate_status")
+            row["aggregate_status"] = _public_aggregate_status_label(
+                metric_values.get("aggregate_status")
+            )
             row["cohort_digest"] = metric_values.get("cohort_digest")
             row["source"] = (
                 (metric_values.get("source") or {}).get("rcept_no")
@@ -250,7 +261,7 @@ def _render_peer_benchmark(result: dict[str, Any]) -> str:
         for metric, values in (metrics or {}).items():
             if isinstance(values, dict):
                 lines.append(f"| {year} | {_public_metric_label(metric)} | {values.get('subject_value')} | {values.get('percentile')} | {values.get('p25')} | {values.get('p50')} | {values.get('p75')} | {values.get('metric_n', values.get('n'))} |")
-    lines.extend(["", "표본/출처:", "- 지표 표본수, cohort 표본수, 누락/제외 수와 cohort 재현키는 answer_pack에서 확인할 수 있습니다.", "- peer 개별 식별자와 내부 계산키는 표시하지 않습니다."])
+    lines.extend(["", "표본/출처:", "- 지표 표본수, 비교군 표본수, 누락/제외 수와 비교군 재현키는 표에서 확인할 수 있습니다.", "- 비교기업 개별 식별자와 내부 계산키는 표시하지 않습니다."])
     return "\n".join(lines)
 
 
