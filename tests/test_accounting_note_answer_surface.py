@@ -193,7 +193,11 @@ def test_note_pack_and_chatbot_table_share_enriched_status_and_evidence():
     assert pack["sources"][0]["rcept_no"] == "20250312000001"
     assert text is not None
     assert "확인된 내용" in text
-    assert _MATCHED_EXCERPT in text.split("분석:")[0]
+    assert result["confirmed_facts"][0]["excerpt"] == _MATCHED_EXCERPT
+    assert text.count(_MATCHED_EXCERPT) == 1
+    assert "주석 7 재고자산에서 재고자산 관련 일치 문구 1건을 확인했습니다." in text
+    assert "원문 발췌는 아래 표에 표시합니다." in text
+    assert "사업보고서" in text
     assert "회계정책 주석 캐시에서 조회한 결과" in text
     assert "캐시을" not in text
     assert "표 형태 결과" in text
@@ -217,3 +221,18 @@ def test_non_note_visual_tools_keep_their_existing_table_heading():
     assert text is not None
     assert "시각화 대체 표" in text
     assert "표 형태 결과" not in text
+
+
+def test_non_note_professional_answer_keeps_its_original_confirmed_fact():
+    """Applying note-search presentation summarization to another tool is a bug."""
+    text = render_answer("get_business_overview", {
+        "confirmed_facts": [{
+            "statement": "원래 상세 사실은 그대로 표시됩니다.",
+            "excerpt": "원래 상세 사실은 그대로 표시됩니다.",
+            "source": {"rcept_no": "20250312000001", "source_table": "report_sections"},
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert text is not None
+    assert "원래 상세 사실은 그대로 표시됩니다." in text

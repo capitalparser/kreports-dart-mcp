@@ -1090,11 +1090,60 @@ def _sanitize_legacy_detail(detail: str) -> str:
     return detail.replace("`_meta`", "응답 메타데이터").replace("_meta", "응답 메타데이터")
 
 
+def _note_search_presentation_envelope(envelope: AnswerEnvelopeV1) -> AnswerEnvelopeV1:
+    """Summarize note-search facts for prose while retaining raw evidence elsewhere."""
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for fact in envelope.confirmed_facts:
+        source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
+        note_reference = str(
+            fact.get("note_reference")
+            or source.get("section_title")
+            or "주석"
+        )
+        topic = str(fact.get("topic") or "요청 주제")
+        key = (
+            str(source.get("corp_code") or source.get("corp_name") or ""),
+            str(source.get("rcept_no") or ""),
+            note_reference,
+            topic,
+        )
+        summary = grouped.setdefault(key, {
+            "note_reference": note_reference,
+            "topic": topic,
+            "source": source,
+            "count": 0,
+        })
+        summary["count"] += 1
+
+    summaries = [{
+        "statement": (
+            f"{summary['note_reference']}에서 {summary['topic']} 관련 일치 문구 "
+            f"{summary['count']}건을 확인했습니다. 원문 발췌는 아래 표에 표시합니다."
+        ),
+        "source": summary["source"],
+    } for summary in grouped.values()]
+    return envelope.model_copy(update={"confirmed_facts": summaries})
+
+
+def _is_accounting_note_search(tool_name: str, result: dict[str, Any]) -> bool:
+    query = result.get("query")
+    return (
+        tool_name == "search_dataset"
+        and isinstance(query, dict)
+        and query.get("dataset") == "accounting_note_chapters"
+    )
+
+
 def render_answer(tool_name: str, result: Any) -> str | None:
     """Return Korean narrative text for a structured tool result."""
     if not isinstance(result, dict):
         return None
     envelope = build_answer_envelope(tool_name, result)
+    presentation_envelope = (
+        _note_search_presentation_envelope(envelope)
+        if _is_accounting_note_search(tool_name, result)
+        else envelope
+    )
     legacy_result = dict(result)
     legacy_result["data_quality"] = envelope.data_quality.model_dump()
     legacy_result["verdict"] = envelope.verdict
@@ -1102,7 +1151,7 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         legacy_result.pop(field, None)
     detail: str | None = None
     if envelope.data_quality.status in {"missing", "error"}:
-        rendered = _render_professional_envelope(envelope)
+        rendered = _render_professional_envelope(presentation_envelope)
         return _append_visual_table(tool_name, result, rendered)
     if tool_name == "search_company":
         detail = _render_company_search(legacy_result)
@@ -1139,7 +1188,7 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     elif tool_name == "build_audit_acceptance_pack":
         detail = _render_acceptance_pack(legacy_result)
     rendered = _render_professional_envelope(
-        envelope,
+        presentation_envelope,
         detail=_sanitize_legacy_detail(detail) if detail else None,
     )
     return _append_visual_table(tool_name, result, rendered)
