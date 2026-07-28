@@ -1194,19 +1194,19 @@ def test_raw_kam_lifecycle_visual_fallback_maps_public_labels():
         "entity_name": "A",
         "events": [{
             "year": 2025,
-            "topic": "revenue_recognition",
-            "status": "new",
+            "topic": "it_system_conversion",
+            "status": "newly_repeated",
         }],
     })
 
     row = pack.tables[0].rows[0]
-    assert row["topic"] == "수익인식"
-    assert row["status"] == "신규"
+    assert row["topic"] == "기타 핵심감사사항"
+    assert row["status"] == "상태 미분류"
     html = render_visualization_html(pack)
-    assert "수익인식" in html
-    assert "신규" in html
-    assert "revenue_recognition" not in html
-    assert ">new<" not in html
+    assert "기타 핵심감사사항" in html
+    assert "상태 미분류" in html
+    assert "it_system_conversion" not in html
+    assert "newly_repeated" not in html
 
 
 def test_visual_resource_lru_eviction_and_restart_are_stable_fail_closed():

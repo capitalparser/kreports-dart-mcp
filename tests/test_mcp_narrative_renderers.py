@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 from kreports.mcp.renderers import render_answer, render_audit_matter_search
 
@@ -118,6 +119,48 @@ def test_public_kam_lifecycle_maps_topic_and_state_labels_everywhere():
         assert "신규" in public_text
         assert "revenue_recognition" not in public_text
         assert '"new"' not in public_text
+
+
+def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values():
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.resources import read_resource
+
+    payload = {
+        "subject": {"corp_name": "A"},
+        "start_year": 2024,
+        "end_year": 2025,
+        "events": [{
+            "year": 2025,
+            "topic": "it_system_conversion",
+            "status": "newly_repeated",
+            "title": "정보시스템 전환",
+        }],
+        "data_quality": {"status": "usable"},
+    }
+    original = deepcopy(payload)
+
+    out = enrich_answer_response("get_kam_lifecycle", payload)
+    repeated = enrich_answer_response("get_kam_lifecycle", out)
+
+    assert payload == original
+    assert out["events"] == [{
+        "year": 2025,
+        "topic": "기타 핵심감사사항",
+        "status": "상태 미분류",
+        "title": "정보시스템 전환",
+    }]
+    assert repeated["events"] == out["events"]
+    resource_text = read_resource(out["answer_pack"]["resource_uri"])["text"]
+    for public_text in (
+        json.dumps(out, ensure_ascii=False),
+        out["answer"],
+        str(out["answer_pack"]["tables"]),
+        resource_text,
+    ):
+        assert "기타 핵심감사사항" in public_text
+        assert "상태 미분류" in public_text
+        assert "it_system_conversion" not in public_text
+        assert "newly_repeated" not in public_text
 
 
 def test_render_new_tools_have_answers():

@@ -1,6 +1,7 @@
 """Public labels for auditor-facing MCP payloads."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -23,16 +24,25 @@ _KAM_LIFECYCLE_LABELS = {
     "repeated_changed": "반복·문구 변경",
     "repeated_stable": "반복·문구 안정",
 }
+_MACHINE_ENUM = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", re.ASCII)
 
 
 def public_kam_topic_label(value: object) -> str:
     text = str(value or "").strip()
-    return _KAM_TOPIC_LABELS.get(text, text or "미분류")
+    if text in _KAM_TOPIC_LABELS:
+        return _KAM_TOPIC_LABELS[text]
+    if _MACHINE_ENUM.fullmatch(text):
+        return "기타 핵심감사사항"
+    return text or "미분류"
 
 
 def public_kam_lifecycle_label(value: object) -> str:
     text = str(value or "").strip()
-    return _KAM_LIFECYCLE_LABELS.get(text, text or "미분류")
+    if text in _KAM_LIFECYCLE_LABELS:
+        return _KAM_LIFECYCLE_LABELS[text]
+    if _MACHINE_ENUM.fullmatch(text):
+        return "상태 미분류"
+    return text or "미분류"
 
 
 def public_kam_lifecycle_events(events: object) -> list[dict[str, Any]]:
