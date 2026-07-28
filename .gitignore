@@ -62,3 +62,6 @@ artifacts/
 # Local backfill process markers
 *.pid
 .dart-backfill.lock/
+
+# Isolated implementation worktrees
+.worktrees/
