@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from kreports.db.models import Company, ReportSection
+from kreports.db.models import AuditProcedureItem, Company, KamItem, ReportSection
 
 
 def _add_company(session, corp_code: str = "00000001") -> None:
@@ -195,6 +195,16 @@ def test_kam_lifecycle_rows_without_semantic_coverage_stay_limited(monkeypatch):
 
     monkeypatch.setattr(audit_reporting, "resolve_corp_code", lambda _: "001")
     monkeypatch.setattr(audit_reporting, "get_company_summary", lambda _: {"corp_code": "001", "corp_name": "A"})
+    monkeypatch.setattr(audit_reporting, "get_audit_report_sections", lambda *args, **kwargs: {
+        "data_quality": {
+            "status": "limited",
+            "semantic_complete": False,
+            "topic_coverage": {"available": 0, "total": 1, "status": "limited"},
+            "reason_coverage": {"available": 0, "total": 1, "status": "limited"},
+            "procedure_coverage": {"available": 0, "total": 1, "status": "limited"},
+            "source_coverage": {"available": 1, "total": 1, "status": "usable"},
+        },
+    })
     monkeypatch.setattr(kam_lifecycle, "kam_lifecycle_for_company", lambda *args, **kwargs: {
         "events": [{
             "year": 2025,
@@ -213,3 +223,179 @@ def test_kam_lifecycle_rows_without_semantic_coverage_stay_limited(monkeypatch):
     assert out["data_quality"]["timeline_status"] == "usable"
     assert out["data_quality"]["semantic_complete"] is False
     assert out["data_quality"]["topic_coverage"]["available"] == 0
+
+
+def test_two_item_kam_body_uses_each_material_item_as_coverage_denominator(
+    temp_engine,
+):
+    from kreports.analysis.audit_reporting import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    receipt = "20260311000007"
+    with get_session() as session:
+        _add_company(session)
+        session.add(ReportSection(
+            rcept_no=receipt,
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "수익인식은 핵심감사사항으로 결정했습니다. 문서검사를 수행하였습니다. "
+                "재고자산 평가는 추정의 불확실성 때문에 핵심감사사항으로 결정했습니다."
+            ),
+            body_hash="two-kam-items",
+            body_length=80,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add_all([
+            KamItem(
+                rcept_no=receipt,
+                corp_code="00000001",
+                bsns_year=2025,
+                source_type="audit_report",
+                ordinal=1,
+                title="수익인식",
+                normalized_topic="revenue",
+                reason_text="거래조건 판단이 중요합니다.",
+                audit_response_text="문서검사를 수행하였습니다.",
+                related_note_references_json="[]",
+                full_body_hash="1" * 40,
+                full_body_length=40,
+                source_basis="source_documents.full_body",
+                quality_status="full_body",
+                fetched_at=datetime.utcnow(),
+            ),
+            KamItem(
+                rcept_no=receipt,
+                corp_code="00000001",
+                bsns_year=2025,
+                source_type="audit_report",
+                ordinal=2,
+                title="재고자산 평가",
+                normalized_topic="inventory",
+                reason_text="추정의 불확실성이 중요합니다.",
+                audit_response_text=None,
+                related_note_references_json="[]",
+                full_body_hash="2" * 40,
+                full_body_length=35,
+                source_basis="source_documents.full_body",
+                quality_status="full_body",
+                fetched_at=datetime.utcnow(),
+            ),
+        ])
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["data_quality"]["semantic_complete"] is False
+    assert out["data_quality"]["topic_coverage"]["total"] == 2
+    assert out["data_quality"]["reason_coverage"]["available"] == 2
+    assert out["data_quality"]["procedure_coverage"] == {
+        "available": 1,
+        "total": 2,
+        "status": "limited",
+    }
+
+
+def test_unrelated_receipt_procedure_cannot_complete_kam_semantics(temp_engine):
+    from kreports.analysis.audit_reporting import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        _add_company(session)
+        session.add(ReportSection(
+            rcept_no="20260311000008",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text="수익인식은 중요한 판단 때문에 핵심감사사항으로 결정했습니다.",
+            body_hash="kam-without-procedure",
+            body_length=36,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no="20260311000009",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            kam_topic="revenue",
+            procedure_type="substantive_test",
+            procedure_text="다른 감사보고서에서 문서검사를 수행하였습니다.",
+            procedure_hash="unrelated-procedure",
+            procedure_length=28,
+            section_ordinal=0,
+            procedure_ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["data_quality"]["semantic_complete"] is False
+    assert out["data_quality"]["procedure_coverage"]["available"] == 0
+    assert "related_audit_procedures" not in out["sections"][0]
+
+
+def test_invalid_receipt_is_not_source_coverage_or_public_receipt(temp_engine):
+    from kreports.analysis.audit_reporting import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        _add_company(session)
+        session.add(ReportSection(
+            rcept_no="not-a-filing",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "수익인식은 핵심감사사항으로 결정했습니다. "
+                "우리는 문서검사를 수행하였습니다."
+            ),
+            body_hash="invalid-receipt",
+            body_length=50,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["data_quality"]["semantic_complete"] is False
+    assert out["data_quality"]["source_coverage"]["available"] == 0
+    assert not out["sections"][0].get("rcept_no")
+    assert not out["confirmed_facts"][0]["source"].get("rcept_no")
+
+
+def test_attachment_receipt_is_canonicalized_to_public_parent(temp_engine):
+    from kreports.analysis.audit_reporting import get_audit_report_sections
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        _add_company(session)
+        session.add(ReportSection(
+            rcept_no="20260311000010_001_xml",
+            corp_code="00000001",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "수익인식은 핵심감사사항으로 결정했습니다. "
+                "우리는 문서검사를 수행하였습니다."
+            ),
+            body_hash="synthetic-receipt",
+            body_length=50,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    out = get_audit_report_sections("000001", year=2025, section_key="kam")
+
+    assert out["data_quality"]["source_coverage"]["available"] == 1
+    assert out["sections"][0]["rcept_no"] == "20260311000010"
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000010"

@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from typing import Any
 
+from kreports.analysis.evidence import parent_rcept_no
+
 PackBuilder = Callable[[dict[str, Any]], dict[str, Any] | None]
 DetailRenderer = Callable[[dict[str, Any]], str]
 
@@ -24,6 +26,26 @@ _PEER_REASON_LABELS = {
     "same_ksic_prefix": "동일 업종 분류",
     "asset_size_bucket": "자산규모 구간",
     "audit_fee_available": "감사보수 확인",
+}
+_KAM_TOPIC_LABELS = {
+    "revenue": "수익인식",
+    "revenue_recognition": "수익인식",
+    "inventory": "재고자산",
+    "impairment": "손상평가",
+    "fair_value": "공정가치",
+    "provision": "충당부채 및 우발사항",
+    "provisions": "충당부채 및 우발사항",
+    "going_concern": "계속기업",
+    "consolidation": "연결범위",
+    "tax": "법인세",
+    "development_cost": "개발비",
+    "unknown": "미분류",
+}
+_MATTER_CATEGORY_LABELS = {
+    "other_matter": "기타사항",
+    "basis_for_opinion": "의견근거",
+    "emphasis": "강조사항",
+    "going_concern": "계속기업 관련 문단",
 }
 _COVERAGE_LABELS = {
     "selection_basis": "선정기준",
@@ -285,14 +307,28 @@ def _kam_rows(rows: object) -> list[dict[str, Any]]:
         if not isinstance(section, dict) or section.get("section_key") != "kam":
             continue
         analysis = section.get("kam_analysis") if isinstance(section.get("kam_analysis"), dict) else {}
-        table_rows.append({
-            "year": section.get("bsns_year") or section.get("year"),
-            "topic": ", ".join(analysis.get("topics") or []) or "미분류",
-            "lifecycle": section.get("lifecycle") or "미분류",
-            "reason_available": "확보" if analysis.get("has_reason_hint") else "미확보",
-            "procedure_available": "확보" if analysis.get("has_procedure_hint") else "미확보",
-            "rcept_no": section.get("rcept_no") or "-",
-        })
+        items = section.get("kam_items")
+        if not isinstance(items, list) or not items:
+            items = [{
+                "topic": topic,
+                "reason_available": analysis.get("has_reason_hint") is True,
+                "procedure_available": analysis.get("has_procedure_hint") is True,
+                "rcept_no": section.get("rcept_no"),
+            } for topic in analysis.get("topics") or [None]]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            topic = str(item.get("topic") or "unknown")
+            table_rows.append({
+                "year": section.get("bsns_year") or section.get("year"),
+                "topic": _KAM_TOPIC_LABELS.get(topic, "기타 핵심감사사항"),
+                "lifecycle": item.get("lifecycle") or section.get("lifecycle") or "미분류",
+                "reason_available": "확보" if item.get("reason_available") else "미확보",
+                "procedure_available": "확보" if item.get("procedure_available") else "미확보",
+                "rcept_no": parent_rcept_no(
+                    str(item.get("rcept_no") or section.get("rcept_no") or ""),
+                ) or "-",
+            })
     return table_rows
 
 
@@ -360,9 +396,14 @@ def _matter_pack(result: dict[str, Any]) -> dict[str, Any]:
     for section in matter_sections:
         if isinstance(section, dict):
             rows.append({
-                "category": section.get("matter_category") or section.get("section_key"),
+                "category": _MATTER_CATEGORY_LABELS.get(
+                    str(section.get("matter_category") or section.get("section_key") or ""),
+                    "기타 감사보고서 사항",
+                ),
                 "signal": "검토 신호" if section.get("acceptance_signal") else "근거 보존 (신호 아님)",
-                "rcept_no": section.get("rcept_no") or "-",
+                "rcept_no": parent_rcept_no(
+                    str(section.get("rcept_no") or ""),
+                ) or "-",
             })
     if rows:
         pack["tables"].append(_table(

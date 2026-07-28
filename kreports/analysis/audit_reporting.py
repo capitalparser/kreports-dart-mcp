@@ -519,7 +519,7 @@ def _audit_section_source(
         "corp_name": record.get("corp_name") or (subject or {}).get("corp_name") or record.get("corp_code"),
         "report_nm": "감사보고서" if record.get("source_type") == "audit_report" or source_table != "report_sections.business_report" else "사업보고서",
         "bsns_year": record.get("bsns_year") or record.get("year"),
-        "rcept_no": record.get("rcept_no"),
+        "rcept_no": parent_rcept_no(str(record.get("rcept_no") or "")),
         "section_title": record.get("section_title") or default_section_title,
         "section_key": record.get("section_key"),
         "source_table": source_table,
@@ -834,17 +834,75 @@ def _coverage_status(*, available: int, total: int) -> str:
     return "usable" if available == total else "limited"
 
 
-def _kam_semantic_coverage(rows: list[dict]) -> dict:
-    """Measure KAM meaning separately from mere timeline/row existence."""
+def _kam_semantic_items(row: dict) -> list[dict]:
+    stored_items = row.get("kam_items")
+    if isinstance(stored_items, list) and stored_items:
+        return [item for item in stored_items if isinstance(item, dict)]
+
+    analysis = row.get("kam_analysis") if isinstance(row.get("kam_analysis"), dict) else {}
+    topics = [str(topic) for topic in analysis.get("topics") or [] if topic]
+    receipt = parent_rcept_no(str(row.get("rcept_no") or ""))
+    if len(topics) == 1:
+        return [{
+            "ordinal": 1,
+            "title": row.get("section_title"),
+            "topic": topics[0],
+            "reason_available": analysis.get("has_reason_hint") is True,
+            "procedure_available": analysis.get("has_procedure_hint") is True,
+            "rcept_no": receipt,
+            "segmentation_status": "single_item_body",
+        }]
+    if len(topics) > 1:
+        # Body-level booleans cannot prove which material item owns the reason
+        # or procedure.  Keep each detected topic in the denominator but fail
+        # closed until dedicated item records establish the linkage.
+        return [
+            {
+                "ordinal": ordinal,
+                "title": row.get("section_title"),
+                "topic": topic,
+                "reason_available": False,
+                "procedure_available": False,
+                "rcept_no": receipt,
+                "segmentation_status": "unproven_multi_item_body",
+            }
+            for ordinal, topic in enumerate(topics, start=1)
+        ]
+    return [{
+        "ordinal": 1,
+        "title": row.get("section_title"),
+        "topic": None,
+        "reason_available": False,
+        "procedure_available": False,
+        "rcept_no": receipt,
+        "segmentation_status": "unclassified_body",
+    }]
+
+
+def _kam_semantic_coverage(
+    rows: list[dict],
+    *,
+    semantic_source_allowed: bool = True,
+) -> dict:
+    """Measure every current material KAM item, not whole-section presence."""
     kam_rows = [row for row in rows if row.get("section_key") == "kam"]
-    total = len(kam_rows)
-    topic_available = sum(bool((row.get("kam_analysis") or {}).get("topics")) for row in kam_rows)
-    reason_available = sum(bool((row.get("kam_analysis") or {}).get("has_reason_hint")) for row in kam_rows)
-    procedure_available = sum(
-        bool((row.get("kam_analysis") or {}).get("has_procedure_hint"))
+    items = [
+        item
         for row in kam_rows
+        for item in _kam_semantic_items(row)
+    ]
+    total = len(items)
+    topic_available = sum(bool(item.get("topic")) for item in items)
+    reason_available = sum(item.get("reason_available") is True for item in items)
+    procedure_available = sum(
+        item.get("procedure_available") is True
+        for item in items
     )
-    source_available = sum(bool(str(row.get("rcept_no") or "").strip()) for row in kam_rows)
+    source_available = sum(
+        parent_rcept_no(str(item.get("rcept_no") or "")) is not None
+        and item.get("quality_status", "full_body") == "full_body"
+        for item in items
+    )
 
     def coverage(available: int) -> dict:
         return {
@@ -859,10 +917,11 @@ def _kam_semantic_coverage(rows: list[dict]) -> dict:
     source_coverage = coverage(source_available)
     return {
         "timeline_status": "usable" if total else "missing",
-        "semantic_complete": bool(total) and all(
+        "semantic_complete": semantic_source_allowed and bool(total) and all(
             item["status"] == "usable"
             for item in (topic_coverage, reason_coverage, procedure_coverage, source_coverage)
         ),
+        "semantic_source_eligible": semantic_source_allowed,
         "topic_coverage": topic_coverage,
         "reason_coverage": reason_coverage,
         "procedure_coverage": procedure_coverage,
@@ -888,39 +947,27 @@ def _audit_opinion_coverage(rows: list[dict]) -> dict:
 
 
 def _attach_related_audit_procedures(rows: list[dict], *, corp_code: str, year: int) -> None:
-    kam_rcept_nos = sorted({
-        str(row.get("rcept_no"))
+    kam_receipts = {
+        receipt
         for row in rows
-        if row.get("section_key") == "kam" and row.get("rcept_no")
-    })
-    if not kam_rcept_nos:
+        if row.get("section_key") == "kam"
+        for receipt in [parent_rcept_no(str(row.get("rcept_no") or ""))]
+        if receipt
+    }
+    if not kam_receipts:
         return
-    stmt = text(
-        """
-        SELECT rcept_no, dcm_no, kam_topic, procedure_type, procedure_text,
-               procedure_length, section_ordinal, procedure_ordinal
-        FROM audit_procedure_items
-        WHERE corp_code=:corp_code
-          AND bsns_year=:year
-          AND rcept_no IN :rcept_nos
-        ORDER BY rcept_no, section_ordinal, procedure_ordinal
-        """
-    ).bindparams(bindparam("rcept_nos", expanding=True))
     with _engine_module.engine.connect() as conn:
         procedure_rows = [dict(r) for r in conn.execute(
-            stmt,
-            {"corp_code": corp_code, "year": year, "rcept_nos": kam_rcept_nos},
-        ).mappings().all()]
-        fallback_rows = [dict(r) for r in conn.execute(
             text(
                 """
-                SELECT rcept_no, dcm_no, kam_topic, procedure_type, procedure_text,
+                SELECT rcept_no, dcm_no, kam_item_id, kam_topic,
+                       procedure_type, procedure_text,
                        procedure_length, section_ordinal, procedure_ordinal
                 FROM audit_procedure_items
                 WHERE corp_code=:corp_code
                   AND bsns_year=:year
+                  AND source_type='audit_report'
                 ORDER BY source_type, rcept_no, section_ordinal, procedure_ordinal
-                LIMIT 10
                 """
             ),
             {"corp_code": corp_code, "year": year},
@@ -928,26 +975,24 @@ def _attach_related_audit_procedures(rows: list[dict], *, corp_code: str, year: 
 
     grouped: dict[str, list[dict]] = {}
     for item in procedure_rows:
+        receipt = parent_rcept_no(str(item.get("rcept_no") or ""))
+        if not receipt or receipt not in kam_receipts:
+            continue
         text_value = _display_text(item.pop("procedure_text") or "")
         item["procedure_excerpt"] = text_value[:900]
-        grouped.setdefault(str(item.get("rcept_no")), []).append(item)
-    for item in fallback_rows:
-        text_value = _display_text(item.pop("procedure_text") or "")
-        item["procedure_excerpt"] = text_value[:900]
+        item["rcept_no"] = receipt
+        grouped.setdefault(receipt, []).append(item)
 
     for row in rows:
         if row.get("section_key") != "kam":
             continue
-        procedures = grouped.get(str(row.get("rcept_no")), [])
-        source = "audit_procedure_items"
-        if not procedures:
-            procedures = fallback_rows
-            source = "audit_procedure_items_company_year"
+        receipt = parent_rcept_no(str(row.get("rcept_no") or ""))
+        procedures = grouped.get(receipt or "", [])
         if not procedures:
             continue
         row["related_audit_procedures"] = procedures[:10]
         row["related_audit_procedure_count"] = len(procedures)
-        row["related_audit_procedure_source"] = source
+        row["related_audit_procedure_source"] = "audit_procedure_items"
         analysis = row.setdefault("kam_analysis", {})
         if not analysis.get("has_procedure_hint"):
             analysis["has_procedure_hint"] = True
@@ -957,6 +1002,88 @@ def _attach_related_audit_procedures(rows: list[dict], *, corp_code: str, year: 
                 for item in procedures
                 if item.get("procedure_type")
             })
+
+
+def _attach_kam_item_semantics(
+    rows: list[dict],
+    *,
+    corp_code: str,
+    year: int,
+) -> None:
+    kam_receipts = {
+        receipt
+        for row in rows
+        if row.get("section_key") == "kam"
+        and row.get("source_type") == "audit_report"
+        for receipt in [parent_rcept_no(str(row.get("rcept_no") or ""))]
+        if receipt
+    }
+    if not kam_receipts:
+        return
+    with _engine_module.engine.connect() as conn:
+        stored_rows = [dict(record) for record in conn.execute(
+            text(
+                """
+                SELECT id, rcept_no, ordinal, title, normalized_topic,
+                       reason_text, audit_response_text, quality_status
+                FROM kam_items
+                WHERE corp_code=:corp_code
+                  AND bsns_year=:year
+                  AND source_type='audit_report'
+                ORDER BY rcept_no, ordinal, id
+                """
+            ),
+            {"corp_code": corp_code, "year": year},
+        ).mappings().all()]
+
+    latest_by_identity: dict[tuple[str, int], dict] = {}
+    for item in stored_rows:
+        receipt = parent_rcept_no(str(item.get("rcept_no") or ""))
+        if not receipt or receipt not in kam_receipts:
+            continue
+        ordinal = int(item.get("ordinal") or 0)
+        identity = (receipt, ordinal)
+        current = latest_by_identity.get(identity)
+        if current is None or int(item.get("id") or 0) > int(current.get("id") or 0):
+            latest_by_identity[identity] = item
+
+    grouped: dict[str, list[dict]] = {}
+    for (receipt, _), item in sorted(latest_by_identity.items()):
+        quality_status = item.get("quality_status")
+        item_complete = quality_status == "full_body"
+        grouped.setdefault(receipt, []).append({
+            "kam_item_id": item.get("id"),
+            "ordinal": item.get("ordinal"),
+            "title": item.get("title"),
+            "topic": item.get("normalized_topic"),
+            "reason_available": item_complete and bool(
+                str(item.get("reason_text") or "").strip()
+            ),
+            "procedure_available": item_complete and bool(
+                str(item.get("audit_response_text") or "").strip()
+            ),
+            "rcept_no": receipt,
+            "quality_status": quality_status,
+            "segmentation_status": "stored_item",
+        })
+
+    for row in rows:
+        if (
+            row.get("section_key") != "kam"
+            or row.get("source_type") != "audit_report"
+        ):
+            continue
+        receipt = parent_rcept_no(str(row.get("rcept_no") or ""))
+        items = grouped.get(receipt or "")
+        if items:
+            row["kam_items"] = items
+        else:
+            row["kam_items"] = _kam_semantic_items(row)
+
+
+def _canonicalize_public_receipts(rows: list[dict]) -> None:
+    for row in rows:
+        row["rcept_no"] = parent_rcept_no(str(row.get("rcept_no") or ""))
 
 
 def get_accounting_policy(
@@ -1232,6 +1359,7 @@ def get_audit_report_sections(
             row["kam_analysis"] = summarize_kam_body(body)
         row.pop("body_text", None)
     _attach_related_audit_procedures(rows, corp_code=corp_code, year=year)
+    _attach_kam_item_semantics(rows, corp_code=corp_code, year=year)
     for row in alternative_rows:
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
@@ -1241,6 +1369,13 @@ def get_audit_report_sections(
         row.pop("body_text", None)
     if alternative_year is not None:
         _attach_related_audit_procedures(alternative_rows, corp_code=corp_code, year=alternative_year)
+        _attach_kam_item_semantics(
+            alternative_rows,
+            corp_code=corp_code,
+            year=alternative_year,
+        )
+    _canonicalize_public_receipts(rows)
+    _canonicalize_public_receipts(alternative_rows)
     if rows:
         coverage_note = (
             "Cached audit_report report_sections."
@@ -1255,7 +1390,10 @@ def get_audit_report_sections(
             "business_report is summary coverage only."
         )
     kam_hint_coverage = _kam_hint_coverage(rows)
-    kam_semantics = _kam_semantic_coverage(rows)
+    kam_semantics = _kam_semantic_coverage(
+        rows,
+        semantic_source_allowed=source_type == "audit_report",
+    )
     opinion_coverage = _audit_opinion_coverage(rows)
     semantic_limited = (
         (any(row.get("section_key") == "kam" for row in rows) and not kam_semantics["semantic_complete"])
@@ -1575,30 +1713,19 @@ def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025
         return {"error": "company not found", "company": company}
     result = kam_lifecycle_for_company(corp_code, start_year=start_year, end_year=end_year)
     result["subject"] = subject
-    current_events = [
-        event for event in (result.get("events") or [])
-        if isinstance(event, dict) and event.get("year") == end_year
-    ]
-    total = len(current_events)
-
-    def coverage(available: int) -> dict:
-        return {
-            "available": available,
-            "total": total,
-            "status": _coverage_status(available=available, total=total),
-        }
-
-    topic_coverage = coverage(sum(
-        bool(event.get("topic")) and event.get("topic") != "unknown"
-        for event in current_events
-    ))
-    reason_coverage = coverage(sum(bool(event.get("has_reason_hint")) for event in current_events))
-    procedure_coverage = coverage(sum(bool(event.get("has_procedure_hint")) for event in current_events))
-    source_coverage = coverage(sum(bool(event.get("rcept_no")) for event in current_events))
-    semantic_complete = bool(total) and all(
-        item["status"] == "usable"
-        for item in (topic_coverage, reason_coverage, procedure_coverage, source_coverage)
+    current_sections = get_audit_report_sections(
+        corp_code,
+        year=end_year,
+        section_key="kam",
+        source_type="audit_report",
+        limit=100,
     )
+    current_quality = (
+        current_sections.get("data_quality")
+        if isinstance(current_sections.get("data_quality"), dict)
+        else {}
+    )
+    semantic_complete = current_quality.get("semantic_complete") is True
     quality = result.get("data_quality") if isinstance(result.get("data_quality"), dict) else {}
     timeline_status = quality.get("status") or "missing"
     result["data_quality"] = {
@@ -1606,10 +1733,10 @@ def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025
         "status": "limited" if timeline_status == "usable" and not semantic_complete else timeline_status,
         "timeline_status": timeline_status,
         "semantic_complete": semantic_complete,
-        "topic_coverage": topic_coverage,
-        "reason_coverage": reason_coverage,
-        "procedure_coverage": procedure_coverage,
-        "source_coverage": source_coverage,
+        "topic_coverage": current_quality.get("topic_coverage"),
+        "reason_coverage": current_quality.get("reason_coverage"),
+        "procedure_coverage": current_quality.get("procedure_coverage"),
+        "source_coverage": current_quality.get("source_coverage"),
     }
     return _clean_dict(result)
 
@@ -2123,6 +2250,7 @@ KAM_TOPIC_KEYWORDS = _KAM_TOPIC_KEYWORDS
 cache_quality_status = _cache_quality_status
 cached_years_for_sections = _cached_years_for_sections
 classify_audit_matter = _classify_audit_matter
+attach_kam_item_semantics = _attach_kam_item_semantics
 evidence_audit_procedure_rows = _evidence_audit_procedure_rows
 full_body_kam_procedure_rows = _full_body_kam_procedure_rows
 evidence_report_section_rows = _evidence_report_section_rows

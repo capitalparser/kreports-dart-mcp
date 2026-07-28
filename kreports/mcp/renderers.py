@@ -375,6 +375,48 @@ def _hierarchy_closed_group_rows(
     return visible
 
 
+_PUBLIC_KAM_TOPIC_LABELS = {
+    "revenue": "수익인식",
+    "revenue_recognition": "수익인식",
+    "inventory": "재고자산",
+    "impairment": "손상평가",
+    "fair_value": "공정가치",
+    "provision": "충당부채 및 우발사항",
+    "provisions": "충당부채 및 우발사항",
+    "going_concern": "계속기업",
+    "consolidation": "연결범위",
+    "tax": "법인세",
+    "development_cost": "개발비",
+    "unknown": "미분류",
+}
+_PUBLIC_MATTER_LABELS = {
+    "other_matter": "기타사항",
+    "basis_for_opinion": "의견근거",
+    "emphasis": "강조사항",
+    "going_concern": "계속기업 관련 문단",
+    "covid": "코로나19 영향",
+    "subsequent_event": "후속사건",
+    "restatement": "재작성·정정",
+    "litigation": "소송·분쟁",
+    "scope_limitation": "감사범위 제한",
+    "uncertainty": "중요한 불확실성",
+}
+
+
+def _public_kam_topic(value: object) -> str:
+    return _PUBLIC_KAM_TOPIC_LABELS.get(
+        str(value or ""),
+        "기타 핵심감사사항",
+    )
+
+
+def _public_matter_label(value: object) -> str:
+    return _PUBLIC_MATTER_LABELS.get(
+        str(value or ""),
+        "기타 감사보고서 사항",
+    )
+
+
 def _render_kam_topics(result: dict) -> str:
     status = _status(result)
     subject = _subject_label(result)
@@ -399,11 +441,13 @@ def _render_kam_topics(result: dict) -> str:
     if topic_items:
         for topic in topic_items[:5]:
             if isinstance(topic, dict):
-                lines.append(f"- {topic.get('topic') or topic.get('section_title') or topic}")
+                lines.append(
+                    f"- {_public_kam_topic(topic.get('topic'))}"
+                )
             elif isinstance(topic, tuple) and len(topic) == 2:
-                lines.append(f"- {topic[0]}: {topic[1]}")
+                lines.append(f"- {_public_kam_topic(topic[0])}: {topic[1]}")
             else:
-                lines.append(f"- {topic}")
+                lines.append(f"- {_public_kam_topic(topic)}")
     else:
         summary = result.get("audit_report_events")
         if isinstance(summary, list):
@@ -478,7 +522,10 @@ def _render_audit_report_sections(result: dict) -> str:
         lines.append(f"- {title}: {excerpt[:220]}")
         analysis = section.get("kam_analysis") or {}
         if analysis:
-            topics = ", ".join(analysis.get("topics") or [])
+            topics = ", ".join(
+                _public_kam_topic(topic)
+                for topic in analysis.get("topics") or []
+            )
             if topics:
                 lines.append(f"  KAM topic: {topics}")
             if analysis.get("has_procedure_hint"):
@@ -508,11 +555,22 @@ def _render_audit_report_matters(result: dict) -> str:
     ]
     for company in (result.get("companies") or [])[:5]:
         counts = company.get("matter_counts") or {}
-        count_text = ", ".join(f"{k} {v}" for k, v in counts.items() if v)
+        count_text = ", ".join(
+            f"{_public_matter_label(key)} {value}"
+            for key, value in counts.items()
+            if value
+        )
         lines.append(f"- {company.get('corp_name') or company.get('corp_code')}: {count_text or 'matter count 없음'}")
         first = (company.get("sections") or [{}])[0]
         if first.get("severity_hint") or first.get("topic_tags"):
-            lines.append(f"  분류: {first.get('severity_hint')}, tags={first.get('topic_tags')}")
+            tags = ", ".join(
+                _public_matter_label(tag)
+                for tag in first.get("topic_tags") or []
+            )
+            lines.append(
+                f"  분류: {first.get('severity_hint')}"
+                + (f", 주제={tags}" if tags else "")
+            )
     if not result.get("companies"):
         lines.append("- 현재 조건에 맞는 matter 섹션을 찾지 못했습니다.")
     lines.append("")

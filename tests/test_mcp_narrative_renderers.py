@@ -19,6 +19,72 @@ def test_render_audit_matter_search_returns_korean_paragraph():
     assert "데이터 한계" in text
 
 
+def test_public_kam_surfaces_replace_topic_enum_keys_with_korean_labels():
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("compare_peer_kam_topics", {
+        "subject": {"corp_name": "A"},
+        "year": 2025,
+        "kam_topics": {"revenue_recognition": 1},
+        "subject_sections": [{
+            "section_key": "kam",
+            "bsns_year": 2025,
+            "rcept_no": "20260311000013",
+            "kam_analysis": {
+                "topics": ["revenue_recognition"],
+                "has_reason_hint": True,
+                "has_procedure_hint": True,
+            },
+        }],
+        "audit_report_sections": {
+            "topic_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "reason_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "procedure_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "source_coverage": {"available": 1, "total": 1, "status": "usable"},
+        },
+        "data_quality": {"status": "usable"},
+    })
+
+    public_text = " ".join([
+        out["answer"],
+        str(out["answer_pack"]["tables"]),
+        read_resource(out["answer_pack"]["resource_uri"])["text"],
+    ])
+    assert "수익인식" in public_text
+    assert "revenue_recognition" not in public_text
+
+
+def test_public_matter_surfaces_replace_category_enum_keys_with_korean_labels():
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.resources import read_resource
+
+    out = enrich_answer_response("search_audit_report_matters", {
+        "query": {"year": 2025},
+        "total_companies": 1,
+        "total_sections": 1,
+        "companies": [{
+            "corp_name": "A",
+            "matter_counts": {"other_matter": 1},
+            "sections": [{
+                "section_key": "other_matter",
+                "matter_category": "other_matter",
+                "acceptance_signal": True,
+                "rcept_no": "20260311000014",
+            }],
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    public_text = " ".join([
+        out["answer"],
+        str(out["answer_pack"]["tables"]),
+        read_resource(out["answer_pack"]["resource_uri"])["text"],
+    ])
+    assert "기타사항" in public_text
+    assert "other_matter" not in public_text
+
+
 def test_render_new_tools_have_answers():
     cases = [
         ("get_kam_lifecycle", {"events": [{"year": 2024, "topic": "revenue", "status": "new"}], "start_year": 2021, "end_year": 2025, "data_quality": {"status": "usable"}}),

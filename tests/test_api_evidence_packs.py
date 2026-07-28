@@ -307,7 +307,7 @@ def test_audit_report_sections_dedupes_repeated_attachment_facts(temp_engine):
 
     assert out["section_count"] == 2
     assert len(out["confirmed_facts"]) == 1
-    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000001_001_xml"
+    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20260311000001"
 
 
 def test_audit_matters_api_adds_confirmed_facts(temp_engine):
@@ -397,3 +397,53 @@ def test_kam_section_answer_pack_keeps_semantic_coverage_table(temp_engine):
         "audit_report_kam_items",
         "audit_report_kam_coverage",
     }
+
+
+def test_public_kam_handler_never_claims_business_or_all_summary_semantics(
+    temp_engine,
+):
+    import json
+
+    from kreports.db.engine import get_session
+    from kreports.mcp.tools import call_tool
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="001",
+            corp_name="A",
+            stock_code="000001",
+            market="KOSPI",
+        ))
+        for source_type, receipt in (
+            ("business_report", "20260311000011"),
+            ("audit_report", "20260311000012"),
+        ):
+            session.add(ReportSection(
+                rcept_no=receipt,
+                corp_code="001",
+                bsns_year=2025,
+                source_type=source_type,
+                section_key="kam",
+                section_title="핵심감사사항",
+                body_text=(
+                    "수익인식은 핵심감사사항으로 결정했습니다. "
+                    "우리는 문서검사를 수행하였습니다."
+                ),
+                body_hash=f"kam-{source_type}",
+                body_length=50,
+                ordinal=0,
+                fetched_at=datetime.utcnow(),
+            ))
+
+    for source_type in ("business_report", "all"):
+        out = json.loads(call_tool(
+            "get_audit_report_sections",
+            {
+                "company": "000001",
+                "year": 2025,
+                "section_key": "kam",
+                "source_type": source_type,
+            },
+        ))
+        assert out["data_quality"]["status"] == "limited"
+        assert out["data_quality"]["semantic_complete"] is False

@@ -25,9 +25,11 @@ from kreports.analysis.audit_procedure_evidence import (
     procedure_read_engine,
 )
 from kreports.analysis.company_profile import get_industry_name, resolve_corp_code
+from kreports.analysis.evidence import parent_rcept_no
 from kreports.analysis.audit_reporting import (
     AUDIT_MATTER_KEYS,
     KAM_TOPIC_KEYWORDS,
+    attach_kam_item_semantics,
     cache_quality_status,
     cached_years_for_sections,
     classify_audit_matter,
@@ -1540,6 +1542,16 @@ def compare_peer_kam_topics(
         for topic in topics:
             body_topic_counts[topic] = body_topic_counts.get(topic, 0) + 1
         sections_by_corp.setdefault(row["corp_code"], []).append(row)
+    for item_corp_code, company_rows in sections_by_corp.items():
+        attach_kam_item_semantics(
+            company_rows,
+            corp_code=item_corp_code,
+            year=year,
+        )
+        for row in company_rows:
+            row["rcept_no"] = parent_rcept_no(
+                str(row.get("rcept_no") or ""),
+            )
 
     summary_stmt = text(
         f"""
@@ -1562,6 +1574,9 @@ def compare_peer_kam_topics(
     for row in summary_rows:
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
+        row["rcept_no"] = parent_rcept_no(
+            str(row.get("rcept_no") or ""),
+        )
         row.pop("body_text", None)
 
     business_summary_by_corp: dict[str, list[dict]] = {}
@@ -1756,6 +1771,9 @@ def compare_peer_audit_report_matters(
         key = row["section_key"]
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
+        row["rcept_no"] = parent_rcept_no(
+            str(row.get("rcept_no") or ""),
+        )
         row.update(classify_audit_matter(body, key))
         row.pop("body_text", None)
         counts[key]["total_sections"] += 1

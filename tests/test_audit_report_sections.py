@@ -984,7 +984,7 @@ def test_get_audit_report_sections_enriches_short_kam_with_indexed_procedures(te
     assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 1
 
 
-def test_get_audit_report_sections_falls_back_to_company_year_procedures(temp_engine):
+def test_get_audit_report_sections_rejects_other_source_company_year_procedures(temp_engine):
     from kreports.db.engine import get_session
 
     with get_session() as session:
@@ -1018,9 +1018,9 @@ def test_get_audit_report_sections_falls_back_to_company_year_procedures(temp_en
     out = get_audit_report_sections("000001", year=2024, section_key="kam")
 
     section = out["sections"][0]
-    assert section["related_audit_procedure_source"] == "audit_procedure_items_company_year"
-    assert "할인율" in section["related_audit_procedures"][0]["procedure_excerpt"]
-    assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 1
+    assert "related_audit_procedure_source" not in section
+    assert "related_audit_procedures" not in section
+    assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 0
 
 
 def test_get_audit_report_sections_returns_alternative_cached_year_when_requested_year_missing(temp_engine):
