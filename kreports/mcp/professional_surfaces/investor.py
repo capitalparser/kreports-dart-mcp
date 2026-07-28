@@ -27,6 +27,14 @@ _PUBLIC_EVENT_LABELS = {
     "amendment": "정정공시",
     "control_change": "최대주주 변경",
 }
+_PUBLIC_TAKEAWAY_LABELS = {
+    "quality_profile_supportive": "현금전환을 포함한 필수 품질 점검 충족",
+    "quality_profile_mixed": "재무 품질 점검 결과 혼재",
+    "financial_data_missing": "재무 데이터 미확보",
+    "accounting_or_governance_risk_needs_review": "회계·지배구조 리스크 추가 검토 필요",
+    "dilution_events_present": "희석 가능 자본조달 이벤트 확인",
+    "shareholder_return_event_present": "주주환원 관련 이벤트 확인",
+}
 
 
 def _public_metric_label(value: Any) -> str:
@@ -35,6 +43,10 @@ def _public_metric_label(value: Any) -> str:
 
 def _public_event_label(value: Any) -> str:
     return _PUBLIC_EVENT_LABELS.get(str(value), "기타 공시 이벤트")
+
+
+def _public_takeaway_label(value: Any) -> str:
+    return _PUBLIC_TAKEAWAY_LABELS.get(str(value), "기타 관찰 포인트")
 
 
 def _status(result: dict[str, Any]) -> str:
@@ -126,7 +138,11 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
         fields = [
             ("fs_div", "FS", None), ("metric_n", "지표 표본수", "개"),
             ("cohort_n", "Cohort 표본수", "개"), ("missing_n", "누락/제외", "개"),
+            ("observed_n", "조회된 지표 관측수", "개"),
+            ("selection_truncated_n", "선정 미조회 수", "개"),
+            ("aggregate_status", "집계 상태", None),
             ("cohort_digest", "Cohort 재현키", None),
+            ("source", "대상회사 연간 출처", None),
         ]
         existing = {column["field"] for column in table["columns"]}
         table["columns"].extend(
@@ -139,14 +155,30 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
             row["metric_n"] = metric_values.get("metric_n", row.get("n"))
             row["cohort_n"] = metric_values.get("cohort_n", result.get("n_peers"))
             row["missing_n"] = metric_values.get("missing_n")
+            row["observed_n"] = metric_values.get("observed_n")
+            row["selection_truncated_n"] = metric_values.get("selection_truncated_n")
+            row["aggregate_status"] = metric_values.get("aggregate_status")
             row["cohort_digest"] = metric_values.get("cohort_digest")
+            row["source"] = (
+                (metric_values.get("source") or {}).get("rcept_no")
+                or "사업보고서 접수번호 미확보"
+            )
     return pack
 
 
 def _investor_signals_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _build_investor_signals_pack
 
-    pack = _build_investor_signals_pack(result)
+    public_result = deepcopy(result)
+    public_result["event_counts"] = {
+        _public_event_label(event_type): count
+        for event_type, count in (result.get("event_counts") or {}).items()
+    }
+    public_result["takeaways"] = [
+        _public_takeaway_label(takeaway)
+        for takeaway in (result.get("takeaways") or [])
+    ]
+    pack = _build_investor_signals_pack(public_result)
     quality = result.get("quality_snapshot") or {}
     checks = quality.get("checks") or {}
     rows = [

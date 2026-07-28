@@ -104,6 +104,79 @@ def select_peer_group_with_evidence(**kwargs: Any) -> dict[str, Any]:
     return result
 
 
+def _batch_subject_annual_sources(
+    *,
+    corp_code: str,
+    corp_name: str | None,
+    years: list[int],
+    fs_div: str | None,
+) -> dict[int, dict[str, Any]]:
+    """Resolve every subject-year filing receipt in one disclosure query."""
+    if not corp_code or not years:
+        return {}
+    conditions = " OR ".join(
+        f"report_nm LIKE :report_year_{index}"
+        for index, _ in enumerate(years)
+    )
+    stmt = text(
+        "SELECT rcept_no, corp_name, report_nm"
+        " FROM disclosures"
+        " WHERE corp_code=:corp_code"
+        f" AND ({conditions})"
+        " ORDER BY disc_date DESC, rcept_no DESC"
+    )
+    params = {
+        "corp_code": corp_code,
+        **{
+            f"report_year_{index}": f"%사업보고서 ({year}.%"
+            for index, year in enumerate(years)
+        },
+    }
+    with _engine_module.engine.connect() as conn:
+        disclosures = [dict(row) for row in conn.execute(stmt, params).mappings()]
+
+    sources: dict[int, dict[str, Any]] = {}
+    for year in years:
+        disclosure = next(
+            (
+                row for row in disclosures
+                if f"사업보고서 ({year}." in str(row.get("report_nm") or "")
+            ),
+            None,
+        )
+        common = {
+            "corp_code": corp_code,
+            "corp_name": (
+                disclosure.get("corp_name")
+                if disclosure
+                else corp_name or corp_code
+            ),
+            "bsns_year": year,
+            "section_title": "재무제표",
+            "source_table": "financials",
+            "fs_div": fs_div,
+        }
+        if disclosure:
+            sources[year] = {
+                **common,
+                "report_nm": disclosure.get("report_nm"),
+                "rcept_no": disclosure.get("rcept_no"),
+                "provenance_status": "available",
+            }
+        else:
+            sources[year] = {
+                **common,
+                "report_nm": "DART 연간 재무 데이터",
+                "rcept_no": None,
+                "provenance_status": "requested_annual_report_not_cached",
+                "provenance_gap": (
+                    f"요청 사업연도 {year}의 사업보고서 접수번호를 "
+                    "로컬 캐시에서 확인하지 못했습니다."
+                ),
+            }
+    return sources
+
+
 def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
     """Build a constant-query peer matrix from one legacy cohort selection."""
     metrics = list(kwargs.get("metrics") or peer_benchmarks._ALL_METRICS)
@@ -145,6 +218,13 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
     years = (
         list(range(int(latest_year) - int(kwargs.get("years_back", 5)) + 1, int(latest_year) + 1))
         if latest_year is not None else []
+    )
+    subject_corp_code = str(subject.get("corp_code") or "")
+    annual_sources = _batch_subject_annual_sources(
+        corp_code=subject_corp_code,
+        corp_name=subject.get("corp_name"),
+        years=years,
+        fs_div=fs_div,
     )
 
     batch_rows: list[dict[str, Any]] = []
@@ -192,25 +272,52 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
                 for corp_code in identifiers
                 if indexed.get((corp_code, year), {}).get(field) is not None
             ]
-            subject_value = indexed.get((str(subject.get("corp_code")), year), {}).get(field)
+            subject_value = indexed.get((subject_corp_code, year), {}).get(field)
             subject_value = float(subject_value) if subject_value is not None else None
-            metric_n = len(values)
+            observed_n = len(values)
             below = (
                 sum(value < subject_value for value in values)
                 if subject_value is not None else 0
             )
+            aggregate_available = identity_complete
+            aggregate_status = (
+                "available" if aggregate_available
+                else "withheld_empty_cohort" if peer_count == 0
+                else "withheld_incomplete_cohort"
+            )
+            metric_n = observed_n if aggregate_available or peer_count == 0 else None
             year_metrics[metric] = {
-                "p25": round(peer_benchmarks._quantile(values, 0.25), 2) if metric_n >= 5 else None,
-                "p50": round(peer_benchmarks._quantile(values, 0.50), 2) if metric_n else None,
-                "p75": round(peer_benchmarks._quantile(values, 0.75), 2) if metric_n >= 5 else None,
+                "p25": (
+                    round(peer_benchmarks._quantile(values, 0.25), 2)
+                    if aggregate_available and observed_n >= 5 else None
+                ),
+                "p50": (
+                    round(peer_benchmarks._quantile(values, 0.50), 2)
+                    if aggregate_available and observed_n else None
+                ),
+                "p75": (
+                    round(peer_benchmarks._quantile(values, 0.75), 2)
+                    if aggregate_available and observed_n >= 5 else None
+                ),
                 "n": metric_n,
                 "metric_n": metric_n,
                 "cohort_n": peer_count,
-                "missing_n": max(peer_count - metric_n, 0),
+                "missing_n": (
+                    max(peer_count - observed_n, 0)
+                    if aggregate_available or peer_count == 0 else None
+                ),
+                "observed_n": observed_n,
+                "selection_truncated_n": max(peer_count - len(identifiers), 0),
+                "aggregate_status": aggregate_status,
                 "cohort_digest": digest,
                 "subject_value": round(subject_value, 2) if subject_value is not None else None,
-                "percentile": round(100.0 * below / metric_n, 1) if subject_value is not None and metric_n else None,
+                "percentile": (
+                    round(100.0 * below / observed_n, 1)
+                    if aggregate_available and subject_value is not None and observed_n
+                    else None
+                ),
                 "unit": peer_benchmarks._METRIC_UNIT.get(metric),
+                "source": annual_sources.get(year),
             }
         results[year] = year_metrics
 
@@ -221,7 +328,13 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
         )
     if peer_count > 0 and not identity_complete:
         limitations.append(
-            "cohort_identity_incomplete: 선택된 전체 cohort 식별자를 확보하지 못해 digest를 생성하지 않았습니다."
+            "cohort_identity_incomplete: 선택된 전체 cohort 식별자를 확보하지 못해 "
+            "digest와 peer 집계 통계·백분위를 생성하지 않았습니다."
+        )
+    if any(not source.get("rcept_no") for source in annual_sources.values()):
+        limitations.append(
+            "subject_annual_source_missing: 일부 연도 대상회사 재무값의 "
+            "사업보고서 접수번호를 확인하지 못했습니다."
         )
     result = {
         "subject": subject,
@@ -238,11 +351,12 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
         "years": years,
         "metrics": metrics,
         "results": results,
+        "subject_annual_sources": annual_sources,
         "note": selected.get("note"),
         "data_quality": {
-        "status": "limited" if peer_count else "missing",
-        "source": "peer_benchmarks",
-        "limitations": limitations,
+            "status": "limited" if peer_count else "missing",
+            "source": "peer_benchmarks",
+            "limitations": limitations,
         },
         "cohort_provenance": {
             "cohort_n": peer_count,

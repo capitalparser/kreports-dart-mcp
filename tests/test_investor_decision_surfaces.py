@@ -1,6 +1,8 @@
 """Public investor decision surfaces retain evidence and uncertainty."""
 from __future__ import annotations
 
+from datetime import date
+
 
 def _seed_public_peer_matrix(*, years: range, peer_count: int) -> None:
     from kreports.db.engine import get_session
@@ -50,6 +52,23 @@ def _append_public_peers(*, years: range, first_peer: int, last_peer: int) -> No
                     total_equity=1_200 + index * 30, revenue_yoy=0.03 + index / 1_000,
                     beneish_m_score=-2.5 + index / 100,
                 ))
+
+
+def _seed_subject_annual_disclosures(*, years: range) -> None:
+    from kreports.db.engine import get_session
+    from kreports.db.models import Disclosure
+
+    with get_session() as session:
+        for index, year in enumerate(years, start=1):
+            session.add(Disclosure(
+                rcept_no=f"{year + 1}0101{index:06d}",
+                corp_code="00000001",
+                corp_name="대상",
+                disc_date=date(year + 1, 3, 31),
+                disc_type="A",
+                report_nm=f"사업보고서 ({year}.12)",
+                flr_nm="대상",
+            ))
 
 
 def test_investor_check_keeps_missing_cash_conversion_unknown():
@@ -150,8 +169,13 @@ def test_peer_metric_rows_have_denominators_digest_and_provenance_limit(temp_eng
         [f"{index:08d}" for index in range(2, 42)], year=2024, fs_div="CFS",
         selection_policy=out["cohort_provenance"]["selection_policy"],
     )
+    assert metric["source"]["rcept_no"] is None
+    assert metric["source"]["provenance_status"] == "requested_annual_report_not_cached"
     assert out["data_quality"]["status"] == "limited"
-    assert out["data_quality"]["limitations"]
+    assert any(
+        "subject_annual_source_missing" in limitation
+        for limitation in out["data_quality"]["limitations"]
+    )
 
 
 def test_cached_event_is_screening_classification_not_confirmed_control_change():
@@ -202,14 +226,16 @@ def test_public_peer_handler_query_count_is_constant_as_matrix_grows(temp_engine
         years_back=5,
     )
 
-    assert wide_count == narrow_count == 8
+    assert wide_count == narrow_count == 9
 
 
 def test_public_peer_handler_binds_digest_to_full_selected_cohort_and_fs_basis(temp_engine):
+    from kreports.mcp.answer_pack import build_answer_pack
     from kreports.mcp.handlers.search import handle_compare_to_industry_multi
     from kreports.mcp.input_models import CompareToIndustryMultiInput
 
     _seed_public_peer_matrix(years=range(2023, 2025), peer_count=7)
+    _seed_subject_annual_disclosures(years=range(2023, 2025))
     out = handle_compare_to_industry_multi(CompareToIndustryMultiInput(
         company="00000001", metrics=["ROE"], years_back=2,
         fs_div="CFS", fs_strategy="CFS",
@@ -224,6 +250,20 @@ def test_public_peer_handler_binds_digest_to_full_selected_cohort_and_fs_basis(t
         for metrics in out["results"].values()
         for values in metrics.values()
     )
+    assert {
+        year: values["source"]["rcept_no"]
+        for year, metrics in out["results"].items()
+        for values in metrics.values()
+    } == {
+        2023: "20240101000001",
+        2024: "20250101000002",
+    }
+    pack = build_answer_pack("compare_to_industry_multi", out)
+    matrix = next(table for table in pack["tables"] if table["id"] == "peer_metric_matrix")
+    assert {row["year"]: row["source"] for row in matrix["rows"]} == {
+        2023: "20240101000001",
+        2024: "20250101000002",
+    }
 
 
 def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_returned(temp_engine):
@@ -247,7 +287,17 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
     assert provenance["identifier_count"] == 200
     assert provenance["identity_status"] == "incomplete"
     assert provenance["digest_status"] == "withheld"
-    assert out["results"][2024]["ROE"]["cohort_digest"] is None
+    metric = out["results"][2024]["ROE"]
+    assert metric["cohort_digest"] is None
+    assert metric["aggregate_status"] == "withheld_incomplete_cohort"
+    assert metric["selection_truncated_n"] == 5
+    assert metric["observed_n"] == 200
+    assert metric["metric_n"] is None
+    assert metric["missing_n"] is None
+    assert metric["percentile"] is None
+    assert metric["p25"] is None
+    assert metric["p50"] is None
+    assert metric["p75"] is None
     assert out["data_quality"]["status"] == "limited"
     assert any("cohort_identity_incomplete" in item for item in out["data_quality"]["limitations"])
 
@@ -297,14 +347,54 @@ def test_public_answers_and_packs_do_not_leak_internal_metric_or_event_keys():
                     "event_type": "capital_raise", "event_title": "유상증자 결정"}],
         "total_events": 1, "data_quality": {"status": "usable"},
     }
+    investor_result = {
+        "subject": {"corp_name": "대상"},
+        "quality_snapshot": {"checks": {}},
+        "event_counts": {"capital_raise": 1},
+        "takeaways": ["quality_profile_supportive"],
+        "data_quality": {"status": "limited"},
+    }
 
     peer_answer = render_answer("compare_to_industry_multi", peer_result)
     event_answer = render_answer("search_disclosure_events", event_result)
+    investor_answer = render_answer("get_investor_signals", investor_result)
     peer_pack = build_answer_pack("compare_to_industry_multi", peer_result)
     event_pack = build_answer_pack("search_disclosure_events", event_result)
-    rendered = "\n".join([peer_answer, event_answer, str(peer_pack), str(event_pack)])
+    investor_pack = build_answer_pack("get_investor_signals", investor_result)
+    rendered = "\n".join([
+        peer_answer, event_answer, investor_answer,
+        str(peer_pack), str(event_pack), str(investor_pack),
+    ])
 
     assert "베니시 M 점수" in rendered
     assert "유상증자" in rendered
+    assert "현금전환을 포함한 필수 품질 점검 충족" in rendered
     assert "Beneish_M" not in rendered
     assert "capital_raise" not in rendered
+    assert "quality_profile_supportive" not in rendered
+
+
+def test_investor_signal_pack_status_and_labels_survive_resource_rendering():
+    from kreports.mcp.resources import read_resource
+    from kreports.mcp.tools import _attach_meta
+
+    out = _attach_meta("get_investor_signals", {
+        "subject": {"corp_name": "대상"},
+        "quality_snapshot": {"checks": {}},
+        "event_counts": {"capital_raise": 1},
+        "takeaways": ["quality_profile_supportive"],
+        "data_quality": {
+            "status": "limited",
+            "limitations": ["annual_source_missing"],
+        },
+    })
+    resource = read_resource(out["answer_pack"]["resource_uri"])
+
+    assert out["data_quality"]["status"] == "limited"
+    assert out["answer_pack"]["summary"]["status"] == "limited"
+    assert out["answer_pack"]["data_quality"]["status"] == "limited"
+    assert "limited" in resource["text"]
+    assert "유상증자" in resource["text"]
+    assert "현금전환을 포함한 필수 품질 점검 충족" in resource["text"]
+    assert "capital_raise" not in resource["text"]
+    assert "quality_profile_supportive" not in resource["text"]
