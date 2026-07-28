@@ -547,7 +547,7 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
     calculation_status = (
         "calculated"
         if result.get("enterprise_value") is not None
-        else "unavailable"
+        else "calculation_unavailable"
     )
     # The visual contract derives a domain status from a non-canonical summary
     # status while preserving data_quality.status as the canonical availability.
@@ -570,23 +570,15 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         limit=1,
     )
 
-    if calculation_status == "unavailable":
+    if calculation_status == "calculation_unavailable":
         pack["tool_name"] = "build_dcf_model_pack"
+        pack["request_context"] = {
+            "base_year": result.get("base_year"),
+            "fs_div": result.get("fs_div"),
+        }
         pack["sources"] = []
         missing_accounts = _safe_dcf_rows(result.get("missing_accounts"), limit=20)
         pack["tables"].extend([
-            _table(
-                "dcf_actuals",
-                "요청 기준연도 공시 실제값",
-                [
-                    ("metric_key", "지표"), ("amount", "금액(KRW)"),
-                    ("unit", "단위"), ("year", "연도"),
-                    ("fs_div", "재무제표"),
-                    ("source_account_id", "원천 계정 ID"),
-                    ("source_account_name", "원천 계정명"),
-                    ("source_table", "원천 테이블"), ("fetched_at", "수집시각"),
-                ], actuals,
-            ),
             _table(
                 "dcf_assumptions",
                 "명시적 분석가 가정",
@@ -595,16 +587,15 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
                     ("unit", "값 단위"), ("basis", "근거 구분"),
                 ], assumptions,
             ),
-        ])
-        if missing_accounts:
-            pack["tables"].append(_table(
+            _table(
                 "dcf_missing_accounts",
                 "누락 공시 실제값",
                 [
                     ("field", "계정"), ("year", "사업연도"),
                     ("fs_div", "재무제표"), ("basis", "확인 기준"),
                 ], missing_accounts,
-            ))
+            ),
+        ])
         pack["limitations"] = [
             *pack.get("limitations", []),
             "기업가치 계산에 필요한 입력 또는 공시 실제값이 부족하여 가치 브리지와 민감도를 제공하지 않습니다.",

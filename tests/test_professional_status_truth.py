@@ -173,11 +173,25 @@ def test_renderer_failure_uses_nonempty_canonical_fallback(monkeypatch):
 def test_allowlisted_domain_verdict_uses_public_korean_label_not_snake_case(
     tool_name, verdict, expected_label,
 ):
-    out = enrich_answer_response(tool_name, {
+    payload = {
         "verdict": verdict,
         "inputs": {"wacc": 0.1},
         "data_quality": {"status": "usable"},
-    })
+    }
+    if tool_name == "build_dcf_model_pack":
+        payload.update({
+            "base_year": 2024,
+            "fs_div": "CFS",
+            "enterprise_value": (
+                None if verdict == "calculation_unavailable" else 1
+            ),
+            "valuation_bridge": (
+                {}
+                if verdict == "calculation_unavailable"
+                else {"enterprise_value": 1}
+            ),
+        })
+    out = enrich_answer_response(tool_name, payload)
 
     assert f"- {expected_label}" in out["answer"]
     assert verdict not in out["answer"]

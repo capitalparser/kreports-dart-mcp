@@ -35,6 +35,33 @@ _PUBLIC_SOURCE_LABELS = {
     "report_sections.audit_report": "감사보고서 캐시",
     "source_documents": "원문 문서 캐시",
 }
+_DCF_ASSUMPTION_KEYS = {
+    "revenue_growth",
+    "operating_margin",
+    "tax_rate",
+    "da_to_revenue",
+    "capex_to_revenue",
+    "nwc_to_revenue",
+    "wacc",
+    "terminal_growth",
+}
+_DCF_MISSING_FIELDS = {
+    *_DCF_ASSUMPTION_KEYS,
+    "revenue",
+    "operating_profit",
+    "depreciation_amortization",
+    "purchase_ppe",
+    "purchase_intangible_assets",
+    "trade_receivables",
+    "inventories",
+    "trade_payables",
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+}
+_DCF_REMEDIATION_SCHEMAS = {
+    "dcf_assumptions": ("key", "value", "unit", "basis"),
+    "dcf_missing_accounts": ("field", "year", "fs_div", "basis"),
+}
 
 
 def _strict_model_config() -> ConfigDict:
@@ -373,12 +400,20 @@ class VisualDataQualityV1(BaseModel):
         return values
 
 
+class DcfRequestContextV1(BaseModel):
+    model_config = _strict_model_config()
+
+    base_year: int = Field(ge=1900, le=2100)
+    fs_div: Literal["CFS", "OFS"]
+
+
 class VisualizationPackV1(BaseModel):
     model_config = _strict_model_config()
 
     kind: Literal["answer_pack"] = "answer_pack"
     version: Literal["visualization_pack.v1"] = PACK_VERSION
     tool_name: Literal["build_dcf_model_pack"] | None = None
+    request_context: DcfRequestContextV1 | None = None
     summary: SummarySpecV1 = Field(default_factory=lambda: SummarySpecV1(
         title="시각화",
         status="usable",
@@ -585,13 +620,11 @@ class VisualizationPackV1(BaseModel):
             self.status == "missing"
             and self.tool_name == "build_dcf_model_pack"
         ):
-            allowed_dcf_tables = {
-                "dcf_actuals",
-                "dcf_assumptions",
-                "dcf_missing_accounts",
-            }
+            allowed_dcf_tables = set(_DCF_REMEDIATION_SCHEMAS)
             if (
-                any(
+                self.request_context is None
+                or self.summary.domain_status != "calculation_unavailable"
+                or any(
                     table.id not in allowed_dcf_tables
                     for table in self.tables
                 )
@@ -603,6 +636,36 @@ class VisualizationPackV1(BaseModel):
                 raise ValueError(
                     "missing DCF remediation pack contains non-remediation facts"
                 )
+            for table in self.tables:
+                expected = _DCF_REMEDIATION_SCHEMAS[table.id]
+                if tuple(column.key for column in table.columns) != expected:
+                    raise ValueError(
+                        "missing DCF remediation table has an invalid schema"
+                    )
+                for row in table.rows:
+                    if set(row) != set(expected):
+                        raise ValueError(
+                            "missing DCF remediation row has an invalid schema"
+                        )
+                    if table.id == "dcf_assumptions":
+                        if (
+                            row["key"] not in _DCF_ASSUMPTION_KEYS
+                            or not _is_quantitative_value(row["value"])
+                            or row["unit"] != "ratio"
+                            or row["basis"] != "analyst_input"
+                        ):
+                            raise ValueError(
+                                "missing DCF assumption is not bounded"
+                            )
+                    elif (
+                        row["field"] not in _DCF_MISSING_FIELDS
+                        or row["year"] != self.request_context.base_year
+                        or row["fs_div"] != self.request_context.fs_div
+                        or row["basis"] != "requested_dcf_source_actual"
+                    ):
+                        raise ValueError(
+                            "missing DCF account does not match request context"
+                        )
         elif self.status == "missing" and any(
             table.rows for table in self.tables
         ):
@@ -831,6 +894,68 @@ def _canonical_table(
     }
 
 
+def _validate_raw_missing_dcf_remediation(raw: dict[str, Any]) -> None:
+    """Reject values the generic canonicalizer would otherwise drop."""
+    context = raw.get("request_context")
+    summary = raw.get("summary")
+    if (
+        not isinstance(context, dict)
+        or set(context) != {"base_year", "fs_div"}
+        or not isinstance(context.get("base_year"), int)
+        or isinstance(context.get("base_year"), bool)
+        or not 1900 <= context["base_year"] <= 2100
+        or context.get("fs_div") not in {"CFS", "OFS"}
+        or not isinstance(summary, dict)
+        or summary.get("status") != "calculation_unavailable"
+    ):
+        raise ValueError("missing DCF remediation context is invalid")
+    for collection in ("charts", "diagrams", "timelines", "sources"):
+        if raw.get(collection):
+            raise ValueError(
+                "missing DCF remediation cannot carry visual or source facts"
+            )
+    for table in raw.get("tables") or []:
+        if not isinstance(table, dict):
+            raise ValueError("missing DCF remediation table is invalid")
+        table_id = str(table.get("id") or "")
+        expected = _DCF_REMEDIATION_SCHEMAS.get(table_id)
+        if expected is None:
+            raise ValueError("missing DCF remediation table is forbidden")
+        columns = table.get("columns")
+        if not isinstance(columns, list) or tuple(
+            str(column.get("field") or column.get("key") or "")
+            if isinstance(column, dict)
+            else ""
+            for column in columns
+        ) != expected:
+            raise ValueError("missing DCF remediation table schema is invalid")
+        rows = table.get("rows")
+        if not isinstance(rows, list):
+            raise ValueError("missing DCF remediation rows are invalid")
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != set(expected):
+                raise ValueError("missing DCF remediation row schema is invalid")
+            if table_id == "dcf_assumptions":
+                if (
+                    row["key"] not in _DCF_ASSUMPTION_KEYS
+                    or not _is_quantitative_value(row["value"])
+                    or row["unit"] != "ratio"
+                    or row["basis"] != "analyst_input"
+                ):
+                    raise ValueError(
+                        "missing DCF remediation assumption is invalid"
+                    )
+            elif (
+                row["field"] not in _DCF_MISSING_FIELDS
+                or row["year"] != context["base_year"]
+                or row["fs_div"] != context["fs_div"]
+                or row["basis"] != "requested_dcf_source_actual"
+            ):
+                raise ValueError(
+                    "missing DCF remediation account context is invalid"
+                )
+
+
 def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
     raw_quality = raw.get("data_quality")
     quality = raw_quality if isinstance(raw_quality, dict) else {}
@@ -859,6 +984,8 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
         status == "missing"
         and raw.get("tool_name") == "build_dcf_model_pack"
     )
+    if missing_dcf_remediation:
+        _validate_raw_missing_dcf_remediation(raw)
     limitations = [
         _safe_text(item)
         for item in [
@@ -1101,6 +1228,11 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
             "build_dcf_model_pack"
             if missing_dcf_remediation
             else None
+        ),
+        **(
+            {"request_context": raw.get("request_context")}
+            if missing_dcf_remediation
+            else {}
         ),
         "summary": {
             "title": _safe_text(summary.get("title") or "시각화"),

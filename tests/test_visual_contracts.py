@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import math
 import re
@@ -1405,9 +1406,10 @@ def test_missing_dcf_pack_may_carry_only_bounded_remediation_rows():
     pack = build_visualization_pack({
         "kind": "answer_pack",
         "tool_name": "build_dcf_model_pack",
+        "request_context": {"base_year": 2024, "fs_div": "OFS"},
         "summary": {
             "title": "DCF 산출 불가",
-            "status": "unavailable",
+            "status": "calculation_unavailable",
             "subject": "A",
         },
         "tables": [{
@@ -1416,11 +1418,13 @@ def test_missing_dcf_pack_may_carry_only_bounded_remediation_rows():
             "columns": [
                 {"field": "key", "label": "가정"},
                 {"field": "value", "label": "값", "unit": "ratio"},
+                {"field": "unit", "label": "단위"},
                 {"field": "basis", "label": "근거"},
             ],
             "rows": [{
                 "key": "wacc",
                 "value": 0.09,
+                "unit": "ratio",
                 "basis": "analyst_input",
             }],
         }, {
@@ -1430,11 +1434,13 @@ def test_missing_dcf_pack_may_carry_only_bounded_remediation_rows():
                 {"field": "field", "label": "계정"},
                 {"field": "year", "label": "사업연도"},
                 {"field": "fs_div", "label": "재무제표"},
+                {"field": "basis", "label": "확인 기준"},
             ],
             "rows": [{
                 "field": "revenue",
                 "year": 2024,
                 "fs_div": "OFS",
+                "basis": "requested_dcf_source_actual",
             }],
         }],
         "charts": [],
@@ -1447,9 +1453,11 @@ def test_missing_dcf_pack_may_carry_only_bounded_remediation_rows():
     })
 
     assert pack.tool_name == "build_dcf_model_pack"
+    assert pack.request_context.base_year == 2024
+    assert pack.request_context.fs_div == "OFS"
     assert pack.status == "missing"
     assert pack.summary.status == "missing"
-    assert pack.summary.domain_status == "unavailable"
+    assert pack.summary.domain_status == "calculation_unavailable"
     assert pack.data_quality.status == "missing"
     assert {table.status for table in pack.tables} == {"limited"}
 
@@ -1504,9 +1512,10 @@ def test_missing_dcf_remediation_exception_does_not_relax_other_facts(
 ):
     raw = {
         "kind": "answer_pack",
+        "request_context": {"base_year": 2024, "fs_div": "OFS"},
         "summary": {
             "title": "DCF 산출 불가",
-            "status": "unavailable",
+            "status": "calculation_unavailable",
             "subject": "A",
         },
         "tables": [_table(
@@ -1523,8 +1532,113 @@ def test_missing_dcf_remediation_exception_does_not_relax_other_facts(
         **override,
     }
 
-    with pytest.raises(ValidationError, match=message):
+    with pytest.raises((ValidationError, ValueError), match=message):
         build_visualization_pack(raw)
+
+
+def test_missing_dcf_remediation_rejects_schema_context_and_value_escape_hatches():
+    valid = {
+        "kind": "answer_pack",
+        "tool_name": "build_dcf_model_pack",
+        "request_context": {"base_year": 2024, "fs_div": "OFS"},
+        "summary": {
+            "title": "DCF 산출 불가",
+            "status": "calculation_unavailable",
+            "subject": "A",
+        },
+        "tables": [{
+            "id": "dcf_assumptions",
+            "title": "명시적 분석가 가정",
+            "columns": [
+                {"field": "key", "label": "가정"},
+                {"field": "value", "label": "값", "unit": "ratio"},
+                {"field": "unit", "label": "단위"},
+                {"field": "basis", "label": "근거"},
+            ],
+            "rows": [{
+                "key": "wacc",
+                "value": 0.09,
+                "unit": "ratio",
+                "basis": "analyst_input",
+            }],
+        }, {
+            "id": "dcf_missing_accounts",
+            "title": "누락 공시 실제값",
+            "columns": [
+                {"field": "field", "label": "계정"},
+                {"field": "year", "label": "사업연도"},
+                {"field": "fs_div", "label": "재무제표"},
+                {"field": "basis", "label": "확인 기준"},
+            ],
+            "rows": [{
+                "field": "revenue",
+                "year": 2024,
+                "fs_div": "OFS",
+                "basis": "requested_dcf_source_actual",
+            }],
+        }],
+        "charts": [],
+        "diagrams": [],
+        "timelines": [],
+        "sources": [],
+        "data_quality": {"status": "missing"},
+        "status": "missing",
+        "limitations": ["기업가치 계산 입력이 부족합니다."],
+    }
+    invalid = []
+
+    wrong_domain = deepcopy(valid)
+    wrong_domain["summary"]["status"] = "unavailable"
+    invalid.append(wrong_domain)
+
+    actuals = deepcopy(valid)
+    actuals["tables"].append({
+        "id": "dcf_actuals",
+        "title": "실제값",
+        "columns": [{"field": "enterprise_value", "label": "기업가치"}],
+        "rows": [],
+    })
+    invalid.append(actuals)
+
+    wrong_year = deepcopy(valid)
+    wrong_year["tables"][1]["rows"][0]["year"] = 2023
+    invalid.append(wrong_year)
+
+    wrong_fs = deepcopy(valid)
+    wrong_fs["tables"][1]["rows"][0]["fs_div"] = "CFS"
+    invalid.append(wrong_fs)
+
+    extra_column = deepcopy(valid)
+    extra_column["tables"][0]["columns"].append({
+        "field": "enterprise_value",
+        "label": "기업가치",
+    })
+    extra_column["tables"][0]["rows"][0]["enterprise_value"] = 999
+    invalid.append(extra_column)
+
+    extra_row_field = deepcopy(valid)
+    extra_row_field["tables"][1]["rows"][0]["enterprise_value"] = 999
+    invalid.append(extra_row_field)
+
+    bad_key = deepcopy(valid)
+    bad_key["tables"][0]["rows"][0]["key"] = "enterprise_value"
+    invalid.append(bad_key)
+
+    nonfinite = deepcopy(valid)
+    nonfinite["tables"][0]["rows"][0]["value"] = float("inf")
+    invalid.append(nonfinite)
+
+    wrong_basis = deepcopy(valid)
+    wrong_basis["tables"][0]["rows"][0]["basis"] = "source_actual"
+    invalid.append(wrong_basis)
+
+    missing_context = deepcopy(valid)
+    missing_context.pop("request_context")
+    invalid.append(missing_context)
+
+    for payload in invalid:
+        with pytest.raises((ValidationError, ValueError), match="DCF"):
+            build_visualization_pack(payload)
 
 
 def test_ratio_units_and_quality_metadata_have_markdown_html_fact_parity():
