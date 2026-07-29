@@ -197,17 +197,22 @@ def test_legacy_detail_uses_public_source_labels(tool_name, payload, internal_na
     assert internal_name not in text
 
 
-@pytest.mark.parametrize("tool_name,payload", [
-    ("get_quality_of_earnings_pack", {"metrics": {"years": 3}}),
-    ("compare_to_industry_multi", {"results": {2025: {"ROE": {"percentile": 50}}}}),
-    ("get_subsidiary_auditors", {"consolidated_totals": {"assets_amount_m": 1000}}),
+@pytest.mark.parametrize("tool_name,payload,expected_status", [
+    ("get_quality_of_earnings_pack", {"metrics": {"years": 3}}, "limited"),
+    ("compare_to_industry_multi", {"results": {2025: {"ROE": {"percentile": 50}}}}, "missing"),
+    ("get_subsidiary_auditors", {"consolidated_totals": {"assets_amount_m": 1000}}, "missing"),
 ])
-def test_inferred_limited_quality_never_has_optimistic_legacy_detail(tool_name, payload):
+def test_inferred_sparse_quality_never_has_optimistic_legacy_detail(
+    tool_name, payload, expected_status,
+):
     text = render_answer(tool_name, payload)
 
     assert text is not None
     assert "판정: usable" not in text
-    assert "세부 결과:\n판정: limited" in text
+    if expected_status == "missing":
+        assert text.startswith("판정:\n- missing")
+    else:
+        assert f"세부 결과:\n판정: {expected_status}" in text
 
 
 def test_dcf_detail_uses_public_assumption_labels_and_safe_basis_text():

@@ -206,7 +206,7 @@ def test_user_api_key_is_redacted_on_every_compatibility_surface(
         ("x", "database unavailable"),
     ],
 )
-def test_secret_sanitizer_does_not_over_redact_empty_or_short_unrelated_text(
+def test_handler_failure_hides_unrelated_exception_for_empty_or_short_secret(
     monkeypatch,
     secret,
     message,
@@ -230,8 +230,9 @@ def test_secret_sanitizer_does_not_over_redact_empty_or_short_unrelated_text(
         "fetch_disclosure_on_demand",
         {"rcept_no": "20250711000001", "user_dart_api_key": secret},
     ).model_dump_json()
-    assert message in serialized
-    assert "[REDACTED]" not in serialized
+    assert message not in serialized
+    assert "로컬 캐시 스키마 또는 준비된 데이터에 접근할 수 없습니다." in serialized
+    assert "[REDACTED]" in serialized
 
 
 def test_compat_handlers_return_raw_domain_result_and_trim_required_strings():

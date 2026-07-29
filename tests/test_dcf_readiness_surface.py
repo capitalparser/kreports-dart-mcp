@@ -146,7 +146,8 @@ def test_unavailable_dcf_model_suppresses_value_bridge_and_chart():
     assert pack["summary"]["domain_status"] == "calculation_unavailable"
     assert {table["id"] for table in pack["tables"]}.isdisjoint({"dcf_valuation_bridge", "dcf_sensitivity"})
     assert not pack["charts"]
-    assert answer.startswith("산출 불가: 필수 입력 또는 공시 실제값이 부족하여 기업가치를 계산하지 않았습니다.")
+    assert answer.startswith("판정:")
+    assert "산출 불가: 필수 입력 또는 공시 실제값이 부족하여 기업가치를 계산하지 않았습니다." in answer
     assert "기업가치: None" not in answer
 
 
@@ -172,7 +173,8 @@ def test_dcf_candidate_public_answer_and_pack_keep_readiness_separate():
     answer = render_answer("get_dcf_input_candidates", result)
     pack = build_answer_pack("get_dcf_input_candidates", result)
 
-    assert answer.startswith("DCF 입력 후보 상태: usable\n가치평가 준비도: blocked")
+    assert answer.startswith("판정:")
+    assert "DCF 입력 후보 상태: usable\n가치평가 준비도: blocked" in answer
     assert pack is not None
     assert pack["summary"]["domain_status"] == "blocked"
     assert any(table["id"] == "valuation_blockers" for table in pack["tables"])
@@ -200,7 +202,8 @@ def test_enriched_dcf_candidate_keeps_public_readiness_and_input_immutable():
     out = _attach_meta("get_dcf_input_candidates", raw)
 
     assert raw == before
-    assert out["answer"].startswith("DCF 입력 후보 상태: usable\n가치평가 준비도: blocked")
+    assert out["answer"].startswith("판정:")
+    assert "DCF 입력 후보 상태: usable\n가치평가 준비도: blocked" in out["answer"]
     assert out["answer_pack"]["summary"]["domain_status"] == "blocked"
     assert any(table["id"] == "valuation_blockers" for table in out["answer_pack"]["tables"])
 
@@ -279,8 +282,10 @@ def test_enterprise_value_none_overrides_stale_calculated_public_fields():
         resource = read_resource(pack["resource_uri"])["text"]
         assert stale_value not in resource
         assert "누락 공시 실제값" in resource
-    assert direct_answer.startswith("산출 불가:")
-    assert enriched["answer"].startswith("산출 불가:")
+    assert direct_answer.startswith("판정:")
+    assert enriched["answer"].startswith("판정:")
+    assert "산출 불가:" in direct_answer
+    assert "산출 불가:" in enriched["answer"]
     assert "누락 공시 실제값" in direct_answer
     assert stale_value not in str(direct_pack)
     assert stale_value not in str(enriched)
@@ -468,7 +473,8 @@ def test_dcf_source_error_keeps_safe_readiness_pack_and_quarantines_exception():
     assert direct_pack is not None
     assert enriched["answer_pack"] is not None
     for answer in (direct_answer, enriched["answer"]):
-        assert answer.startswith("산출 불가:")
+        assert answer.startswith("판정:")
+        assert "산출 불가:" in answer
         assert "누락 공시 실제값" in answer
     for pack in (direct_pack, enriched["answer_pack"]):
         assert any(table["id"] == "dcf_missing_accounts" for table in pack["tables"])
@@ -699,7 +705,8 @@ def test_exact_company_resolution_error_has_canonical_dcf_availability_pack(
     )
     assert direct_pack is not None
     assert enriched["answer_pack"] is not None
-    assert enriched["answer"].startswith("산출 불가:")
+    assert enriched["answer"].startswith("판정:")
+    assert "산출 불가:" in enriched["answer"]
     resource = read_resource(enriched["answer_pack"]["resource_uri"])["text"]
     assert "누락 공시 실제값" in resource
     assert "OFS" in resource

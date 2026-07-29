@@ -14,6 +14,8 @@ from typer.testing import CliRunner
 
 
 def _minimal_manifest_payload() -> dict:
+    from kreports.release_artifact import FROZEN_TOOL_COUNT, FROZEN_TOOL_WIRE_SHA256
+
     return {
         "artifact_version": "1.0",
         "generated_at": "2026-07-27T00:00:00Z",
@@ -33,10 +35,8 @@ def _minimal_manifest_payload() -> dict:
         },
         "tool_contract": {
             "version": "1.0",
-            "tool_count": 32,
-            "wire_sha256": (
-                "055f54993bf45f2e4a1388642871d09c1e2f45fc0b5fde1e83228bb910b38339"
-            ),
+            "tool_count": FROZEN_TOOL_COUNT,
+            "wire_sha256": FROZEN_TOOL_WIRE_SHA256,
         },
         "release_gate": {
             "profile": "public_runtime",
@@ -49,7 +49,7 @@ def _minimal_manifest_payload() -> dict:
         },
         "inline_raw_count": 0,
         "contracts": {
-            "all_tools": {"passed": True, "checks": 32},
+            "all_tools": {"passed": True, "checks": FROZEN_TOOL_COUNT},
             "golden_contract_sha256": "b" * 64,
             "golden_contract_passed": True,
         },
@@ -673,7 +673,7 @@ def test_release_gate_readiness_predicate_requires_ok_and_no_failures():
         "dataset_version": "fixture",
         "required_failures": [],
         "degraded_features": [],
-        "tool_count": 32,
+        "tool_count": 33,
     }
     assert release_gate_is_ready(ambiguous) is False
 
@@ -856,7 +856,7 @@ def test_readyz_and_manifest_share_the_same_fail_closed_predicate(monkeypatch):
         "dataset_version": "fixture",
         "required_failures": [],
         "degraded_features": [],
-        "tool_count": 32,
+        "tool_count": 33,
     }
     monkeypatch.setattr(
         http_server,

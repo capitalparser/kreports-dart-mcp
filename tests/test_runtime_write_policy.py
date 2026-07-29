@@ -217,7 +217,7 @@ def test_release_gate_reports_stale_running_backfill_without_repairing_it(temp_e
 
     assert report["profile"] == "public_runtime"
     assert "stale_backfill_run" in report["required_failures"]
-    assert report["tool_count"] == 32
+    assert report["tool_count"] == 33
 
 
 def test_release_gate_fails_closed_without_manifest_contract(temp_engine, monkeypatch):
