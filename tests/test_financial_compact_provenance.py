@@ -285,3 +285,61 @@ def test_compact_snapshot_does_not_confirm_converted_unit_for_unproven_values(
         "source_table": "financial_facts_compact",
         "citation_basis": "company_year_annual_filing_match",
     }
+
+
+def test_compact_snapshot_limits_provenance_to_returned_years_across_surfaces(
+    temp_engine,
+):
+    """A hidden prior year must not downgrade the requested latest-year snapshot."""
+    from sqlalchemy import text
+
+    from kreports.analysis.financial_analysis import (
+        _financial_snapshot_from_compact,
+        get_financial_snapshot,
+    )
+    from kreports.db.engine import get_session
+    from kreports.mcp.handlers.company import handle_get_financial_snapshot
+    from kreports.mcp.input_models import GetFinancialSnapshotInput
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+            ('00126380', 2023, 'CFS', 'assets', '자산총계', 200000000,
+             'financial_facts', NULL, 'instant', '20240318000001',
+             '사업보고서 (2023.12)', 'company_year_annual_filing_match',
+             'limited', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', 'KRW', 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    raw = _financial_snapshot_from_compact("00126380", "CFS", 1)
+    public = get_financial_snapshot("00126380", years=1)
+    mcp = handle_get_financial_snapshot(
+        GetFinancialSnapshotInput(company="00126380", years=1)
+    )
+
+    for result in (raw, public, mcp):
+        assert result["row_count"] == 1
+        assert result["rows"][0]["연도"] == 2024
+        assert result["unit"] == "억원"
+        assert result["data_quality"]["status"] == "usable"
+        assert "limitations" not in result["data_quality"]
+        assert result["rows"][0]["source"]["rcept_no"] == "20250318000001"
+
+    two_years = _financial_snapshot_from_compact("00126380", "CFS", 2)
+
+    assert [row["연도"] for row in two_years["rows"]] == [2023, 2024]
+    assert two_years["unit"] is None
+    assert two_years["data_quality"]["status"] == "limited"
+    assert {
+        "unit_unproven:assets",
+        "quality_limited:assets",
+    }.issubset(set(two_years["data_quality"]["limitations"]))

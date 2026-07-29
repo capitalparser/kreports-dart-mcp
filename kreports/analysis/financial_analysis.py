@@ -357,7 +357,7 @@ def _financial_snapshot_from_compact(
 
     grouped: dict[int, dict[str, float | None]] = {}
     persisted_citations: dict[int, set[tuple[object, object, object]]] = {}
-    provenance_limitations: set[str] = set()
+    provenance_limitations_by_year: dict[int, set[str]] = {}
     displayed_metric_keys = {
         *_COMPACT_FINANCIAL_FIELD_MAP,
         "purchase_ppe",
@@ -376,11 +376,15 @@ def _financial_snapshot_from_compact(
                 row.get("citation_basis"),
             ))
             if amount is not None and metric in displayed_metric_keys:
+                year_limitations = provenance_limitations_by_year.setdefault(
+                    year,
+                    set(),
+                )
                 if row.get("unit") != "KRW":
-                    provenance_limitations.add(f"unit_unproven:{metric}")
+                    year_limitations.add(f"unit_unproven:{metric}")
                 quality_status = str(row.get("quality_status") or "").strip()
                 if quality_status != "usable":
-                    provenance_limitations.add(
+                    year_limitations.add(
                         f"quality_limited:{metric}"
                         if quality_status == "limited"
                         else f"quality_unproven:{metric}"
@@ -444,6 +448,14 @@ def _financial_snapshot_from_compact(
     if years is not None:
         out_rows = out_rows[-int(years):]
 
+    provenance_limitations = {
+        limitation
+        for row in out_rows
+        for limitation in provenance_limitations_by_year.get(
+            int(row["연도"]),
+            set(),
+        )
+    }
     out_df = pd.DataFrame(out_rows)
     selected_cols = [c for c in _ANNUAL_FIELDS if c in out_df.columns] if not out_df.empty else []
     serialized_rows = _df_to_records(out_df[selected_cols]) if selected_cols else []
