@@ -11,6 +11,87 @@ import pytest
 
 
 _TEST_CAPABILITY = "ab" * 32
+_EXPECTED_PROFESSIONAL_TOOLS = (
+    "prepare_standard_audit_hours_inputs",
+    "compare_peer_audit_fees",
+    "build_audit_acceptance_pack",
+    "compare_peer_risk_profile",
+    "get_audit_history",
+    "get_audit_report_sections",
+    "search_audit_report_matters",
+    "compare_peer_audit_report_matters",
+    "get_kam_lifecycle",
+    "compare_peer_kam_topics",
+    "get_financial_snapshot",
+    "compare_to_industry_multi",
+    "get_investor_signals",
+    "search_disclosure_events",
+    "get_quality_of_earnings_pack",
+    "get_dcf_input_candidates",
+    "build_dcf_model_pack",
+)
+
+
+def _semantic_snapshot_fixture(
+    **overrides: object,
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "ok": True,
+        "kam_count": 10,
+        "procedure_count": 8,
+        "kam_quality_by_year": {"2025": {"usable": 10}},
+        "procedure_quality_by_year": {"2025": {"usable": 8}},
+        "duplicate_logical_identities": [],
+        "integrity": {
+            "orphan_procedure_count": 0,
+            "cross_receipt_source_ordinal_link_count": 0,
+            "usable_response_without_procedure_count": 0,
+        },
+        "semantic_sha256": "b" * 64,
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
+def _mcp_row(
+    tool: str,
+    *,
+    status: str = "usable",
+    limitation_count: int = 0,
+    **overrides: object,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "tool": tool,
+        "status": status,
+        "domain_verdict": None,
+        "fact_count": 1,
+        "evidence_count": 1,
+        "pack_status": status,
+        "table_ids": [],
+        "source_count": 0,
+        "resource_checked": False,
+        "first_answer_paragraph": "bounded answer",
+        "limitation_count": limitation_count,
+    }
+    row.update(overrides)
+    return row
+
+
+def _valid_mcp_payload(
+    *,
+    row_overrides: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    overrides = row_overrides or {}
+    return {
+        "ok": True,
+        "tool_count": 17,
+        "schema_error_closed": True,
+        "all_boundary_parity": True,
+        "matrix": [
+            _mcp_row(tool, **overrides.get(tool, {}))
+            for tool in _EXPECTED_PROFESSIONAL_TOOLS
+        ],
+    }
 
 
 def _install_fake_worker(tmp_path: Path, body: str) -> None:
@@ -177,6 +258,48 @@ def test_invoke_worker_rejects_capability_in_child_output(
     )
 
 
+@pytest.mark.parametrize("transform", ["upper", "mixed"])
+def test_invoke_worker_rejects_equivalent_hex_capability_case(
+    tmp_path: Path,
+    transform: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        WorkerInvocation,
+        invoke_worker,
+    )
+
+    _install_fake_worker(
+        tmp_path,
+        f"""
+import json
+import os
+capability = os.environ["KREPORTS_REHEARSAL_CAPABILITY"]
+if {transform!r} == "upper":
+    disclosed = capability.upper()
+else:
+    disclosed = "".join(
+        character.upper() if index % 2 else character
+        for index, character in enumerate(capability)
+    )
+print(json.dumps({{"ok": True, "disclosed": disclosed}}))
+""".strip(),
+    )
+
+    with pytest.raises(RehearsalRunError) as caught:
+        invoke_worker(
+            python_executable=Path(sys.executable),
+            database=tmp_path / "clone.db",
+            marker_path=(
+                tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+            ),
+            capability=_TEST_CAPABILITY,
+            invocation=WorkerInvocation("migrate", "collector"),
+        )
+
+    assert caught.value.code == "worker_capability_disclosed"
+
+
 def test_invoke_worker_adds_year_only_for_year_scoped_actions(
     tmp_path: Path,
 ) -> None:
@@ -225,7 +348,10 @@ def _install_phase_harness(
     fail_year: int | None = None,
     mcp_payload: dict[str, object] | None = None,
     snapshot_drift: bool = False,
+    snapshot_payload: dict[str, object] | None = None,
     expected_capability: str | None = None,
+    fail_preflight_code: str | None = None,
+    source_change_check: int | None = None,
 ) -> tuple[Path, Path, Path, list[tuple[object, ...]]]:
     from kreports.maintenance import kam_backfill_rehearsal as rehearsal
 
@@ -236,6 +362,7 @@ def _install_phase_harness(
     repository_root = tmp_path / "repository"
     repository_root.mkdir()
     calls: list[tuple[object, ...]] = []
+    source_check_count = 0
 
     def identity(path: Path) -> SimpleNamespace:
         return SimpleNamespace(
@@ -255,13 +382,16 @@ def _install_phase_harness(
         min_free_bytes: int,
     ) -> SimpleNamespace:
         calls.append(("preflight", source_db, target_dir, min_free_bytes))
+        if fail_preflight_code is not None:
+            raise SimpleSafetyError(
+                fail_preflight_code,
+                "bounded preflight failure",
+            )
         return SimpleNamespace(
             source=identity(source_db),
             rehearsal_dir=target_dir,
-            repository_root=repository_root,
             free_bytes=20 * 1024**3,
             filesystem_type="apfs",
-            enforced_min_free_bytes=min_free_bytes,
         )
 
     def assert_space(path: Path, *, min_free_bytes: int) -> int:
@@ -277,7 +407,14 @@ def _install_phase_harness(
         return identity(clone_path)
 
     def unchanged(expected: SimpleNamespace) -> SimpleNamespace:
+        nonlocal source_check_count
+        source_check_count += 1
         calls.append(("source-unchanged", expected.sha256))
+        if source_check_count == source_change_check:
+            raise SimpleSafetyError(
+                "source_changed",
+                "source identity changed",
+            )
         return expected
 
     class SimpleSafetyError(RuntimeError):
@@ -322,32 +459,19 @@ def _install_phase_harness(
             )
         if invocation.action == "semantic-snapshot":
             snapshot_index += 1
-            return {
-                "ok": True,
-                "semantic_sha256": (
-                    "c" * 64
-                    if snapshot_drift and snapshot_index == 3
-                    else "b" * 64
-                ),
-                "counts": {"kam_items": 10, "audit_procedure_items": 8},
-                "year_quality": {"2025": {"usable": 2}},
-                "integrity": {
-                    "duplicate_identity_count": 0,
-                    "orphan_procedure_count": 0,
-                },
-                "snapshot_index": snapshot_index,
-            }
+            payload = dict(
+                snapshot_payload
+                if snapshot_payload is not None
+                else _semantic_snapshot_fixture()
+            )
+            payload["semantic_sha256"] = (
+                "c" * 64
+                if snapshot_drift and snapshot_index == 3
+                else payload.get("semantic_sha256")
+            )
+            return payload
         if invocation.action == "mcp-validate":
-            return mcp_payload or {
-                "ok": True,
-                "tool_count": 17,
-                "schema_error_closed": True,
-                "all_boundary_parity": True,
-                "matrix": [
-                    {"tool": f"professional_tool_{index}", "status": "usable"}
-                    for index in range(17)
-                ],
-            }
+            return mcp_payload or _valid_mcp_payload()
         return {"ok": True, "action": invocation.action, "year": invocation.year}
 
     monkeypatch.setattr(rehearsal, "invoke_worker", worker)
@@ -426,7 +550,7 @@ def test_rehearsal_creates_bound_marker_after_clone_before_workers(
         rehearsal_dir=rehearsal_dir,
         repository_root=repository_root,
         python_executable=Path(sys.executable),
-        min_free_bytes=10 * 1024**3,
+        min_free_bytes=12 * 1024**3,
     )
 
     marker_path = Path(report["marker_path"])
@@ -569,6 +693,118 @@ def test_rehearsal_fails_closed_when_second_pass_digest_changes(
     assert report["phases"][-1]["status"] == "failed"
 
 
+@pytest.mark.parametrize(
+    ("source_change_check", "expected_phase"),
+    [
+        (1, "clone_created"),
+        (2, "schema_migrated"),
+    ],
+)
+def test_source_change_always_classifies_live_digest_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_change_check: int,
+    expected_phase: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        source_change_check=source_change_check,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+
+    assert report["status"] == "live_digest_changed"
+    assert report["last_phase"] == expected_phase
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        pytest.param({"ok": True}, id="missing-all-evidence"),
+        pytest.param(
+            _semantic_snapshot_fixture(semantic_sha256="B" * 64),
+            id="non-lowercase-digest",
+        ),
+        pytest.param(
+            _semantic_snapshot_fixture(
+                kam_count=0,
+                procedure_count=0,
+                kam_quality_by_year={},
+                procedure_quality_by_year={},
+            ),
+            id="empty-count-and-quality-structures",
+        ),
+        pytest.param(
+            _semantic_snapshot_fixture(integrity={
+                "orphan_procedure_count": 0,
+                "cross_receipt_source_ordinal_link_count": 0,
+            }),
+            id="missing-integrity-counter",
+        ),
+        pytest.param(
+            _semantic_snapshot_fixture(integrity={
+                "orphan_procedure_count": -1,
+                "cross_receipt_source_ordinal_link_count": 0,
+                "usable_response_without_procedure_count": 0,
+            }),
+            id="negative-integrity-counter",
+        ),
+        pytest.param(
+            _semantic_snapshot_fixture(integrity={
+                "orphan_procedure_count": 1,
+                "cross_receipt_source_ordinal_link_count": 0,
+                "usable_response_without_procedure_count": 0,
+            }),
+            id="positive-integrity-blocker",
+        ),
+        pytest.param(
+            _semantic_snapshot_fixture(
+                duplicate_logical_identities=[{
+                    "rcept_no": "20250000000000",
+                    "source_type": "audit_report",
+                    "ordinal": 1,
+                    "count": 2,
+                }],
+            ),
+            id="duplicate-logical-identity-blocker",
+        ),
+    ],
+)
+def test_rehearsal_rejects_malformed_or_adverse_semantic_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: dict[str, object],
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        snapshot_payload=snapshot,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+
+    assert report["status"] == "backfill_failed"
+    assert report["last_phase"] == "kam_rebuild_complete"
+    assert report["phases"][-1]["status"] == "failed"
+
+
 def test_rehearsal_rejects_existing_clone_and_exact_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -636,6 +872,59 @@ def test_rehearsal_rejects_free_space_floor_override(
 
     assert caught.value.code == "min_free_bytes_below_floor"
     assert not list(rehearsal_dir.iterdir())
+
+
+def test_preflight_rejection_writes_nothing_and_cli_prints_empty_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
+
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        fail_preflight_code="unsafe_rehearsal_directory",
+    )
+    report = rehearsal.run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+
+    assert report["status"] == "preflight_blocked"
+    assert report["report_path"] == ""
+    assert report["markdown_report_path"] == ""
+    assert not list(rehearsal_dir.iterdir())
+
+    monkeypatch.setattr(
+        rehearsal,
+        "run_kam_schema_backfill_rehearsal",
+        lambda **_: report,
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "rehearse-kam-schema-backfill",
+            "--source-db",
+            str(source),
+            "--rehearsal-dir",
+            str(rehearsal_dir),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout.splitlines() == [
+        "status=preflight_blocked",
+        "json_report=",
+        "markdown_report=",
+        "clone=",
+        "clone_retained=false",
+        "live_sha256_unchanged=false",
+    ]
 
 
 def _terminal_report_fixture(status: str) -> dict[str, object]:
@@ -732,30 +1021,16 @@ def test_markdown_redacts_paths_secrets_raw_errors_and_receipt_arrays() -> None:
 
 
 @pytest.mark.parametrize(
-    ("matrix", "expected_status"),
+    ("limitation_count", "expected_status"),
     [
-        (
-            [{
-                "tool": "get_kam_lifecycle",
-                "status": "limited",
-                "limitation_count": 1,
-            }],
-            "data_quality_limited",
-        ),
-        (
-            [{
-                "tool": "get_kam_lifecycle",
-                "status": "limited",
-                "limitation_count": 0,
-            }],
-            "mcp_schema_closed",
-        ),
+        (1, "data_quality_limited"),
+        (0, "backfill_failed"),
     ],
 )
 def test_terminal_status_classifies_mcp_evidence_limitations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    matrix: list[dict[str, object]],
+    limitation_count: int,
     expected_status: str,
 ) -> None:
     from kreports.maintenance.kam_backfill_rehearsal import (
@@ -765,23 +1040,13 @@ def test_terminal_status_classifies_mcp_evidence_limitations(
     source, rehearsal_dir, repository_root, _ = _install_phase_harness(
         tmp_path,
         monkeypatch,
-        mcp_payload={
-            "ok": True,
-            "tool_count": 17,
-            "schema_error_closed": True,
-            "all_boundary_parity": True,
-            "matrix": [
-                *matrix,
-                *[
-                    {
-                        "tool": f"professional_tool_{index}",
-                        "status": "usable",
-                        "limitation_count": 0,
-                    }
-                    for index in range(16)
-                ],
-            ],
-        },
+        mcp_payload=_valid_mcp_payload(row_overrides={
+            "get_kam_lifecycle": {
+                "status": "limited",
+                "pack_status": "limited",
+                "limitation_count": limitation_count,
+            },
+        }),
     )
     report = run_kam_schema_backfill_rehearsal(
         source_db=source,
@@ -825,6 +1090,85 @@ def test_rehearsal_rejects_unclosed_mcp_schema_gate(
     assert report["status"] == "backfill_failed"
     assert report["last_phase"] == "mcp_validation_complete"
     assert report["phases"][-1]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "empty-rows",
+        "duplicate-tools",
+        "unexpected-tool",
+        "invalid-status",
+        "invalid-status-type",
+        "pack-status-mismatch",
+        "invalid-pack-status-type",
+        "invalid-resource-flag",
+        "limited-without-limitation",
+        "missing-without-limitation",
+        "missing-row-field",
+    ],
+)
+def test_rehearsal_rejects_malformed_mcp_matrix_before_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformation: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    payload = _valid_mcp_payload()
+    matrix = payload["matrix"]
+    assert isinstance(matrix, list)
+    if malformation == "empty-rows":
+        payload["matrix"] = [{} for _ in range(17)]
+    elif malformation == "duplicate-tools":
+        payload["matrix"] = [dict(matrix[0]) for _ in range(17)]
+    elif malformation == "unexpected-tool":
+        matrix[0]["tool"] = "not_a_professional_tool"
+    elif malformation == "invalid-status":
+        matrix[0]["status"] = "unknown"
+    elif malformation == "invalid-status-type":
+        matrix[0]["status"] = {"not": "canonical"}
+    elif malformation == "pack-status-mismatch":
+        matrix[0]["pack_status"] = "missing"
+    elif malformation == "invalid-pack-status-type":
+        matrix[0]["pack_status"] = {"not": "canonical"}
+    elif malformation == "invalid-resource-flag":
+        matrix[0]["resource_checked"] = "false"
+    elif malformation == "limited-without-limitation":
+        matrix[0].update({
+            "status": "limited",
+            "pack_status": "limited",
+            "limitation_count": 0,
+        })
+    elif malformation == "missing-without-limitation":
+        matrix[0].update({
+            "status": "missing",
+            "pack_status": "missing",
+            "limitation_count": 0,
+        })
+    else:
+        matrix[0].pop("first_answer_paragraph")
+
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        mcp_payload=payload,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+
+    assert report["status"] == "backfill_failed"
+    assert report["last_phase"] == "mcp_validation_complete"
+    assert report["phases"][-1]["status"] == "failed"
+    assert report["phases"][-1]["evidence"]["error_code"] == (
+        "mcp_schema_not_closed"
+    )
 
 
 @pytest.mark.parametrize(
@@ -930,6 +1274,53 @@ def test_cli_safety_failure_exits_two_and_prints_existing_report(
     assert result.exit_code == 2
     assert f"json_report={json_report}" in result.stdout
     assert "status=preflight_blocked" in result.stdout
+
+
+def test_cli_reports_exact_retained_clone_when_marker_creation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
+
+    source, rehearsal_dir, _, _ = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+    )
+
+    def fail_marker(**_: object) -> Path:
+        raise rehearsal.RehearsalRunError(
+            "rehearsal_marker_invalid",
+            "bounded marker failure",
+        )
+
+    monkeypatch.setattr(rehearsal, "_create_rehearsal_marker", fail_marker)
+    clone = (rehearsal_dir / "kreports-rehearsal.db").resolve()
+    result = CliRunner().invoke(
+        app,
+        [
+            "rehearse-kam-schema-backfill",
+            "--source-db",
+            str(source),
+            "--rehearsal-dir",
+            str(rehearsal_dir),
+        ],
+    )
+
+    assert result.exit_code == 2
+    output = result.stdout.splitlines()
+    assert output[0] == "status=preflight_blocked"
+    assert output[1].startswith("json_report=")
+    assert Path(output[1].partition("=")[2]).is_file()
+    assert output[2].startswith("markdown_report=")
+    assert Path(output[2].partition("=")[2]).is_file()
+    assert output[3:] == [
+        f"clone={clone}",
+        "clone_retained=true",
+        "live_sha256_unchanged=false",
+    ]
 
 
 @pytest.mark.parametrize(

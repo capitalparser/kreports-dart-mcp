@@ -9,6 +9,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 from typing import Literal
@@ -29,6 +30,45 @@ PHASES = (
 MIN_FREE_BYTES = 10 * 1024**3
 MAX_WORKER_OUTPUT_BYTES = 2 * 1024**2
 MARKER_FILENAME = "kam-schema-backfill-rehearsal-marker.json"
+_SEMANTIC_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_INTEGRITY_FIELDS = {
+    "orphan_procedure_count",
+    "cross_receipt_source_ordinal_link_count",
+    "usable_response_without_procedure_count",
+}
+_CANONICAL_MCP_STATUSES = {"usable", "limited", "missing", "error"}
+_EXPECTED_PROFESSIONAL_TOOLS = (
+    "prepare_standard_audit_hours_inputs",
+    "compare_peer_audit_fees",
+    "build_audit_acceptance_pack",
+    "compare_peer_risk_profile",
+    "get_audit_history",
+    "get_audit_report_sections",
+    "search_audit_report_matters",
+    "compare_peer_audit_report_matters",
+    "get_kam_lifecycle",
+    "compare_peer_kam_topics",
+    "get_financial_snapshot",
+    "compare_to_industry_multi",
+    "get_investor_signals",
+    "search_disclosure_events",
+    "get_quality_of_earnings_pack",
+    "get_dcf_input_candidates",
+    "build_dcf_model_pack",
+)
+_MCP_ROW_FIELDS = {
+    "tool",
+    "status",
+    "domain_verdict",
+    "fact_count",
+    "evidence_count",
+    "pack_status",
+    "table_ids",
+    "source_count",
+    "resource_checked",
+    "first_answer_paragraph",
+    "limitation_count",
+}
 _WORKER_TIMEOUT_SECONDS = {
     "migrate": 600,
     "kam-dry-run": 900,
@@ -157,7 +197,8 @@ def invoke_worker(
             "worker_execution_failed",
             "Worker could not complete within its bounded execution window.",
         ) from exc
-    if capability in completed.stdout or capability in completed.stderr:
+    serialized_output = f"{completed.stdout}\n{completed.stderr}".lower()
+    if capability.lower() in serialized_output:
         raise RehearsalRunError(
             "worker_capability_disclosed",
             "Worker output disclosed its one-run rehearsal capability.",
@@ -402,21 +443,160 @@ def _finalize_report(
 def _classify_completed_mcp(payload: dict[str, object]) -> str:
     matrix = payload.get("matrix")
     rows = matrix if isinstance(matrix, list) else []
-    incomplete = [
-        row
+    statuses = {
+        row.get("status")
         for row in rows
         if isinstance(row, dict)
-        and row.get("status") in {"limited", "missing"}
-    ]
-    if not incomplete:
-        return "complete"
-    if all(
-        isinstance(row.get("limitation_count"), int)
-        and int(row["limitation_count"]) > 0
-        for row in incomplete
-    ):
+    }
+    if statuses & {"limited", "missing"}:
         return "data_quality_limited"
-    return "mcp_schema_closed"
+    if "error" in statuses:
+        return "mcp_schema_closed"
+    return "complete"
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _valid_quality_distribution(
+    value: object,
+    *,
+    expected_count: int,
+) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    total = 0
+    for year, statuses in value.items():
+        if not isinstance(year, str) or not year:
+            return False
+        if not isinstance(statuses, dict) or not statuses:
+            return False
+        for status, count in statuses.items():
+            if (
+                not isinstance(status, str)
+                or not status
+                or not _is_nonnegative_int(count)
+                or int(count) == 0
+            ):
+                return False
+            total += int(count)
+    return total == expected_count
+
+
+def _validate_semantic_snapshot(snapshot: dict[str, object]) -> None:
+    digest = snapshot.get("semantic_sha256")
+    kam_count = snapshot.get("kam_count")
+    procedure_count = snapshot.get("procedure_count")
+    integrity = snapshot.get("integrity")
+    duplicates = snapshot.get("duplicate_logical_identities")
+    if (
+        not isinstance(digest, str)
+        or not _SEMANTIC_SHA256.fullmatch(digest)
+        or not _is_nonnegative_int(kam_count)
+        or not _is_nonnegative_int(procedure_count)
+        or int(kam_count) == 0
+        or int(procedure_count) == 0
+        or not _valid_quality_distribution(
+            snapshot.get("kam_quality_by_year"),
+            expected_count=int(kam_count),
+        )
+        or not _valid_quality_distribution(
+            snapshot.get("procedure_quality_by_year"),
+            expected_count=int(procedure_count),
+        )
+        or not isinstance(integrity, dict)
+        or set(integrity) != _INTEGRITY_FIELDS
+        or not all(
+            _is_nonnegative_int(integrity[field])
+            for field in _INTEGRITY_FIELDS
+        )
+        or not isinstance(duplicates, list)
+    ):
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Semantic snapshot evidence is missing or malformed.",
+        )
+    if duplicates or any(
+        int(integrity[field]) > 0
+        for field in _INTEGRITY_FIELDS
+    ):
+        raise RehearsalRunError(
+            "semantic_snapshot_blocked",
+            "Semantic snapshot contains an integrity blocker.",
+        )
+
+
+def _validate_mcp_payload(payload: dict[str, object]) -> None:
+    matrix = payload.get("matrix")
+    if (
+        payload.get("tool_count") != len(_EXPECTED_PROFESSIONAL_TOOLS)
+        or payload.get("schema_error_closed") is not True
+        or payload.get("all_boundary_parity") is not True
+        or not isinstance(matrix, list)
+        or len(matrix) != len(_EXPECTED_PROFESSIONAL_TOOLS)
+    ):
+        raise RehearsalRunError(
+            "mcp_schema_not_closed",
+            "Professional MCP schema and parity gates did not close.",
+        )
+
+    observed_tools: set[str] = set()
+    for row in matrix:
+        if not isinstance(row, dict) or set(row) != _MCP_ROW_FIELDS:
+            raise RehearsalRunError(
+                "mcp_schema_not_closed",
+                "Professional MCP matrix row is malformed.",
+            )
+        tool = row.get("tool")
+        status = row.get("status")
+        pack_status = row.get("pack_status")
+        table_ids = row.get("table_ids")
+        if (
+            not isinstance(tool, str)
+            or tool not in _EXPECTED_PROFESSIONAL_TOOLS
+            or tool in observed_tools
+            or not isinstance(status, str)
+            or status not in _CANONICAL_MCP_STATUSES
+            or (
+                pack_status is not None
+                and (
+                    not isinstance(pack_status, str)
+                    or pack_status != status
+                )
+            )
+            or type(row.get("resource_checked")) is not bool
+            or not isinstance(row.get("first_answer_paragraph"), str)
+            or not isinstance(table_ids, list)
+            or not all(
+                isinstance(table_id, str) and bool(table_id)
+                for table_id in table_ids
+            )
+            or not all(
+                _is_nonnegative_int(row.get(field))
+                for field in (
+                    "fact_count",
+                    "evidence_count",
+                    "source_count",
+                    "limitation_count",
+                )
+            )
+            or (
+                status in {"limited", "missing"}
+                and int(row["limitation_count"]) == 0
+            )
+        ):
+            raise RehearsalRunError(
+                "mcp_schema_not_closed",
+                "Professional MCP matrix row failed its closure contract.",
+            )
+        observed_tools.add(tool)
+
+    if observed_tools != set(_EXPECTED_PROFESSIONAL_TOOLS):
+        raise RehearsalRunError(
+            "mcp_schema_not_closed",
+            "Professional MCP matrix does not cover the expected tools.",
+        )
 
 
 def _phase_record(
@@ -435,15 +615,13 @@ def _phase_record(
 
 
 def _failure_status(phase: str, error: BaseException) -> str:
+    if getattr(error, "code", "") == "source_changed":
+        return "live_digest_changed"
     if phase in {"source_preflight", "clone_created"}:
         return "preflight_blocked"
     if phase == "schema_migrated":
         return "migration_failed"
-    if phase == "live_immutability_verified" or getattr(
-        error,
-        "code",
-        "",
-    ) == "source_changed":
+    if phase == "live_immutability_verified":
         return "live_digest_changed"
     return "backfill_failed"
 
@@ -451,7 +629,14 @@ def _failure_status(phase: str, error: BaseException) -> str:
 def _snapshot_integrity(snapshot: dict[str, object]) -> dict[str, object]:
     return {
         key: snapshot.get(key)
-        for key in ("counts", "year_quality", "integrity")
+        for key in (
+            "kam_count",
+            "procedure_count",
+            "kam_quality_by_year",
+            "procedure_quality_by_year",
+            "duplicate_logical_identities",
+            "integrity",
+        )
     }
 
 
@@ -469,8 +654,6 @@ def run_kam_schema_backfill_rehearsal(
             "min_free_bytes_below_floor",
             "Rehearsal free-space floor cannot be lower than 10 GiB.",
         )
-    writer = _ReportWriter(rehearsal_dir)
-    capability = secrets.token_hex(32)
     report: dict[str, object] = {
         "schema_version": "kam-schema-backfill-rehearsal.v1",
         "status": "running",
@@ -480,7 +663,8 @@ def run_kam_schema_backfill_rehearsal(
         "source": None,
         "clone": None,
         "clone_path": None,
-        "report_path": str(writer.path.resolve()),
+        "report_path": "",
+        "markdown_report_path": "",
         "marker_path": None,
         "phases": [],
     }
@@ -489,6 +673,49 @@ def run_kam_schema_backfill_rehearsal(
     preflight_result = None
     clone_path = rehearsal_dir / "kreports-rehearsal.db"
     marker_path: Path | None = None
+
+    def preflight_operation() -> dict[str, object]:
+        nonlocal safety, expected_source, preflight_result
+        safety = _load_safety()
+        preflight_result = safety.preflight_rehearsal(
+            source_db,
+            rehearsal_dir,
+            repository_root=repository_root,
+            min_free_bytes=min_free_bytes,
+        )
+        expected_source = preflight_result.source
+        report["source"] = _identity_payload(preflight_result.source)
+        return {
+            "free_bytes": preflight_result.free_bytes,
+            "filesystem_type": preflight_result.filesystem_type,
+            "source": _identity_payload(preflight_result.source),
+        }
+
+    preflight_started_at = _timestamp()
+    report["last_phase"] = "source_preflight"
+    try:
+        preflight_evidence = preflight_operation()
+    except Exception as exc:
+        report["phases"].append(_phase_record(
+            "source_preflight",
+            "failed",
+            preflight_started_at,
+            {"error_code": getattr(exc, "code", "unexpected_failure")},
+        ))
+        report["status"] = _failure_status("source_preflight", exc)
+        report["finished_at"] = _timestamp()
+        return report
+
+    report["phases"].append(_phase_record(
+        "source_preflight",
+        "complete",
+        preflight_started_at,
+        preflight_evidence,
+    ))
+    writer = _ReportWriter(rehearsal_dir)
+    report["report_path"] = str(writer.path.resolve())
+    capability = secrets.token_hex(32)
+    writer.write(report)
 
     def persist_phase(
         name: str,
@@ -518,43 +745,24 @@ def run_kam_schema_backfill_rehearsal(
         writer.write(report)
         return evidence
 
-    def preflight_operation() -> dict[str, object]:
-        nonlocal safety, expected_source, preflight_result
-        safety = _load_safety()
-        preflight_result = safety.preflight_rehearsal(
-            source_db,
-            rehearsal_dir,
-            repository_root=repository_root,
-            min_free_bytes=min_free_bytes,
-        )
-        expected_source = preflight_result.source
-        report["source"] = _identity_payload(preflight_result.source)
-        return {
-            "free_bytes": preflight_result.free_bytes,
-            "filesystem_type": preflight_result.filesystem_type,
-            "source": _identity_payload(preflight_result.source),
-        }
-
-    if persist_phase("source_preflight", preflight_operation) is None:
-        return _finalize_report(report, writer)
-
     def clone_operation() -> dict[str, object]:
-        nonlocal marker_path
+        nonlocal clone_path, marker_path
         clone_identity = safety.create_apfs_clone(preflight_result)
+        clone_path = Path(clone_identity.path).resolve()
+        report["clone"] = _identity_payload(clone_identity)
+        report["clone_path"] = str(clone_path)
         marker_path = _create_rehearsal_marker(
             run_id=writer.run_id,
             source_identity=expected_source,
             clone_identity=clone_identity,
-            repository_root=preflight_result.repository_root,
+            repository_root=repository_root,
             rehearsal_dir=preflight_result.rehearsal_dir,
             filesystem_type=preflight_result.filesystem_type,
-            min_free_bytes=preflight_result.enforced_min_free_bytes,
+            min_free_bytes=MIN_FREE_BYTES,
             capability=capability,
         )
-        safety.assert_source_unchanged(expected_source)
-        report["clone"] = _identity_payload(clone_identity)
-        report["clone_path"] = str(Path(clone_identity.path).resolve())
         report["marker_path"] = str(marker_path)
+        safety.assert_source_unchanged(expected_source)
         return {
             "clone": _identity_payload(clone_identity),
             "marker": marker_path.name,
@@ -611,6 +819,7 @@ def run_kam_schema_backfill_rehearsal(
         snapshot_before = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
+        _validate_semantic_snapshot(snapshot_before)
         safety.assert_free_space(
             rehearsal_dir,
             min_free_bytes=min_free_bytes,
@@ -637,6 +846,7 @@ def run_kam_schema_backfill_rehearsal(
         snapshot_after_first = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
+        _validate_semantic_snapshot(snapshot_after_first)
         return {"years": years, "snapshot_after": snapshot_after_first}
 
     if persist_phase(
@@ -660,6 +870,7 @@ def run_kam_schema_backfill_rehearsal(
         snapshot_after_second = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
+        _validate_semantic_snapshot(snapshot_after_second)
         if (
             snapshot_after_first.get("semantic_sha256")
             != snapshot_after_second.get("semantic_sha256")
@@ -692,18 +903,7 @@ def run_kam_schema_backfill_rehearsal(
         mcp_payload = run_worker(
             WorkerInvocation("mcp-validate", "readonly"),
         )
-        matrix = mcp_payload.get("matrix")
-        if (
-            mcp_payload.get("tool_count") != 17
-            or mcp_payload.get("schema_error_closed") is not True
-            or mcp_payload.get("all_boundary_parity") is not True
-            or not isinstance(matrix, list)
-            or len(matrix) != 17
-        ):
-            raise RehearsalRunError(
-                "mcp_schema_not_closed",
-                "Professional MCP schema and parity gates did not close.",
-            )
+        _validate_mcp_payload(mcp_payload)
         safety.assert_source_unchanged(expected_source)
         return mcp_payload
 
