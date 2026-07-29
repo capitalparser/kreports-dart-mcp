@@ -12,6 +12,7 @@ import pytest
 def _source(year: int) -> dict[str, str]:
     receipt = f"{year + 1}0310002820"
     return {
+        "source_label": "공시",
         "rcept_no": receipt,
         "source_url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}",
     }
@@ -29,7 +30,7 @@ def _prepared_hours_result() -> dict:
                 "audit_fee_m": 200,
                 "audit_hours": 1000,
                 "hours_basis": "actual",
-                "input_status": "complete",
+                "input_status": "usable",
                 "missing_fields": [],
                 "financial_source": _source(year),
                 "audit_source": _source(year),
@@ -79,6 +80,28 @@ PRIORITY_TABLES = {
     "build_dcf_model_pack": "dcf_model_readiness",
 }
 
+PRIORITY_MINIMUM_ROWS = {
+    "prepare_standard_audit_hours_inputs": 3,
+    "compare_peer_audit_fees": 2,
+    "estimate_audit_hours_proxy": 1,
+    "build_audit_acceptance_pack": 7,
+    "compare_peer_risk_profile": 1,
+    "get_audit_history": 1,
+    "get_audit_report_sections": 1,
+    "search_audit_report_matters": 1,
+    "compare_peer_audit_report_matters": 2,
+    "get_kam_lifecycle": 1,
+    "compare_peer_kam_topics": 2,
+    "get_financial_snapshot": 5,
+    "select_peer_group": 1,
+    "compare_to_industry_multi": 5,
+    "get_investor_signals": 1,
+    "search_disclosure_events": 1,
+    "get_quality_of_earnings_pack": 1,
+    "get_dcf_input_candidates": 1,
+    "build_dcf_model_pack": 1,
+}
+
 
 def _quality(*, status: str = "limited") -> dict:
     return {
@@ -122,7 +145,14 @@ def _priority_result(name: str) -> dict:
         result["subject_metrics"] = {"audit_fee_m": 200, "audit_hours": 1000, "total_assets": 1000}
     elif name == "build_audit_acceptance_pack":
         result["data_quality"]["section_statuses"] = {
-            key: {"status": "limited", "required": True, "applicability": "applicable", "coverage": {"rows": 1}, "sources": [source], "blockers": []}
+            key: {
+                "status": "usable" if key == "kam" else "limited",
+                "required": True,
+                "applicability": "applicable",
+                "coverage": {"rows": 1},
+                "sources": [source],
+                "blockers": [],
+            }
             for key in ("peer_group", "audit_effort", "financial_risk", "audit_history", "accounting_policy", "kam", "audit_report_matters")
         }
     elif name == "compare_peer_risk_profile":
@@ -139,13 +169,56 @@ def _priority_result(name: str) -> dict:
         result["events"] = [{"year": 2025, "topic": "revenue", "status": "new", "title": "수익인식", "reason_hint": "추정", "procedure_hint": "검증"}]
     elif name == "compare_peer_kam_topics":
         result["subject_sections"] = [{"bsns_year": 2025, "section_key": "kam", "rcept_no": source["rcept_no"], "corp_name": "삼성전자", "kam_items": [{"normalized_topic": "revenue", "reason_text": "추정", "audit_response_text": "검증"}]}]
+        result["peer_section_samples"] = {"비교회사": [{
+            "bsns_year": 2025,
+            "section_key": "kam",
+            "rcept_no": source["rcept_no"],
+            "corp_name": "비교회사",
+            "kam_items": [{"normalized_topic": "inventory", "reason_text": "추정", "audit_response_text": "검증"}],
+        }]}
         result["audit_report_sections"] = {"semantic_complete": 1, "total": 1}
     elif name == "get_financial_snapshot":
-        result.update(unit="억원", rows=[{"연도": 2025, "구분": "CFS", "매출액": 1000, "영업이익": 100, "순이익": 80, "영업CF": 120, "매출성장률": 3, "영업이익률": 10, "source": source}])
+        result.update(unit="억원", rows=[
+            {
+                "연도": year,
+                "구분": "CFS",
+                "매출액": 1000 + (year - 2021) * 10,
+                "영업이익": 100,
+                "순이익": 80,
+                "영업CF": 120,
+                "매출성장률": 3,
+                "영업이익률": 10,
+                "source": _source(year),
+            }
+            for year in range(2021, 2026)
+        ])
     elif name == "select_peer_group":
         result["peer_selection"] = [{"company_name": "비교회사", "ksic": "264", "scale": 1000, "include_reason": "동일 업종"}]
     elif name == "compare_to_industry_multi":
-        result.update(fs_div_used="CFS", n_peers=2, metrics=["ROE"], results={2025: {"ROE": {"subject_value": 8, "percentile": 50, "p25": 5, "p50": 7, "p75": 9, "n": 2, "metric_n": 2, "cohort_n": 2, "missing_n": 0, "observed_n": 2, "aggregate_status": "available", "cohort_digest": "digest", "unit": "%", "source": source}}})
+        result.update(
+            fs_div_used="CFS",
+            n_peers=2,
+            metrics=["ROE"],
+            results={
+                year: {"ROE": {
+                    "subject_value": 8,
+                    "percentile": 50,
+                    "p25": 5,
+                    "p50": 7,
+                    "p75": 9,
+                    "n": 2,
+                    "metric_n": 2,
+                    "cohort_n": 2,
+                    "missing_n": 0,
+                    "observed_n": 2,
+                    "aggregate_status": "available",
+                    "cohort_digest": f"digest-{year}",
+                    "unit": "%",
+                    "source": _source(year),
+                }}
+                for year in range(2021, 2026)
+            },
+        )
     elif name == "get_investor_signals":
         result["quality_snapshot"] = {"checks": {"cash": {"name": "현금전환", "value": None, "status": "unknown", "meaning": "확인 필요"}}}
     elif name == "search_disclosure_events":
@@ -175,7 +248,24 @@ def test_each_priority_tool_has_a_material_canonical_public_pack(tool_name, tabl
     assert out["answer_pack"]["data_quality"]["status"] == out["data_quality"]["status"]
     table = next(table for table in out["answer_pack"]["tables"] if table["id"] == table_id)
     assert table_id != "availability"
-    assert len(table["rows"]) > 0
+    assert len(table["rows"]) >= PRIORITY_MINIMUM_ROWS[tool_name]
+    if tool_name == "compare_peer_audit_fees":
+        assert {row.get("role") for row in table["rows"]} >= {"subject", "peer"}
+    if tool_name in {
+        "compare_peer_audit_report_matters", "compare_peer_kam_topics",
+    }:
+        assert {row.get("role") for row in table["rows"]} >= {"대상회사", "비교회사"}
+    if tool_name == "get_financial_snapshot":
+        assert len({row.get("year") for row in table["rows"]}) == 5
+    if tool_name == "compare_to_industry_multi":
+        assert all(
+            row.get("metric") and row.get("n", 0) > 0
+            for row in table["rows"]
+        )
+    if tool_name == "build_audit_acceptance_pack":
+        status_by_area = {row["review_area"]: row["status"] for row in table["rows"]}
+        assert status_by_area["핵심감사사항"] == "usable"
+        assert status_by_area["감사 노력"] == "limited"
     has_sources_and_facts = (
         len(out["answer_pack"].get("sources") or []) >= 1
         and len(out.get("confirmed_facts") or []) >= 1
@@ -315,6 +405,49 @@ def test_handler_execution_error_is_canonical_and_never_leaks_sql(monkeypatch):
     assert content[0].text == envelope["answer"]
     rendered = json.dumps([legacy, envelope, stdio], ensure_ascii=False)
     assert all(token not in rendered for token in ("OperationalError", "no such column", "audit_procedure_items", "kam_item_id", "SQL"))
+
+
+def test_post_handler_enrichment_failure_is_bounded_at_every_public_boundary(monkeypatch):
+    """A failure after a successful handler must use the same safe canonical error."""
+    from kreports.mcp.catalog import TOOL_CATALOG
+    import kreports.mcp.dispatch as dispatch
+    from kreports.mcp.server import handle_call_tool
+    from kreports.mcp.tools import call_tool
+
+    original = TOOL_CATALOG["search_company"]
+    monkeypatch.setitem(
+        TOOL_CATALOG,
+        "search_company",
+        replace(original, handler=lambda _args: {"count": 0, "companies": []}),
+    )
+
+    def enrichment_failure(*_args, **_kwargs):
+        raise RuntimeError(
+            "SELECT secret_column FROM private_table /tmp/private.db"
+        )
+
+    monkeypatch.setattr(dispatch, "enrich_answer_response", enrichment_failure)
+    arguments = {"query": "삼성전자"}
+    legacy = json.loads(call_tool("search_company", arguments))
+    envelope = dispatch.dispatch_tool("search_company", arguments).model_dump(mode="json")
+    content, stdio = asyncio.run(handle_call_tool("search_company", arguments))
+
+    for out in (legacy, envelope, stdio):
+        assert out["data_quality"]["status"] == "error"
+        assert out["answer"].startswith("판정:")
+        assert "로컬 캐시 스키마 또는 준비된 데이터" in out["answer"]
+        assert out["answer_pack"]["tables"][0]["id"] == "availability"
+        assert out["confirmed_facts"] == []
+        assert out["evidence"] == []
+        assert out["next_checks"] == [
+            "로컬 캐시 스키마와 준비된 데이터 artifact를 확인한 뒤 다시 배포하세요.",
+        ]
+    assert content[0].text == envelope["answer"]
+    rendered = json.dumps([legacy, envelope, stdio], ensure_ascii=False)
+    assert all(token not in rendered for token in (
+        "Internal error", "RuntimeError", "SELECT", "secret_column",
+        "private_table", "/tmp/private.db",
+    ))
 
 
 def test_prepared_audit_hours_parity_across_every_public_boundary(monkeypatch):

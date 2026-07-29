@@ -16,6 +16,8 @@ def _is_numeric_measure(value: Any) -> bool:
 
 
 def _base_pack(title: str, result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _collect_sources
+
     quality = result.get("data_quality") or {}
     subject = result.get("subject") or {}
     return {
@@ -30,7 +32,7 @@ def _base_pack(title: str, result: dict[str, Any]) -> dict[str, Any]:
         "charts": [],
         "diagrams": [],
         "timelines": [],
-        "sources": [],
+        "sources": _collect_sources(result),
         "data_quality": quality,
     }
 

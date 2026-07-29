@@ -208,29 +208,88 @@ _HANDLER_FAILURE_MESSAGE = (
 
 
 def _handler_failure_result(name: str) -> dict[str, Any]:
-    """Return a bounded canonical result without leaking an internal exception."""
-    from kreports.mcp.contracts import enrich_answer_response
-
-    result = enrich_answer_response(name, {
-        "data_quality": {
+    """Return a standalone bounded error without using the enrichment path."""
+    next_check = "로컬 캐시 스키마와 준비된 데이터 artifact를 확인한 뒤 다시 배포하세요."
+    quality = {
+        "status": "error",
+        "grade": None,
+        "dataset_version": "unknown",
+        "schema_version": "unknown",
+        "covered_years": [],
+        "missing_fields": [],
+        "limitations": [_HANDLER_FAILURE_MESSAGE],
+        "section_statuses": {},
+    }
+    release = {
+        "release_ready": False,
+        "manifest_available": False,
+        "required_failures": ["release_context_unavailable"],
+        "degraded_features": [],
+        "snapshot_version": None,
+    }
+    answer = "\n".join([
+        "판정:",
+        "- error",
+        "",
+        "업무 결론:",
+        "- 별도 결론 없음",
+        "",
+        "데이터 한계:",
+        f"- {_HANDLER_FAILURE_MESSAGE}",
+        "",
+        "추가 확인사항:",
+        f"- {next_check}",
+    ])
+    pack = {
+        "kind": "answer_pack",
+        "version": "answer_pack.v1",
+        "summary": {"title": "데이터 가용성", "status": "error", "subject": "대상 조건"},
+        "tables": [{
+            "id": "availability",
+            "title": "데이터 가용성",
+            "columns": [{"field": "status", "label": "상태"}],
+            "rows": [{"status": "error"}],
             "status": "error",
-            "limitations": [_HANDLER_FAILURE_MESSAGE],
-        },
-        "next_checks": [
-            "로컬 캐시 스키마와 준비된 데이터 artifact를 확인한 뒤 다시 배포하세요.",
-        ],
-    })
-    # Retain the legacy error key for compatibility, but never expose an
-    # exception string, SQL, path, table, or column name.
-    result["error"] = _HANDLER_FAILURE_MESSAGE
-    return result
+        }],
+        "charts": [],
+        "diagrams": [],
+        "timelines": [],
+        "sources": [],
+        "data_quality": quality,
+        "limitations": [_HANDLER_FAILURE_MESSAGE],
+        "release_context": release,
+    }
+    return {
+        "error": _HANDLER_FAILURE_MESSAGE,
+        "answer": answer,
+        "domain_verdict": None,
+        "confirmed_facts": [],
+        "analysis": [],
+        "evidence": [],
+        "data_quality": quality,
+        "release_context": release,
+        "warnings": [_HANDLER_FAILURE_MESSAGE],
+        "next_checks": [next_check],
+        "answer_pack": pack,
+    }
 
 
 def _handler_failure_envelope(name: str) -> AnswerEnvelopeV1:
     result = _handler_failure_result(name)
-    result.pop("error", None)
-    envelope = build_answer_envelope(name, result)
-    return envelope.model_copy(update={"answer_pack": result.get("answer_pack")})
+    return AnswerEnvelopeV1(
+        tool_name=name,
+        verdict="error",
+        domain_verdict=None,
+        answer=result["answer"],
+        confirmed_facts=[],
+        analysis=[],
+        evidence=[],
+        data_quality=result["data_quality"],
+        release_context=result["release_context"],
+        warnings=result["warnings"],
+        next_checks=result["next_checks"],
+        answer_pack=result["answer_pack"],
+    )
 
 
 def _safe_exception_message(
@@ -323,17 +382,15 @@ def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelope
     public_name = _bounded_tool_name(name)
     try:
         result = _enriched_result(name, arguments)
-        return build_answer_envelope(public_name, result)
+        envelope = build_answer_envelope(public_name, result)
+        return envelope.model_copy(update={"answer_pack": result.get("answer_pack")})
     except (LookupError, ArgumentValidationError) as exc:
         return _error_envelope(public_name, str(exc))
     except HandlerExecutionError as exc:
         del exc
         return _handler_failure_envelope(public_name)
-    except Exception as exc:
-        return _error_envelope(
-            public_name,
-            f"Internal error: {_safe_exception_message(exc, arguments)}",
-        )
+    except Exception:
+        return _handler_failure_envelope(public_name)
 
 
 def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -352,10 +409,8 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
     except HandlerExecutionError as exc:
         del exc
         return _handler_failure_result(name)
-    except Exception as exc:
-        return {
-            "error": f"Internal error: {_safe_exception_message(exc, arguments)}"
-        }
+    except Exception:
+        return _handler_failure_result(name)
 
 
 def list_mcp_tools() -> list[Tool]:
