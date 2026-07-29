@@ -3,6 +3,7 @@ import os
 import json
 import platform
 import shutil
+import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -64,6 +65,71 @@ def get_session():
     from kreports.db.engine import get_session as configured_session
 
     return configured_session()
+
+
+@app.command("rehearse-kam-schema-backfill")
+def rehearse_kam_schema_backfill_cmd(
+    source_db: Path = typer.Option(..., "--source-db"),
+    rehearsal_dir: Path = typer.Option(..., "--rehearsal-dir"),
+    python_executable: Path = typer.Option(
+        Path(sys.executable),
+        "--python-executable",
+    ),
+) -> None:
+    """Run a retained-clone KAM migration/backfill rehearsal."""
+    for path, expected in (
+        (source_db, "file"),
+        (rehearsal_dir, "directory"),
+        (python_executable, "file"),
+    ):
+        valid_kind = path.is_file() if expected == "file" else path.is_dir()
+        if not path.is_absolute() or not valid_kind:
+            raise typer.BadParameter(
+                f"{expected} path must be absolute and existing",
+            )
+
+    # Deliberately lazy: normal CLI startup must not bind the rehearsal
+    # safety module, runtime database, or APFS-specific implementation.
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    try:
+        report = run_kam_schema_backfill_rehearsal(
+            source_db=source_db,
+            rehearsal_dir=rehearsal_dir,
+            repository_root=Path(__file__).resolve().parents[2],
+            python_executable=python_executable,
+        )
+    except RehearsalRunError as exc:
+        report = {
+            "status": "preflight_blocked",
+            "report_path": str(exc.report_path or ""),
+            "markdown_report_path": "",
+            "clone_path": "",
+            "live_sha256_unchanged": False,
+        }
+
+    status = str(report.get("status") or "preflight_blocked")
+    clone_path = str(report.get("clone_path") or "")
+    typer.echo(f"status={status}")
+    typer.echo(f"json_report={report.get('report_path') or ''}")
+    typer.echo(
+        f"markdown_report={report.get('markdown_report_path') or ''}",
+    )
+    typer.echo(f"clone={clone_path}")
+    typer.echo(f"clone_retained={str(bool(clone_path)).lower()}")
+    typer.echo(
+        "live_sha256_unchanged="
+        f"{str(bool(report.get('live_sha256_unchanged'))).lower()}",
+    )
+    if status not in {
+        "complete",
+        "mcp_schema_closed",
+        "data_quality_limited",
+    }:
+        raise typer.Exit(2)
 
 
 @contextmanager
