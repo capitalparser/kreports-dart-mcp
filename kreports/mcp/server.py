@@ -89,12 +89,17 @@ async def handle_call_tool(name: str, arguments: dict):
 
 
 async def run() -> None:
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+    finally:
+        from kreports.db.engine import dispose_engine
+
+        dispose_engine()
 
 
 def main() -> None:

@@ -1,12 +1,14 @@
 import json
 import re
-from datetime import date, datetime, timezone
+from contextlib import contextmanager
+from datetime import UTC, date, datetime
+
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql.dml import Delete, Insert, Update
 from sqlalchemy.sql.elements import TextClause
-from contextlib import contextmanager
+
 from kreports.config import settings
 from kreports.db.models import (
     Base,
@@ -36,6 +38,12 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+def dispose_engine() -> None:
+    """Release KReports-owned pooled connections without issuing SQL."""
+    engine.dispose()
+
 
 _TEXT_WRITE_PREFIX = re.compile(
     r"^\s*(?:INSERT|UPDATE|DELETE|REPLACE|MERGE|CREATE|ALTER|DROP|TRUNCATE|VACUUM|PRAGMA)\b",
@@ -348,12 +356,14 @@ def write_dataset_manifest(
 
     _require_session_write("write dataset manifest")
     if not isinstance(dataset_version, str):
-        raise ValueError("dataset_version must contain 1 to 80 characters")
+        raise ValueError(  # noqa: TRY004 - preserve public validation contract
+            "dataset_version must contain 1 to 80 characters"
+        )
     normalized_version = dataset_version.strip()
     if not normalized_version or len(normalized_version) > 80:
         raise ValueError("dataset_version must contain 1 to 80 characters")
 
-    generated_at = datetime.now(timezone.utc)
+    generated_at = datetime.now(UTC)
     try:
         with get_session() as session:
             if session.get(DatasetManifest, normalized_version) is not None:
