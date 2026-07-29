@@ -441,6 +441,7 @@ def _install_phase_harness(
         marker_path: Path,
         capability: str,
         invocation: object,
+        repository_root: Path | None = None,
     ) -> dict[str, object]:
         nonlocal snapshot_index
         calls.append((
@@ -801,7 +802,11 @@ def test_rehearsal_rejects_malformed_or_adverse_semantic_snapshot(
     )
 
     assert report["status"] == "backfill_failed"
-    assert report["last_phase"] == "kam_rebuild_complete"
+    assert report["last_phase"] == (
+        "procedure_reconcile_complete"
+        if snapshot.get("kam_count") == 0
+        else "kam_rebuild_complete"
+    )
     assert report["phases"][-1]["status"] == "failed"
 
 

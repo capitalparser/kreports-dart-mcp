@@ -140,6 +140,7 @@ def invoke_worker(
     marker_path: Path,
     capability: str,
     invocation: WorkerInvocation,
+    repository_root: Path | None = None,
 ) -> dict[str, object]:
     """Invoke one fresh worker with an explicit database and minimal env."""
     if (
@@ -173,7 +174,11 @@ def invoke_worker(
         command.extend(["--year", str(invocation.year)])
     environment = {
         "PATH": os.environ.get("PATH", ""),
-        "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+        "PYTHONPATH": (
+            str(repository_root)
+            if repository_root is not None
+            else os.environ.get("PYTHONPATH", "")
+        ),
         "DB_URL": f"sqlite:///{database}",
         "KREPORTS_RUNTIME_MODE": invocation.runtime_mode,
         "KREPORTS_REHEARSAL_MARKER": str(marker_path),
@@ -484,7 +489,11 @@ def _valid_quality_distribution(
     return total == expected_count
 
 
-def _validate_semantic_snapshot(snapshot: dict[str, object]) -> None:
+def _validate_semantic_snapshot(
+    snapshot: dict[str, object],
+    *,
+    allow_empty: bool = False,
+) -> None:
     digest = snapshot.get("semantic_sha256")
     kam_count = snapshot.get("kam_count")
     procedure_count = snapshot.get("procedure_count")
@@ -495,16 +504,8 @@ def _validate_semantic_snapshot(snapshot: dict[str, object]) -> None:
         or not _SEMANTIC_SHA256.fullmatch(digest)
         or not _is_nonnegative_int(kam_count)
         or not _is_nonnegative_int(procedure_count)
-        or int(kam_count) == 0
-        or int(procedure_count) == 0
-        or not _valid_quality_distribution(
-            snapshot.get("kam_quality_by_year"),
-            expected_count=int(kam_count),
-        )
-        or not _valid_quality_distribution(
-            snapshot.get("procedure_quality_by_year"),
-            expected_count=int(procedure_count),
-        )
+        or (not allow_empty and int(kam_count) == 0)
+        or (not allow_empty and int(procedure_count) == 0)
         or not isinstance(integrity, dict)
         or set(integrity) != _INTEGRITY_FIELDS
         or not all(
@@ -517,6 +518,22 @@ def _validate_semantic_snapshot(snapshot: dict[str, object]) -> None:
             "semantic_snapshot_invalid",
             "Semantic snapshot evidence is missing or malformed.",
         )
+    for count, quality_key in (
+        (int(kam_count), "kam_quality_by_year"),
+        (int(procedure_count), "procedure_quality_by_year"),
+    ):
+        quality = snapshot.get(quality_key)
+        if (
+            (count == 0 and (not allow_empty or quality != {}))
+            or (count > 0 and not _valid_quality_distribution(
+                quality,
+                expected_count=count,
+            ))
+        ):
+            raise RehearsalRunError(
+                "semantic_snapshot_invalid",
+                "Semantic snapshot evidence is missing or malformed.",
+            )
     if duplicates or any(
         int(integrity[field]) > 0
         for field in _INTEGRITY_FIELDS
@@ -749,7 +766,10 @@ def run_kam_schema_backfill_rehearsal(
         nonlocal clone_path, marker_path
         clone_identity = safety.create_apfs_clone(preflight_result)
         clone_path = Path(clone_identity.path).resolve()
-        report["clone"] = _identity_payload(clone_identity)
+        report["clone"] = {
+            **_identity_payload(clone_identity),
+            "path": str(clone_path),
+        }
         report["clone_path"] = str(clone_path)
         marker_path = _create_rehearsal_marker(
             run_id=writer.run_id,
@@ -783,6 +803,7 @@ def run_kam_schema_backfill_rehearsal(
             marker_path=marker_path,
             capability=capability,
             invocation=invocation,
+            repository_root=repository_root,
         )
 
     def migration_operation() -> dict[str, object]:
@@ -819,7 +840,7 @@ def run_kam_schema_backfill_rehearsal(
         snapshot_before = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
-        _validate_semantic_snapshot(snapshot_before)
+        _validate_semantic_snapshot(snapshot_before, allow_empty=True)
         safety.assert_free_space(
             rehearsal_dir,
             min_free_bytes=min_free_bytes,
@@ -855,7 +876,10 @@ def run_kam_schema_backfill_rehearsal(
     ) is None:
         return _finalize_report(report, writer)
 
+    idempotency_payload: dict[str, object] = {}
+
     def idempotency_operation() -> dict[str, object]:
+        nonlocal idempotency_payload
         safety.assert_free_space(
             rehearsal_dir,
             min_free_bytes=min_free_bytes,
@@ -881,20 +905,23 @@ def run_kam_schema_backfill_rehearsal(
                 "idempotency_mismatch",
                 "Semantic snapshot changed during the second pass.",
             )
-        return {
+        idempotency_payload = {
             "rebuild": rebuild,
             "procedures": procedures,
             "semantic_sha256": snapshot_after_second.get(
                 "semantic_sha256",
             ),
+            "semantic_sha256_equal": True,
             "integrity": _snapshot_integrity(snapshot_after_second),
         }
+        return idempotency_payload
 
     if persist_phase(
         "idempotency_verified",
         idempotency_operation,
     ) is None:
         return _finalize_report(report, writer)
+    report["idempotency"] = idempotency_payload
 
     mcp_payload: dict[str, object] = {}
 
@@ -909,6 +936,7 @@ def run_kam_schema_backfill_rehearsal(
 
     if persist_phase("mcp_validation_complete", mcp_operation) is None:
         return _finalize_report(report, writer)
+    report["mcp"] = mcp_payload
 
     if persist_phase(
         "live_immutability_verified",

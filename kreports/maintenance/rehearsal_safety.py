@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import sqlite3
 import subprocess
@@ -221,18 +222,33 @@ def _resolve_rehearsal_directory(rehearsal_dir: Path) -> Path:
 
 def _filesystem_type(rehearsal_dir: Path) -> str:
     try:
-        completed = subprocess.run(
-            ["/usr/bin/stat", "-f", "%T", str(rehearsal_dir)],
+        df_completed = subprocess.run(
+            ["/bin/df", "-P", str(rehearsal_dir)],
             check=True,
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+        df_lines = df_completed.stdout.splitlines()
+        if len(df_lines) < 2:
+            raise ValueError("df did not report a filesystem device")
+        device = df_lines[-1].split(maxsplit=1)[0]
+        if not device.startswith("/dev/"):
+            raise ValueError("df reported an unsafe filesystem device")
+        diskutil_completed = subprocess.run(
+            ["/usr/sbin/diskutil", "info", "-plist", device],
+            check=True,
+            capture_output=True,
+        )
+        payload = plistlib.loads(diskutil_completed.stdout)
+        filesystem_type = payload.get("FilesystemType")
+        if not isinstance(filesystem_type, str) or not filesystem_type:
+            raise ValueError("diskutil did not report a filesystem type")
+    except (OSError, ValueError, plistlib.InvalidFileException, subprocess.SubprocessError) as exc:
         raise RehearsalSafetyError(
             "filesystem_not_apfs",
             "could not verify APFS rehearsal filesystem",
         ) from exc
-    return completed.stdout.strip().lower()
+    return filesystem_type.lower()
 
 
 def assert_free_space(

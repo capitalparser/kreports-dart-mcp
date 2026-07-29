@@ -124,6 +124,7 @@ def test_live_database_requires_explicit_absolute_regular_file():
 def test_samsung_fy2025_professional_public_result_matrix(immutable_live_database):
     """Record every live tool identically through legacy, envelope, and stdio."""
     from kreports.mcp.dispatch import dispatch_tool
+    from kreports.mcp.resources import read_resource
     from kreports.mcp.server import handle_call_tool
     from kreports.mcp.tools import call_tool
 
@@ -239,8 +240,27 @@ def test_samsung_fy2025_professional_public_result_matrix(immutable_live_databas
             "audit_procedure_items", "OperationalError",
         ))
     else:
+        assert all(outputs[name]["data_quality"]["status"] != "error" for name in affected)
         assert all(
-            "kam_items" not in str(outputs[name].get("answer"))
-            and "kam_item_id" not in str(outputs[name].get("answer"))
-            for name in affected
+            token not in rendered
+            for token in (
+                "no such table",
+                "no such column",
+                "OperationalError",
+                "kam_items",
+                "kam_item_id",
+                "audit_procedure_items",
+            )
         )
+        for tool_name, output in outputs.items():
+            pack = output.get("answer_pack") or {}
+            resource_uri = pack.get("resource_uri")
+            if not isinstance(resource_uri, str):
+                continue
+            resource = read_resource(resource_uri)
+            resource_rendered = json.dumps(resource, ensure_ascii=False)
+            assert output["data_quality"]["status"] in resource_rendered
+            for source in pack.get("sources") or []:
+                receipt = source.get("rcept_no") if isinstance(source, dict) else None
+                if receipt:
+                    assert str(receipt) in resource_rendered, tool_name

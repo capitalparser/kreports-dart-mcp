@@ -848,7 +848,7 @@ def main(argv: list[str] | None = None) -> int:
     action = "unknown"
     try:
         action, year = _parse_arguments(argv)
-        _write_json(execute_action(action, year=year))
+        _write_json({**execute_action(action, year=year), "ok": True})
         return 0
     except WorkerActionError as exc:
         _write_json({"ok": False, "action": action, "error": {"code": exc.code, "message": _bounded_message(exc)}})

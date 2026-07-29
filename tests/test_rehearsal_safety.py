@@ -86,8 +86,29 @@ def _arrange_source_case(tmp_path: Path, arrange: str) -> tuple[Path, Path, Path
 def _apfs_runner(commands: list[list[str]]):
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
-        if command[:3] == ["/usr/bin/stat", "-f", "%T"]:
-            return subprocess.CompletedProcess(command, 0, stdout="apfs\n", stderr="")
+        if command[:2] == ["/bin/df", "-P"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                    "/dev/disk3s5 1 1 1 50% /System/Volumes/Data\n"
+                ),
+                stderr="",
+            )
+        if command[:3] == ["/usr/sbin/diskutil", "info", "-plist"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                    b"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                    b"\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">"
+                    b"<plist version=\"1.0\"><dict><key>FilesystemType</key>"
+                    b"<string>apfs</string></dict></plist>"
+                ),
+                stderr=b"",
+            )
         if command[0] == "/bin/cp":
             shutil.copy2(command[2], command[3])
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -268,6 +289,39 @@ def test_preflight_rejects_different_filesystem(
     assert caught.value.code == "different_filesystem"
 
 
+# Break caught: accepting a `stat -f %T` result as a filesystem type rejects a
+# real APFS rehearsal path on macOS and blocks every retained-clone rehearsal.
+def test_preflight_resolves_apfs_through_df_device_and_diskutil_plist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _valid_paths(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(rehearsal_safety.sys, "platform", "darwin")
+    monkeypatch.setattr(rehearsal_safety.subprocess, "run", _apfs_runner(commands))
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            2 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+        ),
+    )
+
+    approved = preflight_rehearsal(
+        paths.source,
+        paths.rehearsal_dir,
+        repository_root=paths.repository_root,
+    )
+
+    assert approved.filesystem_type == "apfs"
+    assert commands[:2] == [
+        ["/bin/df", "-P", str(paths.rehearsal_dir)],
+        ["/usr/sbin/diskutil", "info", "-plist", "/dev/disk3s5"],
+    ]
+
+
 # Break caught: allowing a non-APFS destination would silently downgrade the
 # clone operation to a filesystem with different semantics.
 def test_preflight_requires_apfs_filesystem(
@@ -280,7 +334,17 @@ def test_preflight_requires_apfs_filesystem(
         rehearsal_safety.subprocess,
         "run",
         lambda command, **_kwargs: subprocess.CompletedProcess(
-            command, 0, stdout="hfs\n", stderr=""
+            command,
+            0,
+            stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                "/dev/disk3s5 1 1 1 50% /System/Volumes/Data\n"
+                if command[:2] == ["/bin/df", "-P"]
+                else b"<?xml version=\"1.0\"?><plist version=\"1.0\">"
+                b"<dict><key>FilesystemType</key><string>hfs</string>"
+                b"</dict></plist>"
+            ),
+            stderr="",
         ),
     )
 
@@ -668,11 +732,12 @@ def test_create_apfs_clone_maps_cp_failure_to_unsupported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, preflight, _ = _valid_preflight(tmp_path, monkeypatch)
+    fallback_runner = _apfs_runner([])
 
     def rejected_clone(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if command[0] == "/bin/cp":
             raise subprocess.CalledProcessError(1, command, stderr="unsupported")
-        return subprocess.CompletedProcess(command, 0, stdout="apfs\n", stderr="")
+        return fallback_runner(command, **_kwargs)
 
     monkeypatch.setattr(rehearsal_safety.subprocess, "run", rejected_clone)
 
@@ -707,12 +772,7 @@ def test_assert_source_unchanged_rejects_metadata_and_sidecar_changes(
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires Darwin APFS clonefile")
 def test_create_apfs_clone_with_real_cp_on_apfs(tmp_path: Path) -> None:
     paths = _valid_paths(tmp_path)
-    filesystem_type = subprocess.run(
-        ["/usr/bin/stat", "-f", "%T", str(paths.rehearsal_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip().lower()
+    filesystem_type = rehearsal_safety._filesystem_type(paths.rehearsal_dir)
     if filesystem_type != "apfs":
         pytest.skip("temporary directory is not APFS")
 
