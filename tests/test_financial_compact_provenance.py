@@ -514,6 +514,12 @@ def test_dispatch_promotes_exact_growth_sources_to_envelope_and_investor_pack(
         "20240318000001",
         "20250318000001",
     ]
+    revenue_column = next(
+        column
+        for column in pack["tables"][0]["columns"]
+        if column["field"] == "revenue"
+    )
+    assert revenue_column["unit"] == "억원"
 
 
 def test_dispatch_keeps_bad_prior_growth_suppressed_and_current_source_bounded(
@@ -564,6 +570,54 @@ def test_dispatch_keeps_bad_prior_growth_suppressed_and_current_source_bounded(
     assert growth_row["revenue_growth"] is None
     assert not growth_row.get("growth_sources")
     assert growth_row["source"] == "20250318000001"
+    assert [
+        source["rcept_no"] for source in result["answer_pack"]["sources"]
+    ] == ["20250318000001"]
+
+
+def test_dispatch_pack_does_not_default_unproven_amount_unit_to_억원(
+    temp_engine,
+):
+    """An explicit unknown domain unit must stay unknown in the public pack."""
+    from sqlalchemy import text
+
+    from kreports.analysis.financial_analysis import get_financial_snapshot
+    from kreports.db.engine import get_session
+    from kreports.mcp.dispatch import dispatch_tool
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', NULL, 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'limited', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    domain = get_financial_snapshot("00126380", years=1)
+    result = dispatch_tool(
+        "get_financial_snapshot",
+        {"company": "00126380", "years": 1},
+    ).model_dump(mode="json")
+
+    assert domain["unit"] is None
+    assert domain["data_quality"]["status"] == "limited"
+    assert result["verdict"] == "limited"
+    assert result["answer_pack"]["data_quality"]["status"] == "limited"
+    table = result["answer_pack"]["tables"][0]
+    assert table["rows"][0]["revenue"] == 1.0
+    for field in ("revenue", "operating_profit", "net_income", "operating_cf"):
+        column = next(
+            column for column in table["columns"]
+            if column["field"] == field
+        )
+        assert "unit" not in column
     assert [
         source["rcept_no"] for source in result["answer_pack"]["sources"]
     ] == ["20250318000001"]

@@ -191,7 +191,7 @@ def _table(table_id: str, title: str, fields: list[tuple[str, str, str | None]],
 
 def _financial_snapshot_pack(result: dict[str, Any]) -> dict[str, Any]:
     pack = _pack(f"{_subject(result)} 재무 추이", result)
-    unit = str(result.get("unit") or "억원")
+    unit = str(result["unit"]) if result.get("unit") is not None else None
     source_receipts: set[str] = set()
 
     def add_source(source: object) -> str | None:
