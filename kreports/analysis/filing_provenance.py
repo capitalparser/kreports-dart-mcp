@@ -1,13 +1,13 @@
 """Resolve structured annual facts to proven DART filing sources."""
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, TypeAlias
 
 from sqlalchemy import text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis.evidence import parent_rcept_no
-
 
 _SOURCE_FACT_TABLES = {
     "financial_facts_compact": ("financial_facts_compact", "bsns_year", ""),
@@ -18,6 +18,98 @@ _SOURCE_FACT_TABLES = {
     ),
     "financials": ("financials", "year", "AND f.quarter=4"),
 }
+
+CompactCitationScope: TypeAlias = tuple[str, int, str]
+
+_VALID_RECEIPT_GLOB = "*[0-9][0-9][0-9][0-9][0-9][0-9][0-9]" \
+    "[0-9][0-9][0-9][0-9][0-9][0-9][0-9]*"
+
+
+def compact_citation_anchors(
+    scopes: Iterable[CompactCitationScope], *, batch_size: int = 100
+) -> dict[CompactCitationScope, dict[str, Any]]:
+    """Resolve annual-filing anchors for known compact scopes in bounded batches.
+
+    A returned receipt is a company/year annual filing match, never direct
+    endpoint lineage for the compact financial value.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    normalized_scopes: set[CompactCitationScope] = set()
+    for corp_code, bsns_year, fs_div in scopes:
+        normalized_corp_code = str(corp_code or "").strip()
+        normalized_fs_div = str(fs_div or "").strip()
+        try:
+            normalized_year = int(bsns_year)
+        except (TypeError, ValueError):
+            continue
+        if normalized_corp_code and normalized_fs_div and normalized_year > 0:
+            normalized_scopes.add(
+                (normalized_corp_code, normalized_year, normalized_fs_div)
+            )
+    ordered_scopes = sorted(normalized_scopes)
+    if not ordered_scopes:
+        return {}
+
+    anchors: dict[CompactCitationScope, dict[str, Any]] = {}
+    for start in range(0, len(ordered_scopes), batch_size):
+        requested_scopes = ordered_scopes[start:start + batch_size]
+        params: dict[str, Any] = {}
+        requested_values: list[str] = []
+        for index, (corp_code, bsns_year, fs_div) in enumerate(requested_scopes):
+            params.update({
+                f"corp_{index}": corp_code,
+                f"year_{index}": bsns_year,
+                f"fs_{index}": fs_div,
+            })
+            requested_values.append(
+                f"(:corp_{index}, :year_{index}, :fs_{index})"
+            )
+        query = text(f"""
+            WITH requested(corp_code, bsns_year, fs_div) AS (
+                VALUES {", ".join(requested_values)}
+            ),
+            ranked AS (
+                SELECT
+                    requested.corp_code,
+                    requested.bsns_year,
+                    requested.fs_div,
+                    d.rcept_no,
+                    d.report_nm,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            requested.corp_code,
+                            requested.bsns_year,
+                            requested.fs_div
+                        ORDER BY d.disc_date DESC, d.rcept_no DESC
+                    ) AS source_rank
+                FROM requested
+                JOIN disclosures AS d ON d.corp_code = requested.corp_code
+                WHERE d.report_nm LIKE
+                      ('%사업보고서 (' || requested.bsns_year || '.%')
+                  AND d.rcept_no GLOB '{_VALID_RECEIPT_GLOB}'
+            )
+            SELECT corp_code, bsns_year, fs_div, rcept_no, report_nm
+            FROM ranked
+            WHERE source_rank = 1
+        """)
+        with _engine_module.engine.connect() as conn:
+            rows = conn.execute(query, params).mappings().all()
+        for row in rows:
+            scope = (str(row["corp_code"]), int(row["bsns_year"]), str(row["fs_div"]))
+            receipt = parent_rcept_no(row["rcept_no"])
+            if receipt is None:
+                continue
+            anchors[scope] = {
+                "corp_code": scope[0],
+                "bsns_year": scope[1],
+                "fs_div": scope[2],
+                "rcept_no": receipt,
+                "report_nm": row["report_nm"],
+                "citation_basis": "company_year_annual_filing_match",
+            }
+    return anchors
 
 
 def annual_filing_sources(
