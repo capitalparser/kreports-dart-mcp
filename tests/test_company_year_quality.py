@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 
@@ -140,6 +141,40 @@ def test_quality_summary_serialization_contains_no_timestamp():
         "blockers",
         "quality_version",
     }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "extra_key",
+        "invalid_status",
+        "invalid_grade",
+        "too_many_blockers",
+        "long_blocker",
+        "long_version",
+    ],
+)
+def test_quality_summary_rejects_noncanonical_or_unbounded_semantics(mutation):
+    inputs = _quality_evidence_inputs()
+    if mutation == "extra_key":
+        summary = build_quality_evidence_summary(**inputs)
+        summary["timestamp"] = "2026-07-29T00:00:00Z"
+        with pytest.raises(ValueError):
+            quality_input_fingerprint(summary)
+        return
+    if mutation == "invalid_status":
+        inputs["statuses"]["kam"] = "available"
+    elif mutation == "invalid_grade":
+        inputs["grades"]["group_audit"] = "B"
+    elif mutation == "too_many_blockers":
+        inputs["blockers"] = tuple(f"blocker-{index}" for index in range(33))
+    elif mutation == "long_blocker":
+        inputs["blockers"] = ("x" * 129,)
+    else:
+        inputs["quality_version"] = "v" * 21
+
+    with pytest.raises(ValueError):
+        build_quality_evidence_summary(**inputs)
 
 
 def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
@@ -653,7 +688,7 @@ def test_company_year_quality_reads_legacy_blank_fingerprint_as_limited(
         (
             "a" * 64,
             '{"statuses": {}}',
-            "품질 원장의 입력 증거 fingerprint가 증거 요약과 일치하지 않습니다.",
+            "품질 원장의 증거 요약이 유효한 JSON 객체가 아닙니다.",
         ),
     ],
 )
@@ -694,6 +729,74 @@ def test_company_year_quality_rejects_unverified_freshness_metadata(
     assert quality["input_fingerprint"] == fingerprint
     assert quality["evidence_summary"] == {}
     assert quality["freshness_limitations"] == [expected_limitation]
+
+
+def _raw_summary_fingerprint(summary: dict[str, object]) -> str:
+    payload = json.dumps(
+        summary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("mismatch", ["extra_timestamp", "row_grade"])
+def test_company_year_quality_rejects_self_consistent_noncanonical_summary(
+    temp_engine,
+    mismatch,
+):
+    from kreports.quality.company_year import company_year_quality
+
+    summary = build_quality_evidence_summary(
+        statuses={
+            "financial_core": "available",
+            "auditor": "available",
+            "audit_fee": "available",
+            "policy": "full_body",
+            "kam": "full_body",
+            "audit_procedure": "available",
+            "group_audit": "missing",
+        },
+        grades={
+            "investor_core": "B" if mismatch == "row_grade" else "A",
+            "auditor_full": "A",
+            "group_audit": "D",
+        },
+        blockers=(),
+        quality_version="v1",
+    )
+    if mismatch == "extra_timestamp":
+        summary["timestamp"] = "2026-07-29T00:00:00Z"
+    fingerprint = _raw_summary_fingerprint(summary)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=2025,
+                market="KOSPI",
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v1",
+                input_fingerprint=fingerprint,
+                evidence_summary_json=json.dumps(summary),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["evidence_summary"] == {}
+    assert quality["freshness_limitations"]
 
 
 def test_three_core_years_are_investor_b_but_transport_error_is_d(

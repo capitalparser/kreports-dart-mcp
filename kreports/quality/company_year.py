@@ -39,7 +39,12 @@ from kreports.db.models import (
     ReportSection,
     SourceDocument,
 )
-from kreports.db.quality_snapshot import QUALITY_VERSION
+from kreports.db.quality_snapshot import (
+    QUALITY_CONTENT_FIELDS,
+    QUALITY_VERSION,
+    QualitySnapshotError,
+    validate_quality_row_freshness,
+)
 from kreports.quality.company_year_fingerprint import (
     build_quality_evidence_summary,
     quality_input_fingerprint,
@@ -70,6 +75,9 @@ INVALID_SUMMARY_FRESHNESS_LIMITATION = (
 )
 FINGERPRINT_MISMATCH_FRESHNESS_LIMITATION = (
     "품질 원장의 입력 증거 fingerprint가 증거 요약과 일치하지 않습니다."
+)
+SUMMARY_MISMATCH_FRESHNESS_LIMITATION = (
+    "품질 원장의 증거 요약이 저장된 품질 결과와 일치하지 않습니다."
 )
 
 # Public constants make grading reviewable without reverse-engineering query
@@ -1008,26 +1016,39 @@ def company_year_quality(corp_code: str, year: int) -> dict[str, Any]:
         input_fingerprint = str(row.input_fingerprint or "").strip()
         freshness_limitations: list[str] = []
         evidence_summary: dict[str, object] = {}
+        try:
+            raw_blockers = json.loads(row.blockers_json)
+        except (TypeError, json.JSONDecodeError):
+            raw_blockers = []
+        blockers = (
+            sorted(raw_blockers)
+            if isinstance(raw_blockers, list)
+            and all(isinstance(value, str) for value in raw_blockers)
+            else []
+        )
         if not input_fingerprint:
             freshness_limitations.append(LEGACY_FRESHNESS_LIMITATION)
         else:
             try:
-                stored_summary = json.loads(row.evidence_summary_json)
-            except (TypeError, json.JSONDecodeError):
-                stored_summary = None
-            if not isinstance(stored_summary, dict):
-                freshness_limitations.append(
-                    INVALID_SUMMARY_FRESHNESS_LIMITATION
+                (
+                    input_fingerprint,
+                    evidence_summary,
+                    blockers,
+                ) = validate_quality_row_freshness(
+                    {
+                        field: getattr(row, field)
+                        for field in QUALITY_CONTENT_FIELDS
+                    }
                 )
-            elif (
-                quality_input_fingerprint(stored_summary)
-                != input_fingerprint
-            ):
-                freshness_limitations.append(
-                    FINGERPRINT_MISMATCH_FRESHNESS_LIMITATION
-                )
-            else:
-                evidence_summary = stored_summary
+            except QualitySnapshotError as exc:
+                message = str(exc)
+                if "input_fingerprint" in message:
+                    limitation = FINGERPRINT_MISMATCH_FRESHNESS_LIMITATION
+                elif "persisted quality fields" in message:
+                    limitation = SUMMARY_MISMATCH_FRESHNESS_LIMITATION
+                else:
+                    limitation = INVALID_SUMMARY_FRESHNESS_LIMITATION
+                freshness_limitations.append(limitation)
         return {
             "corp_code": row.corp_code,
             "bsns_year": int(row.bsns_year),
@@ -1047,7 +1068,7 @@ def company_year_quality(corp_code: str, year: int) -> dict[str, Any]:
                 "auditor_full": row.auditor_grade,
                 "group_audit": row.group_audit_grade,
             },
-            "blockers": json.loads(row.blockers_json),
+            "blockers": blockers,
             "quality_version": row.quality_version,
             "input_fingerprint": input_fingerprint or None,
             "evidence_summary": evidence_summary,
