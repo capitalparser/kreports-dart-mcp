@@ -271,6 +271,7 @@ def test_verify_recomputes_current_gate_and_ignores_tampered_pass(
 
 
 def test_explicit_db_path_cannot_mix_with_global_engine(tmp_path, monkeypatch):
+    import importlib
     import sys
 
     from sqlalchemy.orm import sessionmaker
@@ -311,7 +312,8 @@ def test_explicit_db_path_cannot_mix_with_global_engine(tmp_path, monkeypatch):
     assert evidence["release_gate"]["passed"] is False
     assert evidence["release_gate"]["blockers"]
     for module_name in lazy_modules:
-        assert sys.modules[module_name].get_session is global_engine.get_session
+        module = importlib.import_module(module_name)
+        assert module.get_session is global_engine.get_session
 
 
 def test_explicit_runtime_serializes_concurrent_database_bindings(tmp_path):
