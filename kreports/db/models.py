@@ -212,6 +212,23 @@ class FinancialFactCompact(Base):
     amount = Column(BigInteger, nullable=True)
     source_account_id = Column(String(200), nullable=True)
     source_account_nm = Column(String(300), nullable=True)
+    source_table = Column(String(40), nullable=True)
+    unit = Column(String(30), nullable=True)
+    period_type = Column(String(20), nullable=True)
+    citation_rcept_no = Column(String(80), nullable=True)
+    citation_report_nm = Column(String(300), nullable=True)
+    citation_basis = Column(
+        String(50),
+        nullable=False,
+        default="uncitable",
+        server_default="uncitable",
+    )
+    quality_status = Column(
+        String(24),
+        nullable=False,
+        default="limited",
+        server_default="limited",
+    )
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (

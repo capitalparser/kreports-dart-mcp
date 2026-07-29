@@ -19,6 +19,13 @@ def test_financial_facts_compact_schema(temp_engine):
         "amount",
         "source_account_id",
         "source_account_nm",
+        "source_table",
+        "unit",
+        "period_type",
+        "citation_rcept_no",
+        "citation_report_nm",
+        "citation_basis",
+        "quality_status",
     }.issubset(columns)
 
 

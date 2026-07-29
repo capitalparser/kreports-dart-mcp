@@ -426,6 +426,40 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_10_financial_compact_provenance",
+        description="Add financial compact provenance fields",
+        statements=(
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN source_table VARCHAR(40)
+            """,
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN unit VARCHAR(30)
+            """,
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN period_type VARCHAR(20)
+            """,
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN citation_rcept_no VARCHAR(80)
+            """,
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN citation_report_nm VARCHAR(300)
+            """,
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN citation_basis VARCHAR(50) NOT NULL DEFAULT 'uncitable'
+            """,
+            """
+            ALTER TABLE financial_facts_compact
+            ADD COLUMN quality_status VARCHAR(24) NOT NULL DEFAULT 'limited'
+            """,
+        ),
+    ),
 )
 
 

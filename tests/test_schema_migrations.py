@@ -27,6 +27,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_07_audit_fee_availability",
         "20260711_08_group_audit_graph",
         "20260711_09_audit_fee_observations",
+        "20260711_10_financial_compact_provenance",
     ]
     assert second == []
 
@@ -375,6 +376,22 @@ def test_audit_fee_observation_migration_adds_immutable_claim_store(temp_engine)
         "bsns_year",
         "quality_status",
     ]
+
+
+def test_financial_compact_provenance_migration_is_additive(temp_engine):
+    from kreports.db.migrations import MIGRATIONS
+
+    assert MIGRATIONS[9].revision == "20260711_10_financial_compact_provenance"
+    columns = {
+        item["name"]: item
+        for item in inspect(temp_engine).get_columns("financial_facts_compact")
+    }
+    assert {
+        "source_table", "unit", "period_type", "citation_rcept_no",
+        "citation_report_nm", "citation_basis", "quality_status",
+    }.issubset(columns)
+    assert columns["citation_basis"]["default"].strip("'") == "uncitable"
+    assert columns["quality_status"]["default"].strip("'") == "limited"
 
 
 def test_audit_fee_observation_current_slot_allows_one_current_claim(
