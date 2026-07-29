@@ -41,6 +41,21 @@ _INTEGRITY_FIELDS = {
     "cross_receipt_source_ordinal_link_count",
     "usable_response_without_procedure_count",
 }
+_DB_EVIDENCE_AGGREGATE_FIELDS = {
+    "audit_fee_observations": {
+        "row_count",
+        "current_count",
+        "historical_count",
+    },
+    "financial_compact_provenance": {
+        "row_count",
+        "uncitable_count",
+    },
+    "company_year_quality_freshness": {
+        "row_count",
+        "blank_fingerprint_count",
+    },
+}
 _CANONICAL_MCP_STATUSES = {"usable", "limited", "missing", "error"}
 _EXPECTED_PROFESSIONAL_TOOLS = (
     "prepare_standard_audit_hours_inputs",
@@ -522,10 +537,61 @@ def _valid_quality_distribution(
     return total == expected_count
 
 
+def _validate_db_evidence_aggregates(
+    snapshot: dict[str, object],
+) -> None:
+    sections: dict[str, dict[str, int]] = {}
+    for section_name, expected_fields in _DB_EVIDENCE_AGGREGATE_FIELDS.items():
+        section = snapshot.get(section_name)
+        if (
+            not isinstance(section, dict)
+            or set(section) != expected_fields
+            or not all(
+                _is_nonnegative_int(section[field])
+                for field in expected_fields
+            )
+        ):
+            raise RehearsalRunError(
+                "semantic_snapshot_invalid",
+                "Database evidence aggregate is missing or malformed.",
+            )
+        sections[section_name] = section
+
+    observations = sections["audit_fee_observations"]
+    if observations["row_count"] != (
+        observations["current_count"]
+        + observations["historical_count"]
+    ):
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Audit observation aggregate counts are inconsistent.",
+        )
+
+    financial = sections["financial_compact_provenance"]
+    if financial["uncitable_count"] > financial["row_count"]:
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Financial provenance aggregate counts are inconsistent.",
+        )
+
+    quality = sections["company_year_quality_freshness"]
+    if quality["blank_fingerprint_count"] > quality["row_count"]:
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Quality freshness aggregate counts are inconsistent.",
+        )
+    if quality["blank_fingerprint_count"] > 0:
+        raise RehearsalRunError(
+            "semantic_snapshot_blocked",
+            "Rebuilt quality rows contain blank input fingerprints.",
+        )
+
+
 def _validate_semantic_snapshot(
     snapshot: dict[str, object],
     *,
     allow_empty: bool = False,
+    require_db_evidence: bool = False,
 ) -> None:
     digest = snapshot.get("semantic_sha256")
     kam_count = snapshot.get("kam_count")
@@ -567,6 +633,8 @@ def _validate_semantic_snapshot(
                 "semantic_snapshot_invalid",
                 "Semantic snapshot evidence is missing or malformed.",
             )
+    if require_db_evidence:
+        _validate_db_evidence_aggregates(snapshot)
     if duplicates or any(
         int(integrity[field]) > 0
         for field in _INTEGRITY_FIELDS
@@ -676,8 +744,12 @@ def _failure_status(phase: str, error: BaseException) -> str:
     return "backfill_failed"
 
 
-def _snapshot_integrity(snapshot: dict[str, object]) -> dict[str, object]:
-    return {
+def _snapshot_integrity(
+    snapshot: dict[str, object],
+    *,
+    include_db_evidence: bool = False,
+) -> dict[str, object]:
+    integrity = {
         key: snapshot.get(key)
         for key in (
             "kam_count",
@@ -686,11 +758,15 @@ def _snapshot_integrity(snapshot: dict[str, object]) -> dict[str, object]:
             "procedure_quality_by_year",
             "duplicate_logical_identities",
             "integrity",
-            "audit_fee_observations",
-            "financial_compact_provenance",
-            "company_year_quality_freshness",
         )
     }
+    if include_db_evidence:
+        _validate_db_evidence_aggregates(snapshot)
+        integrity.update({
+            key: snapshot[key]
+            for key in _DB_EVIDENCE_AGGREGATE_FIELDS
+        })
+    return integrity
 
 
 def run_kam_schema_backfill_rehearsal(
@@ -977,7 +1053,10 @@ def run_kam_schema_backfill_rehearsal(
             snapshot_after_first = run_worker(
                 WorkerInvocation("semantic-snapshot", "readonly"),
             )
-            _validate_semantic_snapshot(snapshot_after_first)
+            _validate_semantic_snapshot(
+                snapshot_after_first,
+                require_db_evidence=True,
+            )
             return {
                 "years": years,
                 "snapshot_after": snapshot_after_first,
@@ -1023,12 +1102,21 @@ def run_kam_schema_backfill_rehearsal(
         snapshot_after_second = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
-        _validate_semantic_snapshot(snapshot_after_second)
+        _validate_semantic_snapshot(
+            snapshot_after_second,
+            require_db_evidence=include_db_evidence,
+        )
         if (
             snapshot_after_first.get("semantic_sha256")
             != snapshot_after_second.get("semantic_sha256")
-            or _snapshot_integrity(snapshot_after_first)
-            != _snapshot_integrity(snapshot_after_second)
+            or _snapshot_integrity(
+                snapshot_after_first,
+                include_db_evidence=include_db_evidence,
+            )
+            != _snapshot_integrity(
+                snapshot_after_second,
+                include_db_evidence=include_db_evidence,
+            )
         ):
             raise RehearsalRunError(
                 "idempotency_mismatch",
@@ -1041,7 +1129,10 @@ def run_kam_schema_backfill_rehearsal(
                 "semantic_sha256",
             ),
             "semantic_sha256_equal": True,
-            "integrity": _snapshot_integrity(snapshot_after_second),
+            "integrity": _snapshot_integrity(
+                snapshot_after_second,
+                include_db_evidence=include_db_evidence,
+            ),
         }
         if include_db_evidence:
             idempotency_payload.update({

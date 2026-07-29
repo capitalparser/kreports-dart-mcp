@@ -66,6 +66,17 @@ def _semantic_snapshot_fixture(
     return snapshot
 
 
+def _legacy_semantic_snapshot_fixture() -> dict[str, object]:
+    snapshot = _semantic_snapshot_fixture()
+    for key in (
+        "audit_fee_observations",
+        "financial_compact_provenance",
+        "company_year_quality_freshness",
+    ):
+        snapshot.pop(key)
+    return snapshot
+
+
 def _mcp_row(
     tool: str,
     *,
@@ -1115,6 +1126,219 @@ def test_rehearsal_rejects_malformed_or_adverse_semantic_snapshot(
         else "kam_rebuild_complete"
     )
     assert report["phases"][-1]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("section", "value", "expected_code"),
+    [
+        (
+            "audit_fee_observations",
+            None,
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            None,
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            None,
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            [],
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 1,
+                "current_count": 1,
+                "historical_count": 0,
+                "unexpected": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 1,
+                "current_count": -1,
+                "historical_count": 2,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 1,
+                "current_count": True,
+                "historical_count": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 2,
+                "current_count": 1,
+                "historical_count": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            {
+                "row_count": 1,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            {
+                "row_count": 1,
+                "uncitable_count": 2,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            {
+                "row_count": False,
+                "uncitable_count": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            {
+                "row_count": 1,
+                "blank_fingerprint_count": 0,
+                "unexpected": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            {
+                "row_count": 1,
+                "blank_fingerprint_count": 2,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            {
+                "row_count": 1,
+                "blank_fingerprint_count": 1,
+            },
+            "semantic_snapshot_blocked",
+        ),
+    ],
+)
+def test_opt_in_snapshot_rejects_missing_malformed_or_inconsistent_aggregates(
+    section: str,
+    value: object,
+    expected_code: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        _validate_semantic_snapshot,
+    )
+
+    snapshot = _semantic_snapshot_fixture()
+    if value is None:
+        snapshot.pop(section)
+    else:
+        snapshot[section] = value
+
+    with pytest.raises(RehearsalRunError) as caught:
+        _validate_semantic_snapshot(
+            snapshot,
+            require_db_evidence=True,
+        )
+
+    assert caught.value.code == expected_code
+
+
+def test_opt_in_snapshot_accepts_consistent_zero_observation_revision04_case(
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        _validate_semantic_snapshot,
+    )
+
+    snapshot = _semantic_snapshot_fixture(
+        audit_fee_observations={
+            "row_count": 0,
+            "current_count": 0,
+            "historical_count": 0,
+        },
+        financial_compact_provenance={
+            "row_count": 1,
+            "uncitable_count": 0,
+        },
+        company_year_quality_freshness={
+            "row_count": 5,
+            "blank_fingerprint_count": 0,
+        },
+    )
+
+    _validate_semantic_snapshot(snapshot, require_db_evidence=True)
+
+
+def test_db_evidence_strictness_is_opt_in_and_legacy_integrity_shape_survives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    legacy_snapshot = _legacy_semantic_snapshot_fixture()
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        legacy_root,
+        monkeypatch,
+        snapshot_payload=legacy_snapshot,
+    )
+    legacy_report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+    assert legacy_report["status"] == "complete"
+    assert set(legacy_report["idempotency"]["integrity"]) == {
+        "kam_count",
+        "procedure_count",
+        "kam_quality_by_year",
+        "procedure_quality_by_year",
+        "duplicate_logical_identities",
+        "integrity",
+    }
+
+    strict_root = tmp_path / "strict"
+    strict_root.mkdir()
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        strict_root,
+        monkeypatch,
+        snapshot_payload=legacy_snapshot,
+    )
+    strict_report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        include_db_evidence=True,
+    )
+    assert strict_report["status"] == "backfill_failed"
+    assert strict_report["last_phase"] == "quality_ledger_rebuilt"
+    assert strict_report["phases"][-1]["evidence"]["error_code"] == (
+        "semantic_snapshot_invalid"
+    )
 
 
 def test_rehearsal_rejects_existing_clone_and_exact_report(
