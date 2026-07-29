@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from pathlib import Path
 import sys
+from datetime import UTC
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 
 _TEST_CAPABILITY = "ab" * 32
 _EXPECTED_PROFESSIONAL_TOOLS = (
@@ -46,6 +46,19 @@ def _semantic_snapshot_fixture(
             "orphan_procedure_count": 0,
             "cross_receipt_source_ordinal_link_count": 0,
             "usable_response_without_procedure_count": 0,
+        },
+        "audit_fee_observations": {
+            "row_count": 1,
+            "current_count": 1,
+            "historical_count": 0,
+        },
+        "financial_compact_provenance": {
+            "row_count": 1,
+            "uncitable_count": 0,
+        },
+        "company_year_quality_freshness": {
+            "row_count": 1,
+            "blank_fingerprint_count": 0,
         },
         "semantic_sha256": "b" * 64,
     }
@@ -592,6 +605,11 @@ def test_rehearsal_runs_exact_phases_and_ascending_year_order(
     assert [
         year for action, year in worker_calls if action == "procedure-index"
     ] == [*REHEARSAL_YEARS, *REHEARSAL_YEARS]
+    assert not {
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
+    } & {action for action, _year in worker_calls}
     assert sum(call[0] == "free-space" for call in calls) == 5
     assert sum(call[0] == "source-unchanged" for call in calls) == 8
     assert Path(report["report_path"]).exists()
@@ -599,6 +617,142 @@ def test_rehearsal_runs_exact_phases_and_ascending_year_order(
         Path(report["report_path"]).read_text(encoding="utf-8"),
     )
     assert persisted["phases"] == report["phases"]
+
+
+def test_evidence_hardening_is_opt_in_and_preserves_exact_worker_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        PHASES,
+        REHEARSAL_YEARS,
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, calls = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        min_free_bytes=10 * 1024**3,
+        include_db_evidence=True,
+    )
+
+    phase_names = [phase["name"] for phase in report["phases"]]
+    procedure_index = phase_names.index("procedure_reconcile_complete")
+    assert phase_names == [
+        *PHASES[: procedure_index + 1],
+        "audit_fee_observations_backfilled",
+        "financial_compact_provenance_rebuilt",
+        "quality_ledger_rebuilt",
+        *PHASES[procedure_index + 1 :],
+    ]
+
+    worker_calls = [
+        (call[1], call[2])
+        for call in calls
+        if call[0] == "worker"
+    ]
+    snapshot_positions = [
+        index
+        for index, (action, _year) in enumerate(worker_calls)
+        if action == "semantic-snapshot"
+    ]
+    second_pass = worker_calls[
+        snapshot_positions[1] + 1 : snapshot_positions[2] + 1
+    ]
+    expected_second_pass = [
+        *[("kam-rebuild", year) for year in REHEARSAL_YEARS],
+        *[("procedure-index", year) for year in REHEARSAL_YEARS],
+        *[
+            ("audit-fee-observation-backfill", year)
+            for year in REHEARSAL_YEARS
+        ],
+        *[
+            ("financial-compact-rebuild", year)
+            for year in REHEARSAL_YEARS
+        ],
+        *[
+            ("company-year-quality-rebuild", year)
+            for year in REHEARSAL_YEARS
+        ],
+        ("semantic-snapshot", None),
+    ]
+    assert second_pass == expected_second_pass
+    assert report["idempotency"]["integrity"][
+        "audit_fee_observations"
+    ]["current_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("failed_action", "expected_phase", "next_action"),
+    [
+        (
+            "audit-fee-observation-backfill",
+            "audit_fee_observations_backfilled",
+            "financial-compact-rebuild",
+        ),
+        (
+            "financial-compact-rebuild",
+            "financial_compact_provenance_rebuilt",
+            "company-year-quality-rebuild",
+        ),
+        (
+            "company-year-quality-rebuild",
+            "quality_ledger_rebuilt",
+            "semantic-snapshot",
+        ),
+    ],
+)
+def test_each_evidence_phase_fails_closed_before_later_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_action: str,
+    expected_phase: str,
+    next_action: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, calls = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        fail_action=failed_action,
+        fail_year=2023,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        min_free_bytes=10 * 1024**3,
+        include_db_evidence=True,
+    )
+    failed_worker_index = next(
+        index
+        for index, call in enumerate(calls)
+        if call[:3] == ("worker", failed_action, 2023)
+    )
+
+    assert report["status"] == "backfill_failed"
+    assert report["last_phase"] == expected_phase
+    assert report["phases"][-1]["status"] == "failed"
+    assert calls[failed_worker_index - 2][0] == "source-unchanged"
+    assert calls[failed_worker_index - 1][0] == "free-space"
+    assert calls[-1][0] == "source-unchanged"
+    assert all(
+        call[0] != "worker"
+        for call in calls[failed_worker_index + 1 :]
+    )
+    assert not any(
+        call[:2] == ("worker", next_action)
+        for call in calls[failed_worker_index + 1 :]
+    )
 
 
 def test_rehearsal_creates_bound_marker_after_clone_before_workers(
@@ -967,7 +1121,7 @@ def test_rehearsal_rejects_existing_clone_and_exact_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from kreports.maintenance import kam_backfill_rehearsal as rehearsal
 
@@ -987,7 +1141,7 @@ def test_rehearsal_rejects_existing_clone_and_exact_report(
 
     other_dir = tmp_path / "other-rehearsal"
     other_dir.mkdir()
-    fixed = datetime(2026, 7, 29, 1, 2, 3, tzinfo=timezone.utc)
+    fixed = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
     monkeypatch.setattr(rehearsal, "_utc_now", lambda: fixed)
     existing = (
         other_dir / "kam-schema-backfill-rehearsal-20260729T010203Z.json"
