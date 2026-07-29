@@ -327,6 +327,12 @@ def compare_peer_kam_topics(
     subject_sections = [
         row for row in (result.get("subject_sections") or []) if isinstance(row, dict)
     ]
+    subject_kam_sections = [
+        row for row in subject_sections if row.get("section_key") == "kam"
+    ]
+    non_kam_subject_sections = [
+        row for row in subject_sections if row.get("section_key") != "kam"
+    ]
     section_summary = (
         result.get("audit_report_sections")
         if isinstance(result.get("audit_report_sections"), dict)
@@ -340,10 +346,12 @@ def compare_peer_kam_topics(
         and raw_material_count >= 0
     )
     material_count = (
-        raw_material_count if material_count_available else len(subject_sections)
+        raw_material_count
+        if material_count_available
+        else len(subject_kam_sections)
     )
     corp_code = str(subject.get("corp_code") or "")
-    if material_count > len(subject_sections) and corp_code:
+    if material_count > len(subject_kam_sections) and corp_code:
         reloaded = _get_audit_report_sections(
             corp_code,
             year=year,
@@ -356,12 +364,23 @@ def compare_peer_kam_topics(
             if isinstance(reloaded, dict) and isinstance(reloaded.get("sections"), list)
             else []
         )
-        if len(reloaded_sections) > len(subject_sections):
+        reloaded_kam_sections = [
+            deepcopy(row)
+            for row in reloaded_sections
+            if isinstance(row, dict) and row.get("section_key") == "kam"
+        ]
+        if len(reloaded_kam_sections) > len(subject_kam_sections):
+            subject_kam_sections = reloaded_kam_sections
             subject_sections = [
-                deepcopy(row) for row in reloaded_sections if isinstance(row, dict)
+                *subject_kam_sections,
+                *non_kam_subject_sections,
             ]
     if corp_code:
-        attach_kam_item_semantics(subject_sections, corp_code=corp_code, year=year)
+        attach_kam_item_semantics(
+            subject_kam_sections,
+            corp_code=corp_code,
+            year=year,
+        )
     for row in subject_sections:
         _canonical_receipt(row)
     peer_samples = result.get("peer_section_samples")
@@ -376,10 +395,10 @@ def compare_peer_kam_topics(
     for row in result.get("subject_business_report_kam_summary") or []:
         if isinstance(row, dict):
             _canonical_receipt(row)
-    semantic = kam_semantic_coverage(subject_sections)
+    semantic = kam_semantic_coverage(subject_kam_sections)
     population_proved = (
         material_count_available
-        and material_count == len(subject_sections)
+        and material_count == len(subject_kam_sections)
     )
     if not population_proved:
         semantic["semantic_complete"] = False

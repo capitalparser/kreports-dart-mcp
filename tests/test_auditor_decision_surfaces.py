@@ -1060,20 +1060,41 @@ def test_peer_kam_wrapper_reloads_full_population_and_fails_on_incomplete_eleven
     assert result["data_quality"]["status"] == "limited"
 
 
-def test_peer_kam_uses_kam_count_not_total_audit_section_count(monkeypatch):
+def test_peer_kam_filters_mixed_sections_for_semantic_population(monkeypatch):
     from kreports.analysis import auditor_decisions
 
-    row = {
+    kam_row = {
         "rcept_no": "20250101000001",
         "section_key": "kam",
         "complete": True,
     }
+    non_kam_rows = [
+        {
+            "rcept_no": f"2025010100000{index + 2}",
+            "section_key": section_key,
+            "complete": False,
+        }
+        for index, section_key in enumerate(
+            (
+                "audit_opinion",
+                "emphasis",
+                "going_concern",
+                "audit_opinion",
+                "emphasis",
+                "going_concern",
+                "audit_opinion",
+                "emphasis",
+                "going_concern",
+            ),
+        )
+    ]
+    mixed_sections = [kam_row, *non_kam_rows]
     monkeypatch.setattr(
         auditor_decisions,
         "_legacy_compare_peer_kam_topics",
         lambda **_: {
             "subject": {"corp_code": "001"},
-            "subject_sections": [row],
+            "subject_sections": mixed_sections,
             "peer_section_samples": {},
             "audit_report_sections": {"subject_section_count": 11},
             "data_quality": {
@@ -1085,12 +1106,17 @@ def test_peer_kam_uses_kam_count_not_total_audit_section_count(monkeypatch):
     monkeypatch.setattr(
         auditor_decisions,
         "_get_audit_report_sections",
-        lambda *_args, **_kwargs: {"sections": [row]},
+        lambda *_args, **_kwargs: {"sections": [kam_row]},
     )
+
+    def attach_semantics(rows, **_kwargs):
+        for row in rows:
+            row["semantics_attached"] = True
+
     monkeypatch.setattr(
         auditor_decisions,
         "attach_kam_item_semantics",
-        lambda *_args, **_kwargs: None,
+        attach_semantics,
     )
     monkeypatch.setattr(
         auditor_decisions,
@@ -1106,6 +1132,12 @@ def test_peer_kam_uses_kam_count_not_total_audit_section_count(monkeypatch):
 
     result = auditor_decisions.compare_peer_kam_topics("001")
 
+    assert len(result["subject_sections"]) == 10
+    assert result["subject_sections"][0]["semantics_attached"] is True
+    assert all(
+        "semantics_attached" not in row
+        for row in result["subject_sections"][1:]
+    )
     assert result["audit_report_sections"]["semantic_complete"] is True
     assert result["data_quality"]["status"] == "usable"
 
