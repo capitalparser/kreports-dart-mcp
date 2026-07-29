@@ -157,6 +157,7 @@ def test_real_rehearsal_migrates_rebuilds_and_preserves_source(
     legacy_kam_source: Path,
     apfs_rehearsal_dir: Path,
 ) -> None:
+    from kreports.db.migrations import MIGRATIONS
     from kreports.maintenance.kam_backfill_rehearsal import (
         run_kam_schema_backfill_rehearsal,
     )
@@ -238,18 +239,19 @@ def test_real_rehearsal_migrates_rebuilds_and_preserves_source(
             "group_relationships",
             "group_component_metrics",
         } <= clone_tables
-        assert {row[0] for row in clone_connection.execute(
-            "SELECT revision FROM schema_migrations"
-        )} == {
-            "20260711_01_quality_contract",
-            "20260711_02_company_year_quality",
-            "20260711_03_backfill_run_lifecycle",
-            "20260711_04_backfill_owner_identity",
+        recorded_revisions = {
+            row[0]
+            for row in clone_connection.execute(
+                "SELECT revision FROM schema_migrations"
+            )
+        }
+        assert recorded_revisions == {item.revision for item in MIGRATIONS}
+        assert [item.revision for item in MIGRATIONS[4:8]] == [
             "20260711_05_kam_items",
             "20260711_06_audit_procedure_linkage",
             "20260711_07_audit_fee_availability",
             "20260711_08_group_audit_graph",
-        }
+        ]
         assert {row[1] for row in clone_connection.execute(
             "PRAGMA table_info(group_component_metrics)"
         )} >= {

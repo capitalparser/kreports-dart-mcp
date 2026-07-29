@@ -33,6 +33,179 @@ def test_schema_migrations_are_idempotent(temp_engine):
     assert second == []
 
 
+def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
+    tmp_path,
+):
+    """Catch an additive foundation migration that loses revision-08 evidence."""
+    from kreports.db.migrations import (
+        MIGRATIONS,
+        _checksum,
+        apply_schema_migrations,
+    )
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'revision-08-foundation.db'}")
+    with legacy.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision VARCHAR(40) PRIMARY KEY,
+              checksum VARCHAR(64) NOT NULL,
+              description VARCHAR(300) NOT NULL,
+              applied_at DATETIME NOT NULL
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE audit_fees (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              auditor_nm VARCHAR(100),
+              audit_fee_m INTEGER,
+              audit_hours INTEGER,
+              non_audit_fee_m INTEGER,
+              non_audit_hours INTEGER,
+              nas_ratio FLOAT,
+              independence_risk_flag BOOLEAN,
+              fetched_at DATETIME NOT NULL,
+              contract_fee_m INTEGER,
+              contract_hours INTEGER,
+              actual_fee_m INTEGER,
+              actual_hours INTEGER,
+              source_class VARCHAR(40),
+              source_rcept_no VARCHAR(80),
+              source_period VARCHAR(80),
+              availability_status VARCHAR(40),
+              quality_status VARCHAR(24),
+              compatibility_basis VARCHAR(40),
+              conflict_status VARCHAR(24),
+              source_observations_json TEXT
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE financial_facts_compact (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fs_div VARCHAR(3) NOT NULL,
+              metric_key VARCHAR(50) NOT NULL,
+              metric_name VARCHAR(200) NOT NULL,
+              amount BIGINT,
+              source_account_id VARCHAR(200),
+              source_account_nm VARCHAR(300),
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_financial_facts_compact
+                UNIQUE (corp_code, bsns_year, fs_div, metric_key)
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE company_year_quality (
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              market VARCHAR(10),
+              financial_core_status VARCHAR(24) NOT NULL,
+              auditor_status VARCHAR(24) NOT NULL,
+              audit_fee_status VARCHAR(24) NOT NULL,
+              policy_status VARCHAR(24) NOT NULL,
+              kam_status VARCHAR(24) NOT NULL,
+              audit_procedure_status VARCHAR(24) NOT NULL,
+              group_audit_status VARCHAR(24) NOT NULL,
+              investor_grade VARCHAR(1) NOT NULL,
+              auditor_grade VARCHAR(1) NOT NULL,
+              group_audit_grade VARCHAR(1) NOT NULL,
+              blockers_json TEXT NOT NULL DEFAULT '[]',
+              quality_version VARCHAR(20) NOT NULL DEFAULT 'v1',
+              updated_at DATETIME NOT NULL,
+              PRIMARY KEY (corp_code, bsns_year)
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO audit_fees (
+              corp_code, bsns_year, fetched_at, contract_fee_m, actual_fee_m
+            ) VALUES ('00126380', 2025, '2026-07-29 00:00:00', 1000, 2000)
+        """))
+        connection.execute(text("""
+            INSERT INTO financial_facts_compact (
+              corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+              fetched_at
+            ) VALUES (
+              '00126380', 2025, 'CFS', 'revenue', 'Revenue', 333000,
+              '2026-07-29 00:00:00'
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO company_year_quality (
+              corp_code, bsns_year, financial_core_status, auditor_status,
+              audit_fee_status, policy_status, kam_status,
+              audit_procedure_status, group_audit_status, investor_grade,
+              auditor_grade, group_audit_grade, updated_at
+            ) VALUES (
+              '00126380', 2025, 'available', 'available', 'available',
+              'available', 'available', 'available', 'available', 'A', 'B',
+              'C', '2026-07-29 00:00:00'
+            )
+        """))
+        for migration in MIGRATIONS[:8]:
+            connection.execute(
+                text("""
+                    INSERT INTO schema_migrations
+                    (revision, checksum, description, applied_at)
+                    VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)
+                """),
+                {
+                    "revision": migration.revision,
+                    "checksum": _checksum(migration),
+                    "description": migration.description,
+                },
+            )
+
+    with legacy.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        applied = apply_schema_migrations(connection)
+        second_applied = apply_schema_migrations(connection)
+        seeded_audit_fee = connection.execute(text("""
+            SELECT corp_code, bsns_year, contract_fee_m, actual_fee_m
+            FROM audit_fees
+        """)).one()
+        seeded_compact = connection.execute(text("""
+            SELECT corp_code, bsns_year, metric_key, amount
+            FROM financial_facts_compact
+        """)).one()
+        seeded_quality = connection.execute(text("""
+            SELECT corp_code, bsns_year, investor_grade, input_fingerprint
+            FROM company_year_quality
+        """)).one()
+        recorded_ledger = dict(connection.execute(text("""
+            SELECT revision, checksum
+            FROM schema_migrations
+        """)).all())
+        revision_11 = connection.execute(text("""
+            SELECT revision FROM schema_migrations
+            WHERE revision = :revision
+        """), {"revision": MIGRATIONS[10].revision}).scalar_one()
+        foreign_key_check = connection.exec_driver_sql(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+        quick_check = connection.exec_driver_sql("PRAGMA quick_check").scalar_one()
+
+    assert applied == [
+        "20260711_09_audit_fee_observations",
+        "20260711_10_financial_compact_provenance",
+        "20260711_11_company_year_quality_freshness",
+    ]
+    assert second_applied == []
+    assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)
+    assert seeded_compact == ("00126380", 2025, "revenue", 333_000)
+    assert seeded_quality == ("00126380", 2025, "A", "")
+    assert {
+        item.revision: recorded_ledger[item.revision] for item in MIGRATIONS[:8]
+    } == {item.revision: _checksum(item) for item in MIGRATIONS[:8]}
+    # SQLite preserves the full value despite the legacy VARCHAR(40) affinity.
+    assert revision_11 == "20260711_11_company_year_quality_freshness"
+    assert len(revision_11) == 42
+    assert foreign_key_check == []
+    assert quick_check == "ok"
+
+
 def test_schema_migration_records_stable_sha256_and_current_version(temp_engine):
     from kreports.db.migrations import (
         MIGRATIONS,

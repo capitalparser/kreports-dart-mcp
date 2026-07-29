@@ -194,7 +194,7 @@ def test_migration_08_schema_and_prior_checksums(temp_engine):
     with temp_engine.begin() as conn:
         apply_schema_migrations(conn)
         assert apply_schema_migrations(conn) == []
-    assert MIGRATIONS[-1].revision == "20260711_08_group_audit_graph"
+    assert MIGRATIONS[7].revision == "20260711_08_group_audit_graph"
     assert prior == [_checksum(item) for item in MIGRATIONS[:7]]
     tables = set(inspect(temp_engine).get_table_names())
     assert {"group_entities", "group_relationships", "group_component_metrics"} <= tables
