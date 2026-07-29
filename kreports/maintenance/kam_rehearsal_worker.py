@@ -8,20 +8,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
-from dataclasses import dataclass
 import fcntl
 import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
 import re
 import sqlite3
 import stat as stat_module
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
-
 
 YEARS = (2021, 2022, 2023, 2024, 2025)
 CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
@@ -56,6 +55,9 @@ _ACTIONS = {
     "kam-dry-run",
     "kam-rebuild",
     "procedure-index",
+    "audit-fee-observation-backfill",
+    "financial-compact-rebuild",
+    "company-year-quality-rebuild",
     "semantic-snapshot",
     "mcp-validate",
 }
@@ -102,6 +104,22 @@ PROCEDURE_SNAPSHOT_COLUMNS = (
     "procedure_hash", "procedure_length", "assertion_hints_json",
     "linked_metric_keys_json", "linked_note_keys_json", "linked_event_keys_json",
     "parser_version", "quality_status", "section_ordinal", "procedure_ordinal",
+)
+AUDIT_OBSERVATION_SEMANTIC_FIELDS = (
+    "observation_hash", "source_slot_hash", "corp_code", "bsns_year",
+    "source_class", "source_rcept_no", "source_period", "contract_fee_m",
+    "contract_hours", "actual_fee_m", "actual_hours", "availability_status",
+    "quality_status", "parser_version", "is_current", "supersedes_hash",
+)
+FINANCIAL_COMPACT_PROVENANCE_FIELDS = (
+    "corp_code", "bsns_year", "fs_div", "metric_key", "amount",
+    "source_account_id", "source_table", "unit", "period_type",
+    "citation_rcept_no", "citation_report_nm", "citation_basis",
+    "quality_status",
+)
+QUALITY_FRESHNESS_FIELDS = (
+    "corp_code", "bsns_year", "input_fingerprint",
+    "evidence_summary_json", "quality_version",
 )
 
 
@@ -225,7 +243,7 @@ def _require_rehearsal_binding(
         if not hmac.compare_digest(signature, expected_signature):
             raise ValueError("marker signature mismatch")
         if not isinstance(payload["database_path"], str):
-            raise ValueError("marker database path is invalid")
+            raise TypeError("marker database path is invalid")
         marker_database = Path(payload["database_path"])
         if not marker_database.is_absolute() or marker_database.resolve(strict=True) != database:
             raise ValueError("marker database path is invalid")
@@ -237,7 +255,7 @@ def _require_rehearsal_binding(
         if payload["database_inode"] != stat.st_ino or payload["database_device"] != stat.st_dev:
             raise ValueError("marker database identity is invalid")
         if not isinstance(payload["source_path"], str):
-            raise ValueError("marker source path is invalid")
+            raise TypeError("marker source path is invalid")
         source = Path(payload["source_path"])
         if not source.is_absolute() or source.is_symlink() or not source.is_file():
             raise ValueError("marker source path is invalid")
@@ -431,8 +449,8 @@ def _bound_database_runtime(
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.pool import StaticPool
 
-        from kreports.config import settings
         import kreports.db.engine as engine_module
+        from kreports.config import settings
 
         original_engine = engine_module.engine
         original_session_local = engine_module.SessionLocal
@@ -615,11 +633,26 @@ def _quality_distribution(rows: list[dict[str, object]]) -> dict[str, dict[str, 
 
 
 def semantic_snapshot() -> dict[str, object]:
-    """Return a deterministic, typed KAM/procedure semantic identity snapshot."""
+    """Return a deterministic semantic identity snapshot without timestamps."""
     connection = _open_readonly_database()
     try:
         kam_rows = _snapshot_rows(connection, "kam_items", KAM_SNAPSHOT_COLUMNS)
         procedure_rows = _snapshot_rows(connection, "audit_procedure_items", PROCEDURE_SNAPSHOT_COLUMNS)
+        observation_rows = _snapshot_rows(
+            connection,
+            "audit_fee_observations",
+            AUDIT_OBSERVATION_SEMANTIC_FIELDS,
+        )
+        financial_rows = _snapshot_rows(
+            connection,
+            "financial_facts_compact",
+            FINANCIAL_COMPACT_PROVENANCE_FIELDS,
+        )
+        quality_rows = _snapshot_rows(
+            connection,
+            "company_year_quality",
+            QUALITY_FRESHNESS_FIELDS,
+        )
         duplicate_logical_identities = [
             dict(row) for row in connection.execute(
                 "SELECT rcept_no, source_type, ordinal, COUNT(*) AS count FROM kam_items GROUP BY rcept_no, source_type, ordinal HAVING COUNT(*) > 1"
@@ -630,7 +663,13 @@ def semantic_snapshot() -> dict[str, object]:
             "cross_receipt_source_ordinal_link_count": int(connection.execute("SELECT COUNT(*) FROM audit_procedure_items p JOIN kam_items k ON k.id=p.kam_item_id WHERE p.rcept_no != k.rcept_no OR p.source_type != k.source_type OR p.section_ordinal != k.ordinal").fetchone()[0]),
             "usable_response_without_procedure_count": int(connection.execute("SELECT COUNT(*) FROM kam_items k WHERE k.quality_status='usable' AND trim(COALESCE(k.audit_response_text, '')) != '' AND NOT EXISTS (SELECT 1 FROM audit_procedure_items p WHERE p.kam_item_id=k.id)").fetchone()[0]),
         }
-        payload = {"kam_items": kam_rows, "audit_procedure_items": procedure_rows}
+        payload = {
+            "kam_items": kam_rows,
+            "audit_procedure_items": procedure_rows,
+            "audit_fee_observations": observation_rows,
+            "financial_compact_provenance": financial_rows,
+            "company_year_quality_freshness": quality_rows,
+        }
         digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {
             "kam_count": len(kam_rows),
@@ -639,6 +678,29 @@ def semantic_snapshot() -> dict[str, object]:
             "procedure_quality_by_year": _quality_distribution(procedure_rows),
             "duplicate_logical_identities": duplicate_logical_identities,
             "integrity": integrity,
+            "audit_fee_observations": {
+                "row_count": len(observation_rows),
+                "current_count": sum(
+                    bool(row["is_current"]) for row in observation_rows
+                ),
+                "historical_count": sum(
+                    not bool(row["is_current"]) for row in observation_rows
+                ),
+            },
+            "financial_compact_provenance": {
+                "row_count": len(financial_rows),
+                "uncitable_count": sum(
+                    row["citation_basis"] == "uncitable"
+                    for row in financial_rows
+                ),
+            },
+            "company_year_quality_freshness": {
+                "row_count": len(quality_rows),
+                "blank_fingerprint_count": sum(
+                    not str(row["input_fingerprint"] or "").strip()
+                    for row in quality_rows
+                ),
+            },
             "semantic_sha256": digest,
         }
     finally:
@@ -752,7 +814,15 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
     """Execute one validated action after the child process has bound its DB."""
     if action not in _ACTIONS:
         raise WorkerActionError("invalid_action", "unsupported worker action")
-    if action in {"kam-dry-run", "kam-rebuild", "procedure-index"}:
+    year_actions = {
+        "kam-dry-run",
+        "kam-rebuild",
+        "procedure-index",
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
+    }
+    if action in year_actions:
         if year not in YEARS:
             raise WorkerActionError("invalid_year", "year must be one of 2021..2025")
     elif year is not None:
@@ -763,6 +833,9 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
         "kam-dry-run",
         "kam-rebuild",
         "procedure-index",
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
     }
     if collector:
         _require_mode("collector", action)
@@ -825,6 +898,40 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
                     "procedure index reported failures",
                 )
             return result
+        if action == "audit-fee-observation-backfill":
+            from kreports.maintenance.audit_fee_observation_backfill import (
+                backfill_audit_fee_observations,
+            )
+
+            result = backfill_audit_fee_observations(
+                year_from=int(year),
+                year_to=int(year),
+                dry_run=False,
+            )
+            if int(result.get("failed_company_years") or 0):
+                raise WorkerActionError(
+                    "backfill_failed",
+                    "audit fee observation backfill reported failures",
+                )
+            return result
+        if action == "financial-compact-rebuild":
+            from kreports.maintenance.financial_compact import (
+                rebuild_financial_facts_compact,
+            )
+
+            return rebuild_financial_facts_compact(
+                year_from=int(year),
+                year_to=int(year),
+            )
+        if action == "company-year-quality-rebuild":
+            from kreports.quality.company_year import (
+                rebuild_company_year_quality,
+            )
+
+            return rebuild_company_year_quality(
+                year_from=int(year),
+                year_to=int(year),
+            )
         if action == "semantic-snapshot":
             return semantic_snapshot()
         return validate_professional_mcp()
@@ -853,7 +960,7 @@ def main(argv: list[str] | None = None) -> int:
     except WorkerActionError as exc:
         _write_json({"ok": False, "action": action, "error": {"code": exc.code, "message": _bounded_message(exc)}})
         return 2
-    except Exception as exc:  # pragma: no cover - final containment boundary
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - containment boundary
         _write_json({"ok": False, "action": action, "error": {"code": "worker_failed", "message": _bounded_message(exc)}})
         return 2
 

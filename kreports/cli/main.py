@@ -7,7 +7,7 @@ import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 # CLI는 headless 환경
 os.environ.setdefault("KREPORTS_HEADLESS", "1")
@@ -94,26 +94,30 @@ def backfill_audit_fee_observations_cmd(
     )
 
 
-@app.command("rehearse-kam-schema-backfill")
-def rehearse_kam_schema_backfill_cmd(
-    source_db: Path = typer.Option(..., "--source-db"),
-    rehearsal_dir: Path = typer.Option(..., "--rehearsal-dir"),
-    python_executable: Path = typer.Option(
-        Path(sys.executable),
-        "--python-executable",
-    ),
+def _run_clone_rehearsal_cli(
+    *,
+    source_db: Path,
+    rehearsal_dir: Path,
+    python_executable: Path,
+    include_db_evidence: bool,
 ) -> None:
-    """Run a retained-clone KAM migration/backfill rehearsal."""
-    for path, expected in (
-        (source_db, "file"),
-        (rehearsal_dir, "directory"),
-        (python_executable, "file"),
+    for path, expected, reject_symlink in (
+        (source_db, "file", True),
+        (rehearsal_dir, "directory", True),
+        (python_executable, "file", False),
     ):
         valid_kind = path.is_file() if expected == "file" else path.is_dir()
-        if not path.is_absolute() or not valid_kind:
+        if (
+            not path.is_absolute()
+            or (reject_symlink and path.is_symlink())
+            or not valid_kind
+        ):
             raise typer.BadParameter(
                 f"{expected} path must be absolute and existing",
             )
+    source_db = source_db.resolve(strict=True)
+    rehearsal_dir = rehearsal_dir.resolve(strict=True)
+    python_executable = python_executable.resolve(strict=True)
 
     # Deliberately lazy: normal CLI startup must not bind the rehearsal
     # safety module, runtime database, or APFS-specific implementation.
@@ -123,11 +127,16 @@ def rehearse_kam_schema_backfill_cmd(
     )
 
     try:
+        arguments: dict[str, object] = {
+            "source_db": source_db,
+            "rehearsal_dir": rehearsal_dir,
+            "repository_root": Path(__file__).resolve().parents[2],
+            "python_executable": python_executable,
+        }
+        if include_db_evidence:
+            arguments["include_db_evidence"] = True
         report = run_kam_schema_backfill_rehearsal(
-            source_db=source_db,
-            rehearsal_dir=rehearsal_dir,
-            repository_root=Path(__file__).resolve().parents[2],
-            python_executable=python_executable,
+            **arguments,
         )
     except RehearsalRunError as exc:
         report = {
@@ -157,6 +166,42 @@ def rehearse_kam_schema_backfill_cmd(
         "data_quality_limited",
     }:
         raise typer.Exit(2)
+
+
+@app.command("rehearse-kam-schema-backfill")
+def rehearse_kam_schema_backfill_cmd(
+    source_db: Annotated[Path, typer.Option("--source-db")],
+    rehearsal_dir: Annotated[Path, typer.Option("--rehearsal-dir")],
+    python_executable: Annotated[
+        Path,
+        typer.Option("--python-executable"),
+    ] = Path(sys.executable),
+) -> None:
+    """Run a retained-clone KAM migration/backfill rehearsal."""
+    _run_clone_rehearsal_cli(
+        source_db=source_db,
+        rehearsal_dir=rehearsal_dir,
+        python_executable=python_executable,
+        include_db_evidence=False,
+    )
+
+
+@app.command("rehearse-db-evidence-hardening")
+def rehearse_db_evidence_hardening_cmd(
+    source_db: Annotated[Path, typer.Option("--source-db")],
+    rehearsal_dir: Annotated[Path, typer.Option("--rehearsal-dir")],
+    python_executable: Annotated[
+        Path,
+        typer.Option("--python-executable"),
+    ] = Path(sys.executable),
+) -> None:
+    """Rehearse all local database evidence rebuilds on a retained clone."""
+    _run_clone_rehearsal_cli(
+        source_db=source_db,
+        rehearsal_dir=rehearsal_dir,
+        python_executable=python_executable,
+        include_db_evidence=True,
+    )
 
 
 @contextmanager

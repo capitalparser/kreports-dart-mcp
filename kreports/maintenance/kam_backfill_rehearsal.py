@@ -1,20 +1,19 @@
 """Fail-closed orchestration for a retained KAM schema backfill rehearsal."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import hmac
 import importlib
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import subprocess
 import tempfile
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
-
 
 REHEARSAL_YEARS = (2021, 2022, 2023, 2024, 2025)
 PHASES = (
@@ -28,6 +27,11 @@ PHASES = (
     "mcp_validation_complete",
     "live_immutability_verified",
 )
+DB_EVIDENCE_PHASES = (
+    "audit_fee_observations_backfilled",
+    "financial_compact_provenance_rebuilt",
+    "quality_ledger_rebuilt",
+)
 MIN_FREE_BYTES = 10 * 1024**3
 MAX_WORKER_OUTPUT_BYTES = 2 * 1024**2
 MARKER_FILENAME = "kam-schema-backfill-rehearsal-marker.json"
@@ -36,6 +40,21 @@ _INTEGRITY_FIELDS = {
     "orphan_procedure_count",
     "cross_receipt_source_ordinal_link_count",
     "usable_response_without_procedure_count",
+}
+_DB_EVIDENCE_AGGREGATE_FIELDS = {
+    "audit_fee_observations": {
+        "row_count",
+        "current_count",
+        "historical_count",
+    },
+    "financial_compact_provenance": {
+        "row_count",
+        "uncitable_count",
+    },
+    "company_year_quality_freshness": {
+        "row_count",
+        "blank_fingerprint_count",
+    },
 }
 _CANONICAL_MCP_STATUSES = {"usable", "limited", "missing", "error"}
 _EXPECTED_PROFESSIONAL_TOOLS = (
@@ -75,6 +94,9 @@ _WORKER_TIMEOUT_SECONDS = {
     "kam-dry-run": 900,
     "kam-rebuild": 3600,
     "procedure-index": 3600,
+    "audit-fee-observation-backfill": 900,
+    "financial-compact-rebuild": 1800,
+    "company-year-quality-rebuild": 1800,
     "semantic-snapshot": 600,
     "mcp-validate": 900,
 }
@@ -248,7 +270,7 @@ def invoke_worker(
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _timestamp(value: datetime | None = None) -> str:
@@ -264,17 +286,17 @@ def _load_safety():
 def _identity_payload(identity: object) -> dict[str, object]:
     try:
         allocated_size = (
-            Path(getattr(identity, "path")).stat().st_blocks * 512
+            Path(identity.path).stat().st_blocks * 512
         )
     except (OSError, TypeError):
         allocated_size = None
     return {
-        "size": int(getattr(identity, "size")),
+        "size": int(identity.size),
         "allocated_size": allocated_size,
-        "inode": int(getattr(identity, "inode")),
-        "device": int(getattr(identity, "device")),
-        "mtime_ns": int(getattr(identity, "mtime_ns")),
-        "sha256": str(getattr(identity, "sha256")),
+        "inode": int(identity.inode),
+        "device": int(identity.device),
+        "mtime_ns": int(identity.mtime_ns),
+        "sha256": str(identity.sha256),
     }
 
 
@@ -345,7 +367,7 @@ def _create_rehearsal_marker(
     min_free_bytes: int,
     capability: str,
 ) -> Path:
-    database_path = Path(getattr(clone_identity, "path")).resolve()
+    database_path = Path(clone_identity.path).resolve()
     marker_path = database_path.parent / MARKER_FILENAME
     if not database_path.is_absolute() or marker_path.is_symlink():
         raise RehearsalRunError(
@@ -356,15 +378,15 @@ def _create_rehearsal_marker(
         "schema_version": "kam-schema-backfill-rehearsal-marker.v1",
         "run_id": run_id,
         "database_path": str(database_path),
-        "database_inode": int(getattr(clone_identity, "inode")),
-        "database_device": int(getattr(clone_identity, "device")),
-        "source_sha256": str(getattr(source_identity, "sha256")),
-        "clone_initial_sha256": str(getattr(clone_identity, "sha256")),
+        "database_inode": int(clone_identity.inode),
+        "database_device": int(clone_identity.device),
+        "source_sha256": str(source_identity.sha256),
+        "clone_initial_sha256": str(clone_identity.sha256),
         "source_path": str(
-            Path(getattr(source_identity, "path")).resolve(),
+            Path(source_identity.path).resolve(),
         ),
-        "source_inode": int(getattr(source_identity, "inode")),
-        "source_device": int(getattr(source_identity, "device")),
+        "source_inode": int(source_identity.inode),
+        "source_device": int(source_identity.device),
         "repository_root": str(repository_root.resolve()),
         "rehearsal_dir": str(rehearsal_dir.resolve()),
         "filesystem_type": filesystem_type,
@@ -442,7 +464,7 @@ def render_rehearsal_markdown(
         "| Phase | Status | Started | Finished |",
         "| --- | --- | --- | --- |",
     ]
-    for phase in phase_rows[: len(PHASES)]:
+    for phase in phase_rows[: len(PHASES) + len(DB_EVIDENCE_PHASES)]:
         if not isinstance(phase, dict):
             continue
         lines.append(
@@ -515,10 +537,61 @@ def _valid_quality_distribution(
     return total == expected_count
 
 
+def _validate_db_evidence_aggregates(
+    snapshot: dict[str, object],
+) -> None:
+    sections: dict[str, dict[str, int]] = {}
+    for section_name, expected_fields in _DB_EVIDENCE_AGGREGATE_FIELDS.items():
+        section = snapshot.get(section_name)
+        if (
+            not isinstance(section, dict)
+            or set(section) != expected_fields
+            or not all(
+                _is_nonnegative_int(section[field])
+                for field in expected_fields
+            )
+        ):
+            raise RehearsalRunError(
+                "semantic_snapshot_invalid",
+                "Database evidence aggregate is missing or malformed.",
+            )
+        sections[section_name] = section
+
+    observations = sections["audit_fee_observations"]
+    if observations["row_count"] != (
+        observations["current_count"]
+        + observations["historical_count"]
+    ):
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Audit observation aggregate counts are inconsistent.",
+        )
+
+    financial = sections["financial_compact_provenance"]
+    if financial["uncitable_count"] > financial["row_count"]:
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Financial provenance aggregate counts are inconsistent.",
+        )
+
+    quality = sections["company_year_quality_freshness"]
+    if quality["blank_fingerprint_count"] > quality["row_count"]:
+        raise RehearsalRunError(
+            "semantic_snapshot_invalid",
+            "Quality freshness aggregate counts are inconsistent.",
+        )
+    if quality["blank_fingerprint_count"] > 0:
+        raise RehearsalRunError(
+            "semantic_snapshot_blocked",
+            "Rebuilt quality rows contain blank input fingerprints.",
+        )
+
+
 def _validate_semantic_snapshot(
     snapshot: dict[str, object],
     *,
     allow_empty: bool = False,
+    require_db_evidence: bool = False,
 ) -> None:
     digest = snapshot.get("semantic_sha256")
     kam_count = snapshot.get("kam_count")
@@ -560,6 +633,8 @@ def _validate_semantic_snapshot(
                 "semantic_snapshot_invalid",
                 "Semantic snapshot evidence is missing or malformed.",
             )
+    if require_db_evidence:
+        _validate_db_evidence_aggregates(snapshot)
     if duplicates or any(
         int(integrity[field]) > 0
         for field in _INTEGRITY_FIELDS
@@ -669,8 +744,12 @@ def _failure_status(phase: str, error: BaseException) -> str:
     return "backfill_failed"
 
 
-def _snapshot_integrity(snapshot: dict[str, object]) -> dict[str, object]:
-    return {
+def _snapshot_integrity(
+    snapshot: dict[str, object],
+    *,
+    include_db_evidence: bool = False,
+) -> dict[str, object]:
+    integrity = {
         key: snapshot.get(key)
         for key in (
             "kam_count",
@@ -681,6 +760,13 @@ def _snapshot_integrity(snapshot: dict[str, object]) -> dict[str, object]:
             "integrity",
         )
     }
+    if include_db_evidence:
+        _validate_db_evidence_aggregates(snapshot)
+        integrity.update({
+            key: snapshot[key]
+            for key in _DB_EVIDENCE_AGGREGATE_FIELDS
+        })
+    return integrity
 
 
 def run_kam_schema_backfill_rehearsal(
@@ -690,6 +776,7 @@ def run_kam_schema_backfill_rehearsal(
     repository_root: Path,
     python_executable: Path,
     min_free_bytes: int = MIN_FREE_BYTES,
+    include_db_evidence: bool = False,
 ) -> dict[str, object]:
     """Run the exact retained-clone rehearsal state machine."""
     if min_free_bytes < MIN_FREE_BYTES:
@@ -738,7 +825,7 @@ def run_kam_schema_backfill_rehearsal(
     report["last_phase"] = "source_preflight"
     try:
         preflight_evidence = preflight_operation()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bounded preflight boundary
         report["phases"].append(_phase_record(
             "source_preflight",
             "failed",
@@ -763,19 +850,33 @@ def run_kam_schema_backfill_rehearsal(
     def persist_phase(
         name: str,
         operation,
+        *,
+        verify_source_on_failure: bool = False,
     ) -> object | None:
         started_at = _timestamp()
         report["last_phase"] = name
         try:
             evidence = operation()
-        except Exception as exc:
+        except Exception as error:  # noqa: BLE001 - persisted phase boundary
+            selected_error = error
+            if verify_source_on_failure:
+                try:
+                    safety.assert_source_unchanged(expected_source)
+                except Exception as source_error:  # noqa: BLE001
+                    selected_error = source_error
             report["phases"].append(_phase_record(
                 name,
                 "failed",
                 started_at,
-                {"error_code": getattr(exc, "code", "unexpected_failure")},
+                {
+                    "error_code": getattr(
+                        selected_error,
+                        "code",
+                        "unexpected_failure",
+                    ),
+                },
             ))
-            report["status"] = _failure_status(name, exc)
+            report["status"] = _failure_status(name, selected_error)
             report["finished_at"] = _timestamp()
             writer.write(report)
             return None
@@ -853,6 +954,24 @@ def run_kam_schema_backfill_rehearsal(
             for year in REHEARSAL_YEARS
         ]
 
+    def evidence_year_loop(action: str) -> list[dict[str, object]]:
+        outputs: list[dict[str, object]] = []
+        for year in REHEARSAL_YEARS:
+            safety.assert_source_unchanged(expected_source)
+            safety.assert_free_space(
+                rehearsal_dir,
+                min_free_bytes=min_free_bytes,
+            )
+            outputs.append(
+                run_worker(WorkerInvocation(action, "collector", year)),
+            )
+        return outputs
+
+    def evidence_phase_operation(action: str) -> dict[str, object]:
+        years = evidence_year_loop(action)
+        safety.assert_source_unchanged(expected_source)
+        return {"years": years}
+
     if persist_phase(
         "kam_dry_run_complete",
         lambda: {"years": year_loop("kam-dry-run", "collector")},
@@ -891,17 +1010,64 @@ def run_kam_schema_backfill_rehearsal(
         )
         years = year_loop("procedure-index", "collector")
         safety.assert_source_unchanged(expected_source)
-        snapshot_after_first = run_worker(
-            WorkerInvocation("semantic-snapshot", "readonly"),
-        )
-        _validate_semantic_snapshot(snapshot_after_first)
-        return {"years": years, "snapshot_after": snapshot_after_first}
+        evidence: dict[str, object] = {"years": years}
+        if not include_db_evidence:
+            snapshot_after_first = run_worker(
+                WorkerInvocation("semantic-snapshot", "readonly"),
+            )
+            _validate_semantic_snapshot(snapshot_after_first)
+            evidence["snapshot_after"] = snapshot_after_first
+        return evidence
 
     if persist_phase(
         "procedure_reconcile_complete",
         first_procedure_operation,
     ) is None:
         return _finalize_report(report, writer)
+
+    if include_db_evidence:
+        if persist_phase(
+            "audit_fee_observations_backfilled",
+            lambda: evidence_phase_operation(
+                "audit-fee-observation-backfill",
+            ),
+            verify_source_on_failure=True,
+        ) is None:
+            return _finalize_report(report, writer)
+
+        if persist_phase(
+            "financial_compact_provenance_rebuilt",
+            lambda: evidence_phase_operation(
+                "financial-compact-rebuild",
+            ),
+            verify_source_on_failure=True,
+        ) is None:
+            return _finalize_report(report, writer)
+
+        def first_quality_operation() -> dict[str, object]:
+            nonlocal snapshot_after_first
+            years = evidence_year_loop(
+                "company-year-quality-rebuild",
+            )
+            safety.assert_source_unchanged(expected_source)
+            snapshot_after_first = run_worker(
+                WorkerInvocation("semantic-snapshot", "readonly"),
+            )
+            _validate_semantic_snapshot(
+                snapshot_after_first,
+                require_db_evidence=True,
+            )
+            return {
+                "years": years,
+                "snapshot_after": snapshot_after_first,
+            }
+
+        if persist_phase(
+            "quality_ledger_rebuilt",
+            first_quality_operation,
+            verify_source_on_failure=True,
+        ) is None:
+            return _finalize_report(report, writer)
 
     idempotency_payload: dict[str, object] = {}
 
@@ -919,15 +1085,38 @@ def run_kam_schema_backfill_rehearsal(
         )
         procedures = year_loop("procedure-index", "collector")
         safety.assert_source_unchanged(expected_source)
+        audit_observations: list[dict[str, object]] = []
+        financial_compact: list[dict[str, object]] = []
+        quality_ledger: list[dict[str, object]] = []
+        if include_db_evidence:
+            audit_observations = evidence_year_loop(
+                "audit-fee-observation-backfill",
+            )
+            financial_compact = evidence_year_loop(
+                "financial-compact-rebuild",
+            )
+            quality_ledger = evidence_year_loop(
+                "company-year-quality-rebuild",
+            )
+            safety.assert_source_unchanged(expected_source)
         snapshot_after_second = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
-        _validate_semantic_snapshot(snapshot_after_second)
+        _validate_semantic_snapshot(
+            snapshot_after_second,
+            require_db_evidence=include_db_evidence,
+        )
         if (
             snapshot_after_first.get("semantic_sha256")
             != snapshot_after_second.get("semantic_sha256")
-            or _snapshot_integrity(snapshot_after_first)
-            != _snapshot_integrity(snapshot_after_second)
+            or _snapshot_integrity(
+                snapshot_after_first,
+                include_db_evidence=include_db_evidence,
+            )
+            != _snapshot_integrity(
+                snapshot_after_second,
+                include_db_evidence=include_db_evidence,
+            )
         ):
             raise RehearsalRunError(
                 "idempotency_mismatch",
@@ -940,13 +1129,23 @@ def run_kam_schema_backfill_rehearsal(
                 "semantic_sha256",
             ),
             "semantic_sha256_equal": True,
-            "integrity": _snapshot_integrity(snapshot_after_second),
+            "integrity": _snapshot_integrity(
+                snapshot_after_second,
+                include_db_evidence=include_db_evidence,
+            ),
         }
+        if include_db_evidence:
+            idempotency_payload.update({
+                "audit_fee_observations": audit_observations,
+                "financial_compact": financial_compact,
+                "quality_ledger": quality_ledger,
+            })
         return idempotency_payload
 
     if persist_phase(
         "idempotency_verified",
         idempotency_operation,
+        verify_source_on_failure=include_db_evidence,
     ) is None:
         return _finalize_report(report, writer)
     report["idempotency"] = {

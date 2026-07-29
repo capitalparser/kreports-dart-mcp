@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from pathlib import Path
 import sys
+from datetime import UTC
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 
 _TEST_CAPABILITY = "ab" * 32
 _EXPECTED_PROFESSIONAL_TOOLS = (
@@ -47,9 +47,33 @@ def _semantic_snapshot_fixture(
             "cross_receipt_source_ordinal_link_count": 0,
             "usable_response_without_procedure_count": 0,
         },
+        "audit_fee_observations": {
+            "row_count": 1,
+            "current_count": 1,
+            "historical_count": 0,
+        },
+        "financial_compact_provenance": {
+            "row_count": 1,
+            "uncitable_count": 0,
+        },
+        "company_year_quality_freshness": {
+            "row_count": 1,
+            "blank_fingerprint_count": 0,
+        },
         "semantic_sha256": "b" * 64,
     }
     snapshot.update(overrides)
+    return snapshot
+
+
+def _legacy_semantic_snapshot_fixture() -> dict[str, object]:
+    snapshot = _semantic_snapshot_fixture()
+    for key in (
+        "audit_fee_observations",
+        "financial_compact_provenance",
+        "company_year_quality_freshness",
+    ):
+        snapshot.pop(key)
     return snapshot
 
 
@@ -592,6 +616,11 @@ def test_rehearsal_runs_exact_phases_and_ascending_year_order(
     assert [
         year for action, year in worker_calls if action == "procedure-index"
     ] == [*REHEARSAL_YEARS, *REHEARSAL_YEARS]
+    assert not {
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
+    } & {action for action, _year in worker_calls}
     assert sum(call[0] == "free-space" for call in calls) == 5
     assert sum(call[0] == "source-unchanged" for call in calls) == 8
     assert Path(report["report_path"]).exists()
@@ -599,6 +628,142 @@ def test_rehearsal_runs_exact_phases_and_ascending_year_order(
         Path(report["report_path"]).read_text(encoding="utf-8"),
     )
     assert persisted["phases"] == report["phases"]
+
+
+def test_evidence_hardening_is_opt_in_and_preserves_exact_worker_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        PHASES,
+        REHEARSAL_YEARS,
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, calls = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        min_free_bytes=10 * 1024**3,
+        include_db_evidence=True,
+    )
+
+    phase_names = [phase["name"] for phase in report["phases"]]
+    procedure_index = phase_names.index("procedure_reconcile_complete")
+    assert phase_names == [
+        *PHASES[: procedure_index + 1],
+        "audit_fee_observations_backfilled",
+        "financial_compact_provenance_rebuilt",
+        "quality_ledger_rebuilt",
+        *PHASES[procedure_index + 1 :],
+    ]
+
+    worker_calls = [
+        (call[1], call[2])
+        for call in calls
+        if call[0] == "worker"
+    ]
+    snapshot_positions = [
+        index
+        for index, (action, _year) in enumerate(worker_calls)
+        if action == "semantic-snapshot"
+    ]
+    second_pass = worker_calls[
+        snapshot_positions[1] + 1 : snapshot_positions[2] + 1
+    ]
+    expected_second_pass = [
+        *[("kam-rebuild", year) for year in REHEARSAL_YEARS],
+        *[("procedure-index", year) for year in REHEARSAL_YEARS],
+        *[
+            ("audit-fee-observation-backfill", year)
+            for year in REHEARSAL_YEARS
+        ],
+        *[
+            ("financial-compact-rebuild", year)
+            for year in REHEARSAL_YEARS
+        ],
+        *[
+            ("company-year-quality-rebuild", year)
+            for year in REHEARSAL_YEARS
+        ],
+        ("semantic-snapshot", None),
+    ]
+    assert second_pass == expected_second_pass
+    assert report["idempotency"]["integrity"][
+        "audit_fee_observations"
+    ]["current_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("failed_action", "expected_phase", "next_action"),
+    [
+        (
+            "audit-fee-observation-backfill",
+            "audit_fee_observations_backfilled",
+            "financial-compact-rebuild",
+        ),
+        (
+            "financial-compact-rebuild",
+            "financial_compact_provenance_rebuilt",
+            "company-year-quality-rebuild",
+        ),
+        (
+            "company-year-quality-rebuild",
+            "quality_ledger_rebuilt",
+            "semantic-snapshot",
+        ),
+    ],
+)
+def test_each_evidence_phase_fails_closed_before_later_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_action: str,
+    expected_phase: str,
+    next_action: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, calls = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        fail_action=failed_action,
+        fail_year=2023,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        min_free_bytes=10 * 1024**3,
+        include_db_evidence=True,
+    )
+    failed_worker_index = next(
+        index
+        for index, call in enumerate(calls)
+        if call[:3] == ("worker", failed_action, 2023)
+    )
+
+    assert report["status"] == "backfill_failed"
+    assert report["last_phase"] == expected_phase
+    assert report["phases"][-1]["status"] == "failed"
+    assert calls[failed_worker_index - 2][0] == "source-unchanged"
+    assert calls[failed_worker_index - 1][0] == "free-space"
+    assert calls[-1][0] == "source-unchanged"
+    assert all(
+        call[0] != "worker"
+        for call in calls[failed_worker_index + 1 :]
+    )
+    assert not any(
+        call[:2] == ("worker", next_action)
+        for call in calls[failed_worker_index + 1 :]
+    )
 
 
 def test_rehearsal_creates_bound_marker_after_clone_before_workers(
@@ -963,11 +1128,224 @@ def test_rehearsal_rejects_malformed_or_adverse_semantic_snapshot(
     assert report["phases"][-1]["status"] == "failed"
 
 
+@pytest.mark.parametrize(
+    ("section", "value", "expected_code"),
+    [
+        (
+            "audit_fee_observations",
+            None,
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            None,
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            None,
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            [],
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 1,
+                "current_count": 1,
+                "historical_count": 0,
+                "unexpected": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 1,
+                "current_count": -1,
+                "historical_count": 2,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 1,
+                "current_count": True,
+                "historical_count": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "audit_fee_observations",
+            {
+                "row_count": 2,
+                "current_count": 1,
+                "historical_count": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            {
+                "row_count": 1,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            {
+                "row_count": 1,
+                "uncitable_count": 2,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "financial_compact_provenance",
+            {
+                "row_count": False,
+                "uncitable_count": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            {
+                "row_count": 1,
+                "blank_fingerprint_count": 0,
+                "unexpected": 0,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            {
+                "row_count": 1,
+                "blank_fingerprint_count": 2,
+            },
+            "semantic_snapshot_invalid",
+        ),
+        (
+            "company_year_quality_freshness",
+            {
+                "row_count": 1,
+                "blank_fingerprint_count": 1,
+            },
+            "semantic_snapshot_blocked",
+        ),
+    ],
+)
+def test_opt_in_snapshot_rejects_missing_malformed_or_inconsistent_aggregates(
+    section: str,
+    value: object,
+    expected_code: str,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        _validate_semantic_snapshot,
+    )
+
+    snapshot = _semantic_snapshot_fixture()
+    if value is None:
+        snapshot.pop(section)
+    else:
+        snapshot[section] = value
+
+    with pytest.raises(RehearsalRunError) as caught:
+        _validate_semantic_snapshot(
+            snapshot,
+            require_db_evidence=True,
+        )
+
+    assert caught.value.code == expected_code
+
+
+def test_opt_in_snapshot_accepts_consistent_zero_observation_revision04_case(
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        _validate_semantic_snapshot,
+    )
+
+    snapshot = _semantic_snapshot_fixture(
+        audit_fee_observations={
+            "row_count": 0,
+            "current_count": 0,
+            "historical_count": 0,
+        },
+        financial_compact_provenance={
+            "row_count": 1,
+            "uncitable_count": 0,
+        },
+        company_year_quality_freshness={
+            "row_count": 5,
+            "blank_fingerprint_count": 0,
+        },
+    )
+
+    _validate_semantic_snapshot(snapshot, require_db_evidence=True)
+
+
+def test_db_evidence_strictness_is_opt_in_and_legacy_integrity_shape_survives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    legacy_snapshot = _legacy_semantic_snapshot_fixture()
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        legacy_root,
+        monkeypatch,
+        snapshot_payload=legacy_snapshot,
+    )
+    legacy_report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+    assert legacy_report["status"] == "complete"
+    assert set(legacy_report["idempotency"]["integrity"]) == {
+        "kam_count",
+        "procedure_count",
+        "kam_quality_by_year",
+        "procedure_quality_by_year",
+        "duplicate_logical_identities",
+        "integrity",
+    }
+
+    strict_root = tmp_path / "strict"
+    strict_root.mkdir()
+    source, rehearsal_dir, repository_root, _ = _install_phase_harness(
+        strict_root,
+        monkeypatch,
+        snapshot_payload=legacy_snapshot,
+    )
+    strict_report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        include_db_evidence=True,
+    )
+    assert strict_report["status"] == "backfill_failed"
+    assert strict_report["last_phase"] == "quality_ledger_rebuilt"
+    assert strict_report["phases"][-1]["evidence"]["error_code"] == (
+        "semantic_snapshot_invalid"
+    )
+
+
 def test_rehearsal_rejects_existing_clone_and_exact_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from kreports.maintenance import kam_backfill_rehearsal as rehearsal
 
@@ -987,7 +1365,7 @@ def test_rehearsal_rejects_existing_clone_and_exact_report(
 
     other_dir = tmp_path / "other-rehearsal"
     other_dir.mkdir()
-    fixed = datetime(2026, 7, 29, 1, 2, 3, tzinfo=timezone.utc)
+    fixed = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
     monkeypatch.setattr(rehearsal, "_utc_now", lambda: fixed)
     existing = (
         other_dir / "kam-schema-backfill-rehearsal-20260729T010203Z.json"
@@ -1387,6 +1765,59 @@ def test_cli_prints_retained_artifacts_for_successful_outcomes(
         "clone_retained=true",
         "live_sha256_unchanged=true",
     ]
+
+
+def test_db_evidence_cli_resolves_paths_and_opts_into_evidence_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from kreports.cli import main as cli_main
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
+
+    source = tmp_path / "source.db"
+    source.write_bytes(b"source")
+    rehearsal_dir = tmp_path / "rehearsal"
+    rehearsal_dir.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_rehearsal(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "status": "complete",
+            "report_path": "",
+            "markdown_report_path": "",
+            "clone_path": "",
+            "live_sha256_unchanged": True,
+        }
+
+    monkeypatch.setattr(
+        rehearsal,
+        "run_kam_schema_backfill_rehearsal",
+        fake_rehearsal,
+    )
+    result = CliRunner().invoke(
+        cli_main.app,
+        [
+            "rehearse-db-evidence-hardening",
+            "--source-db",
+            str(source),
+            "--rehearsal-dir",
+            str(rehearsal_dir),
+            "--python-executable",
+            sys.executable,
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "source_db": source.resolve(),
+        "rehearsal_dir": rehearsal_dir.resolve(),
+        "repository_root": Path(cli_main.__file__).resolve().parents[2],
+        "python_executable": Path(sys.executable).resolve(),
+        "include_db_evidence": True,
+    }
 
 
 def test_cli_safety_failure_exits_two_and_prints_existing_report(

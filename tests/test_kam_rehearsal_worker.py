@@ -9,18 +9,17 @@ import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
-import sqlite3
 import socket
+import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kreports.db.migrations import MIGRATIONS, _checksum
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MARKER_SCHEMA = "kam-schema-backfill-rehearsal-marker.v1"
@@ -278,6 +277,159 @@ def legacy_database(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def revision08_evidence_database(tmp_path: Path) -> Path:
+    """A revision-08 clone with the pre-foundation evidence table shapes."""
+    from sqlalchemy import create_engine
+
+    from kreports.db.models import Base
+
+    path = tmp_path / "revision-08-evidence.db"
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            DROP TABLE audit_fee_observations;
+            DROP TABLE financial_facts_compact;
+            DROP TABLE company_year_quality;
+            CREATE TABLE financial_facts_compact (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fs_div VARCHAR(3) NOT NULL,
+              metric_key VARCHAR(50) NOT NULL,
+              metric_name VARCHAR(200) NOT NULL,
+              amount BIGINT,
+              source_account_id VARCHAR(200),
+              source_account_nm VARCHAR(300),
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_financial_facts_compact
+                UNIQUE (corp_code, bsns_year, fs_div, metric_key)
+            );
+            CREATE INDEX idx_fin_compact_corp_year
+              ON financial_facts_compact (corp_code, bsns_year);
+            CREATE INDEX idx_fin_compact_metric
+              ON financial_facts_compact (metric_key);
+            CREATE TABLE company_year_quality (
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              market VARCHAR(10),
+              financial_core_status VARCHAR(24) NOT NULL,
+              auditor_status VARCHAR(24) NOT NULL,
+              audit_fee_status VARCHAR(24) NOT NULL,
+              policy_status VARCHAR(24) NOT NULL,
+              kam_status VARCHAR(24) NOT NULL,
+              audit_procedure_status VARCHAR(24) NOT NULL,
+              group_audit_status VARCHAR(24) NOT NULL,
+              investor_grade VARCHAR(1) NOT NULL,
+              auditor_grade VARCHAR(1) NOT NULL,
+              group_audit_grade VARCHAR(1) NOT NULL,
+              blockers_json TEXT NOT NULL DEFAULT '[]',
+              quality_version VARCHAR(20) NOT NULL DEFAULT 'v1',
+              updated_at DATETIME NOT NULL,
+              PRIMARY KEY (corp_code, bsns_year)
+            );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              revision TEXT PRIMARY KEY,
+              checksum TEXT NOT NULL,
+              description TEXT NOT NULL,
+              applied_at TEXT NOT NULL
+            );
+            DELETE FROM schema_migrations;
+            """
+        )
+        connection.executemany(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?, ?)",
+            [
+                (
+                    migration.revision,
+                    _checksum(migration),
+                    migration.description,
+                    "2026-07-29T00:00:00Z",
+                )
+                for migration in MIGRATIONS[:8]
+            ],
+        )
+    return path
+
+
+def _seed_local_database_evidence(database: Path) -> None:
+    from datetime import date
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from kreports.collector.audit_fee_sources import (
+        AuditFeeObservation,
+        observations_json,
+    )
+    from kreports.db.models import (
+        AuditFee,
+        Company,
+        Disclosure,
+        FinancialFact,
+    )
+
+    observation = AuditFeeObservation(
+        corp_code="00126380",
+        bsns_year=2025,
+        source_class="cached_business_report",
+        actual_fee_m=100,
+        actual_hours=1_000,
+        source_rcept_no="20260310000001",
+        source_period="2025",
+        raw_values={"fee": "100", "hours": "1000"},
+    )
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with Session(engine) as session:
+            session.add_all([
+                Company(
+                    corp_code="00126380",
+                    stock_code="005930",
+                    corp_name="삼성전자",
+                    market="KOSPI",
+                ),
+                Disclosure(
+                    rcept_no="20260310000001",
+                    corp_code="00126380",
+                    corp_name="삼성전자",
+                    disc_date=date(2026, 3, 10),
+                    disc_type="A",
+                    report_nm="사업보고서 (2025.12)",
+                    flr_nm="삼성전자",
+                ),
+                FinancialFact(
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    reprt_code="11011",
+                    fs_div="CFS",
+                    sj_div="IS",
+                    account_id="ifrs-full_Revenue",
+                    account_nm="매출액",
+                    ord=1,
+                    thstrm_amount=100_000_000,
+                ),
+                AuditFee(
+                    corp_code="00126380",
+                    bsns_year=2025,
+                    auditor_nm="삼일회계법인",
+                    audit_fee_m=100,
+                    audit_hours=1_000,
+                    actual_fee_m=100,
+                    actual_hours=1_000,
+                    source_observations_json=observations_json([observation]),
+                ),
+            ])
+            session.commit()
+    finally:
+        engine.dispose()
+
+
 def test_migrate_applies_every_pending_checked_out_revision(legacy_database: Path) -> None:
     """Catch a worker that reports success while omitting a checked-out migration."""
     first = run_worker(legacy_database, "migrate", runtime_mode="collector")
@@ -360,6 +512,9 @@ def _create_snapshot_database(path: Path) -> None:
             """
             CREATE TABLE kam_items (id INTEGER PRIMARY KEY, rcept_no TEXT NOT NULL, dcm_no TEXT, corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, source_type TEXT NOT NULL, ordinal INTEGER NOT NULL, title TEXT, normalized_topic TEXT, reason_text TEXT, audit_response_text TEXT, related_note_references_json TEXT NOT NULL, full_body_hash TEXT NOT NULL, full_body_length INTEGER NOT NULL, source_basis TEXT NOT NULL, parser_version TEXT NOT NULL, quality_status TEXT NOT NULL);
             CREATE TABLE audit_procedure_items (id INTEGER PRIMARY KEY, rcept_no TEXT NOT NULL, dcm_no TEXT, corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, source_type TEXT NOT NULL, kam_item_id INTEGER, kam_topic TEXT, method TEXT, procedure_type TEXT NOT NULL, procedure_text TEXT NOT NULL, procedure_hash TEXT, procedure_length INTEGER, assertion_hints_json TEXT, linked_metric_keys_json TEXT, linked_note_keys_json TEXT, linked_event_keys_json TEXT, parser_version TEXT, quality_status TEXT, section_ordinal INTEGER NOT NULL, procedure_ordinal INTEGER NOT NULL);
+            CREATE TABLE audit_fee_observations (observation_hash TEXT PRIMARY KEY, source_slot_hash TEXT NOT NULL, corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, source_class TEXT NOT NULL, source_rcept_no TEXT, source_period TEXT, contract_fee_m INTEGER, contract_hours INTEGER, actual_fee_m INTEGER, actual_hours INTEGER, availability_status TEXT NOT NULL, quality_status TEXT NOT NULL, parser_version TEXT NOT NULL, is_current BOOLEAN NOT NULL, supersedes_hash TEXT, observed_at DATETIME NOT NULL);
+            CREATE TABLE financial_facts_compact (corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, fs_div TEXT NOT NULL, metric_key TEXT NOT NULL, amount INTEGER, source_account_id TEXT, source_table TEXT, unit TEXT, period_type TEXT, citation_rcept_no TEXT, citation_report_nm TEXT, citation_basis TEXT NOT NULL, quality_status TEXT NOT NULL, fetched_at DATETIME NOT NULL);
+            CREATE TABLE company_year_quality (corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, input_fingerprint TEXT NOT NULL, evidence_summary_json TEXT NOT NULL, quality_version TEXT NOT NULL, updated_at DATETIME NOT NULL);
             """
         )
         connection.execute("INSERT INTO kam_items VALUES (1, '20260310000001', '1', '00126380', 2025, 'audit_report', 1, '수익', 'revenue', '추정', '검증', '{\"b\":2,\"a\":1}', 'abc', 10, 'full_body', 'v1', 'usable')")
@@ -536,9 +691,11 @@ def test_writable_open_rejects_path_swap_between_receipt_and_sqlite_connect(
         return real_connect(*args, **kwargs)
 
     monkeypatch.setattr(worker.sqlite3, "connect", swapping_connect)
-    with pytest.raises(worker.WorkerActionError) as caught:
-        with worker._open_pinned_database(binding, collector=True):
-            pytest.fail("a swapped path must not reach the action")
+    with (
+        pytest.raises(worker.WorkerActionError) as caught,
+        worker._open_pinned_database(binding, collector=True),
+    ):
+        pytest.fail("a swapped path must not reach the action")
     assert caught.value.code == "rehearsal_binding_required"
     assert _sha256_file(database) == replacement_sha
     assert _probe_value(database) == "replacement"
@@ -636,17 +793,19 @@ def test_writable_transaction_swap_creates_no_sidecars_next_to_either_path(
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
     binding = worker._require_rehearsal_binding(require_initial_digest=False)
 
-    with pytest.raises(worker.WorkerActionError) as caught:
-        with worker._open_pinned_database(binding, collector=True) as connection:
-            assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
-            os.replace(database, held_original)
-            os.replace(replacement, database)
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("UPDATE action_probe SET value='written' WHERE id=1")
-            for path in (database, replacement, held_original):
-                assert not Path(f"{path}-journal").exists()
-                assert not Path(f"{path}-wal").exists()
-            connection.commit()
+    with (
+        pytest.raises(worker.WorkerActionError) as caught,
+        worker._open_pinned_database(binding, collector=True) as connection,
+    ):
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
+        os.replace(database, held_original)
+        os.replace(replacement, database)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE action_probe SET value='written' WHERE id=1")
+        for path in (database, replacement, held_original):
+            assert not Path(f"{path}-journal").exists()
+            assert not Path(f"{path}-wal").exists()
+        connection.commit()
     assert caught.value.code == "rehearsal_binding_required"
     assert _probe_value(database) == "replacement"
     for path in (database, replacement, held_original):
@@ -728,6 +887,116 @@ def test_semantic_snapshot_binds_stable_ids_and_typed_linkage(tmp_path: Path) ->
     assert before["integrity"]["orphan_procedure_count"] == 0
 
 
+def test_semantic_snapshot_covers_evidence_semantics_but_not_timestamps(
+    revision08_evidence_database: Path,
+) -> None:
+    """Catch provenance or freshness changes hidden by an incomplete digest."""
+    migrated = run_worker(
+        revision08_evidence_database,
+        "migrate",
+        runtime_mode="collector",
+    )
+    assert migrated["ok"] is True
+    _seed_local_database_evidence(revision08_evidence_database)
+    marker = write_marker(revision08_evidence_database)
+    for action in (
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
+    ):
+        result = run_worker(
+            revision08_evidence_database,
+            action,
+            "--year",
+            "2025",
+            runtime_mode="collector",
+            marker=marker,
+        )
+        assert result["ok"] is True
+
+    first = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    second = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+
+    assert first["semantic_sha256"] == second["semantic_sha256"]
+    assert first["audit_fee_observations"]["current_count"] >= 1
+    assert first["audit_fee_observations"]["historical_count"] >= 0
+    assert first["financial_compact_provenance"]["uncitable_count"] >= 0
+    assert first["company_year_quality_freshness"]["blank_fingerprint_count"] == 0
+
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE audit_fee_observations SET actual_fee_m=actual_fee_m + 1"
+        )
+    changed_audit = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert changed_audit["semantic_sha256"] != first["semantic_sha256"]
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE audit_fee_observations SET actual_fee_m=actual_fee_m - 1"
+        )
+        original_basis = connection.execute(
+            "SELECT citation_basis FROM financial_facts_compact LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE financial_facts_compact SET citation_basis='changed-basis'"
+        )
+    changed_financial = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert changed_financial["semantic_sha256"] != first["semantic_sha256"]
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE financial_facts_compact SET citation_basis=?",
+            (original_basis,),
+        )
+        original_fingerprint = connection.execute(
+            "SELECT input_fingerprint FROM company_year_quality LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE company_year_quality SET input_fingerprint=?",
+            ("0" * 64,),
+        )
+    changed_quality = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert changed_quality["semantic_sha256"] != first["semantic_sha256"]
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE company_year_quality SET input_fingerprint=?",
+            (original_fingerprint,),
+        )
+        connection.execute(
+            "UPDATE audit_fee_observations SET observed_at='2099-01-01'"
+        )
+        connection.execute(
+            "UPDATE financial_facts_compact SET fetched_at='2099-01-01'"
+        )
+        connection.execute(
+            "UPDATE company_year_quality SET updated_at='2099-01-01'"
+        )
+    timestamp_only = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert timestamp_only["semantic_sha256"] == first["semantic_sha256"]
+
+
 def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
     temp_engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -764,7 +1033,7 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
                 "핵심감사사항\n수익인식\n핵심감사사항으로 선정한 이유\n"
                 "추정\n감사에서 다루어진 방법\n계약서를 검사하였습니다."
             ), doc_hash="a" * 40,
-            storage_status="inline", fetched_at=datetime(2026, 3, 10),
+            storage_status="inline", fetched_at=datetime(2026, 3, 10, tzinfo=UTC),
         ))
         session.add(KamItem(
             rcept_no="20260310000001", dcm_no="1", corp_code="00126380",
@@ -772,7 +1041,8 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
             normalized_topic="revenue", reason_text="추정", audit_response_text="계약서를 검사하였습니다.",
             related_note_references_json="[]", full_body_hash="b" * 40,
             full_body_length=50, source_basis="source_documents.raw_body",
-            parser_version="v1", quality_status="usable", fetched_at=datetime(2026, 3, 10),
+            parser_version="v1", quality_status="usable",
+            fetched_at=datetime(2026, 3, 10, tzinfo=UTC),
         ))
 
     try:
@@ -786,6 +1056,86 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
     assert rebuilt["receipt_counts"]["full_body"] == 1
     assert indexed["failed"] == 0
     assert indexed["rows_written"] >= 1
+
+
+def test_evidence_rebuild_actions_are_bounded_to_local_year_and_never_network(
+    revision08_evidence_database: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch an evidence worker widening its year or constructing a DART client."""
+    import httpx
+
+    import kreports.collector.fetcher as fetcher_module
+    from kreports.maintenance.kam_rehearsal_worker import execute_action
+
+    migrated = run_worker(
+        revision08_evidence_database,
+        "migrate",
+        runtime_mode="collector",
+    )
+    assert migrated["applied_revisions"] == [
+        migration.revision for migration in MIGRATIONS[8:11]
+    ]
+    _seed_local_database_evidence(revision08_evidence_database)
+    marker = write_marker(revision08_evidence_database)
+
+    audit = run_worker(
+        revision08_evidence_database,
+        "audit-fee-observation-backfill",
+        "--year",
+        "2025",
+        runtime_mode="collector",
+        marker=marker,
+    )
+    financial = run_worker(
+        revision08_evidence_database,
+        "financial-compact-rebuild",
+        "--year",
+        "2025",
+        runtime_mode="collector",
+        marker=marker,
+    )
+    quality = run_worker(
+        revision08_evidence_database,
+        "company-year-quality-rebuild",
+        "--year",
+        "2025",
+        runtime_mode="collector",
+        marker=marker,
+    )
+
+    assert audit["ok"] is True
+    assert audit["inserted_observations"] >= 1
+    assert financial["ok"] is True
+    assert financial["total_inserted_or_updated"] >= 1
+    assert quality["ok"] is True
+    assert quality["rows_written"] >= 1
+
+    monkeypatch.setenv(
+        "DB_URL",
+        f"sqlite:///{revision08_evidence_database}",
+    )
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+
+    def blocked_network(*_args, **_kwargs):
+        raise AssertionError("database evidence rehearsal must stay local")
+
+    monkeypatch.setattr(socket.socket, "connect", blocked_network)
+    monkeypatch.setattr(httpx, "Client", blocked_network)
+    monkeypatch.setattr(fetcher_module, "_get_client", blocked_network)
+
+    local_audit = execute_action(
+        "audit-fee-observation-backfill",
+        year=2025,
+    )
+    local_financial = execute_action("financial-compact-rebuild", year=2025)
+    local_quality = execute_action("company-year-quality-rebuild", year=2025)
+
+    assert local_audit["failed_company_years"] == 0
+    assert local_financial["total_inserted_or_updated"] >= 1
+    assert local_quality["rows_written"] >= 1
 
 
 def _bind_direct_rehearsal_marker(
@@ -807,7 +1157,10 @@ def test_kam_rebuild_fails_closed_on_failed_count(
 ) -> None:
     """Catch a KAM rebuild that reports failed receipts but still exits successfully."""
     import kreports.collector.report_document_collector as collector_module
-    from kreports.maintenance.kam_rehearsal_worker import WorkerActionError, execute_action
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        execute_action,
+    )
 
     _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -823,7 +1176,10 @@ def test_procedure_index_fails_closed_on_error_count(
 ) -> None:
     """Catch a procedure indexer that reports normalized errors but still exits successfully."""
     import kreports.collector.report_document_collector as collector_module
-    from kreports.maintenance.kam_rehearsal_worker import WorkerActionError, execute_action
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        execute_action,
+    )
 
     _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -836,7 +1192,10 @@ def test_procedure_index_fails_closed_on_error_count(
 
 def test_mcp_validator_rejects_schema_text_at_every_layer() -> None:
     """Catch public schema leakage even when the private diagnostic fields are clean."""
-    from kreports.maintenance.kam_rehearsal_worker import WorkerActionError, validate_professional_result
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        validate_professional_result,
+    )
 
     leaked = {
         "answer": "판정: error\nno such table: kam_items",
@@ -855,7 +1214,10 @@ def test_mcp_validation_rejects_envelope_only_schema_leak(
     import kreports.mcp.dispatch as dispatch_module
     import kreports.mcp.server as server_module
     import kreports.mcp.tools as tools_module
-    from kreports.maintenance.kam_rehearsal_worker import WorkerActionError, validate_professional_mcp
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        validate_professional_mcp,
+    )
 
     legacy = {
         "answer": "판정:\n- usable",
