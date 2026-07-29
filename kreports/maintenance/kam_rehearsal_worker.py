@@ -310,6 +310,35 @@ def _verify_binding_identity(
         )
 
 
+def _require_fd_database_binding(
+    connection: sqlite3.Connection,
+    file_descriptor: int,
+) -> None:
+    """Prove SQLite duplicated the authenticated descriptor, not a pathname."""
+    main_path = next(
+        (
+            str(row[2])
+            for row in connection.execute("PRAGMA database_list")
+            if str(row[1]) == "main"
+        ),
+        None,
+    )
+    if main_path != f"/dev/fd/{file_descriptor}":
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "SQLite did not retain the authenticated database descriptor",
+        )
+
+
+def _require_memory_journal(connection: sqlite3.Connection) -> None:
+    journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+    if journal_mode != "memory":
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "SQLite journaling left the in-memory safety policy",
+        )
+
+
 @contextmanager
 def _open_pinned_database(
     binding: RehearsalBinding,
@@ -325,27 +354,42 @@ def _open_pinned_database(
     flags = (os.O_RDWR if collector else os.O_RDONLY) | os.O_NOFOLLOW
     flags |= getattr(os, "O_CLOEXEC", 0)
     file_descriptor = -1
+    flock_held = False
     connection: sqlite3.Connection | None = None
     try:
         file_descriptor = os.open(binding.database_path, flags)
         lock_kind = fcntl.LOCK_EX if collector else fcntl.LOCK_SH
         fcntl.flock(file_descriptor, lock_kind | fcntl.LOCK_NB)
+        flock_held = True
         _verify_binding_identity(binding, file_descriptor)
-        # On APFS, the required non-blocking flock and SQLite's default POSIX
-        # locks conflict even within one process.  The signed marker already
-        # restricts this worker to APFS, and the held exclusive flock provides
-        # the action-wide writer lock, so the one pinned collector connection
-        # must not attempt a second, conflicting lock protocol.
-        query = "mode=rw&vfs=unix-none" if collector else "mode=ro&immutable=1"
+        query = "mode=rw" if collector else "mode=ro&immutable=1"
         connection = sqlite3.connect(
-            f"{binding.database_path.as_uri()}?{query}",
+            f"file:/dev/fd/{file_descriptor}?{query}",
             uri=True,
             check_same_thread=False,
         )
         connection.row_factory = sqlite3.Row
-        connection.execute(
-            "PRAGMA foreign_keys=ON" if collector else "PRAGMA query_only=ON"
-        )
+        _require_fd_database_binding(connection, file_descriptor)
+        # The connection now uses a duplicate of the verified descriptor.  On
+        # APFS, retaining flock prevents SQLite's normal VFS from acquiring
+        # the locks it needs to switch to its per-connection memory journal.
+        # Release it only after the FD binding is proven; SQLite's normal
+        # locking protocol protects the action from this point onward.
+        fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+        flock_held = False
+        if collector:
+            configured_journal_mode = str(
+                connection.execute("PRAGMA journal_mode=MEMORY").fetchone()[0]
+            ).lower()
+            if configured_journal_mode != "memory":
+                raise WorkerActionError(
+                    "rehearsal_binding_required",
+                    "could not enable in-memory SQLite journaling",
+                )
+            _require_memory_journal(connection)
+            connection.execute("PRAGMA foreign_keys=ON")
+        else:
+            connection.execute("PRAGMA query_only=ON")
         _verify_binding_identity(binding, file_descriptor)
         try:
             yield connection
@@ -367,7 +411,8 @@ def _open_pinned_database(
             connection.close()
         if file_descriptor >= 0:
             try:
-                fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+                if flock_held:
+                    fcntl.flock(file_descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(file_descriptor)
 
@@ -382,7 +427,7 @@ def _bound_database_runtime(
     global _ACTIVE_DBAPI_CONNECTION
 
     with _open_pinned_database(binding, collector=collector) as connection:
-        from sqlalchemy import create_engine
+        from sqlalchemy import create_engine, event
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.pool import StaticPool
 
@@ -398,16 +443,43 @@ def _bound_database_runtime(
             poolclass=StaticPool,
             pool_reset_on_return=None,
         )
+
+        @event.listens_for(safe_engine, "before_cursor_execute", retval=True)
+        def _preserve_memory_journal(
+            _connection,
+            _cursor,
+            statement,
+            parameters,
+            _context,
+            _executemany,
+        ):
+            if collector and re.match(
+                r"\s*pragma\s+journal_mode\s*=",
+                str(statement),
+                flags=re.IGNORECASE,
+            ):
+                return "PRAGMA journal_mode=MEMORY", parameters
+            return statement, parameters
+
         engine_module.engine = safe_engine
         engine_module.SessionLocal = sessionmaker(
             bind=safe_engine,
             autocommit=False,
             autoflush=False,
         )
-        settings.db_url = f"sqlite:///{binding.database_path}"
+        main_path = str(
+            next(
+                row[2]
+                for row in connection.execute("PRAGMA database_list")
+                if str(row[1]) == "main"
+            )
+        )
+        settings.db_url = f"sqlite:///{main_path}"
         _ACTIVE_DBAPI_CONNECTION = connection
         try:
             yield connection
+            if collector:
+                _require_memory_journal(connection)
         finally:
             _ACTIVE_DBAPI_CONNECTION = None
             engine_module.engine = original_engine
@@ -419,14 +491,10 @@ def _bound_database_runtime(
 def _open_readonly_database() -> sqlite3.Connection:
     if _ACTIVE_DBAPI_CONNECTION is not None:
         return _ACTIVE_DBAPI_CONNECTION
-    path = _configured_database_path()
-    connection = sqlite3.connect(
-        f"{path.as_uri()}?mode=ro&immutable=1",
-        uri=True,
+    raise WorkerActionError(
+        "rehearsal_binding_required",
+        "database inspection requires the pinned rehearsal connection",
     )
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    return connection
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:

@@ -544,6 +544,116 @@ def test_writable_open_rejects_path_swap_between_receipt_and_sqlite_connect(
     assert _probe_value(database) == "replacement"
 
 
+def test_writable_open_fd_binding_survives_aba_swap_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch SQLite reopening a replacement pathname during an ABA window."""
+    import kreports.maintenance.kam_rehearsal_worker as worker
+
+    database = tmp_path / "rehearsal" / "clone.db"
+    replacement = tmp_path / "replacement.db"
+    held_original = tmp_path / "held-original.db"
+    _create_probe_database(database, "original")
+    _create_probe_database(replacement, "replacement")
+    marker = write_marker(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    binding = worker._require_rehearsal_binding(require_initial_digest=False)
+    real_connect = worker.sqlite3.connect
+
+    def aba_connect(*args, **kwargs):
+        os.replace(database, held_original)
+        os.replace(replacement, database)
+        try:
+            return real_connect(*args, **kwargs)
+        finally:
+            os.replace(database, replacement)
+            os.replace(held_original, database)
+
+    monkeypatch.setattr(worker.sqlite3, "connect", aba_connect)
+    with worker._open_pinned_database(binding, collector=True) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE action_probe SET value='written' WHERE id=1")
+        connection.commit()
+
+    monkeypatch.setattr(worker.sqlite3, "connect", real_connect)
+    assert _probe_value(database) == "written"
+    assert _probe_value(replacement) == "replacement"
+
+
+def test_writable_open_uses_authenticated_fd_normal_vfs_and_memory_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a pathname/lockless DBAPI open or rollback/WAL sidecar policy."""
+    import kreports.maintenance.kam_rehearsal_worker as worker
+
+    database = tmp_path / "rehearsal" / "clone.db"
+    _create_probe_database(database, "original")
+    marker = write_marker(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    binding = worker._require_rehearsal_binding(require_initial_digest=False)
+    real_connect = worker.sqlite3.connect
+    opened_uris: list[str] = []
+
+    def observing_connect(database_uri: str, *args, **kwargs):
+        opened_uris.append(database_uri)
+        return real_connect(database_uri, *args, **kwargs)
+
+    monkeypatch.setattr(worker.sqlite3, "connect", observing_connect)
+    with worker._open_pinned_database(binding, collector=True) as connection:
+        main_path = str(
+            connection.execute("PRAGMA database_list").fetchone()[2]
+        )
+        assert opened_uris == [f"file:/dev/fd/{main_path.rsplit('/', 1)[-1]}?mode=rw"]
+        assert main_path.startswith("/dev/fd/")
+        assert "vfs=unix-none" not in opened_uris[0]
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
+
+
+def test_writable_transaction_swap_creates_no_sidecars_next_to_either_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a pinned write that leaves a journal or WAL beside a replacement."""
+    import kreports.maintenance.kam_rehearsal_worker as worker
+
+    database = tmp_path / "rehearsal" / "clone.db"
+    replacement = tmp_path / "replacement.db"
+    held_original = tmp_path / "held-original.db"
+    _create_probe_database(database, "original")
+    _create_probe_database(replacement, "replacement")
+    marker = write_marker(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    binding = worker._require_rehearsal_binding(require_initial_digest=False)
+
+    with pytest.raises(worker.WorkerActionError) as caught:
+        with worker._open_pinned_database(binding, collector=True) as connection:
+            assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
+            os.replace(database, held_original)
+            os.replace(replacement, database)
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE action_probe SET value='written' WHERE id=1")
+            for path in (database, replacement, held_original):
+                assert not Path(f"{path}-journal").exists()
+                assert not Path(f"{path}-wal").exists()
+            connection.commit()
+    assert caught.value.code == "rehearsal_binding_required"
+    assert _probe_value(database) == "replacement"
+    for path in (database, replacement, held_original):
+        assert not Path(f"{path}-journal").exists()
+        assert not Path(f"{path}-wal").exists()
+
+
 def test_writable_action_never_reconnects_to_replacement_after_safe_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
