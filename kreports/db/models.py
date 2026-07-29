@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger, Boolean, Column, Date, DateTime, Float, Integer,
-    ForeignKey, SmallInteger, String, Text, UniqueConstraint, Index,
+    ForeignKey, SmallInteger, String, Text, UniqueConstraint, Index, text,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -259,6 +259,64 @@ class AuditFee(Base):
             "idx_audit_fee_availability_year",
             "bsns_year",
             "availability_status",
+        ),
+    )
+
+
+class AuditFeeObservationRecord(Base):
+    """Immutable source claim for an audit-fee observation slot."""
+
+    __tablename__ = "audit_fee_observations"
+
+    observation_hash = Column(String(64), primary_key=True)
+    source_slot_hash = Column(String(64), nullable=False)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    source_class = Column(String(40), nullable=False)
+    source_rcept_no = Column(String(80), nullable=True)
+    source_period = Column(String(80), nullable=True)
+    contract_fee_m = Column(Integer, nullable=True)
+    contract_hours = Column(Integer, nullable=True)
+    actual_fee_m = Column(Integer, nullable=True)
+    actual_hours = Column(Integer, nullable=True)
+    auditor_nm = Column(String(100), nullable=True)
+    availability_status = Column(String(40), nullable=False)
+    quality_status = Column(String(24), nullable=False)
+    displayed_unit = Column(String(40), nullable=True)
+    raw_values_json = Column(Text, nullable=False, default="{}")
+    source_status = Column(String(40), nullable=True)
+    source_message = Column(Text, nullable=True)
+    source_eligibility = Column(String(24), nullable=False, default="unknown")
+    limitations_json = Column(Text, nullable=False, default="[]")
+    parser_version = Column(String(40), nullable=False)
+    is_current = Column(Boolean, nullable=False, default=True)
+    supersedes_hash = Column(
+        String(64),
+        ForeignKey("audit_fee_observations.observation_hash"),
+        nullable=True,
+    )
+    observed_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "idx_audit_fee_observation_corp_year",
+            "corp_code",
+            "bsns_year",
+        ),
+        Index(
+            "idx_audit_fee_observation_receipt",
+            "source_rcept_no",
+        ),
+        Index(
+            "idx_audit_fee_observation_year_quality",
+            "bsns_year",
+            "quality_status",
+        ),
+        Index(
+            "uq_audit_fee_observation_current_slot",
+            "source_slot_hash",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
         ),
     )
 

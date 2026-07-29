@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.exc import DatabaseError
+from sqlalchemy.exc import DatabaseError, IntegrityError
 
 
 def test_schema_contract_tables_exist(temp_engine):
@@ -26,6 +26,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_06_audit_procedure_linkage",
         "20260711_07_audit_fee_availability",
         "20260711_08_group_audit_graph",
+        "20260711_09_audit_fee_observations",
     ]
     assert second == []
 
@@ -317,6 +318,124 @@ def test_audit_fee_availability_migration_is_append_only_and_nullable(temp_engin
     }
     assert expected.issubset(columns)
     assert all(columns[name]["nullable"] for name in expected)
+
+
+def test_audit_fee_observation_migration_adds_immutable_claim_store(temp_engine):
+    from kreports.db.migrations import MIGRATIONS
+
+    assert MIGRATIONS[8].revision == "20260711_09_audit_fee_observations"
+    columns = {
+        item["name"]: item
+        for item in inspect(temp_engine).get_columns("audit_fee_observations")
+    }
+    assert {
+        "observation_hash", "source_slot_hash", "corp_code", "bsns_year",
+        "source_class", "source_rcept_no", "source_period",
+        "contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours",
+        "auditor_nm", "availability_status", "quality_status",
+        "displayed_unit", "raw_values_json", "source_status",
+        "source_message", "source_eligibility", "limitations_json",
+        "parser_version", "is_current", "supersedes_hash", "observed_at",
+    } == set(columns)
+    foreign_keys = inspect(temp_engine).get_foreign_keys("audit_fee_observations")
+    assert foreign_keys == [
+        {
+            "name": None,
+            "constrained_columns": ["supersedes_hash"],
+            "referred_schema": None,
+            "referred_table": "audit_fee_observations",
+            "referred_columns": ["observation_hash"],
+            "options": {},
+        }
+    ]
+    indexes = {
+        item["name"]: item
+        for item in inspect(temp_engine).get_indexes("audit_fee_observations")
+    }
+    assert indexes["uq_audit_fee_observation_current_slot"]["unique"] == 1
+    assert (
+        indexes["uq_audit_fee_observation_current_slot"]["dialect_options"][
+            "sqlite_where"
+        ].text
+        == "is_current = 1"
+    )
+    assert {
+        "idx_audit_fee_observation_corp_year",
+        "idx_audit_fee_observation_receipt",
+        "idx_audit_fee_observation_year_quality",
+    }.issubset(indexes)
+    assert indexes["idx_audit_fee_observation_corp_year"]["column_names"] == [
+        "corp_code",
+        "bsns_year",
+    ]
+    assert indexes["idx_audit_fee_observation_receipt"]["column_names"] == [
+        "source_rcept_no"
+    ]
+    assert indexes["idx_audit_fee_observation_year_quality"]["column_names"] == [
+        "bsns_year",
+        "quality_status",
+    ]
+
+
+def test_audit_fee_observation_current_slot_allows_one_current_claim(
+    temp_engine,
+):
+    observation = "audit_fee_observations"
+    current_claim = {
+        "observation_hash": "a" * 64,
+        "source_slot_hash": "slot" * 16,
+        "corp_code": "00126380",
+        "bsns_year": 2025,
+        "source_class": "audit_report",
+        "availability_status": "available",
+        "quality_status": "verified",
+        "raw_values_json": "{}",
+        "source_eligibility": "eligible",
+        "limitations_json": "[]",
+        "parser_version": "v1",
+        "is_current": True,
+        "observed_at": "2026-07-29 00:00:00",
+    }
+    duplicate_current_claim = {
+        **current_claim,
+        "observation_hash": "b" * 64,
+    }
+    historical_claim = {
+        **current_claim,
+        "observation_hash": "c" * 64,
+        "is_current": False,
+    }
+    insert = text(
+        """
+        INSERT INTO audit_fee_observations (
+          observation_hash, source_slot_hash, corp_code, bsns_year,
+          source_class, availability_status, quality_status, raw_values_json,
+          source_eligibility, limitations_json, parser_version, is_current,
+          observed_at
+        ) VALUES (
+          :observation_hash, :source_slot_hash, :corp_code, :bsns_year,
+          :source_class, :availability_status, :quality_status, :raw_values_json,
+          :source_eligibility, :limitations_json, :parser_version, :is_current,
+          :observed_at
+        )
+        """
+    )
+
+    with temp_engine.begin() as conn:
+        conn.execute(insert, historical_claim)
+        conn.execute(insert, current_claim)
+
+    with pytest.raises(IntegrityError), temp_engine.begin() as conn:
+        conn.execute(insert, duplicate_current_claim)
+
+    with temp_engine.connect() as conn:
+        assert conn.execute(
+            text(
+                f"SELECT COUNT(*) FROM {observation} "
+                "WHERE source_slot_hash = :source_slot_hash"
+            ),
+            {"source_slot_hash": current_claim["source_slot_hash"]},
+        ).scalar_one() == 2
 
 
 def test_backfill_owner_migration_repairs_duplicate_running_leases_atomically(

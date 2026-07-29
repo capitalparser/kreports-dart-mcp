@@ -373,6 +373,59 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_09_audit_fee_observations",
+        description="Add immutable audit fee observation claims",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS audit_fee_observations (
+              observation_hash VARCHAR(64) PRIMARY KEY,
+              source_slot_hash VARCHAR(64) NOT NULL,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              source_class VARCHAR(40) NOT NULL,
+              source_rcept_no VARCHAR(80),
+              source_period VARCHAR(80),
+              contract_fee_m INTEGER,
+              contract_hours INTEGER,
+              actual_fee_m INTEGER,
+              actual_hours INTEGER,
+              auditor_nm VARCHAR(100),
+              availability_status VARCHAR(40) NOT NULL,
+              quality_status VARCHAR(24) NOT NULL,
+              displayed_unit VARCHAR(40),
+              raw_values_json TEXT NOT NULL DEFAULT '{}',
+              source_status VARCHAR(40),
+              source_message TEXT,
+              source_eligibility VARCHAR(24) NOT NULL DEFAULT 'unknown',
+              limitations_json TEXT NOT NULL DEFAULT '[]',
+              parser_version VARCHAR(40) NOT NULL,
+              is_current BOOLEAN NOT NULL DEFAULT 1,
+              supersedes_hash VARCHAR(64),
+              observed_at DATETIME NOT NULL,
+              FOREIGN KEY(supersedes_hash)
+                REFERENCES audit_fee_observations(observation_hash)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_fee_observation_corp_year
+            ON audit_fee_observations (corp_code, bsns_year)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_fee_observation_receipt
+            ON audit_fee_observations (source_rcept_no)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_fee_observation_year_quality
+            ON audit_fee_observations (bsns_year, quality_status)
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_fee_observation_current_slot
+            ON audit_fee_observations (source_slot_hash)
+            WHERE is_current = 1
+            """,
+        ),
+    ),
 )
 
 
