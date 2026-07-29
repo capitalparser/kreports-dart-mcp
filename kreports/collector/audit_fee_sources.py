@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import hashlib
 import json
 import re
 from typing import Any, Iterable
@@ -10,6 +11,14 @@ from typing import Any, Iterable
 
 _MISSING_TOKENS = {"", "-", "n/a", "na", "해당없음", "없음"}
 _DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
+AUDIT_FEE_OBSERVATION_PARSER_VERSION = "v1"
+_MAX_RAW_VALUES = 32
+_MAX_RAW_VALUE_KEY_LENGTH = 80
+_MAX_RAW_VALUE_LENGTH = 500
+_MAX_LIMITATIONS = 20
+_MAX_LIMITATION_LENGTH = 300
+_MAX_SOURCE_MESSAGE_LENGTH = 500
+_MAX_CANONICAL_OBSERVATION_BYTES = 32 * 1024
 
 
 def ds002_source_supported(year: int) -> bool:
@@ -43,11 +52,81 @@ class AuditFeeObservation:
     source_message: str | None = None
     source_eligibility: str = "unknown"
     limitations: tuple[str, ...] = ()
+    parser_version: str = AUDIT_FEE_OBSERVATION_PARSER_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["limitations"] = list(self.limitations)
         return value
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _validate_observation_identity(observation: AuditFeeObservation) -> None:
+    if not observation.corp_code.strip():
+        raise ValueError("audit fee observation corp_code must not be blank")
+    if not observation.source_class.strip():
+        raise ValueError("audit fee observation source_class must not be blank")
+    if int(observation.bsns_year) <= 0:
+        raise ValueError("audit fee observation bsns_year must be positive")
+    if len(observation.raw_values) > _MAX_RAW_VALUES:
+        raise ValueError("raw values exceed maximum key count")
+    for key, value in observation.raw_values.items():
+        if len(str(key)) > _MAX_RAW_VALUE_KEY_LENGTH:
+            raise ValueError("raw value key exceeds maximum length")
+        if value is not None and len(str(value)) > _MAX_RAW_VALUE_LENGTH:
+            raise ValueError("raw value exceeds maximum length")
+    if len(observation.limitations) > _MAX_LIMITATIONS:
+        raise ValueError("limitations exceed maximum count")
+    if any(len(str(item)) > _MAX_LIMITATION_LENGTH for item in observation.limitations):
+        raise ValueError("limitation exceeds maximum length")
+    if (
+        observation.source_message is not None
+        and len(str(observation.source_message)) > _MAX_SOURCE_MESSAGE_LENGTH
+    ):
+        raise ValueError("source message exceeds maximum length")
+
+
+def canonical_observation_payload(
+    observation: AuditFeeObservation,
+) -> dict[str, object]:
+    """Return the bounded semantic identity payload for one source claim."""
+    _validate_observation_identity(observation)
+    payload: dict[str, object] = observation.to_dict()
+    payload["limitations"] = sorted({str(item) for item in observation.limitations})
+    payload["raw_values"] = {
+        str(key): None if value is None else str(value)
+        for key, value in sorted(observation.raw_values.items(), key=lambda item: str(item[0]))
+    }
+    return payload
+
+
+def observation_hash(observation: AuditFeeObservation) -> str:
+    """Hash all bounded semantic claim fields, excluding storage state."""
+    payload = _canonical_json(canonical_observation_payload(observation))
+    if len(payload.encode("utf-8")) > _MAX_CANONICAL_OBSERVATION_BYTES:
+        raise ValueError("canonical observation payload exceeds 32 KiB")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def source_slot_hash(observation: AuditFeeObservation) -> str:
+    """Hash the stable source slot independently from claim contents."""
+    _validate_observation_identity(observation)
+    slot = {
+        "corp_code": observation.corp_code.strip(),
+        "bsns_year": int(observation.bsns_year),
+        "source_class": observation.source_class.strip(),
+        "source_rcept_no": (observation.source_rcept_no or "").strip(),
+        "source_period": (observation.source_period or "").strip(),
+    }
+    return hashlib.sha256(_canonical_json(slot).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
