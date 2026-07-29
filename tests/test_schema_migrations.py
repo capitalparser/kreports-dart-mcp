@@ -4,7 +4,6 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
-
 REVISION_08_CHECKSUMS = {
     "20260711_01_quality_contract": (
         "f538065ca8ca190f28ba13b436a3dd8e1135591bcef1ac05d2e5e77464dfd6aa"
