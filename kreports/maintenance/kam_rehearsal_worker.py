@@ -8,20 +8,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
-from dataclasses import dataclass
 import fcntl
 import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
 import re
 import sqlite3
 import stat as stat_module
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
-
 
 YEARS = (2021, 2022, 2023, 2024, 2025)
 CANONICAL_STATUSES = {"usable", "limited", "missing", "error"}
@@ -56,6 +55,9 @@ _ACTIONS = {
     "kam-dry-run",
     "kam-rebuild",
     "procedure-index",
+    "audit-fee-observation-backfill",
+    "financial-compact-rebuild",
+    "company-year-quality-rebuild",
     "semantic-snapshot",
     "mcp-validate",
 }
@@ -225,7 +227,7 @@ def _require_rehearsal_binding(
         if not hmac.compare_digest(signature, expected_signature):
             raise ValueError("marker signature mismatch")
         if not isinstance(payload["database_path"], str):
-            raise ValueError("marker database path is invalid")
+            raise TypeError("marker database path is invalid")
         marker_database = Path(payload["database_path"])
         if not marker_database.is_absolute() or marker_database.resolve(strict=True) != database:
             raise ValueError("marker database path is invalid")
@@ -237,7 +239,7 @@ def _require_rehearsal_binding(
         if payload["database_inode"] != stat.st_ino or payload["database_device"] != stat.st_dev:
             raise ValueError("marker database identity is invalid")
         if not isinstance(payload["source_path"], str):
-            raise ValueError("marker source path is invalid")
+            raise TypeError("marker source path is invalid")
         source = Path(payload["source_path"])
         if not source.is_absolute() or source.is_symlink() or not source.is_file():
             raise ValueError("marker source path is invalid")
@@ -431,8 +433,8 @@ def _bound_database_runtime(
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.pool import StaticPool
 
-        from kreports.config import settings
         import kreports.db.engine as engine_module
+        from kreports.config import settings
 
         original_engine = engine_module.engine
         original_session_local = engine_module.SessionLocal
@@ -752,7 +754,15 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
     """Execute one validated action after the child process has bound its DB."""
     if action not in _ACTIONS:
         raise WorkerActionError("invalid_action", "unsupported worker action")
-    if action in {"kam-dry-run", "kam-rebuild", "procedure-index"}:
+    year_actions = {
+        "kam-dry-run",
+        "kam-rebuild",
+        "procedure-index",
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
+    }
+    if action in year_actions:
         if year not in YEARS:
             raise WorkerActionError("invalid_year", "year must be one of 2021..2025")
     elif year is not None:
@@ -763,6 +773,9 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
         "kam-dry-run",
         "kam-rebuild",
         "procedure-index",
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
     }
     if collector:
         _require_mode("collector", action)
@@ -825,6 +838,40 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
                     "procedure index reported failures",
                 )
             return result
+        if action == "audit-fee-observation-backfill":
+            from kreports.maintenance.audit_fee_observation_backfill import (
+                backfill_audit_fee_observations,
+            )
+
+            result = backfill_audit_fee_observations(
+                year_from=int(year),
+                year_to=int(year),
+                dry_run=False,
+            )
+            if int(result.get("failed_company_years") or 0):
+                raise WorkerActionError(
+                    "backfill_failed",
+                    "audit fee observation backfill reported failures",
+                )
+            return result
+        if action == "financial-compact-rebuild":
+            from kreports.maintenance.financial_compact import (
+                rebuild_financial_facts_compact,
+            )
+
+            return rebuild_financial_facts_compact(
+                year_from=int(year),
+                year_to=int(year),
+            )
+        if action == "company-year-quality-rebuild":
+            from kreports.quality.company_year import (
+                rebuild_company_year_quality,
+            )
+
+            return rebuild_company_year_quality(
+                year_from=int(year),
+                year_to=int(year),
+            )
         if action == "semantic-snapshot":
             return semantic_snapshot()
         return validate_professional_mcp()
@@ -853,7 +900,7 @@ def main(argv: list[str] | None = None) -> int:
     except WorkerActionError as exc:
         _write_json({"ok": False, "action": action, "error": {"code": exc.code, "message": _bounded_message(exc)}})
         return 2
-    except Exception as exc:  # pragma: no cover - final containment boundary
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - containment boundary
         _write_json({"ok": False, "action": action, "error": {"code": "worker_failed", "message": _bounded_message(exc)}})
         return 2
 
