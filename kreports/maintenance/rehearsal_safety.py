@@ -81,7 +81,7 @@ def _require_preflight_approval(preflight: SourcePreflight) -> _PreflightApprova
     approval = _PREFLIGHT_APPROVALS.get(id(preflight))
     if approval is None or approval.reference() is not preflight:
         raise RehearsalSafetyError(
-            "untrusted_preflight",
+            "unsafe_rehearsal_directory",
             "preflight must be the exact object approved in this process",
         )
     return approval

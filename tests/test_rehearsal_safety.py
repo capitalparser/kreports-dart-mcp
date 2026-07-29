@@ -547,7 +547,7 @@ def test_create_apfs_clone_rejects_reconstructed_equal_preflight(
     with pytest.raises(RehearsalSafetyError) as caught:
         create_apfs_clone(reconstructed)
 
-    assert caught.value.code == "untrusted_preflight"
+    assert caught.value.code == "unsafe_rehearsal_directory"
     assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
@@ -573,7 +573,7 @@ def test_create_apfs_clone_rejects_copied_preflight(
     with pytest.raises(RehearsalSafetyError) as caught:
         create_apfs_clone(copied)
 
-    assert caught.value.code == "untrusted_preflight"
+    assert caught.value.code == "unsafe_rehearsal_directory"
     assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
@@ -589,7 +589,7 @@ def test_create_apfs_clone_rejects_forged_unsafe_directory(
     with pytest.raises(RehearsalSafetyError) as caught:
         create_apfs_clone(forged)
 
-    assert caught.value.code == "untrusted_preflight"
+    assert caught.value.code == "unsafe_rehearsal_directory"
     assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
@@ -605,7 +605,7 @@ def test_create_apfs_clone_rejects_repository_root_forgery(
     with pytest.raises(RehearsalSafetyError) as caught:
         create_apfs_clone(forged)
 
-    assert caught.value.code == "untrusted_preflight"
+    assert caught.value.code == "unsafe_rehearsal_directory"
     assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
