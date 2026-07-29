@@ -770,7 +770,6 @@ def test_qoe_matters_survive_missing_financial_series_across_public_surfaces(
     )
     from kreports.mcp.resources import read_resource
 
-    monkeypatch.setattr(investor_quality, "engine", temp_engine)
     monkeypatch.setattr(
         investor_quality,
         "_financial_series",
@@ -1002,7 +1001,6 @@ def test_qoe_matters_dedupe_parent_receipts_and_keep_receipt_sources(temp_engine
     from kreports.mcp.answer_pack import build_answer_pack
     from kreports.db.engine import get_session
 
-    monkeypatch.setattr(investor_quality, "engine", temp_engine)
     monkeypatch.setattr(investor_quality, "_financial_series", lambda *_args, **_kwargs: [
         {"bsns_year": 2024, "revenue": 100, "operating_profit": 10, "net_income": 8, "operating_cf": 9},
     ])

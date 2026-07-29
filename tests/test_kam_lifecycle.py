@@ -3,10 +3,9 @@ from sqlalchemy.orm import sessionmaker
 from kreports.db.models import Company, ReportSection
 
 
-def test_kam_lifecycle_marks_new_and_repeated_topics(temp_engine, monkeypatch):
+def test_kam_lifecycle_marks_new_and_repeated_topics(temp_engine):
     import kreports.analysis.kam_lifecycle as lifecycle
 
-    monkeypatch.setattr(lifecycle, "engine", temp_engine)
     Session = sessionmaker(bind=temp_engine)
     with Session() as session:
         session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))

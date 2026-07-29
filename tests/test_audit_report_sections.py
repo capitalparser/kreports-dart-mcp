@@ -1147,11 +1147,9 @@ def test_compare_peer_kam_topics_reports_reason_and_procedure_coverage(temp_engi
 
 
 def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypatch):
-    import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
     from kreports.db.models import AuditProcedureItem, KamItem
 
-    monkeypatch.setattr(collector_module, "engine", temp_engine)
 
     with get_session() as session:
         session.add(ReportSection(
@@ -1208,10 +1206,8 @@ def test_index_audit_procedures_from_existing_kam_sections(temp_engine, monkeypa
 
 
 def test_index_audit_procedures_does_not_infer_evidence_document_summary(temp_engine, monkeypatch):
-    import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session
 
-    monkeypatch.setattr(collector_module, "engine", temp_engine)
 
     with get_session() as session:
         session.add(EvidenceDocument(

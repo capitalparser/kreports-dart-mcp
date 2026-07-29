@@ -5,10 +5,9 @@ from sqlalchemy.orm import sessionmaker
 from kreports.db.models import Company, Disclosure, SourceDocument
 
 
-def test_raw_annual_report_coverage_counts_latest_only(temp_engine, monkeypatch):
+def test_raw_annual_report_coverage_counts_latest_only(temp_engine):
     import kreports.analysis.raw_coverage as raw_coverage
 
-    monkeypatch.setattr(raw_coverage, "engine", temp_engine)
     Session = sessionmaker(bind=temp_engine)
     with Session() as session:
         session.add_all([

@@ -12,9 +12,7 @@ import pytest
 from unittest.mock import patch
 import os
 
-from kreports.collector import fin_collector
-from kreports.db.engine import init_db, get_session, engine
-from kreports.db.models import Base, Company, Financial, FinancialFact
+from kreports.db.models import Company, Financial, FinancialFact
 
 
 CORP_CODE = "00946030"   # 로보티즈
@@ -66,12 +64,6 @@ def fresh_db(tmp_path, monkeypatch):
         os.environ["DB_URL"] = original_db_url
     reload(_cfg)
     reload(_eng)
-    import kreports.analysis.api as _api
-    import kreports.analysis.peer as _peer
-    import kreports.analysis.readiness as _readiness
-    _api._engine = _eng.engine
-    _peer.engine = _eng.engine
-    _readiness.engine = _eng.engine
 
 
 def _make_acntall_response_full():
@@ -120,7 +112,7 @@ class TestSummaryFallbackChain:
     def test_acntall_cfs_success_no_fallback(self, fresh_db):
         eng, fc, _ = fresh_db
         with patch.object(fc, "fetch_financial_statements",
-                          return_value=_make_acntall_response_full()) as m_all, \
+                          return_value=_make_acntall_response_full()), \
              patch.object(fc, "fetch_financial_summary") as m_acnt, \
              patch("kreports.config.settings.request_delay", 0):
             status = fc.collect_financial(STOCK_CODE, YEAR, QUARTER)

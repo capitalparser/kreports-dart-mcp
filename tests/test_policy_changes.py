@@ -3,10 +3,9 @@ from sqlalchemy.orm import sessionmaker
 from kreports.db.models import AccountingNoteChapter, Company
 
 
-def test_accounting_policy_changes_detects_changed_text(temp_engine, monkeypatch):
+def test_accounting_policy_changes_detects_changed_text(temp_engine):
     import kreports.analysis.policy_changes as policy_changes
 
-    monkeypatch.setattr(policy_changes, "engine", temp_engine)
     Session = sessionmaker(bind=temp_engine)
     with Session() as session:
         session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))

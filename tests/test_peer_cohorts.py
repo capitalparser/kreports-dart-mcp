@@ -1166,9 +1166,14 @@ def test_missing_and_pre_migration_databases_do_not_create_or_change_files(
     tmp_path,
 ):
     from kreports.analysis import peer
+    import kreports.db.engine as engine_module
 
     missing = tmp_path / "missing.db"
-    monkeypatch.setattr(peer, "engine", create_engine(f"sqlite:///{missing}"))
+    monkeypatch.setattr(
+        engine_module,
+        "engine",
+        create_engine(f"sqlite:///{missing}"),
+    )
     with pytest.raises(peer.PeerDatabaseUnavailable, match="runtime_db_unavailable"):
         peer.build_peer_cohort("00000001", 2024, "investor", 5)
     assert not missing.exists()
@@ -1186,7 +1191,11 @@ def test_missing_and_pre_migration_databases_do_not_create_or_change_files(
         path.name: (path.stat().st_size, path.stat().st_mtime_ns)
         for path in tmp_path.iterdir()
     }
-    monkeypatch.setattr(peer, "engine", create_engine(f"sqlite:///{legacy}"))
+    monkeypatch.setattr(
+        engine_module,
+        "engine",
+        create_engine(f"sqlite:///{legacy}"),
+    )
     with pytest.raises(peer.PeerDatabaseUnavailable, match="missing_schema:financials"):
         peer.build_peer_cohort("00000001", 2024, "investor", 5)
     after = {
@@ -1198,6 +1207,7 @@ def test_missing_and_pre_migration_databases_do_not_create_or_change_files(
 
 def test_nonempty_wal_fails_closed_without_file_changes(monkeypatch, tmp_path):
     from kreports.analysis import peer
+    import kreports.db.engine as engine_module
 
     database = tmp_path / "wal.db"
     connection = sqlite3.connect(database)
@@ -1207,7 +1217,11 @@ def test_nonempty_wal_fails_closed_without_file_changes(monkeypatch, tmp_path):
         connection.commit()
         wal = tmp_path / "wal.db-wal"
         assert wal.stat().st_size > 0
-        monkeypatch.setattr(peer, "engine", create_engine(f"sqlite:///{database}"))
+        monkeypatch.setattr(
+            engine_module,
+            "engine",
+            create_engine(f"sqlite:///{database}"),
+        )
         before = {
             path.name: (path.stat().st_size, path.stat().st_mtime_ns)
             for path in tmp_path.iterdir()

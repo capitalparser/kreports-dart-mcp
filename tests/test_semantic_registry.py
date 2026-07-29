@@ -129,13 +129,12 @@ def test_unknown_dataset_fails_closed():
         dataset_definition("invented_dataset")
 
 
-def test_financial_series_preserves_legacy_quality_aliases(temp_engine, monkeypatch):
+def test_financial_series_preserves_legacy_quality_aliases(temp_engine):
     """Removing net_income or operating_cf from QoE rows breaks existing consumers."""
     from kreports.analysis import investor_quality
     from kreports.db.engine import get_session
     from sqlalchemy import text
 
-    monkeypatch.setattr(investor_quality, "engine", temp_engine)
     with get_session() as session:
         session.execute(text("""
             INSERT INTO financial_facts_compact
@@ -153,7 +152,7 @@ def test_financial_series_preserves_legacy_quality_aliases(temp_engine, monkeypa
     }]
 
 
-def test_financial_series_fetches_explicit_dcf_support_metric(temp_engine, monkeypatch):
+def test_financial_series_fetches_explicit_dcf_support_metric(temp_engine):
     """Dropping tax expense from the explicit DCF metric query breaks tax-rate inputs."""
     from sqlalchemy import text
 
@@ -161,7 +160,6 @@ def test_financial_series_fetches_explicit_dcf_support_metric(temp_engine, monke
     from kreports.db.engine import get_session
     from kreports.semantic.metrics import DCF_SUPPORT_METRICS
 
-    monkeypatch.setattr(investor_quality, "engine", temp_engine)
     with get_session() as session:
         session.execute(text("""
             INSERT INTO financial_facts_compact

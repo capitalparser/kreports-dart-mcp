@@ -15,9 +15,6 @@ from kreports.db.models import (
 
 
 def test_index_audit_procedures_uses_cached_kam_body_only(temp_engine, monkeypatch):
-    import kreports.collector.report_document_collector as collector_module
-
-    monkeypatch.setattr(collector_module, "engine", temp_engine)
     with get_session() as session:
         session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
         session.add(
@@ -89,9 +86,7 @@ def test_index_audit_procedures_cli_uses_structured_kam_lifecycle(
     monkeypatch,
 ):
     import kreports.cli.main as cli_module
-    import kreports.collector.report_document_collector as collector_module
 
-    monkeypatch.setattr(collector_module, "engine", temp_engine)
     monkeypatch.setattr(cli_module, "init_db", lambda: None)
     with get_session() as session:
         session.add(
@@ -150,9 +145,6 @@ def test_index_audit_procedures_cli_uses_structured_kam_lifecycle(
 
 
 def test_index_audit_procedures_cleans_downgraded_identity(temp_engine, monkeypatch):
-    import kreports.collector.report_document_collector as collector_module
-
-    monkeypatch.setattr(collector_module, "engine", temp_engine)
     with get_session() as session:
         item = KamItem(
             corp_code="00126380",
@@ -231,7 +223,6 @@ def test_rebuild_reconciles_hash_replacement_with_zero_steps_exactly(
 ):
     import kreports.collector.report_document_collector as collector_module
 
-    monkeypatch.setattr(collector_module, "engine", temp_engine)
     old_body = """
     <TITLE>핵심감사사항</TITLE>
     <TITLE>수익인식</TITLE>

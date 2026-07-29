@@ -116,12 +116,6 @@ def fresh_audit_fee_db(tmp_path, monkeypatch):
         os.environ["DB_URL"] = original_db_url
     reload(_cfg)
     reload(_eng)
-    import kreports.analysis.api as _api
-    import kreports.analysis.peer as _peer
-    import kreports.analysis.readiness as _readiness
-    _api._engine = _eng.engine
-    _peer.engine = _eng.engine
-    _readiness.engine = _eng.engine
 
 
 def test_collect_audit_fee_success_saves_row(fresh_audit_fee_db):
