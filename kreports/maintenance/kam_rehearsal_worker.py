@@ -63,6 +63,17 @@ _FORBIDDEN_SCHEMA_LITERALS = (
     "audit_procedure_items",
 )
 _PATH_TEXT = re.compile(r"(?:[A-Za-z]:)?/(?:[^\s:'\"]+/)+[^\s:'\"]*")
+_MARKER_SCHEMA = "kam-schema-backfill-rehearsal-marker.v1"
+_MARKER_FIELDS = {
+    "schema_version",
+    "run_id",
+    "database_path",
+    "database_inode",
+    "database_device",
+    "source_sha256",
+    "clone_initial_sha256",
+}
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 KAM_SNAPSHOT_COLUMNS = (
     "id", "rcept_no", "dcm_no", "corp_code", "bsns_year", "source_type",
@@ -97,12 +108,50 @@ def _configured_database_path() -> Path:
     if not url.startswith("sqlite:///"):
         raise WorkerActionError("invalid_database_url", "DB_URL must be an absolute SQLite URL")
     raw_path = unquote(url[len("sqlite:///"):])
-    path = Path(raw_path)
-    if not path.is_absolute():
+    configured_path = Path(raw_path)
+    if not configured_path.is_absolute():
         raise WorkerActionError("invalid_database_url", "DB_URL must name an absolute SQLite file")
+    try:
+        path = configured_path.resolve(strict=True)
+    except OSError as exc:
+        raise WorkerActionError("database_unavailable", "configured SQLite database is unavailable") from exc
     if not path.is_file():
         raise WorkerActionError("database_unavailable", "configured SQLite database is unavailable")
     return path
+
+
+def _require_rehearsal_binding() -> Path:
+    """Validate the pre-import clone capability for every database action."""
+    database = _configured_database_path()
+    raw_marker = os.environ.get("KREPORTS_REHEARSAL_MARKER", "")
+    if not raw_marker:
+        raise WorkerActionError("rehearsal_binding_required", "rehearsal marker is required")
+    marker = Path(raw_marker)
+    if not marker.is_absolute() or marker.is_symlink() or not marker.is_file():
+        raise WorkerActionError("rehearsal_binding_required", "rehearsal marker must be a regular absolute file")
+    try:
+        marker = marker.resolve(strict=True)
+        if marker.parent != database.parent or marker.stat().st_size > 8192:
+            raise ValueError("marker path or size is invalid")
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or set(payload) != _MARKER_FIELDS:
+            raise ValueError("marker schema is invalid")
+        marker_database = Path(str(payload["database_path"]))
+        if not marker_database.is_absolute() or marker_database.resolve(strict=True) != database:
+            raise ValueError("marker database path is invalid")
+        if payload["schema_version"] != _MARKER_SCHEMA:
+            raise ValueError("marker version is invalid")
+        if not isinstance(payload["run_id"], str) or not 1 <= len(payload["run_id"]) <= 128:
+            raise ValueError("marker run id is invalid")
+        stat = database.stat()
+        if payload["database_inode"] != stat.st_ino or payload["database_device"] != stat.st_dev:
+            raise ValueError("marker database identity is invalid")
+        for field in ("source_sha256", "clone_initial_sha256"):
+            if not isinstance(payload[field], str) or not _SHA256.fullmatch(payload[field]):
+                raise ValueError("marker digest is invalid")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkerActionError("rehearsal_binding_required", "rehearsal marker does not bind this database") from exc
+    return database
 
 
 def _open_readonly_database() -> sqlite3.Connection:
@@ -190,6 +239,7 @@ def _bounded_rebuild_result(result: dict[str, Any]) -> dict[str, object]:
 def _validate_state_after_migration(state: dict[str, object]) -> None:
     if (
         state["checksum_mismatches"]
+        or state["pending_revisions"]
         or not state["schema_complete"]
         or state["quick_check"] != ["ok"]
         or state["foreign_key_violations"]
@@ -302,6 +352,14 @@ def validate_professional_mcp() -> dict[str, object]:
         if not (isinstance(stdio_result, tuple) and len(stdio_result) == 2):
             raise WorkerActionError("mcp_boundary_mismatch", f"{name} returned an invalid stdio shape")
         contents, stdio = stdio_result
+        legacy_pack = legacy.get("answer_pack")
+        envelope_pack = envelope.get("answer_pack")
+        stdio_pack = stdio.get("answer_pack") if isinstance(stdio, dict) else None
+        if any(
+            _public_schema_leak(value)
+            for value in (legacy, envelope, stdio, legacy_pack, envelope_pack, stdio_pack)
+        ):
+            raise WorkerActionError("mcp_schema_not_closed", f"{name} public result leaks schema text")
         if stdio != envelope:
             raise WorkerActionError("mcp_boundary_mismatch", f"{name} stdio envelope differs")
         for field in ("answer", "answer_pack", "domain_verdict"):
@@ -367,6 +425,7 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
         _require_mode("collector", action)
     else:
         _require_mode("readonly", action)
+    _require_rehearsal_binding()
 
     if action == "migrate":
         before = migration_state()
@@ -382,13 +441,13 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
     if action in {"kam-dry-run", "kam-rebuild"}:
         from kreports.collector.report_document_collector import rebuild_kam_items
         result = _bounded_rebuild_result(rebuild_kam_items(year=int(year), dry_run=action == "kam-dry-run"))
-        if int(result.get("error") or 0):
+        if int(result.get("error") or 0) or int(result.get("failed") or 0):
             raise WorkerActionError("backfill_failed", "KAM rebuild reported receipt errors")
         return result
     if action == "procedure-index":
         from kreports.collector.report_document_collector import index_audit_procedures_from_sections
         result = _bounded_rebuild_result(index_audit_procedures_from_sections(year=int(year)))
-        if int(result.get("failed") or 0):
+        if int(result.get("error") or 0) or int(result.get("failed") or 0):
             raise WorkerActionError("backfill_failed", "procedure index reported failures")
         return result
     if action == "semantic-snapshot":
