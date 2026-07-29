@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import contextmanager
+from dataclasses import dataclass
+import fcntl
 import hashlib
 import hmac
 import json
@@ -15,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat as stat_module
 from typing import Any
 from urllib.parse import unquote
 
@@ -84,6 +88,7 @@ _MARKER_FIELDS = {
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MIN_FREE_BYTES = 10 * 1024**3
+_ACTIVE_DBAPI_CONNECTION: sqlite3.Connection | None = None
 
 KAM_SNAPSHOT_COLUMNS = (
     "id", "rcept_no", "dcm_no", "corp_code", "bsns_year", "source_type",
@@ -108,9 +113,40 @@ class WorkerActionError(RuntimeError):
         super().__init__(_bounded_message(message))
 
 
+@dataclass(frozen=True)
+class RehearsalBinding:
+    """Resolved file identity authenticated by the signed clone receipt."""
+
+    database_path: Path
+    database_inode: int
+    database_device: int
+
+
 def _bounded_message(value: object) -> str:
     message = _PATH_TEXT.sub("[path]", str(value).replace("\n", " ").replace("\r", " "))
     return message[:500] or "worker action failed"
+
+
+def _assert_no_symlink_components(path: Path) -> None:
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "database path must be absolute and normalized",
+        )
+    current = Path(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            if stat_module.S_ISLNK(os.lstat(current).st_mode):
+                raise WorkerActionError(
+                    "rehearsal_binding_required",
+                    "database path must not contain symlinks",
+                )
+    except OSError as exc:
+        raise WorkerActionError(
+            "database_unavailable",
+            "configured SQLite database is unavailable",
+        ) from exc
 
 
 def _configured_database_path() -> Path:
@@ -121,11 +157,13 @@ def _configured_database_path() -> Path:
     configured_path = Path(raw_path)
     if not configured_path.is_absolute():
         raise WorkerActionError("invalid_database_url", "DB_URL must name an absolute SQLite file")
+    _assert_no_symlink_components(configured_path)
     try:
         path = configured_path.resolve(strict=True)
     except OSError as exc:
         raise WorkerActionError("database_unavailable", "configured SQLite database is unavailable") from exc
-    if not path.is_file():
+    path_stat = os.lstat(path)
+    if not stat_module.S_ISREG(path_stat.st_mode):
         raise WorkerActionError("database_unavailable", "configured SQLite database is unavailable")
     return path
 
@@ -142,7 +180,10 @@ def _is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _require_rehearsal_binding(*, require_initial_digest: bool) -> Path:
+def _require_rehearsal_binding(
+    *,
+    require_initial_digest: bool,
+) -> RehearsalBinding:
     """Validate the pre-import clone capability for every database action."""
     database = _configured_database_path()
     raw_marker = os.environ.get("KREPORTS_REHEARSAL_MARKER", "")
@@ -243,12 +284,146 @@ def _require_rehearsal_binding(*, require_initial_digest: bool) -> Path:
             raise ValueError("rehearsal clone changed before migration")
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise WorkerActionError("rehearsal_binding_required", "rehearsal marker does not bind this database") from exc
-    return database
+    return RehearsalBinding(
+        database_path=database,
+        database_inode=stat.st_ino,
+        database_device=stat.st_dev,
+    )
+
+
+def _verify_binding_identity(
+    binding: RehearsalBinding,
+    file_descriptor: int,
+) -> None:
+    _assert_no_symlink_components(binding.database_path)
+    path_stat = os.lstat(binding.database_path)
+    descriptor_stat = os.fstat(file_descriptor)
+    expected = (binding.database_inode, binding.database_device)
+    if (
+        not stat_module.S_ISREG(path_stat.st_mode)
+        or (path_stat.st_ino, path_stat.st_dev) != expected
+        or (descriptor_stat.st_ino, descriptor_stat.st_dev) != expected
+    ):
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "rehearsal database identity changed",
+        )
+
+
+@contextmanager
+def _open_pinned_database(
+    binding: RehearsalBinding,
+    *,
+    collector: bool,
+):
+    """Hold and verify one file identity while opening the action DBAPI handle."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "no-follow database open is unavailable",
+        )
+    flags = (os.O_RDWR if collector else os.O_RDONLY) | os.O_NOFOLLOW
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    file_descriptor = -1
+    connection: sqlite3.Connection | None = None
+    try:
+        file_descriptor = os.open(binding.database_path, flags)
+        lock_kind = fcntl.LOCK_EX if collector else fcntl.LOCK_SH
+        fcntl.flock(file_descriptor, lock_kind | fcntl.LOCK_NB)
+        _verify_binding_identity(binding, file_descriptor)
+        # On APFS, the required non-blocking flock and SQLite's default POSIX
+        # locks conflict even within one process.  The signed marker already
+        # restricts this worker to APFS, and the held exclusive flock provides
+        # the action-wide writer lock, so the one pinned collector connection
+        # must not attempt a second, conflicting lock protocol.
+        query = "mode=rw&vfs=unix-none" if collector else "mode=ro&immutable=1"
+        connection = sqlite3.connect(
+            f"{binding.database_path.as_uri()}?{query}",
+            uri=True,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "PRAGMA foreign_keys=ON" if collector else "PRAGMA query_only=ON"
+        )
+        _verify_binding_identity(binding, file_descriptor)
+        try:
+            yield connection
+        finally:
+            # Re-check after the action as well as around the DBAPI open.  If
+            # an attacker renamed the authenticated path while the pinned
+            # connection was in use, replace any lower-level SQLite/SQLAlchemy
+            # error with the bounded public binding failure.
+            _verify_binding_identity(binding, file_descriptor)
+    except WorkerActionError:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "could not pin the rehearsal database identity",
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+        if file_descriptor >= 0:
+            try:
+                fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(file_descriptor)
+
+
+@contextmanager
+def _bound_database_runtime(
+    binding: RehearsalBinding,
+    *,
+    collector: bool,
+):
+    """Bind every KReports database consumer to one already-open DBAPI handle."""
+    global _ACTIVE_DBAPI_CONNECTION
+
+    with _open_pinned_database(binding, collector=collector) as connection:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from kreports.config import settings
+        import kreports.db.engine as engine_module
+
+        original_engine = engine_module.engine
+        original_session_local = engine_module.SessionLocal
+        original_db_url = settings.db_url
+        safe_engine = create_engine(
+            "sqlite://",
+            creator=lambda: connection,
+            poolclass=StaticPool,
+            pool_reset_on_return=None,
+        )
+        engine_module.engine = safe_engine
+        engine_module.SessionLocal = sessionmaker(
+            bind=safe_engine,
+            autocommit=False,
+            autoflush=False,
+        )
+        settings.db_url = f"sqlite:///{binding.database_path}"
+        _ACTIVE_DBAPI_CONNECTION = connection
+        try:
+            yield connection
+        finally:
+            _ACTIVE_DBAPI_CONNECTION = None
+            engine_module.engine = original_engine
+            engine_module.SessionLocal = original_session_local
+            settings.db_url = original_db_url
+            safe_engine.dispose()
 
 
 def _open_readonly_database() -> sqlite3.Connection:
+    if _ACTIVE_DBAPI_CONNECTION is not None:
+        return _ACTIVE_DBAPI_CONNECTION
     path = _configured_database_path()
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection = sqlite3.connect(
+        f"{path.as_uri()}?mode=ro&immutable=1",
+        uri=True,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     return connection
@@ -310,7 +485,8 @@ def migration_state() -> dict[str, object]:
             "foreign_key_violations": foreign_keys,
         }
     finally:
-        connection.close()
+        if connection is not _ACTIVE_DBAPI_CONNECTION:
+            connection.close()
 
 
 def _require_mode(expected: str, action: str) -> None:
@@ -398,7 +574,8 @@ def semantic_snapshot() -> dict[str, object]:
             "semantic_sha256": digest,
         }
     finally:
-        connection.close()
+        if connection is not _ACTIVE_DBAPI_CONNECTION:
+            connection.close()
 
 
 def _public_schema_leak(value: object) -> bool:
@@ -513,38 +690,76 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
     elif year is not None:
         raise WorkerActionError("invalid_action_arguments", f"{action} does not accept --year")
 
-    if action in {"migrate", "kam-dry-run", "kam-rebuild", "procedure-index"}:
+    collector = action in {
+        "migrate",
+        "kam-dry-run",
+        "kam-rebuild",
+        "procedure-index",
+    }
+    if collector:
         _require_mode("collector", action)
     else:
         _require_mode("readonly", action)
-    _require_rehearsal_binding(require_initial_digest=action == "migrate")
+    binding = _require_rehearsal_binding(
+        require_initial_digest=action == "migrate",
+    )
 
-    if action == "migrate":
-        before = migration_state()
-        try:
-            from kreports.db.engine import init_db
-            init_db()
-        except Exception as exc:
-            raise WorkerActionError("migration_failed", exc) from exc
-        after = migration_state()
-        _validate_state_after_migration(after)
-        before_revisions = set(before["recorded_revisions"])
-        return {"before": before, "applied_revisions": [revision for revision in after["recorded_revisions"] if revision not in before_revisions], "after": after}
-    if action in {"kam-dry-run", "kam-rebuild"}:
-        from kreports.collector.report_document_collector import rebuild_kam_items
-        result = _bounded_rebuild_result(rebuild_kam_items(year=int(year), dry_run=action == "kam-dry-run"))
-        if int(result.get("error") or 0) or int(result.get("failed") or 0):
-            raise WorkerActionError("backfill_failed", "KAM rebuild reported receipt errors")
-        return result
-    if action == "procedure-index":
-        from kreports.collector.report_document_collector import index_audit_procedures_from_sections
-        result = _bounded_rebuild_result(index_audit_procedures_from_sections(year=int(year)))
-        if int(result.get("error") or 0) or int(result.get("failed") or 0):
-            raise WorkerActionError("backfill_failed", "procedure index reported failures")
-        return result
-    if action == "semantic-snapshot":
-        return semantic_snapshot()
-    return validate_professional_mcp()
+    with _bound_database_runtime(binding, collector=collector):
+        if action == "migrate":
+            before = migration_state()
+            try:
+                from kreports.db.engine import init_db
+                init_db()
+            except Exception as exc:
+                raise WorkerActionError("migration_failed", exc) from exc
+            after = migration_state()
+            _validate_state_after_migration(after)
+            before_revisions = set(before["recorded_revisions"])
+            return {
+                "before": before,
+                "applied_revisions": [
+                    revision
+                    for revision in after["recorded_revisions"]
+                    if revision not in before_revisions
+                ],
+                "after": after,
+            }
+        if action in {"kam-dry-run", "kam-rebuild"}:
+            from kreports.collector.report_document_collector import (
+                rebuild_kam_items,
+            )
+            result = _bounded_rebuild_result(
+                rebuild_kam_items(
+                    year=int(year),
+                    dry_run=action == "kam-dry-run",
+                )
+            )
+            if int(result.get("error") or 0) or int(
+                result.get("failed") or 0
+            ):
+                raise WorkerActionError(
+                    "backfill_failed",
+                    "KAM rebuild reported receipt errors",
+                )
+            return result
+        if action == "procedure-index":
+            from kreports.collector.report_document_collector import (
+                index_audit_procedures_from_sections,
+            )
+            result = _bounded_rebuild_result(
+                index_audit_procedures_from_sections(year=int(year))
+            )
+            if int(result.get("error") or 0) or int(
+                result.get("failed") or 0
+            ):
+                raise WorkerActionError(
+                    "backfill_failed",
+                    "procedure index reported failures",
+                )
+            return result
+        if action == "semantic-snapshot":
+            return semantic_snapshot()
+        return validate_professional_mcp()
 
 
 def _parse_arguments(argv: list[str] | None) -> tuple[str, int | None]:

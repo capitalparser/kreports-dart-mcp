@@ -456,6 +456,152 @@ def test_rehearsal_capability_is_redacted_from_failure_output(tmp_path: Path) ->
     assert secret not in result.stderr
 
 
+@pytest.mark.parametrize("symlink_kind", ["final", "component"])
+def test_worker_rejects_symlink_in_raw_database_path(
+    tmp_path: Path,
+    symlink_kind: str,
+) -> None:
+    """Catch raw DB_URL symlinks being normalized into an apparently safe path."""
+    real_dir = tmp_path / "real-rehearsal"
+    real_dir.mkdir()
+    database = real_dir / "snapshot.db"
+    _create_snapshot_database(database)
+    marker = write_marker(database)
+    if symlink_kind == "final":
+        raw_database = tmp_path / "snapshot-link.db"
+        raw_database.symlink_to(database)
+    else:
+        alias = tmp_path / "rehearsal-alias"
+        alias.symlink_to(real_dir, target_is_directory=True)
+        raw_database = alias / database.name
+    result = run_worker_process(
+        raw_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "rehearsal_binding_required"
+    assert str(raw_database) not in result.stdout
+
+
+def _create_probe_database(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE action_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO action_probe (id, value) VALUES (1, ?)",
+            (value,),
+        )
+
+
+def _probe_value(path: Path) -> str:
+    with sqlite3.connect(path) as connection:
+        return str(
+            connection.execute(
+                "SELECT value FROM action_probe WHERE id=1"
+            ).fetchone()[0]
+        )
+
+
+def test_writable_open_rejects_path_swap_between_receipt_and_sqlite_connect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a replacement file winning the race between validation and mode=rw open."""
+    import kreports.maintenance.kam_rehearsal_worker as worker
+
+    database = tmp_path / "rehearsal" / "clone.db"
+    replacement = tmp_path / "replacement.db"
+    moved_original = tmp_path / "original-held.db"
+    _create_probe_database(database, "original")
+    _create_probe_database(replacement, "replacement")
+    replacement_sha = _sha256_file(replacement)
+    marker = write_marker(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    binding = worker._require_rehearsal_binding(require_initial_digest=False)
+    real_connect = worker.sqlite3.connect
+    swapped = False
+
+    def swapping_connect(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.replace(database, moved_original)
+            os.replace(replacement, database)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(worker.sqlite3, "connect", swapping_connect)
+    with pytest.raises(worker.WorkerActionError) as caught:
+        with worker._open_pinned_database(binding, collector=True):
+            pytest.fail("a swapped path must not reach the action")
+    assert caught.value.code == "rehearsal_binding_required"
+    assert _sha256_file(database) == replacement_sha
+    assert _probe_value(database) == "replacement"
+
+
+def test_writable_action_never_reconnects_to_replacement_after_safe_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch SQLAlchemy reconnecting by path after the safe DBAPI connection opened."""
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    import kreports.collector.report_document_collector as collector_module
+    import kreports.db.engine as engine_module
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        execute_action,
+    )
+
+    database = tmp_path / "rehearsal" / "clone.db"
+    replacement = tmp_path / "replacement.db"
+    moved_original = tmp_path / "original-held.db"
+    _create_probe_database(database, "original")
+    _create_probe_database(replacement, "replacement")
+    marker = write_marker(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    raw_engine = create_engine(f"sqlite:///{database}")
+    monkeypatch.setattr(engine_module, "engine", raw_engine)
+    monkeypatch.setattr(
+        engine_module,
+        "SessionLocal",
+        sessionmaker(bind=raw_engine, autocommit=False, autoflush=False),
+    )
+
+    def swap_then_write(**_kwargs):
+        os.replace(database, moved_original)
+        os.replace(replacement, database)
+        with engine_module.get_session() as session:
+            session.execute(
+                text("UPDATE action_probe SET value='written' WHERE id=1")
+            )
+        return {"error": 0, "failed": 0, "receipts": []}
+
+    monkeypatch.setattr(
+        collector_module,
+        "rebuild_kam_items",
+        swap_then_write,
+    )
+    try:
+        with pytest.raises(WorkerActionError) as caught:
+            execute_action("kam-rebuild", year=2025)
+    finally:
+        raw_engine.dispose()
+    assert caught.value.code == "rehearsal_binding_required"
+    assert str(database) not in str(caught.value)
+    assert _probe_value(database) == "replacement"
+    assert _probe_value(moved_original) in {"original", "written"}
+
+
 def test_semantic_snapshot_binds_stable_ids_and_typed_linkage(tmp_path: Path) -> None:
     """Catch a snapshot that omits procedure method, IDs, or KAM foreign keys."""
     path = tmp_path / "snapshot.db"
@@ -477,8 +623,12 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
 ) -> None:
     """Catch an action changed to fetch a filing instead of using persisted evidence."""
     import httpx
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import kreports.db.engine as engine_module
     from kreports.db.engine import get_session
-    from kreports.db.models import Company, KamItem, SourceDocument
+    from kreports.db.models import Base, Company, KamItem, SourceDocument
     from kreports.maintenance.kam_rehearsal_worker import execute_action
 
     def blocked_network(*_args, **_kwargs):
@@ -486,7 +636,15 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
 
     monkeypatch.setattr(socket.socket, "connect", blocked_network)
     monkeypatch.setattr(httpx.Client, "send", blocked_network)
-    _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
+    database = _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
+    clone_engine = create_engine(f"sqlite:///{database}")
+    Base.metadata.create_all(bind=clone_engine)
+    monkeypatch.setattr(engine_module, "engine", clone_engine)
+    monkeypatch.setattr(
+        engine_module,
+        "SessionLocal",
+        sessionmaker(bind=clone_engine, autocommit=False, autoflush=False),
+    )
     with get_session() as session:
         session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
         session.add(SourceDocument(
@@ -507,9 +665,12 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
             parser_version="v1", quality_status="usable", fetched_at=datetime(2026, 3, 10),
         ))
 
-    dry = execute_action("kam-dry-run", year=2025)
-    rebuilt = execute_action("kam-rebuild", year=2025)
-    indexed = execute_action("procedure-index", year=2025)
+    try:
+        dry = execute_action("kam-dry-run", year=2025)
+        rebuilt = execute_action("kam-rebuild", year=2025)
+        indexed = execute_action("procedure-index", year=2025)
+    finally:
+        clone_engine.dispose()
     assert dry["database_status"] == "available"
     assert dry["rows_written"] == 0
     assert rebuilt["receipt_counts"]["full_body"] == 1
@@ -517,7 +678,10 @@ def test_kam_rebuild_and_procedure_index_use_local_evidence_only(
     assert indexed["rows_written"] >= 1
 
 
-def _bind_direct_rehearsal_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _bind_direct_rehearsal_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
     database = tmp_path / "direct-worker.db"
     sqlite3.connect(database).close()
     marker = write_marker(database)
@@ -525,6 +689,7 @@ def _bind_direct_rehearsal_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
     monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    return database
 
 
 def test_kam_rebuild_fails_closed_on_failed_count(
