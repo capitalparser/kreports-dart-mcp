@@ -5,6 +5,34 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
 
+REVISION_08_CHECKSUMS = {
+    "20260711_01_quality_contract": (
+        "f538065ca8ca190f28ba13b436a3dd8e1135591bcef1ac05d2e5e77464dfd6aa"
+    ),
+    "20260711_02_company_year_quality": (
+        "797837a4df0a92135542e376db48a9a7078bd9da3abd7a950b71243fda6348eb"
+    ),
+    "20260711_03_backfill_run_lifecycle": (
+        "b5a958e21c751e72e4243b5f4a35b03ff41f313a87e5e058e7a9623bfaf4f324"
+    ),
+    "20260711_04_backfill_owner_identity": (
+        "021162b6c422573f7741f8cf271c2b83f55df4d1909b2f424216b8aea428b24b"
+    ),
+    "20260711_05_kam_items": (
+        "0fa52c82a3c4807885b757734417f5069e04698c954cabb414d67b7e4ac84d06"
+    ),
+    "20260711_06_audit_procedure_linkage": (
+        "d35015b9c185fcf69b62fcf74224cc21b2607ea61047a0505b588bbc1e8cd637"
+    ),
+    "20260711_07_audit_fee_availability": (
+        "05a32077fd271047be3c5ef964208aad731c6a3dee7a9b9686b06478abb0256c"
+    ),
+    "20260711_08_group_audit_graph": (
+        "2064e12d09a4d1376b25f244813204357db7f0ca6462f164d3ab7f090cd46df8"
+    ),
+}
+
+
 def test_schema_contract_tables_exist(temp_engine):
     tables = set(inspect(temp_engine).get_table_names())
     assert {"schema_migrations", "dataset_manifest"}.issubset(tables)
@@ -43,6 +71,9 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         apply_schema_migrations,
     )
 
+    assert {item.revision: _checksum(item) for item in MIGRATIONS[:8]} == (
+        REVISION_08_CHECKSUMS
+    )
     legacy = create_engine(f"sqlite:///{tmp_path / 'revision-08-foundation.db'}")
     with legacy.begin() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys = ON")
@@ -153,7 +184,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
                 """),
                 {
                     "revision": migration.revision,
-                    "checksum": _checksum(migration),
+                    "checksum": REVISION_08_CHECKSUMS[migration.revision],
                     "description": migration.description,
                 },
             )
@@ -198,7 +229,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
     assert seeded_quality == ("00126380", 2025, "A", "")
     assert {
         item.revision: recorded_ledger[item.revision] for item in MIGRATIONS[:8]
-    } == {item.revision: _checksum(item) for item in MIGRATIONS[:8]}
+    } == REVISION_08_CHECKSUMS
     # SQLite preserves the full value despite the legacy VARCHAR(40) affinity.
     assert revision_11 == "20260711_11_company_year_quality_freshness"
     assert len(revision_11) == 42
