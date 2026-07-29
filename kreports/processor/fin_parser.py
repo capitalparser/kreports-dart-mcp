@@ -4,6 +4,10 @@ from kreports.semantic.metrics import financial_summary_account_map
 
 logger = logging.getLogger(__name__)
 
+# OpenDART financial amount strings are parsed and persisted without scaling.
+# FinancialFact and Financial integer amount columns therefore store KRW.
+FINANCIAL_AMOUNT_STORAGE_UNIT = "KRW"
+
 # DART reprt_code → 분기 번호
 REPRT_TO_QUARTER = {
     "11013": 1,  # 1분기보고서

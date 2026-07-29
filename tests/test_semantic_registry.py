@@ -73,6 +73,28 @@ def test_required_financial_metrics_have_definitions():
     assert REQUIRED_METRIC_KEYS.issubset(METRICS)
 
 
+def test_all_compact_metrics_have_unscaled_krw_storage_and_financial_periods():
+    """A compact metric with a scaled/unknown source or event period is uncitable."""
+    from kreports.semantic.metrics import compact_metric_definitions
+
+    metrics = compact_metric_definitions()
+
+    assert metrics
+    assert all(
+        (
+            metric.unit,
+            metric.source_unit,
+            metric.source_multiplier,
+            metric.period_type,
+        )
+        in {
+            ("KRW", "KRW", 1, "instant"),
+            ("KRW", "KRW", 1, "duration"),
+        }
+        for metric in metrics
+    )
+
+
 def test_semantic_definitions_are_immutable():
     """Mutating a shared metric or dataset definition at runtime is a bug."""
     from kreports.semantic.datasets import dataset_definition
