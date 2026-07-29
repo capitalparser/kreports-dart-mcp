@@ -477,6 +477,7 @@ def test_compact_rebuild_dedupes_identical_same_statement_rows():
         "amount": 1000,
         "source_account_id": "ifrs-full_Revenue",
         "source_account_nm": "매출",
+        "source_table": "financial_facts",
     }]
 
 

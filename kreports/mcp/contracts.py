@@ -802,6 +802,21 @@ def _canonicalize_qoe_matter_evidence(
     return normalized
 
 
+def _confirmed_fact_sources(fact: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every source explicitly bound to one confirmed fact."""
+    sources: list[dict[str, Any]] = []
+    source = fact.get("source")
+    if isinstance(source, dict):
+        sources.append(source)
+    additional = fact.get("sources")
+    if isinstance(additional, list):
+        sources.extend(
+            item for item in additional[:64]
+            if isinstance(item, dict)
+        )
+    return sources
+
+
 def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
     # A peer-comparison handler error is an opaque implementation diagnostic,
     # not presentation data.  Establish a complete public quality contract
@@ -863,8 +878,11 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
     ]
     unresolved_fact_count = sum(
         not (
-            isinstance(fact.get("source"), dict)
-            and evidence_reference_fields(fact["source"])
+            (sources := _confirmed_fact_sources(fact))
+            and all(
+                evidence_reference_fields(source)
+                for source in sources
+            )
         )
         for fact in confirmed_facts
     )
@@ -1039,8 +1057,13 @@ def _evidence(result: dict[str, Any]) -> list[EvidenceRefV1]:
     seen: set[str] = set()
     candidates: list[tuple[dict[str, Any], str | None]] = []
     for fact in result.get("confirmed_facts") or []:
-        if isinstance(fact, dict) and isinstance(fact.get("source"), dict):
-            candidates.append((fact["source"], str(fact.get("excerpt") or "").strip() or None))
+        if not isinstance(fact, dict):
+            continue
+        excerpt = str(fact.get("excerpt") or "").strip() or None
+        candidates.extend(
+            (source, excerpt)
+            for source in _confirmed_fact_sources(fact)
+        )
     for field in ("rcept_no", "parent_rcept_no"):
         if result.get(field):
             candidates.append(({field: result[field]}, None))

@@ -311,15 +311,43 @@ def _financial_snapshot_from_compact(
 ) -> dict:
     fs_div_used = fs_div
     with _engine_module.engine.connect() as conn:
+        compact_columns = {
+            row["name"]
+            for row in conn.execute(
+                text("PRAGMA table_info(financial_facts_compact)")
+            ).mappings()
+        }
+        has_persisted_provenance = {
+            "unit",
+            "citation_rcept_no",
+            "citation_report_nm",
+            "citation_basis",
+            "quality_status",
+        }.issubset(compact_columns)
+        provenance_select = (
+            "unit, citation_rcept_no, citation_report_nm, "
+            "citation_basis, quality_status"
+            if has_persisted_provenance
+            else "NULL AS unit, NULL AS citation_rcept_no, NULL AS citation_report_nm, "
+            "NULL AS citation_basis, NULL AS quality_status"
+        )
+        corp_name = conn.execute(
+            text("""
+                SELECT corp_name
+                FROM companies
+                WHERE corp_code=:corp_code
+            """),
+            {"corp_code": corp_code},
+        ).scalar_one_or_none() or corp_code
         rows = conn.execute(text("""
-            SELECT bsns_year, fs_div, metric_key, amount
+            SELECT bsns_year, fs_div, metric_key, amount, """ + provenance_select + """
             FROM financial_facts_compact
             WHERE corp_code=:corp_code AND fs_div=:fs_div
             ORDER BY bsns_year, metric_key
         """), {"corp_code": corp_code, "fs_div": fs_div}).mappings().all()
         if not rows and fs_div == "CFS":
             rows = conn.execute(text("""
-                SELECT bsns_year, fs_div, metric_key, amount
+                SELECT bsns_year, fs_div, metric_key, amount, """ + provenance_select + """
                 FROM financial_facts_compact
                 WHERE corp_code=:corp_code AND fs_div='OFS'
                 ORDER BY bsns_year, metric_key
@@ -328,14 +356,72 @@ def _financial_snapshot_from_compact(
                 fs_div_used = "OFS"
 
     grouped: dict[int, dict[str, float | None]] = {}
+    persisted_citations: dict[int, set[tuple[object, object, object]]] = {}
+    metric_provenance: dict[int, dict[str, dict[str, object]]] = {}
+    provenance_limitations_by_year: dict[int, set[str]] = {}
+    displayed_metric_keys = {
+        *_COMPACT_FINANCIAL_FIELD_MAP,
+        "purchase_ppe",
+        "purchase_intangible_assets",
+    }
     for row in rows:
         year = int(row["bsns_year"])
         metric = str(row["metric_key"])
         amount = row["amount"]
         grouped.setdefault(year, {})
         grouped[year][metric] = (float(amount) / 1e8) if amount is not None else None
+        if has_persisted_provenance:
+            metric_provenance.setdefault(year, {})[metric] = {
+                "unit": row.get("unit"),
+                "quality_status": row.get("quality_status"),
+                "citation_rcept_no": row.get("citation_rcept_no"),
+                "citation_report_nm": row.get("citation_report_nm"),
+                "citation_basis": row.get("citation_basis"),
+            }
+            persisted_citations.setdefault(year, set()).add((
+                row.get("citation_rcept_no"),
+                row.get("citation_report_nm"),
+                row.get("citation_basis"),
+            ))
+            if amount is not None and metric in displayed_metric_keys:
+                year_limitations = provenance_limitations_by_year.setdefault(
+                    year,
+                    set(),
+                )
+                if row.get("unit") != "KRW":
+                    year_limitations.add(f"unit_unproven:{metric}")
+                quality_status = str(row.get("quality_status") or "").strip()
+                if quality_status != "usable":
+                    year_limitations.add(
+                        f"quality_limited:{metric}"
+                        if quality_status == "limited"
+                        else f"quality_unproven:{metric}"
+                    )
+
+    def proven_metric_source(year: int, metric: str) -> dict | None:
+        provenance = metric_provenance.get(year, {}).get(metric)
+        if (
+            not provenance
+            or provenance.get("unit") != "KRW"
+            or provenance.get("quality_status") != "usable"
+            or not provenance.get("citation_rcept_no")
+            or provenance.get("citation_basis")
+            != "company_year_annual_filing_match"
+        ):
+            return None
+        return {
+            "corp_code": corp_code,
+            "corp_name": corp_name,
+            "report_nm": provenance.get("citation_report_nm"),
+            "bsns_year": year,
+            "rcept_no": provenance["citation_rcept_no"],
+            "section_title": "재무제표",
+            "source_table": "financial_facts_compact",
+            "citation_basis": provenance["citation_basis"],
+        }
 
     out_rows: list[dict] = []
+    previous_year: int | None = None
     previous_revenue: float | None = None
     for year in sorted(grouped):
         metrics = grouped[year]
@@ -353,10 +439,30 @@ def _financial_snapshot_from_compact(
         item["부채비율"] = _pct(item.get("부채총계"), item.get("자본총계"))
         item["ROE"] = _pct(item.get("순이익"), item.get("자본총계"))
         item["ROA"] = _pct(item.get("순이익"), item.get("자산총계"))
-        item["매출성장률"] = _pct(
-            (item.get("매출액") - previous_revenue) if previous_revenue not in (None, 0) and item.get("매출액") is not None else None,
-            previous_revenue,
-        )
+        current_revenue = item.get("매출액")
+        if (
+            previous_year is not None
+            and previous_revenue not in (None, 0)
+            and current_revenue is not None
+        ):
+            prior_source = proven_metric_source(previous_year, "revenue")
+            current_source = proven_metric_source(year, "revenue")
+            if prior_source and current_source:
+                item["매출성장률"] = _pct(
+                    current_revenue - previous_revenue,
+                    previous_revenue,
+                )
+                item["derived_sources"] = {
+                    "매출성장률": [prior_source, current_source],
+                }
+            else:
+                item["매출성장률"] = None
+                provenance_limitations_by_year.setdefault(year, set()).add(
+                    f"derived_input_unproven:revenue_growth:{previous_year}"
+                )
+        else:
+            item["매출성장률"] = None
+        previous_year = year
         previous_revenue = item.get("매출액")
         item["FCF"] = (
             item["영업CF"] - item["CapEx"]
@@ -366,18 +472,61 @@ def _financial_snapshot_from_compact(
         item["FCF마진"] = _pct(item.get("FCF"), item.get("매출액"))
         item["CapEx_OCF"] = _pct(item.get("CapEx"), item.get("영업CF"))
         item["CFO_NI"] = _ratio(item.get("영업CF"), item.get("순이익"))
+        if has_persisted_provenance:
+            sources = persisted_citations.get(year, set())
+            if len(sources) == 1:
+                receipt, report_nm, basis = next(iter(sources))
+            else:
+                receipt = report_nm = basis = None
+            if receipt and basis == "company_year_annual_filing_match":
+                item["source"] = {
+                    "corp_code": corp_code,
+                    "corp_name": corp_name,
+                    "report_nm": report_nm,
+                    "bsns_year": year,
+                    "rcept_no": receipt,
+                    "section_title": "재무제표",
+                    "source_table": "financial_facts_compact",
+                    "citation_basis": basis,
+                }
+            else:
+                item["source"] = _uncitable_annual_source(
+                    corp_code, None, year, "재무제표", "financial_facts_compact"
+                )
+                item["source"]["citation_basis"] = basis or "uncitable"
         out_rows.append(item)
 
     if years is not None:
         out_rows = out_rows[-int(years):]
 
+    provenance_limitations = {
+        limitation
+        for row in out_rows
+        for limitation in provenance_limitations_by_year.get(
+            int(row["연도"]),
+            set(),
+        )
+    }
     out_df = pd.DataFrame(out_rows)
     selected_cols = [c for c in _ANNUAL_FIELDS if c in out_df.columns] if not out_df.empty else []
+    serialized_rows = _df_to_records(out_df[selected_cols]) if selected_cols else []
+    for serialized, source_row in zip(serialized_rows, out_rows):
+        if source_row.get("source"):
+            serialized["source"] = source_row["source"]
+        if source_row.get("derived_sources"):
+            serialized["derived_sources"] = source_row["derived_sources"]
     result = {
         "corp_code": corp_code,
         "fs_div": fs_div_used,
-        "unit": "억원",
-        "rows": _df_to_records(out_df[selected_cols]) if selected_cols else [],
+        "unit": (
+            "억원"
+            if not any(
+                limitation.startswith("unit_")
+                for limitation in provenance_limitations
+            )
+            else None
+        ),
+        "rows": serialized_rows,
         "row_count": len(out_rows),
         "data_quality": {
             "status": "usable" if out_rows else "missing",
@@ -386,7 +535,30 @@ def _financial_snapshot_from_compact(
             "coverage_note": "Compact runtime DB uses annual core metrics; full account-level financial_facts are not bundled.",
         },
     }
-    return _attach_annual_sources(result, source_table="financial_facts_compact")
+    if not has_persisted_provenance:
+        result = _attach_annual_sources(
+            result,
+            source_table="financial_facts_compact",
+        )
+        if provenance_limitations:
+            result["data_quality"] = {
+                **result["data_quality"],
+                "status": "limited",
+                "limitations": sorted(provenance_limitations),
+            }
+        return result
+    citation_limited = any(
+        not row["source"].get("rcept_no") for row in serialized_rows
+    )
+    if citation_limited:
+        provenance_limitations.add("citation_unproven_or_conflicting")
+    if provenance_limitations:
+        result["data_quality"] = {
+            **result["data_quality"],
+            "status": "limited",
+            "limitations": sorted(provenance_limitations),
+        }
+    return result
 
 
 def _attach_annual_sources(result: dict, *, source_table: str) -> dict:

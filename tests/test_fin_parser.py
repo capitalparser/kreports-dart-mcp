@@ -37,6 +37,26 @@ class TestParseAmount:
 
 
 class TestParseAllAccounts:
+    def test_financial_amount_storage_contract_is_unscaled_krw(
+        self, dart_response_samsung_2024
+    ):
+        """Scaling parsed OpenDART integers would corrupt stored financial facts."""
+        from kreports.processor.fin_parser import FINANCIAL_AMOUNT_STORAGE_UNIT
+
+        rows = parse_all_accounts(
+            dart_response_samsung_2024,
+            corp_code=CORP_CODE,
+            year=YEAR,
+            reprt_code=REPRT_CODE,
+            fs_div=FS_DIV,
+        )
+
+        revenue = next(
+            row for row in rows if row["account_id"] == "ifrs-full_Revenue"
+        )
+        assert FINANCIAL_AMOUNT_STORAGE_UNIT == "KRW"
+        assert revenue["thstrm_amount"] == 300_869_340_000_000
+
     def test_returns_list_on_valid_response(self, dart_response_samsung_2024):
         result = parse_all_accounts(dart_response_samsung_2024, CORP_CODE, YEAR, REPRT_CODE, FS_DIV)
         assert result is not None

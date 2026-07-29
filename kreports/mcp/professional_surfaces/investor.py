@@ -3,6 +3,8 @@ from copy import deepcopy
 import re
 from typing import Any
 
+from kreports.analysis.evidence import evidence_reference_fields
+
 PackBuilder = Callable[[dict[str, Any]], dict[str, Any] | None]
 DetailRenderer = Callable[[dict[str, Any]], str]
 
@@ -189,17 +191,47 @@ def _table(table_id: str, title: str, fields: list[tuple[str, str, str | None]],
 
 def _financial_snapshot_pack(result: dict[str, Any]) -> dict[str, Any]:
     pack = _pack(f"{_subject(result)} 재무 추이", result)
-    unit = str(result.get("unit") or "억원")
-    rows = [
-        {
+    unit = str(result["unit"]) if result.get("unit") is not None else None
+    source_receipts: set[str] = set()
+
+    def add_source(source: object) -> str | None:
+        if not isinstance(source, dict):
+            return None
+        reference = evidence_reference_fields(source)
+        if not reference or not reference.get("rcept_no"):
+            return None
+        receipt = str(reference["rcept_no"])
+        if receipt not in source_receipts:
+            source_receipts.add(receipt)
+            pack["sources"].append({
+                "label": reference["source_label"],
+                "rcept_no": receipt,
+                "url": reference["source_url"],
+            })
+        return receipt
+
+    rows: list[dict[str, Any]] = []
+    for row in result.get("rows") or []:
+        current_receipt = add_source(row.get("source"))
+        growth_sources = (
+            (row.get("derived_sources") or {}).get("매출성장률")
+            if isinstance(row.get("derived_sources"), dict)
+            else None
+        )
+        growth_receipts: list[str] = []
+        if isinstance(growth_sources, list):
+            for source in growth_sources:
+                receipt = add_source(source)
+                if receipt and receipt not in growth_receipts:
+                    growth_receipts.append(receipt)
+        rows.append({
             "year": row.get("연도"), "fs_div": row.get("구분"),
             "revenue": row.get("매출액"), "operating_profit": row.get("영업이익"),
             "net_income": row.get("순이익"), "operating_cf": row.get("영업CF"),
             "revenue_growth": row.get("매출성장률"), "operating_margin": row.get("영업이익률"),
-            "source": (row.get("source") or {}).get("rcept_no") or "사업보고서 접수번호 미확보",
-        }
-        for row in (result.get("rows") or [])
-    ]
+            "source": current_receipt or "사업보고서 접수번호 미확보",
+            "growth_sources": growth_receipts or None,
+        })
     if rows:
         pack["tables"].append(_table("financial_trend", "연도별 재무 추이", [
             ("year", "연도", None), ("fs_div", "FS", None),
@@ -207,6 +239,7 @@ def _financial_snapshot_pack(result: dict[str, Any]) -> dict[str, Any]:
             ("net_income", "순이익", unit), ("operating_cf", "영업현금흐름", unit),
             ("revenue_growth", "매출성장률", "%"), ("operating_margin", "영업이익률", "%"),
             ("source", "출처", None),
+            ("growth_sources", "매출성장률 근거 접수번호", None),
         ], rows))
     return pack
 
