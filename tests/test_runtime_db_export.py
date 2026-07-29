@@ -4,7 +4,12 @@ from datetime import date
 from sqlalchemy import inspect
 from sqlalchemy import text
 
-from kreports.db.models import Company, Disclosure, Financial, SourceDocument
+from kreports.db.models import (
+    Company,
+    Disclosure,
+    Financial,
+    SourceDocument,
+)
 
 
 def test_financial_facts_compact_schema(temp_engine):
@@ -130,6 +135,37 @@ def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path
     assert "financial_facts" in result["excluded_tables"]
     assert "extraction_runs" in result["excluded_tables"]
     assert "fetch_log" in result["excluded_tables"]
+
+
+def test_export_runtime_db_retains_all_audit_observation_history(temp_engine, tmp_path):
+    from kreports.collector.audit_fee_sources import AuditFeeObservation
+    from kreports.db.audit_fee_observation_store import persist_audit_fee_observations
+    from kreports.maintenance.runtime_export import export_runtime_db
+    from sqlalchemy.orm import Session
+
+    first = AuditFeeObservation(
+        corp_code="00126380", bsns_year=2024, source_class="cached_business_report",
+        source_rcept_no="receipt", actual_fee_m=100,
+    )
+    correction = AuditFeeObservation(
+        corp_code="00126380", bsns_year=2024, source_class="cached_business_report",
+        source_rcept_no="receipt", actual_fee_m=120,
+    )
+    with Session(temp_engine) as session:
+        persist_audit_fee_observations(session, [first, correction])
+        session.commit()
+
+    out_path = tmp_path / "runtime-history.db"
+    export_runtime_db(output_path=out_path, year_from=2024, year_to=2024)
+    with sqlite3.connect(out_path) as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM audit_fee_observations"
+        ).fetchone()[0]
+        current_count = connection.execute(
+            "SELECT COUNT(*) FROM audit_fee_observations WHERE is_current=1"
+        ).fetchone()[0]
+    assert count == 2
+    assert current_count == 1
 
 
 def test_export_runtime_db_keeps_disclosure_list_but_excludes_on_demand_bodies(temp_engine, tmp_path):

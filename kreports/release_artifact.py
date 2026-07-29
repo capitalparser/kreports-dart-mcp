@@ -53,6 +53,7 @@ REQUIRED_TABLES = (
     "disclosures",
     "financials",
     "financial_facts_compact",
+    "audit_fee_observations",
     "report_sections",
     "evidence_documents",
     "backfill_runs",
@@ -70,6 +71,10 @@ REQUIRED_INDEXES = (
     "idx_audit_procedure_kam_item",
     "idx_audit_procedure_method_year",
     "idx_audit_fee_availability_year",
+    "idx_audit_fee_observation_corp_year",
+    "idx_audit_fee_observation_receipt",
+    "idx_audit_fee_observation_year_quality",
+    "uq_audit_fee_observation_current_slot",
     "idx_group_entity_parent_year",
     "idx_group_entity_resolved_year",
     "idx_group_relationship_parent_year",
@@ -102,6 +107,18 @@ REQUIRED_INDEX_SPECS = {
     ),
     "idx_audit_fee_availability_year": (
         "audit_fees", ("bsns_year", "availability_status"), False, None
+    ),
+    "idx_audit_fee_observation_corp_year": (
+        "audit_fee_observations", ("corp_code", "bsns_year"), False, None
+    ),
+    "idx_audit_fee_observation_receipt": (
+        "audit_fee_observations", ("source_rcept_no",), False, None
+    ),
+    "idx_audit_fee_observation_year_quality": (
+        "audit_fee_observations", ("bsns_year", "quality_status"), False, None
+    ),
+    "uq_audit_fee_observation_current_slot": (
+        "audit_fee_observations", ("source_slot_hash",), True, "where is_current = 1"
     ),
     "idx_group_entity_parent_year": (
         "group_entities", ("parent_corp_code", "effective_year"), False, None

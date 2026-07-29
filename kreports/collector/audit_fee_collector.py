@@ -18,6 +18,10 @@ from kreports.collector.audit_fee_sources import (
     observation_from_dict,
 )
 from kreports.config import settings
+from kreports.db.audit_fee_observation_store import (
+    load_current_audit_fee_observations,
+    persist_audit_fee_observations,
+)
 from kreports.db.engine import get_session
 from kreports.db.models import AuditFee, Company, FetchLog
 
@@ -313,15 +317,37 @@ def upsert_audit_fee_observations(
             .first()
         )
         previous = _previous_audit_fee_values(existing) if existing else {}
+        current = load_current_audit_fee_observations(
+            session,
+            corp_code=corp_code,
+            bsns_year=bsns_year,
+        )
+        if not current and existing is not None:
+            legacy = _persisted_observations(existing)
+            if legacy:
+                if any(
+                    item.corp_code != corp_code or item.bsns_year != bsns_year
+                    for item in legacy
+                ):
+                    raise ValueError(
+                        "persisted audit fee observations must share row identity"
+                    )
+                persist_audit_fee_observations(session, legacy)
+        persist_audit_fee_observations(session, observations)
+        current = load_current_audit_fee_observations(
+            session,
+            corp_code=corp_code,
+            bsns_year=bsns_year,
+        )
         merged = merge_audit_fee_observations(
-            [*_persisted_observations(existing), *observations],
+            current,
             previous=previous,
         )
         values = merged.to_record()
         blocking = next(
             (
                 item
-                for item in sorted(observations, key=lambda item: item.source_class)
+                for item in sorted(current, key=lambda item: item.source_class)
                 if item.availability_status in {"transport_error", "parse_error"}
                 or item.quality_status == "error"
             ),

@@ -214,6 +214,30 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
                 if has_fetch_log
                 else None
             )
+            has_normalized_observations = connection.execute(
+                text(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='audit_fee_observations'"
+                )
+            ).first() is not None
+            normalized_rows = (
+                connection.execute(
+                    text(
+                        "SELECT corp_code, bsns_year, source_class, "
+                        "source_rcept_no, source_period, contract_fee_m, "
+                        "contract_hours, actual_fee_m, actual_hours, auditor_nm, "
+                        "availability_status, quality_status, displayed_unit, "
+                        "raw_values_json, source_status, source_message, "
+                        "source_eligibility, limitations_json "
+                        "FROM audit_fee_observations WHERE corp_code=:corp_code "
+                        "AND bsns_year=:year AND is_current=1 ORDER BY source_class, "
+                        "source_period, source_rcept_no, observation_hash"
+                    ),
+                    {"corp_code": corp_code, "year": year},
+                ).mappings().all()
+                if has_normalized_observations
+                else []
+            )
     except Exception as exc:
         return {
             "corp_code": corp_code,
@@ -290,6 +314,37 @@ def _audit_fee_availability_from_engine(corp_code: str, year: int, active_engine
         provenance_error = bool(provenance_raw)
         observations = []
     raw_observations = observations
+    if has_normalized_observations and normalized_rows:
+        raw_observations = []
+        for normalized in normalized_rows:
+            try:
+                raw_values = json.loads(normalized["raw_values_json"])
+                limitations = json.loads(normalized["limitations_json"])
+            except (TypeError, ValueError):
+                provenance_error = True
+                continue
+            raw_observations.append(
+                {
+                    "corp_code": normalized["corp_code"],
+                    "bsns_year": normalized["bsns_year"],
+                    "source_class": normalized["source_class"],
+                    "source_rcept_no": normalized["source_rcept_no"],
+                    "source_period": normalized["source_period"],
+                    "contract_fee_m": normalized["contract_fee_m"],
+                    "contract_hours": normalized["contract_hours"],
+                    "actual_fee_m": normalized["actual_fee_m"],
+                    "actual_hours": normalized["actual_hours"],
+                    "auditor_nm": normalized["auditor_nm"],
+                    "availability_status": normalized["availability_status"],
+                    "quality_status": normalized["quality_status"],
+                    "displayed_unit": normalized["displayed_unit"],
+                    "raw_values": raw_values,
+                    "source_status": normalized["source_status"],
+                    "source_message": normalized["source_message"],
+                    "source_eligibility": normalized["source_eligibility"],
+                    "limitations": limitations,
+                }
+            )
     observations = [
         item
         for item in raw_observations

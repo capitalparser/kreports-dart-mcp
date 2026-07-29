@@ -16,7 +16,11 @@ from kreports.collector.audit_fee_sources import (
 from kreports.collector.audit_fee_collector import (
     upsert_audit_fee_observations,
 )
+from kreports.db.audit_fee_observation_store import (
+    persist_audit_fee_observations,
+)
 from kreports.db.models import AuditFee
+from sqlalchemy.orm import Session
 
 
 def _observation(source: str, fee: int | None, hours: int | None):
@@ -137,11 +141,35 @@ def test_read_only_availability_exposes_typed_values_and_conflict(temp_engine):
     assert len(out["source_observations"]) == 2
 
 
+def test_availability_prefers_normalized_current_claims_over_summary_json(
+    temp_engine,
+):
+    legacy = _observation("cached_business_report", 100, 1_000)
+    current = _observation("cached_business_report", 200, 2_000)
+    with Session(temp_engine) as session:
+        session.add(
+            AuditFee(
+                corp_code="001",
+                bsns_year=2024,
+                audit_fee_m=200,
+                audit_hours=2_000,
+                source_observations_json=observations_json([legacy]),
+            )
+        )
+        persist_audit_fee_observations(session, [current])
+        session.commit()
+
+    out = audit_fee_availability("001", 2024)
+
+    assert out["selected"]["audit_fee_m"] == 200
+    assert [item["actual_fee_m"] for item in out["source_observations"]] == [200]
+
+
 def test_latest_same_source_observation_controls_eligibility(temp_engine):
     upsert_audit_fee_observations(
         [
             AuditFeeObservation(
-                corp_code="corrected",
+                corp_code="corr0001",
                 bsns_year=2024,
                 source_class="opendart_ds002",
                 source_period="2024",
@@ -154,7 +182,7 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
     upsert_audit_fee_observations(
         [
             AuditFeeObservation(
-                corp_code="corrected",
+                corp_code="corr0001",
                 bsns_year=2024,
                 source_class="opendart_ds002",
                 source_period="2024",
@@ -165,11 +193,11 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
         ]
     )
 
-    out = audit_fee_availability("corrected", 2024)
+    out = audit_fee_availability("corr0001", 2024)
 
     assert out["availability_status"] == "not_available_from_endpoint"
     assert out["source_eligibility"] == "not_eligible"
-    assert len(out["source_observations"]) == 2
+    assert len(out["source_observations"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -184,7 +212,7 @@ def test_sequential_same_identity_correction_controls_canonical_values_after_rel
     first_value,
     corrected_value,
 ):
-    corp_code = f"correction-{first_value}"
+    corp_code = f"c{first_value:07d}"
     for value in (first_value, corrected_value):
         upsert_audit_fee_observations(
             [
@@ -209,7 +237,7 @@ def test_sequential_same_identity_correction_controls_canonical_values_after_rel
     assert out["actual"]["hours"] == corrected_value * 10
     assert out["selected"]["audit_fee_m"] == corrected_value
     assert out["selected"]["audit_hours"] == corrected_value * 10
-    assert len(out["source_observations"]) == 2
+    assert len(out["source_observations"]) == 1
 
 
 def test_legacy_row_is_inferred_without_rewrite(monkeypatch):
