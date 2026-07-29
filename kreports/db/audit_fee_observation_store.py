@@ -98,6 +98,9 @@ def persist_audit_fee_observations(
                 **_record_fields(observation),
             )
         )
+        # SessionLocal disables autoflush. Persist each claim before the next
+        # source-slot lookup so ordered corrections cannot create two currents.
+        session.flush()
         inserted += 1
     return AuditFeeObservationWriteResult(
         inserted=inserted,

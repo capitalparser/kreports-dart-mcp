@@ -169,7 +169,7 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
 
     assert out["availability_status"] == "not_available_from_endpoint"
     assert out["source_eligibility"] == "not_eligible"
-    assert len(out["source_observations"]) == 2
+    assert len(out["source_observations"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -209,7 +209,7 @@ def test_sequential_same_identity_correction_controls_canonical_values_after_rel
     assert out["actual"]["hours"] == corrected_value * 10
     assert out["selected"]["audit_fee_m"] == corrected_value
     assert out["selected"]["audit_hours"] == corrected_value * 10
-    assert len(out["source_observations"]) == 2
+    assert len(out["source_observations"]) == 1
 
 
 def test_legacy_row_is_inferred_without_rewrite(monkeypatch):

@@ -1,4 +1,6 @@
 from dataclasses import replace
+from datetime import datetime, timezone
+import json
 
 import pytest
 from sqlalchemy.orm import Session
@@ -7,14 +9,16 @@ from kreports.collector.audit_fee_sources import (
     AuditFeeObservation,
     canonical_observation_payload,
     observation_hash,
+    observations_json,
     source_slot_hash,
 )
+from kreports.collector.audit_fee_collector import upsert_audit_fee_observations
 from kreports.db.audit_fee_observation_store import (
     AuditFeeObservationWriteResult,
     load_current_audit_fee_observations,
     persist_audit_fee_observations,
 )
-from kreports.db.models import AuditFeeObservationRecord
+from kreports.db.models import AuditFee, AuditFeeObservationRecord
 
 
 def _observation(**changes):
@@ -134,3 +138,52 @@ def test_immutable_store_keeps_correction_history_and_independent_slots(temp_eng
     assert current.supersedes_hash == observation_hash(first_claim)
     assert sum(record.is_current for record in records) == 2
     assert [item.actual_fee_m for item in loaded] == [1_200, 1_300]
+
+
+def test_collector_promotes_legacy_claims_before_projecting_current_claims(
+    temp_engine,
+):
+    legacy_claim = _observation(
+        source_rcept_no="20260210002820",
+        actual_fee_m=900,
+        actual_hours=1_900,
+    )
+    new_claim = _observation(
+        source_class="opendart_ds002",
+        source_rcept_no=None,
+        actual_fee_m=1_000,
+        actual_hours=2_000,
+    )
+    with Session(temp_engine) as session:
+        session.add(
+            AuditFee(
+                corp_code=legacy_claim.corp_code,
+                bsns_year=legacy_claim.bsns_year,
+                audit_fee_m=900,
+                audit_hours=1_900,
+                actual_fee_m=900,
+                actual_hours=1_900,
+                source_observations_json=observations_json([legacy_claim]),
+                non_audit_fee_m=77,
+                fetched_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+    upsert_audit_fee_observations([new_claim])
+
+    with Session(temp_engine) as session:
+        row = session.query(AuditFee).one()
+        normalized_count = session.query(AuditFeeObservationRecord).count()
+        current = load_current_audit_fee_observations(
+            session,
+            corp_code=legacy_claim.corp_code,
+            bsns_year=legacy_claim.bsns_year,
+        )
+
+    assert normalized_count == 2
+    assert row.audit_fee_m == 900
+    assert row.audit_hours == 1_900
+    assert row.non_audit_fee_m == 77
+    assert len(json.loads(row.source_observations_json)) == 2
+    assert {item.actual_fee_m for item in current} == {900, 1_000}
