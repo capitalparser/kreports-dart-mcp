@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 
 import pytest
+
+
+_TEST_CAPABILITY = "ab" * 32
 
 
 def _install_fake_worker(tmp_path: Path, body: str) -> None:
@@ -35,6 +41,9 @@ import json
 import os
 print(json.dumps({
     "ok": True,
+        "capability_matches": os.environ.get(
+            "KREPORTS_REHEARSAL_CAPABILITY"
+        ) == "ab" * 32,
         "observed_env": {
             "DART_API_KEY": os.environ.get("DART_API_KEY"),
             "KREPORTS_RUNTIME_MODE": os.environ.get("KREPORTS_RUNTIME_MODE"),
@@ -51,8 +60,13 @@ print(json.dumps({
     payload = invoke_worker(
         python_executable=Path(sys.executable),
         database=tmp_path / "clone.db",
+        marker_path=(
+            tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+        ),
+        capability=_TEST_CAPABILITY,
         invocation=WorkerInvocation("migrate", "collector"),
     )
+    assert payload["capability_matches"] is True
     assert payload["observed_env"] == {
         "DART_API_KEY": "",
         "KREPORTS_RUNTIME_MODE": "collector",
@@ -61,6 +75,7 @@ print(json.dumps({
             tmp_path / "kam-schema-backfill-rehearsal-marker.json",
         ),
     }
+    assert _TEST_CAPABILITY not in json.dumps(payload, sort_keys=True)
 
 
 @pytest.mark.parametrize(
@@ -99,11 +114,67 @@ def test_invoke_worker_rejects_failed_or_malformed_child_output(
         invoke_worker(
             python_executable=Path(sys.executable),
             database=tmp_path / "clone.db",
+            marker_path=(
+                tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+            ),
+            capability=_TEST_CAPABILITY,
             invocation=WorkerInvocation("migrate", "collector"),
         )
 
     assert caught.value.code == expected_code
     assert str(tmp_path / "clone.db") not in str(caught.value)
+    assert _TEST_CAPABILITY not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """
+import json
+import os
+print(json.dumps({
+    "ok": True,
+    "capability": os.environ["KREPORTS_REHEARSAL_CAPABILITY"],
+}))
+""".strip(),
+        """
+import json
+import os
+import sys
+print(os.environ["KREPORTS_REHEARSAL_CAPABILITY"], file=sys.stderr)
+print(json.dumps({"ok": True}))
+""".strip(),
+    ],
+)
+def test_invoke_worker_rejects_capability_in_child_output(
+    tmp_path: Path,
+    body: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        WorkerInvocation,
+        invoke_worker,
+    )
+
+    _install_fake_worker(tmp_path, body)
+
+    with pytest.raises(RehearsalRunError) as caught:
+        invoke_worker(
+            python_executable=Path(sys.executable),
+            database=tmp_path / "clone.db",
+            marker_path=(
+                tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+            ),
+            capability=_TEST_CAPABILITY,
+            invocation=WorkerInvocation("migrate", "collector"),
+        )
+
+    assert caught.value.code == "worker_capability_disclosed"
+    captured = capsys.readouterr()
+    assert _TEST_CAPABILITY not in (
+        str(caught.value) + captured.out + captured.err
+    )
 
 
 def test_invoke_worker_adds_year_only_for_year_scoped_actions(
@@ -126,11 +197,19 @@ print(json.dumps({"ok": True, "argv": sys.argv[1:]}))
     scoped = invoke_worker(
         python_executable=Path(sys.executable),
         database=tmp_path / "clone.db",
+        marker_path=(
+            tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+        ),
+        capability=_TEST_CAPABILITY,
         invocation=WorkerInvocation("kam-rebuild", "collector", 2023),
     )
     unscoped = invoke_worker(
         python_executable=Path(sys.executable),
         database=tmp_path / "clone.db",
+        marker_path=(
+            tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+        ),
+        capability=_TEST_CAPABILITY,
         invocation=WorkerInvocation("migrate", "collector"),
     )
 
@@ -146,6 +225,7 @@ def _install_phase_harness(
     fail_year: int | None = None,
     mcp_payload: dict[str, object] | None = None,
     snapshot_drift: bool = False,
+    expected_capability: str | None = None,
 ) -> tuple[Path, Path, Path, list[tuple[object, ...]]]:
     from kreports.maintenance import kam_backfill_rehearsal as rehearsal
 
@@ -178,8 +258,10 @@ def _install_phase_harness(
         return SimpleNamespace(
             source=identity(source_db),
             rehearsal_dir=target_dir,
+            repository_root=repository_root,
             free_bytes=20 * 1024**3,
             filesystem_type="apfs",
+            enforced_min_free_bytes=min_free_bytes,
         )
 
     def assert_space(path: Path, *, min_free_bytes: int) -> int:
@@ -219,10 +301,20 @@ def _install_phase_harness(
         *,
         python_executable: Path,
         database: Path,
+        marker_path: Path,
+        capability: str,
         invocation: object,
     ) -> dict[str, object]:
         nonlocal snapshot_index
-        calls.append(("worker", invocation.action, invocation.year))
+        calls.append((
+            "worker",
+            invocation.action,
+            invocation.year,
+            marker_path.name,
+            capability == expected_capability
+            if expected_capability is not None
+            else len(capability) == 64,
+        ))
         if invocation.action == fail_action and invocation.year == fail_year:
             raise rehearsal.RehearsalRunError(
                 "worker_reported_failure",
@@ -312,16 +404,24 @@ def test_rehearsal_runs_exact_phases_and_ascending_year_order(
 def test_rehearsal_creates_bound_marker_after_clone_before_workers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from kreports.maintenance.kam_backfill_rehearsal import (
-        run_kam_schema_backfill_rehearsal,
-    )
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
 
+    capability = "cd" * 32
+    token_hex_calls: list[int] = []
+
+    def token_hex(byte_count: int) -> str:
+        token_hex_calls.append(byte_count)
+        return capability
+
+    monkeypatch.setattr(rehearsal.secrets, "token_hex", token_hex)
     source, rehearsal_dir, repository_root, calls = _install_phase_harness(
         tmp_path,
         monkeypatch,
+        expected_capability=capability,
     )
-    report = run_kam_schema_backfill_rehearsal(
+    report = rehearsal.run_kam_schema_backfill_rehearsal(
         source_db=source,
         rehearsal_dir=rehearsal_dir,
         repository_root=repository_root,
@@ -344,6 +444,14 @@ def test_rehearsal_creates_bound_marker_after_clone_before_workers(
         "database_device",
         "source_sha256",
         "clone_initial_sha256",
+        "source_path",
+        "source_inode",
+        "source_device",
+        "repository_root",
+        "rehearsal_dir",
+        "filesystem_type",
+        "min_free_bytes",
+        "hmac_sha256",
     }
     assert marker["schema_version"] == (
         "kam-schema-backfill-rehearsal-marker.v1"
@@ -355,6 +463,45 @@ def test_rehearsal_creates_bound_marker_after_clone_before_workers(
     assert marker["database_device"] == 2
     assert marker["source_sha256"] == "a" * 64
     assert marker["clone_initial_sha256"] == "a" * 64
+    assert marker["source_path"] == str(source.resolve())
+    assert marker["source_inode"] == 1
+    assert marker["source_device"] == 2
+    assert marker["repository_root"] == str(repository_root.resolve())
+    assert marker["rehearsal_dir"] == str(rehearsal_dir.resolve())
+    assert marker["filesystem_type"] == "apfs"
+    assert marker["min_free_bytes"] == 10 * 1024**3
+    signature = marker.pop("hmac_sha256")
+    canonical = json.dumps(
+        marker,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    expected_signature = hmac.new(
+        bytes.fromhex(capability),
+        canonical,
+        hashlib.sha256,
+    ).hexdigest()
+    assert hmac.compare_digest(signature, expected_signature)
+    assert token_hex_calls == [32]
+    worker_calls = [call for call in calls if call[0] == "worker"]
+    assert worker_calls
+    assert all(call[3:] == (
+        "kam-schema-backfill-rehearsal-marker.json",
+        True,
+    ) for call in worker_calls)
+    captured = capsys.readouterr()
+    persisted_text = (
+        marker_path.read_text(encoding="utf-8")
+        + Path(report["report_path"]).read_text(encoding="utf-8")
+        + Path(report["report_path"]).with_suffix(".md").read_text(
+            encoding="utf-8",
+        )
+        + json.dumps(report, sort_keys=True)
+        + captured.out
+        + captured.err
+    )
+    assert capability not in persisted_text
     assert calls.index(("clone", "kreports-rehearsal.db")) < next(
         index
         for index, call in enumerate(calls)

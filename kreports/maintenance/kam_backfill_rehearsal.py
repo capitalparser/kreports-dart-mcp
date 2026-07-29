@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import hmac
 import importlib
 import json
 import os
 from pathlib import Path
+import secrets
 import subprocess
 from typing import Literal
 
@@ -94,10 +97,11 @@ def invoke_worker(
     *,
     python_executable: Path,
     database: Path,
+    marker_path: Path,
+    capability: str,
     invocation: WorkerInvocation,
 ) -> dict[str, object]:
     """Invoke one fresh worker with an explicit database and minimal env."""
-    marker_path = database.parent / MARKER_FILENAME
     if (
         not marker_path.is_absolute()
         or marker_path.is_symlink()
@@ -106,6 +110,18 @@ def invoke_worker(
         raise RehearsalRunError(
             "rehearsal_marker_invalid",
             "Worker rehearsal marker must be an absolute regular file.",
+        )
+    try:
+        capability_bytes = bytes.fromhex(capability)
+    except ValueError as exc:
+        raise RehearsalRunError(
+            "rehearsal_capability_invalid",
+            "Worker rehearsal capability must be a 32-byte hex value.",
+        ) from exc
+    if len(capability) != 64 or len(capability_bytes) != 32:
+        raise RehearsalRunError(
+            "rehearsal_capability_invalid",
+            "Worker rehearsal capability must be a 32-byte hex value.",
         )
     command = [
         str(python_executable),
@@ -121,6 +137,7 @@ def invoke_worker(
         "DB_URL": f"sqlite:///{database}",
         "KREPORTS_RUNTIME_MODE": invocation.runtime_mode,
         "KREPORTS_REHEARSAL_MARKER": str(marker_path),
+        "KREPORTS_REHEARSAL_CAPABILITY": capability,
         "DART_API_KEY": "",
         "KREPORTS_HEADLESS": "1",
         "DART_HEADLESS": "1",
@@ -140,6 +157,11 @@ def invoke_worker(
             "worker_execution_failed",
             "Worker could not complete within its bounded execution window.",
         ) from exc
+    if capability in completed.stdout or capability in completed.stderr:
+        raise RehearsalRunError(
+            "worker_capability_disclosed",
+            "Worker output disclosed its one-run rehearsal capability.",
+        )
     if completed.returncode != 0:
         raise RehearsalRunError(
             "worker_exit_nonzero",
@@ -245,6 +267,11 @@ def _create_rehearsal_marker(
     run_id: str,
     source_identity: object,
     clone_identity: object,
+    repository_root: Path,
+    rehearsal_dir: Path,
+    filesystem_type: str,
+    min_free_bytes: int,
+    capability: str,
 ) -> Path:
     database_path = Path(getattr(clone_identity, "path")).resolve()
     marker_path = database_path.parent / MARKER_FILENAME
@@ -261,7 +288,27 @@ def _create_rehearsal_marker(
         "database_device": int(getattr(clone_identity, "device")),
         "source_sha256": str(getattr(source_identity, "sha256")),
         "clone_initial_sha256": str(getattr(clone_identity, "sha256")),
+        "source_path": str(
+            Path(getattr(source_identity, "path")).resolve(),
+        ),
+        "source_inode": int(getattr(source_identity, "inode")),
+        "source_device": int(getattr(source_identity, "device")),
+        "repository_root": str(repository_root.resolve()),
+        "rehearsal_dir": str(rehearsal_dir.resolve()),
+        "filesystem_type": filesystem_type,
+        "min_free_bytes": min_free_bytes,
     }
+    canonical_marker = json.dumps(
+        marker,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    marker["hmac_sha256"] = hmac.new(
+        bytes.fromhex(capability),
+        canonical_marker,
+        hashlib.sha256,
+    ).hexdigest()
     with marker_path.open("x", encoding="utf-8") as handle:
         json.dump(
             marker,
@@ -423,6 +470,7 @@ def run_kam_schema_backfill_rehearsal(
             "Rehearsal free-space floor cannot be lower than 10 GiB.",
         )
     writer = _ReportWriter(rehearsal_dir)
+    capability = secrets.token_hex(32)
     report: dict[str, object] = {
         "schema_version": "kam-schema-backfill-rehearsal.v1",
         "status": "running",
@@ -440,6 +488,7 @@ def run_kam_schema_backfill_rehearsal(
     expected_source = None
     preflight_result = None
     clone_path = rehearsal_dir / "kreports-rehearsal.db"
+    marker_path: Path | None = None
 
     def persist_phase(
         name: str,
@@ -490,11 +539,17 @@ def run_kam_schema_backfill_rehearsal(
         return _finalize_report(report, writer)
 
     def clone_operation() -> dict[str, object]:
+        nonlocal marker_path
         clone_identity = safety.create_apfs_clone(preflight_result)
         marker_path = _create_rehearsal_marker(
             run_id=writer.run_id,
             source_identity=expected_source,
             clone_identity=clone_identity,
+            repository_root=preflight_result.repository_root,
+            rehearsal_dir=preflight_result.rehearsal_dir,
+            filesystem_type=preflight_result.filesystem_type,
+            min_free_bytes=preflight_result.enforced_min_free_bytes,
+            capability=capability,
         )
         safety.assert_source_unchanged(expected_source)
         report["clone"] = _identity_payload(clone_identity)
@@ -508,16 +563,26 @@ def run_kam_schema_backfill_rehearsal(
     if persist_phase("clone_created", clone_operation) is None:
         return _finalize_report(report, writer)
 
+    def run_worker(invocation: WorkerInvocation) -> dict[str, object]:
+        if marker_path is None:
+            raise RehearsalRunError(
+                "rehearsal_marker_missing",
+                "Worker cannot start before the clone receipt is retained.",
+            )
+        return invoke_worker(
+            python_executable=python_executable,
+            database=clone_path,
+            marker_path=marker_path,
+            capability=capability,
+            invocation=invocation,
+        )
+
     def migration_operation() -> dict[str, object]:
         safety.assert_free_space(
             rehearsal_dir,
             min_free_bytes=min_free_bytes,
         )
-        payload = invoke_worker(
-            python_executable=python_executable,
-            database=clone_path,
-            invocation=WorkerInvocation("migrate", "collector"),
-        )
+        payload = run_worker(WorkerInvocation("migrate", "collector"))
         safety.assert_source_unchanged(expected_source)
         return payload
 
@@ -529,11 +594,7 @@ def run_kam_schema_backfill_rehearsal(
         runtime_mode: Literal["collector", "readonly"],
     ) -> list[dict[str, object]]:
         return [
-            invoke_worker(
-                python_executable=python_executable,
-                database=clone_path,
-                invocation=WorkerInvocation(action, runtime_mode, year),
-            )
+            run_worker(WorkerInvocation(action, runtime_mode, year))
             for year in REHEARSAL_YEARS
         ]
 
@@ -547,10 +608,8 @@ def run_kam_schema_backfill_rehearsal(
 
     def first_rebuild_operation() -> dict[str, object]:
         nonlocal snapshot_before
-        snapshot_before = invoke_worker(
-            python_executable=python_executable,
-            database=clone_path,
-            invocation=WorkerInvocation("semantic-snapshot", "readonly"),
+        snapshot_before = run_worker(
+            WorkerInvocation("semantic-snapshot", "readonly"),
         )
         safety.assert_free_space(
             rehearsal_dir,
@@ -575,10 +634,8 @@ def run_kam_schema_backfill_rehearsal(
             min_free_bytes=min_free_bytes,
         )
         years = year_loop("procedure-index", "collector")
-        snapshot_after_first = invoke_worker(
-            python_executable=python_executable,
-            database=clone_path,
-            invocation=WorkerInvocation("semantic-snapshot", "readonly"),
+        snapshot_after_first = run_worker(
+            WorkerInvocation("semantic-snapshot", "readonly"),
         )
         return {"years": years, "snapshot_after": snapshot_after_first}
 
@@ -600,10 +657,8 @@ def run_kam_schema_backfill_rehearsal(
             min_free_bytes=min_free_bytes,
         )
         procedures = year_loop("procedure-index", "collector")
-        snapshot_after_second = invoke_worker(
-            python_executable=python_executable,
-            database=clone_path,
-            invocation=WorkerInvocation("semantic-snapshot", "readonly"),
+        snapshot_after_second = run_worker(
+            WorkerInvocation("semantic-snapshot", "readonly"),
         )
         if (
             snapshot_after_first.get("semantic_sha256")
@@ -634,10 +689,8 @@ def run_kam_schema_backfill_rehearsal(
 
     def mcp_operation() -> dict[str, object]:
         nonlocal mcp_payload
-        mcp_payload = invoke_worker(
-            python_executable=python_executable,
-            database=clone_path,
-            invocation=WorkerInvocation("mcp-validate", "readonly"),
+        mcp_payload = run_worker(
+            WorkerInvocation("mcp-validate", "readonly"),
         )
         matrix = mcp_payload.get("matrix")
         if (
