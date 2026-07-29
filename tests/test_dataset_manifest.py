@@ -27,6 +27,8 @@ _QUALITY_CONTENT_FIELDS = (
     "group_audit_grade",
     "blockers_json",
     "quality_version",
+    "input_fingerprint",
+    "evidence_summary_json",
 )
 
 
@@ -37,6 +39,8 @@ def _expected_quality_digest(rows: list[dict]) -> str:
                 field: (
                     sorted(json.loads(row[field]))
                     if field == "blockers_json"
+                    else json.loads(row[field])
+                    if field == "evidence_summary_json"
                     else row[field]
                 )
                 for field in _QUALITY_CONTENT_FIELDS
@@ -61,6 +65,8 @@ def _quality_values(
     investor_grade: str = "A",
     quality_version: str = "v1",
     blockers_json: str = "[]",
+    input_fingerprint: str = "",
+    evidence_summary_json: str = "{}",
 ) -> dict:
     return {
         "corp_code": corp_code,
@@ -78,6 +84,8 @@ def _quality_values(
         "group_audit_grade": "D",
         "blockers_json": blockers_json,
         "quality_version": quality_version,
+        "input_fingerprint": input_fingerprint,
+        "evidence_summary_json": evidence_summary_json,
     }
 
 
@@ -436,6 +444,103 @@ def test_manifest_digest_normalizes_blocker_order_but_detects_content_change(
 
     assert reordered["content_digest"] == first["content_digest"]
     assert changed["content_digest"] != first["content_digest"]
+
+
+def test_manifest_digest_canonicalizes_evidence_summary_json(temp_engine):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values(
+                    "00126380",
+                    2025,
+                    input_fingerprint="a" * 64,
+                    evidence_summary_json=(
+                        '{"blockers":[],"grades":{"investor_core":"A"}}'
+                    ),
+                ),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    first = json.loads(
+        write_dataset_manifest("summary-first")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.evidence_summary_json = (
+            '{ "grades": { "investor_core": "A" }, "blockers": [] }'
+        )
+    reordered = json.loads(
+        write_dataset_manifest("summary-reordered")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.input_fingerprint = "b" * 64
+    fingerprint_changed = json.loads(
+        write_dataset_manifest("fingerprint-changed")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.input_fingerprint = "a" * 64
+        row.evidence_summary_json = (
+            '{"blockers":[],"grades":{"investor_core":"B"}}'
+        )
+    changed = json.loads(
+        write_dataset_manifest("summary-changed")[
+            "quality_snapshot_json"
+        ]
+    )
+
+    assert reordered["content_digest"] == first["content_digest"]
+    assert fingerprint_changed["content_digest"] != first["content_digest"]
+    assert changed["content_digest"] != first["content_digest"]
+
+
+@pytest.mark.parametrize(
+    "evidence_summary_json",
+    [
+        "{not-json",
+        "[]",
+    ],
+)
+def test_dataset_manifest_rejects_invalid_evidence_summary_object(
+    temp_engine,
+    evidence_summary_json,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values(
+                    "00126380",
+                    2025,
+                    evidence_summary_json=evidence_summary_json,
+                ),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="evidence_summary_json must be a JSON object",
+    ):
+        write_dataset_manifest("invalid-evidence-summary")
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,10 @@
 """Deterministic content contract for the company-year quality ledger."""
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from typing import Any
-
 
 QUALITY_VERSION = "v1"
 QUALITY_CONTENT_FIELDS = (
@@ -24,6 +23,8 @@ QUALITY_CONTENT_FIELDS = (
     "group_audit_grade",
     "blockers_json",
     "quality_version",
+    "input_fingerprint",
+    "evidence_summary_json",
 )
 
 
@@ -48,6 +49,20 @@ def _normalized_blockers(value: Any) -> list[str]:
     return sorted(blockers)
 
 
+def _normalized_evidence_summary(value: Any) -> dict[str, Any]:
+    try:
+        summary = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise QualitySnapshotError(
+            "evidence_summary_json must be a JSON object"
+        ) from exc
+    if not isinstance(summary, dict):
+        raise QualitySnapshotError(
+            "evidence_summary_json must be a JSON object"
+        )
+    return summary
+
+
 def quality_content_digest(
     rows: Iterable[Mapping[str, Any]],
 ) -> str:
@@ -58,6 +73,8 @@ def quality_content_digest(
                 field: (
                     _normalized_blockers(row[field])
                     if field == "blockers_json"
+                    else _normalized_evidence_summary(row[field])
+                    if field == "evidence_summary_json"
                     else row[field]
                 )
                 for field in QUALITY_CONTENT_FIELDS

@@ -5,14 +5,20 @@ is derived only from already-collected rows and never performs DART collection.
 """
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import date, datetime, timezone
 import json
 import math
+from collections import defaultdict
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import func
 
+from kreports.analysis.audit_reporting import audit_fee_availability
+from kreports.analysis.group_graph import (
+    classify_qsc,
+    group_entity_from_record,
+    group_relationship_from_record,
+)
 from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingNoteChapter,
@@ -26,23 +32,20 @@ from kreports.db.models import (
     ExtractionRun,
     FetchLog,
     FinancialFactCompact,
+    GroupComponentMetricRecord,
     GroupEntityRecord,
     GroupRelationshipRecord,
-    GroupComponentMetricRecord,
     ReportDocument,
     ReportSection,
     SourceDocument,
 )
-from kreports.runtime import require_runtime_write
-from kreports.analysis.group_graph import (
-    classify_qsc,
-    group_entity_from_record,
-    group_relationship_from_record,
-)
-from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 from kreports.db.quality_snapshot import QUALITY_VERSION
-from kreports.analysis.audit_reporting import audit_fee_availability
-
+from kreports.quality.company_year_fingerprint import (
+    build_quality_evidence_summary,
+    quality_input_fingerprint,
+)
+from kreports.runtime import require_runtime_write
+from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 
 ANNUAL_CORE_YEARS_FOR_A = 5
 ANNUAL_CORE_YEARS_FOR_B = 3
@@ -58,6 +61,15 @@ KAM_PROCEDURE_MARKERS = (
     "수행하였습니다",
     "어떻게 다루",
     "감사인은 다음",
+)
+LEGACY_FRESHNESS_LIMITATION = (
+    "품질 원장이 입력 증거 fingerprint 도입 이전 상태입니다."
+)
+INVALID_SUMMARY_FRESHNESS_LIMITATION = (
+    "품질 원장의 증거 요약이 유효한 JSON 객체가 아닙니다."
+)
+FINGERPRINT_MISMATCH_FRESHNESS_LIMITATION = (
+    "품질 원장의 입력 증거 fingerprint가 증거 요약과 일치하지 않습니다."
 )
 
 # Public constants make grading reviewable without reverse-engineering query
@@ -915,6 +927,26 @@ def rebuild_company_year_quality(
                 )
                 if status == "error"
             )
+            status_values = {
+                "financial_core": statuses[year],
+                "auditor": auditor_status,
+                "audit_fee": audit_fee_status,
+                "policy": policy_status,
+                "kam": kam_status,
+                "audit_procedure": audit_procedure_status,
+                "group_audit": group_audit_status,
+            }
+            grade_values = {
+                "investor_core": investor_grade,
+                "auditor_full": auditor_grade,
+                "group_audit": group_audit_grade,
+            }
+            evidence_summary = build_quality_evidence_summary(
+                statuses=status_values,
+                grades=grade_values,
+                blockers=blockers,
+                quality_version=QUALITY_VERSION,
+            )
             with get_session() as session:
                 row = session.get(
                     CompanyYearQuality,
@@ -943,7 +975,16 @@ def rebuild_company_year_quality(
                     sort_keys=True,
                 )
                 row.quality_version = QUALITY_VERSION
-                row.updated_at = datetime.now(timezone.utc)
+                row.evidence_summary_json = json.dumps(
+                    evidence_summary,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                row.input_fingerprint = quality_input_fingerprint(
+                    evidence_summary
+                )
+                row.updated_at = datetime.now(UTC)
             rows_written += 1
 
     return {
@@ -964,6 +1005,29 @@ def company_year_quality(corp_code: str, year: int) -> dict[str, Any]:
             raise LookupError(
                 f"company-year quality not found: corp_code={corp_code}, year={year}"
             )
+        input_fingerprint = str(row.input_fingerprint or "").strip()
+        freshness_limitations: list[str] = []
+        evidence_summary: dict[str, object] = {}
+        if not input_fingerprint:
+            freshness_limitations.append(LEGACY_FRESHNESS_LIMITATION)
+        else:
+            try:
+                stored_summary = json.loads(row.evidence_summary_json)
+            except (TypeError, json.JSONDecodeError):
+                stored_summary = None
+            if not isinstance(stored_summary, dict):
+                freshness_limitations.append(
+                    INVALID_SUMMARY_FRESHNESS_LIMITATION
+                )
+            elif (
+                quality_input_fingerprint(stored_summary)
+                != input_fingerprint
+            ):
+                freshness_limitations.append(
+                    FINGERPRINT_MISMATCH_FRESHNESS_LIMITATION
+                )
+            else:
+                evidence_summary = stored_summary
         return {
             "corp_code": row.corp_code,
             "bsns_year": int(row.bsns_year),
@@ -985,5 +1049,8 @@ def company_year_quality(corp_code: str, year: int) -> dict[str, Any]:
             },
             "blockers": json.loads(row.blockers_json),
             "quality_version": row.quality_version,
+            "input_fingerprint": input_fingerprint or None,
+            "evidence_summary": evidence_summary,
+            "freshness_limitations": freshness_limitations,
             "updated_at": row.updated_at,
         }

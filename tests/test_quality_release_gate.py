@@ -1,13 +1,13 @@
-from datetime import datetime, timezone
 import hashlib
 import json
+from datetime import UTC, datetime
 
 import pytest
+from typer.testing import CliRunner
 
 from kreports.db.engine import get_session
 from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
 from kreports.db.models import Company, CompanyYearQuality, DatasetManifest
-from typer.testing import CliRunner
 
 _QUALITY_CONTENT_FIELDS = (
     "corp_code",
@@ -25,6 +25,8 @@ _QUALITY_CONTENT_FIELDS = (
     "group_audit_grade",
     "blockers_json",
     "quality_version",
+    "input_fingerprint",
+    "evidence_summary_json",
 )
 
 
@@ -35,6 +37,8 @@ def _expected_quality_digest(rows: list[CompanyYearQuality]) -> str:
                 field: (
                     sorted(json.loads(getattr(row, field)))
                     if field == "blockers_json"
+                    else json.loads(getattr(row, field))
+                    if field == "evidence_summary_json"
                     else getattr(row, field)
                 )
                 for field in _QUALITY_CONTENT_FIELDS
@@ -97,7 +101,7 @@ def _seed_quality_row(
                 group_audit_grade="D",
                 blockers_json="[]",
                 quality_version="v1",
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
 
@@ -223,7 +227,7 @@ def test_invalid_manifest_fails_closed(temp_engine, monkeypatch):
                 manifest_id="manifest-id",
                 schema_version=MIGRATIONS[-1].revision,
                 dataset_version="different-version",
-                generated_at=datetime.now(timezone.utc),
+                generated_at=datetime.now(UTC),
                 year_from=2025,
                 year_to=2025,
                 company_count=0,
@@ -663,7 +667,7 @@ def test_release_gate_rejects_quality_snapshot_row_count_mismatch(
                 group_audit_grade="D",
                 blockers_json="[]",
                 quality_version="v1",
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
@@ -709,7 +713,7 @@ def test_release_gate_rejects_quality_snapshot_coverage_year_mismatch(
                 group_audit_grade="D",
                 blockers_json="[]",
                 quality_version="v1",
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
@@ -759,7 +763,7 @@ def test_public_runtime_does_not_round_1899_of_1999_up_to_threshold(
 ):
     from kreports.quality.release_gate import evaluate_release_gate
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with get_session() as session:
         session.add_all(
             [

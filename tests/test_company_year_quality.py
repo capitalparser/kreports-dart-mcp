@@ -7,9 +7,11 @@ from sqlalchemy import func, inspect
 from kreports.db.engine import get_session
 from kreports.db.models import (
     AuditFee,
+    Auditor,
     AuditProcedureItem,
     BusinessAffiliateAuditor,
     Company,
+    CompanyYearQuality,
     Disclosure,
     ExtractionRun,
     FetchLog,
@@ -504,7 +506,6 @@ def test_explicit_no_kam_and_supported_source_gap_is_not_auditor_ready(
 
 
 def test_rebuild_is_idempotent_and_scoped_by_year_and_market(temp_engine):
-    from kreports.db.models import CompanyYearQuality
     from kreports.quality.company_year import rebuild_company_year_quality
 
     _seed_core_financial_years("00126380", range(2024, 2026), market="KOSPI")
@@ -531,6 +532,168 @@ def test_rebuild_is_idempotent_and_scoped_by_year_and_market(temp_engine):
     assert second["rows_written"] == 2
     assert count == 2
     assert rows == [("00126380", 2024), ("00126380", 2025)]
+
+
+def test_rebuild_persists_stable_freshness_and_tracks_evidence_change(
+    temp_engine,
+):
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+            )
+        )
+
+    rebuild_company_year_quality(2025, 2025)
+    first = company_year_quality("00126380", 2025)
+    with get_session() as session:
+        first_row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert first_row is not None
+        first_summary_json = first_row.evidence_summary_json
+        first_updated_at = first_row.updated_at
+
+    assert first["input_fingerprint"]
+    assert first["evidence_summary"]["statuses"] == first["statuses"]
+    assert first["evidence_summary"]["grades"] == {
+        "investor_core": first["feature_grades"]["investor_core"],
+        "auditor_full": first["feature_grades"]["auditor_full"],
+        "group_audit": first["feature_grades"]["group_audit"],
+    }
+    assert first["freshness_limitations"] == []
+
+    rebuild_company_year_quality(2025, 2025)
+    second = company_year_quality("00126380", 2025)
+    with get_session() as session:
+        second_row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert second_row is not None
+        second_summary_json = second_row.evidence_summary_json
+        second_updated_at = second_row.updated_at
+
+    assert second["input_fingerprint"] == first["input_fingerprint"]
+    assert second_summary_json == first_summary_json
+    assert second_updated_at >= first_updated_at
+
+    with get_session() as session:
+        session.add(
+            Auditor(
+                corp_code="00126380",
+                bsns_year=2025,
+                fs_div="CFS",
+                auditor_nm="감사법인",
+                audit_opinion="적정",
+            )
+        )
+    rebuild_company_year_quality(2025, 2025)
+    changed = company_year_quality("00126380", 2025)
+
+    assert first["statuses"]["auditor"] == "missing"
+    assert changed["statuses"]["auditor"] == "available"
+    assert changed["input_fingerprint"] != first["input_fingerprint"]
+
+
+def test_company_year_quality_reads_legacy_blank_fingerprint_as_limited(
+    temp_engine,
+):
+    from kreports.quality.company_year import company_year_quality
+
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=2025,
+                market="KOSPI",
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v1",
+                input_fingerprint="",
+                evidence_summary_json="{}",
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["input_fingerprint"] is None
+    assert quality["evidence_summary"] == {}
+    assert quality["freshness_limitations"] == [
+        "품질 원장이 입력 증거 fingerprint 도입 이전 상태입니다."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fingerprint", "summary_json", "expected_limitation"),
+    [
+        (
+            "a" * 64,
+            "{not-json",
+            "품질 원장의 증거 요약이 유효한 JSON 객체가 아닙니다.",
+        ),
+        (
+            "a" * 64,
+            "[]",
+            "품질 원장의 증거 요약이 유효한 JSON 객체가 아닙니다.",
+        ),
+        (
+            "a" * 64,
+            '{"statuses": {}}',
+            "품질 원장의 입력 증거 fingerprint가 증거 요약과 일치하지 않습니다.",
+        ),
+    ],
+)
+def test_company_year_quality_rejects_unverified_freshness_metadata(
+    temp_engine,
+    fingerprint,
+    summary_json,
+    expected_limitation,
+):
+    from kreports.quality.company_year import company_year_quality
+
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=2025,
+                market="KOSPI",
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v1",
+                input_fingerprint=fingerprint,
+                evidence_summary_json=summary_json,
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["input_fingerprint"] == fingerprint
+    assert quality["evidence_summary"] == {}
+    assert quality["freshness_limitations"] == [expected_limitation]
 
 
 def test_three_core_years_are_investor_b_but_transport_error_is_d(
