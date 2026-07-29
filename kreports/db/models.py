@@ -312,13 +312,33 @@ class AuditFeeObservationRecord(Base):
     availability_status = Column(String(40), nullable=False)
     quality_status = Column(String(24), nullable=False)
     displayed_unit = Column(String(40), nullable=True)
-    raw_values_json = Column(Text, nullable=False, default="{}")
+    raw_values_json = Column(
+        Text,
+        nullable=False,
+        default="{}",
+        server_default="{}",
+    )
     source_status = Column(String(40), nullable=True)
     source_message = Column(Text, nullable=True)
-    source_eligibility = Column(String(24), nullable=False, default="unknown")
-    limitations_json = Column(Text, nullable=False, default="[]")
+    source_eligibility = Column(
+        String(24),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+    )
+    limitations_json = Column(
+        Text,
+        nullable=False,
+        default="[]",
+        server_default="[]",
+    )
     parser_version = Column(String(40), nullable=False)
-    is_current = Column(Boolean, nullable=False, default=True)
+    is_current = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("1"),
+    )
     supersedes_hash = Column(
         String(64),
         ForeignKey("audit_fee_observations.observation_hash"),

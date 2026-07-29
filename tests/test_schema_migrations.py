@@ -582,6 +582,73 @@ def test_audit_fee_observation_migration_adds_immutable_claim_store(temp_engine)
     ]
 
 
+def test_audit_fee_observation_fresh_metadata_bootstrap_keeps_db_defaults():
+    from kreports.db.models import Base
+
+    fresh = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(fresh)
+
+    columns = {
+        item["name"]: item
+        for item in inspect(fresh).get_columns("audit_fee_observations")
+    }
+    assert {
+        name: columns[name]["default"]
+        for name in (
+            "raw_values_json",
+            "source_eligibility",
+            "limitations_json",
+            "is_current",
+        )
+    } == {
+        "raw_values_json": "'{}'",
+        "source_eligibility": "'unknown'",
+        "limitations_json": "'[]'",
+        "is_current": "1",
+    }
+
+    with fresh.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO audit_fee_observations (
+                  observation_hash, source_slot_hash, corp_code, bsns_year,
+                  source_class, availability_status, quality_status,
+                  parser_version, observed_at
+                ) VALUES (
+                  :observation_hash, :source_slot_hash, :corp_code, :bsns_year,
+                  :source_class, :availability_status, :quality_status,
+                  :parser_version, :observed_at
+                )
+                """
+            ),
+            {
+                "observation_hash": "d" * 64,
+                "source_slot_hash": "fresh" * 12 + "slot",
+                "corp_code": "00126380",
+                "bsns_year": 2025,
+                "source_class": "audit_report",
+                "availability_status": "available",
+                "quality_status": "verified",
+                "parser_version": "v1",
+                "observed_at": "2026-07-29 00:00:00",
+            },
+        )
+        stored = conn.execute(
+            text(
+                """
+                SELECT raw_values_json, source_eligibility,
+                       limitations_json, is_current
+                FROM audit_fee_observations
+                WHERE observation_hash = :observation_hash
+                """
+            ),
+            {"observation_hash": "d" * 64},
+        ).one()
+
+    assert stored == ("{}", "unknown", "[]", 1)
+
+
 def test_financial_compact_provenance_migration_is_additive(temp_engine):
     from kreports.db.migrations import MIGRATIONS
 
