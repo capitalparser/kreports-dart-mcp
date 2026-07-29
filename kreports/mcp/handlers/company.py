@@ -35,25 +35,16 @@ def handle_get_financial_snapshot(args: GetFinancialSnapshotInput) -> dict:
     source_table = data_quality.get("source")
     if source_table not in {"financials", "financial_facts_compact"}:
         source_table = "financials"
-    latest_year = max(
-        (
-            int(row["연도"])
-            for row in rows
-            if row.get("연도") is not None
-        ),
-        default=None,
-    )
+    latest = max(rows, key=lambda row: int(row.get("연도") or 0), default={})
+    latest_year = int(latest["연도"]) if latest.get("연도") is not None else None
     if rows:
         result["confirmed_facts"] = [{
             "statement": (
                 f"{latest_year}년까지 {result.get('fs_div')} 기준 "
                 f"재무 스냅샷 {len(rows)}개 연도를 조회했습니다."
             ),
-            "source": _annual_report_source(
-                corp_code,
-                None,
-                latest_year,
-                section_title="재무제표",
+            "source": latest.get("source") or _annual_report_source(
+                corp_code, None, latest_year, section_title="재무제표",
                 source_table=source_table,
             ),
             "excerpt": (

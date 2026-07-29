@@ -269,6 +269,11 @@ def _load_with_engine(
 ) -> DcfSourceResult:
     columns = _validate_schema(read_engine)
     id_select = "id AS _id" if "id" in columns else "NULL AS _id"
+    provenance_select = (
+        ", citation_rcept_no, unit, quality_status"
+        if {"citation_rcept_no", "unit", "quality_status"}.issubset(columns)
+        else ", NULL AS citation_rcept_no, NULL AS unit, NULL AS quality_status"
+    )
     metric_placeholders = ", ".join(
         f":metric_{index}" for index, _ in enumerate(DCF_MODEL_METRICS)
     )
@@ -285,7 +290,7 @@ def _load_with_engine(
         with read_engine.connect() as connection:
             rows = connection.execute(text(f"""
                 SELECT {id_select}, metric_key, metric_name, amount,
-                       source_account_id, source_account_nm, fetched_at
+                       source_account_id, source_account_nm, fetched_at {provenance_select}
                 FROM financial_facts_compact
                 WHERE corp_code=:company
                   AND bsns_year=:base_year
@@ -332,6 +337,10 @@ def _load_with_engine(
             missing.append(metric_key)
             limitations.append(f"provenance_gap:{metric_key}")
             continue
+        if "citation_rcept_no" in columns and not selected.get("citation_rcept_no"):
+            limitations.append(f"uncitable_compact_value:{metric_key}")
+        if "unit" in columns and selected.get("unit") != "KRW":
+            limitations.append(f"unproven_krw_unit:{metric_key}")
         try:
             facts.append(DcfActualFact(
                 metric_key=metric_key,

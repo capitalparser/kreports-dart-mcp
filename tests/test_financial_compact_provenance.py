@@ -169,3 +169,38 @@ def test_compact_provenance_rejects_unsupported_source_or_period():
         _compact_provenance(metric_key="revenue", source_table="invented", citation=None)
     with pytest.raises(ValueError, match="period type"):
         _compact_provenance(metric_key="audit_fee", source_table="financials", citation=None)
+
+
+def test_compact_snapshot_prefers_persisted_citation_over_newer_disclosure(temp_engine):
+    """A newer disclosure cannot rewrite a citation that the compact rebuild persisted."""
+    from sqlalchemy import text
+
+    from kreports.analysis.financial_analysis import _financial_snapshot_from_compact
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES ('00126380', 2024, 'CFS', 'revenue', '매출액', 100,
+                    'financial_facts', 'KRW', 'duration', '20250318000001',
+                    '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+                    'usable', CURRENT_TIMESTAMP)
+        """))
+        session.add(Disclosure(
+            rcept_no="20250319000001",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2025, 3, 19),
+            disc_type="A",
+            report_nm="사업보고서 (2024.12) [정정]",
+            flr_nm="삼성전자",
+        ))
+        session.commit()
+
+    result = _financial_snapshot_from_compact("00126380", "CFS", None)
+
+    assert result["rows"][0]["source"]["rcept_no"] == "20250318000001"
+    assert result["rows"][0]["source"]["report_nm"] == "사업보고서 (2024.12)"
