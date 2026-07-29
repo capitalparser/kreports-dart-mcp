@@ -271,25 +271,121 @@ def test_verify_recomputes_current_gate_and_ignores_tampered_pass(
 
 
 def test_explicit_db_path_cannot_mix_with_global_engine(tmp_path, monkeypatch):
+    import sys
+
+    from sqlalchemy.orm import sessionmaker
+
     from kreports import release_artifact
     import kreports.db.engine as global_engine
 
     db_path = tmp_path / "explicit-runtime.db"
     _create_contract_db(db_path)
 
-    def global_engine_sentinel(*_args, **_kwargs):
-        raise AssertionError("explicit DB proof touched the global engine")
+    class GlobalEngineSentinel:
+        def connect(self):
+            raise AssertionError("explicit DB proof touched the global engine")
 
-    monkeypatch.setattr(global_engine, "get_session", global_engine_sentinel)
-
-    evidence = release_artifact._collect_current_evidence(
-        db_path,
-        "public_runtime",
+    sentinel = GlobalEngineSentinel()
+    lazy_modules = (
+        "kreports.collector.on_demand",
+        "kreports.quality.release_gate",
     )
+    for module_name in lazy_modules:
+        sys.modules.pop(module_name, None)
+    monkeypatch.setattr(global_engine, "engine", sentinel)
+    monkeypatch.setattr(
+        global_engine,
+        "SessionLocal",
+        sessionmaker(bind=sentinel),
+    )
+
+    try:
+        evidence = release_artifact._collect_current_evidence(
+            db_path,
+            "public_runtime",
+        )
+    finally:
+        monkeypatch.undo()
 
     assert evidence["database"]["file_name"] == db_path.name
     assert evidence["release_gate"]["passed"] is False
     assert evidence["release_gate"]["blockers"]
+    for module_name in lazy_modules:
+        assert sys.modules[module_name].get_session is global_engine.get_session
+
+
+def test_explicit_runtime_serializes_concurrent_database_bindings(tmp_path):
+    """Two concurrent explicit contexts must never observe one another's DB."""
+    import threading
+    import time
+
+    from kreports import release_artifact
+    import kreports.db.engine as engine_module
+
+    def create_marker_db(path, marker):
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO marker(value) VALUES (?)", (marker,))
+
+    first_db = tmp_path / "first.db"
+    second_db = tmp_path / "second.db"
+    create_marker_db(first_db, "first")
+    create_marker_db(second_db, "second")
+    original_engine = engine_module.engine
+    start = threading.Barrier(2)
+    failures: list[str] = []
+
+    def worker(path, expected):
+        try:
+            start.wait(timeout=5)
+            with release_artifact._bound_explicit_runtime(path):
+                for _ in range(30):
+                    with engine_module.engine.connect() as connection:
+                        actual = connection.exec_driver_sql(
+                            "SELECT value FROM marker"
+                        ).scalar_one()
+                    if actual != expected:
+                        failures.append(f"{expected}:{actual}")
+                    time.sleep(0.002)
+        except Exception as exc:
+            failures.append(type(exc).__name__)
+
+    threads = [
+        threading.Thread(target=worker, args=(first_db, "first")),
+        threading.Thread(target=worker, args=(second_db, "second")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert engine_module.engine is original_engine
+
+
+def test_explicit_runtime_restores_nested_and_exceptional_bindings(tmp_path):
+    """Re-entrant and exceptional contexts must restore the prior binding."""
+    from kreports import release_artifact
+    import kreports.db.engine as engine_module
+
+    outer_db = tmp_path / "outer.db"
+    inner_db = tmp_path / "inner.db"
+    _create_contract_db(outer_db)
+    _create_contract_db(inner_db)
+    original_engine = engine_module.engine
+
+    with release_artifact._bound_explicit_runtime(outer_db):
+        outer_engine = engine_module.engine
+        with release_artifact._bound_explicit_runtime(inner_db):
+            assert engine_module.engine is not outer_engine
+        assert engine_module.engine is outer_engine
+
+    with pytest.raises(RuntimeError, match="test failure"):
+        with release_artifact._bound_explicit_runtime(outer_db):
+            raise RuntimeError("test failure")
+
+    assert engine_module.engine is original_engine
 
 
 def test_explicit_runtime_binds_analysis_queries_and_restores_central_engine(

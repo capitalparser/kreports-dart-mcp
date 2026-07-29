@@ -43,6 +43,7 @@ APPROVED_GOLDEN_CONTRACT_SHA256 = (
 _CONTRACT_RUNNER_MARKER = "KREPORTS_RELEASE_CONTRACT="
 _RUNTIME_DIGEST_CACHE: dict[tuple[Any, ...], str] = {}
 _RUNTIME_DIGEST_LOCK = threading.Lock()
+_EXPLICIT_RUNTIME_LOCK = threading.RLock()
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_COUNT = 10**12
 _MAX_TEXT_LENGTH = 10_000
@@ -503,25 +504,26 @@ def _bound_explicit_runtime(db_path: Path):
     """Temporarily bind legacy handlers to the explicit immutable DB."""
     import kreports.db.engine as engine_module
 
-    explicit_engine = create_engine(
-        "sqlite+pysqlite://",
-        creator=lambda: _open_immutable_sqlite(db_path),
-    )
-    explicit_sessions = sessionmaker(
-        bind=explicit_engine,
-        autocommit=False,
-        autoflush=False,
-    )
-    old_engine = engine_module.engine
-    old_sessions = engine_module.SessionLocal
-    engine_module.engine = explicit_engine
-    engine_module.SessionLocal = explicit_sessions
-    try:
-        yield
-    finally:
-        engine_module.engine = old_engine
-        engine_module.SessionLocal = old_sessions
-        explicit_engine.dispose()
+    with _EXPLICIT_RUNTIME_LOCK:
+        explicit_engine = create_engine(
+            "sqlite+pysqlite://",
+            creator=lambda: _open_immutable_sqlite(db_path),
+        )
+        explicit_sessions = sessionmaker(
+            bind=explicit_engine,
+            autocommit=False,
+            autoflush=False,
+        )
+        old_engine = engine_module.engine
+        old_sessions = engine_module.SessionLocal
+        engine_module.engine = explicit_engine
+        engine_module.SessionLocal = explicit_sessions
+        try:
+            yield
+        finally:
+            engine_module.engine = old_engine
+            engine_module.SessionLocal = old_sessions
+            explicit_engine.dispose()
 
 
 def _table_columns(
