@@ -309,6 +309,40 @@ def _dataset_readiness() -> dict[str, Any]:
     }
 
 
+def release_context() -> dict[str, Any]:
+    """Return the bounded deployment context without changing tool quality."""
+    fallback = {
+        "release_ready": False,
+        "manifest_available": False,
+        "required_failures": ["release_context_unavailable"],
+        "degraded_features": [],
+        "snapshot_version": None,
+    }
+    try:
+        readiness = _dataset_readiness()
+        if not isinstance(readiness, dict):
+            return fallback
+        required_failures = readiness.get("required_failures")
+        degraded_features = readiness.get("degraded_features")
+        return {
+            "release_ready": bool(readiness.get("release_ready")),
+            "manifest_available": bool(readiness.get("manifest_available")),
+            "required_failures": [
+                str(value) for value in required_failures[:10]
+            ] if isinstance(required_failures, list) else [],
+            "degraded_features": [
+                str(value) for value in degraded_features[:10]
+            ] if isinstance(degraded_features, list) else [],
+            "snapshot_version": (
+                str(readiness["dataset_version"])
+                if readiness.get("dataset_version") is not None
+                else None
+            ),
+        }
+    except Exception:
+        return fallback
+
+
 def _manifest_payload(session) -> dict[str, Any]:
     if "dataset_manifest" not in inspect(session.get_bind()).get_table_names():
         return {

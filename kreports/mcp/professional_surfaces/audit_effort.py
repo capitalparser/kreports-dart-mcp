@@ -54,7 +54,7 @@ def _build_prepare_inputs_pack(result: dict[str, Any]) -> dict[str, Any]:
     rows = _subject_rows(result)
     if rows:
         pack["tables"].append({
-            "id": "audit_effort_subject_inputs",
+            "id": "standard_audit_hours_inputs",
             "title": "최근 3개년 공개자료 입력",
             "columns": [
                 {"field": "year", "label": "연도"},
@@ -84,7 +84,7 @@ def _build_fee_comparison_pack(result: dict[str, Any]) -> dict[str, Any]:
             rows.append({"role": "peer", **peer})
     if rows:
         pack["tables"].append({
-            "id": "audit_fee_peer_distribution",
+            "id": "peer_audit_fee_benchmark",
             "title": "대상회사 후 peer 감사보수 비교",
             "columns": [
                 {"field": "role", "label": "구분"},
@@ -123,7 +123,7 @@ def _build_fee_comparison_pack(result: dict[str, Any]) -> dict[str, Any]:
                 "id": "audit_fee_peer_chart",
                 "type": "bar",
                 "title": "감사보수 Peer 분포",
-                "data_ref": "audit_fee_peer_distribution",
+                "data_ref": "peer_audit_fee_benchmark",
                 "encodings": {
                     "x": {"field": "corp_name"},
                     "y": {"field": "audit_fee_m"},
@@ -138,7 +138,7 @@ def _build_hours_proxy_pack(result: dict[str, Any]) -> dict[str, Any]:
     metrics = result.get("subject_metrics")
     if isinstance(metrics, dict):
         pack["tables"].append({
-            "id": "audit_effort_proxy",
+            "id": "audit_hours_proxy_inputs",
             "title": "감사시간 공개자료 proxy",
             "columns": [
                 {"field": "audit_fee_m", "label": "감사보수(백만원)"},

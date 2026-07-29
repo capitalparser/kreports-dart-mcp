@@ -986,6 +986,8 @@ def build_audit_acceptance_pack(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    audit_effort_section: SectionStatusV1 | None = None,
+    audit_effort_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Wrap legacy acceptance evidence with Task-4 decision contracts only."""
     selected_cohort = _legacy_select_peer_group(
@@ -1175,6 +1177,6 @@ def build_audit_acceptance_pack(
                 })
     return build_acceptance_evidence(
         legacy_payload={**legacy, "audit_history": history},
-        audit_effort_section=None,
-        audit_effort_rows=[],
+        audit_effort_section=audit_effort_section,
+        audit_effort_rows=audit_effort_rows or [],
     )

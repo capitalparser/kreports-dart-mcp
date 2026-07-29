@@ -16,6 +16,7 @@ from kreports.analysis.auditor_decisions import (
     compare_peer_kam_topics,
     compare_peer_risk_profile,
 )
+from kreports.analysis.audit_effort_inputs import prepare_standard_audit_hours_inputs
 from kreports.analysis.group_audit import get_subsidiary_auditors
 from kreports.analysis.peer_benchmarks import (
     compare_peer_accounting_policies,
@@ -24,6 +25,7 @@ from kreports.analysis.peer_benchmarks import (
     estimate_audit_hours_proxy,
 )
 from kreports.mcp.auditor_public import public_auditor_result
+from kreports.mcp.contracts import SectionStatusV1
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     BuildAuditAcceptancePackInput,
@@ -200,9 +202,28 @@ def handle_estimate_audit_hours_proxy(args: EstimateAuditHoursProxyInput) -> dic
 
 
 def handle_build_audit_acceptance_pack(args: BuildAuditAcceptancePackInput) -> dict:
+    company = resolve_company(args.company)
+    prepared = prepare_standard_audit_hours_inputs(
+        company,
+        year=args.year,
+        fs_strategy=args.fs_strategy,
+    )
+    rows = prepared.get("rows") if isinstance(prepared, dict) else []
+    quality = prepared.get("data_quality") if isinstance(prepared, dict) else {}
+    status = quality.get("status") if isinstance(quality, dict) else "missing"
+    if status not in {"usable", "limited", "missing", "error"}:
+        status = "missing"
+    effort_section = SectionStatusV1(
+        status=status,
+        required=True,
+        applicability="applicable",
+        coverage={"requested_years": 3, "row_count": len(rows) if isinstance(rows, list) else 0},
+    )
     return build_audit_acceptance_pack(
-        company=resolve_company(args.company),
+        company=company,
         year=args.year,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
+        audit_effort_section=effort_section,
+        audit_effort_rows=rows if isinstance(rows, list) else [],
     )

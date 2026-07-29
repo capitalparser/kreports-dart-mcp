@@ -405,6 +405,7 @@ def test_nonerror_unavailable_dcf_uses_same_public_quarantine_as_source_error():
     assert {table["id"] for table in pack["tables"]} <= {
         "dcf_assumptions",
         "dcf_missing_accounts",
+        "dcf_model_readiness",
     }
     assert pack["summary"]["domain_status"] == "calculation_unavailable"
     resource = read_resource(pack["resource_uri"])["text"]
@@ -539,6 +540,7 @@ def test_missing_dcf_status_is_identical_across_every_public_surface():
         assert {table["id"] for table in public_pack["tables"]} <= {
             "dcf_assumptions",
             "dcf_missing_accounts",
+            "dcf_model_readiness",
         }
         assert not public_pack["charts"]
         assert not public_pack["diagrams"]
@@ -983,6 +985,7 @@ def test_loader_missing_without_top_level_error_has_safe_unavailable_surfaces(
     assert {table["id"] for table in pack["tables"]} <= {
         "dcf_assumptions",
         "dcf_missing_accounts",
+        "dcf_model_readiness",
     }
 
 

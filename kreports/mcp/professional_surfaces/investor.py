@@ -244,6 +244,7 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
     for table in pack.get("tables") or []:
         if table.get("id") != "peer_metric_matrix":
             continue
+        table["id"] = "industry_metrics"
         table["title"] = "비교군 지표 비교"
         for column in table["columns"]:
             label = {
@@ -292,6 +293,8 @@ def _peer_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 or "사업보고서 접수번호 미확보"
             )
     for chart in pack.get("charts") or []:
+        if chart.get("data_ref") == "peer_metric_matrix":
+            chart["data_ref"] = "industry_metrics"
         if isinstance(chart.get("title"), str):
             chart["title"] = chart["title"].replace("Peer", "비교군")
     return pack
@@ -329,6 +332,12 @@ def _dcf_candidates_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _build_dcf_pack
 
     pack = _build_dcf_pack(result)
+    for table in pack.get("tables") or []:
+        if table.get("id") == "candidate_assumptions":
+            table["id"] = "dcf_candidates"
+    for chart in pack.get("charts") or []:
+        if chart.get("data_ref") == "candidate_assumptions":
+            chart["data_ref"] = "dcf_candidates"
     blockers = [
         blocker for blocker in result.get("valuation_blockers") or []
         if isinstance(blocker, dict)
@@ -359,6 +368,15 @@ def _quality_of_earnings_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _build_quality_pack
 
     pack = _build_quality_pack(result)
+    for table in pack.get("tables") or []:
+        if table.get("id") == "quality_metrics":
+            table["id"] = "quality_of_earnings"
+            break
+    else:
+        for table in pack.get("tables") or []:
+            if table.get("id") == "quality_signals":
+                table["id"] = "quality_of_earnings"
+                break
     summary = result.get("audit_matter_summary") or {}
     if summary:
         pack["tables"].append(_table(

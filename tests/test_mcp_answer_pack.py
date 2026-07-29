@@ -52,7 +52,7 @@ def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():
     assert pack["summary"]["title"] == "A DCF 입력 후보"
     assert pack["data_quality"]["source"] == "financial_facts_compact"
     assert any(table["id"] == "historical_actuals" for table in pack["tables"])
-    assert any(table["id"] == "candidate_assumptions" for table in pack["tables"])
+    assert any(table["id"] == "dcf_candidates" for table in pack["tables"])
     assert any(chart["id"] == "financial_trend" and chart["type"] == "line" for chart in pack["charts"])
     assert out["answer"]
 
@@ -81,7 +81,7 @@ def test_dcf_candidate_registry_preserves_semantic_labels_and_mixed_units():
     })
     table = next(
         table for table in pack["tables"]
-        if table["id"] == "candidate_assumptions"
+        if table["id"] == "dcf_candidates"
     )
     rows = {row["metric"]: row for row in table["rows"]}
     expected = {
@@ -128,7 +128,7 @@ def test_homogeneous_dcf_candidates_use_static_and_visible_ratio_unit():
     })
     table = next(
         table for table in pack["tables"]
-        if table["id"] == "candidate_assumptions"
+        if table["id"] == "dcf_candidates"
     )
     value_column = next(
         column for column in table["columns"]
@@ -155,7 +155,7 @@ def test_registered_dcf_candidate_unit_cannot_be_overridden_by_caller():
     })
     table = next(
         table for table in pack["tables"]
-        if table["id"] == "candidate_assumptions"
+        if table["id"] == "dcf_candidates"
     )
 
     assert {row["unit"] for row in table["rows"]} == {"ratio"}
@@ -181,7 +181,7 @@ def test_unknown_dcf_candidate_uses_public_fallback_without_key_leak():
     })
     table = next(
         table for table in pack["tables"]
-        if table["id"] == "candidate_assumptions"
+        if table["id"] == "dcf_candidates"
     )
     assert table["rows"][0] == {
         "metric": "사용자 정의 입력 후보",
@@ -358,7 +358,7 @@ def test_attach_meta_adds_peer_benchmark_pack():
     assert pack["summary"]["title"] == "A Peer 벤치마크"
     table = next(
         table for table in pack["tables"]
-        if table["id"] == "peer_metric_matrix"
+        if table["id"] == "industry_metrics"
     )
     assert [
         (row["metric"], row["unit"]) for row in table["rows"]
@@ -471,7 +471,7 @@ def test_audit_peer_nas_ratio_is_explicitly_a_ratio_in_all_views():
     pack = VisualizationPackV1.model_validate(pack_dict)
     table = next(
         table for table in pack.tables
-        if table.id == "audit_fee_peer_distribution"
+        if table.id == "peer_audit_fee_benchmark"
     )
     nas = next(column for column in table.columns if column.key == "nas_ratio")
     assert nas.label == "비감사보수 비율"
@@ -497,7 +497,7 @@ def test_answer_pack_ratio_and_percent_column_inventory_is_explicit():
                 },
                 "data_quality": {"status": "usable"},
             },
-            "candidate_assumptions",
+            "dcf_candidates",
             {"value": "ratio"},
         ),
         (
@@ -510,7 +510,7 @@ def test_answer_pack_ratio_and_percent_column_inventory_is_explicit():
                 },
                 "data_quality": {"status": "usable"},
             },
-            "audit_fee_peer_distribution",
+            "peer_audit_fee_benchmark",
             {"nas_ratio": "ratio"},
         ),
         (
@@ -550,7 +550,7 @@ def test_answer_pack_ratio_and_percent_column_inventory_is_explicit():
                 },
                 "data_quality": {"status": "usable"},
             },
-            "peer_metric_matrix",
+            "industry_metrics",
             {"percentile": "%"},
         ),
     ]
@@ -662,8 +662,8 @@ def test_answer_pack_is_validated_visual_contract_for_all_capabilities():
 
     validated = VisualizationPackV1.model_validate(pack)
     assert validated.version == "visualization_pack.v1"
-    assert validated.tables[0].id == "kam_lifecycle"
-    assert validated.charts[0].data_ref == "kam_lifecycle"
+    assert validated.tables[0].id == "kam_timeline"
+    assert validated.charts[0].data_ref == "kam_timeline"
 
 
 def test_missing_visual_data_returns_explicit_table_and_limitation():
@@ -726,7 +726,7 @@ def test_acceptance_pack_has_exactly_seven_public_review_rows_without_internal_s
         "acceptance_signals": [{"signal": "audit_report_other_matter_paragraph_present"}],
     })
 
-    table = next(table for table in pack["tables"] if table["id"] == "audit_acceptance_evidence")
+    table = next(table for table in pack["tables"] if table["id"] == "acceptance_requirements")
     assert len(table["rows"]) == 7
     assert [column["label"] for column in table["columns"]] == [
         "검토영역", "상태", "확인 사실", "값/coverage", "접수번호", "필수 후속 확인",
@@ -791,3 +791,38 @@ def test_acceptance_answer_pack_keeps_peer_and_metric_denominator_detail_with_pu
     assert metric_table["rows"][0]["peer_n"] == 6
     assert "receivables_to_revenue" not in str(pack)
     assert "same_ksic_prefix" not in str(pack)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "result", "required_table_id"),
+    [
+        (
+            "get_kam_lifecycle",
+            {"events": [{"year": 2025, "topic": "수익인식", "status": "new"}]},
+            "kam_timeline",
+        ),
+        (
+            "get_quality_of_earnings_pack",
+            {
+                "metrics": {"cash_conversion": 1.1},
+                "signals": [{"signal": "cash_conversion", "severity": "low"}],
+            },
+            "quality_of_earnings",
+        ),
+        (
+            "compare_peer_audit_report_matters",
+            {"subject_matters": [{"section_key": "emphasis", "rcept_no": "20260310002820"}]},
+            "peer_audit_report_matters",
+        ),
+    ],
+)
+def test_priority_pack_uses_exact_public_table_id(
+    tool_name,
+    result,
+    required_table_id,
+):
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack(tool_name, result)
+
+    assert any(table["id"] == required_table_id for table in pack["tables"])

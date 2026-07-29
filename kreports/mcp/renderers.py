@@ -1092,6 +1092,22 @@ def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | N
             f"- {public_domain_verdict_label(envelope.tool_name, envelope.domain_verdict)}",
             "",
         ])
+    context = envelope.release_context
+    lines.extend([
+        "배포 준비 상태:",
+        f"- release_ready: {context.release_ready}",
+        f"- manifest_available: {context.manifest_available}",
+        f"- snapshot_version: {context.snapshot_version or '-'}",
+    ])
+    lines.extend(
+        f"- required_failure: {value}"
+        for value in context.required_failures
+    )
+    lines.extend(
+        f"- degraded_feature: {value}"
+        for value in context.degraded_features
+    )
+    lines.append("")
     lines.append("확인된 내용 (공시에서 확인되는 내용):")
     if envelope.confirmed_facts:
         for fact in _dedupe_confirmed_facts_for_render(envelope.confirmed_facts)[:6]:

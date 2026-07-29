@@ -167,6 +167,15 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         )
     if raw_pack is None:
         return None
+    meta = normalized_result.get("_meta")
+    if (
+        isinstance(meta, dict)
+        and isinstance(meta.get("release_context"), dict)
+    ):
+        # Some professional builders predate the shared _base_pack.  Attach at
+        # the public pack boundary so every resource exposes the same bounded
+        # release context as the answer envelope.
+        raw_pack["release_context"] = dict(meta["release_context"])
     from kreports.mcp.visual_contracts import build_visualization_pack
 
     return build_visualization_pack(raw_pack).model_dump(
@@ -177,7 +186,7 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
 
 
 def _base_pack(title: str, result: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:
-    return {
+    pack = {
         "kind": "answer_pack",
         "version": PACK_VERSION,
         "summary": {
@@ -192,6 +201,10 @@ def _base_pack(title: str, result: dict[str, Any], *, status: str | None = None)
         "sources": _collect_sources(result),
         "data_quality": result.get("data_quality") or {},
     }
+    meta = result.get("_meta")
+    if isinstance(meta, dict) and isinstance(meta.get("release_context"), dict):
+        pack["release_context"] = dict(meta["release_context"])
+    return pack
 
 
 def _status(result: dict[str, Any]) -> str:
@@ -578,7 +591,26 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         }
         pack["sources"] = []
         missing_accounts = _safe_dcf_rows(result.get("missing_accounts"), limit=20)
+        readiness_rows = [
+            {
+                "field": row.get("field"),
+                "status": "blocked",
+                "year": row.get("year"),
+                "fs_div": row.get("fs_div"),
+                "basis": row.get("basis"),
+            }
+            for row in missing_accounts
+        ]
         pack["tables"].extend([
+            _table(
+                "dcf_model_readiness",
+                "DCF 모델 준비도 차단 입력",
+                [
+                    ("field", "필수 입력"), ("status", "준비도"),
+                    ("year", "사업연도"), ("fs_div", "재무제표"),
+                    ("basis", "확인 기준"),
+                ], readiness_rows,
+            ),
             _table(
                 "dcf_assumptions",
                 "명시적 분석가 가정",
@@ -603,6 +635,21 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         return pack
 
     pack["tables"].extend([
+        _table(
+            "dcf_model_readiness",
+            "DCF 모델 준비도",
+            [
+                ("field", "검토 항목"), ("status", "준비도"),
+                ("year", "사업연도"), ("fs_div", "재무제표"),
+                ("basis", "확인 기준"),
+            ], [{
+                "field": "enterprise_value",
+                "status": "calculated",
+                "year": result.get("base_year"),
+                "fs_div": result.get("fs_div"),
+                "basis": "calculated_dcf_model",
+            }],
+        ),
         _table(
             "dcf_actuals",
             "요청 기준연도 공시 실제값",
@@ -870,7 +917,7 @@ def _build_kam_lifecycle_pack(result: dict[str, Any]) -> dict[str, Any]:
     rows = public_kam_lifecycle_events(result.get("events"))
     if rows:
         pack["tables"].append(_table(
-            "kam_lifecycle",
+            "kam_timeline",
             "KAM 생애주기",
             [
                 ("year", "연도"),
@@ -886,7 +933,7 @@ def _build_kam_lifecycle_pack(result: dict[str, Any]) -> dict[str, Any]:
             "kam_lifecycle_chart",
             "bar",
             "KAM 생애주기",
-            data_ref="kam_lifecycle",
+                data_ref="kam_timeline",
             encodings={
                 "x": {"field": "year"},
                 "y": {"field": "status"},

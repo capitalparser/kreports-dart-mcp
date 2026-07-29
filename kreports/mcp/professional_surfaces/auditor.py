@@ -208,7 +208,7 @@ def _acceptance_pack(result: dict[str, Any]) -> dict[str, Any]:
     pack = _base_pack(f"{_subject_label(result)} 감사 검토 근거", result)
     rows = _acceptance_rows(result)
     pack["tables"].append(_table(
-        "audit_acceptance_evidence",
+        "acceptance_requirements",
         "수임·유지 검토 영역",
         [
             ("review_area", "검토영역"), ("status", "상태"),
@@ -330,7 +330,7 @@ def _audit_report_sections_pack(result: dict[str, Any]) -> dict[str, Any]:
     kam_rows = _kam_rows(result.get("sections"))
     if kam_rows:
         pack["tables"].append(_table(
-            "audit_report_kam_items", "KAM 의미 근거",
+            "audit_report_sections", "KAM 의미 근거",
             [("year", "연도"), ("topic", "KAM 주제"), ("lifecycle", "반복/신규"),
              ("reason_available", "선정 이유 확보"), ("procedure_available", "감사절차 확보"),
              ("rcept_no", "접수번호")],
@@ -355,7 +355,7 @@ def _peer_kam_pack(result: dict[str, Any]) -> dict[str, Any]:
     quality = result.get("audit_report_sections") if isinstance(result.get("audit_report_sections"), dict) else {}
     if rows:
         pack["tables"].append(_table(
-            "peer_kam_subject_items", "대상회사 KAM 의미 근거",
+            "peer_kam_topics", "대상회사 KAM 의미 근거",
             [("year", "연도"), ("topic", "KAM 주제"), ("lifecycle", "반복/신규"),
              ("reason_available", "선정 이유 확보"), ("procedure_available", "감사절차 확보"),
              ("rcept_no", "접수번호")],
@@ -370,7 +370,11 @@ def _peer_kam_pack(result: dict[str, Any]) -> dict[str, Any]:
     return pack
 
 
-def _matter_pack(result: dict[str, Any]) -> dict[str, Any]:
+def _matter_pack(
+    result: dict[str, Any],
+    *,
+    table_id: str = "audit_report_matters",
+) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
 
     pack = _base_pack(f"{_subject_label(result)} 감사보고서 사항", result)
@@ -398,10 +402,14 @@ def _matter_pack(result: dict[str, Any]) -> dict[str, Any]:
             })
     if rows:
         pack["tables"].append(_table(
-            "audit_report_matters", "감사보고서 사항 분류",
+            table_id, "감사보고서 사항 분류",
             [("category", "분류"), ("signal", "수임 검토 신호"), ("rcept_no", "접수번호")], rows,
         ))
     return pack
+
+
+def _peer_matter_pack(result: dict[str, Any]) -> dict[str, Any]:
+    return _matter_pack(result, table_id="peer_audit_report_matters")
 
 
 def _history_detail(result: dict[str, Any]) -> str:
@@ -452,7 +460,7 @@ PACK_BUILDERS: dict[str, PackBuilder] = {
     "build_audit_acceptance_pack": _acceptance_pack,
     "get_audit_report_sections": _audit_report_sections_pack,
     "search_audit_report_matters": _matter_pack,
-    "compare_peer_audit_report_matters": _matter_pack,
+    "compare_peer_audit_report_matters": _peer_matter_pack,
     "compare_peer_kam_topics": _peer_kam_pack,
 }
 DETAIL_RENDERERS: dict[str, DetailRenderer] = {

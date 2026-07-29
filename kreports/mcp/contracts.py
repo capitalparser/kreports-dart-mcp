@@ -125,6 +125,18 @@ class DataQualityV1(BaseModel):
     section_statuses: dict[str, SectionStatusV1] = Field(default_factory=dict)
 
 
+class ReleaseContextV1(BaseModel):
+    """Bounded release readiness, deliberately separate from question quality."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    release_ready: bool
+    manifest_available: bool
+    required_failures: list[str] = Field(default_factory=list, max_length=10)
+    degraded_features: list[str] = Field(default_factory=list, max_length=10)
+    snapshot_version: str | None = None
+
+
 class EvidenceRefV1(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -156,6 +168,13 @@ class AnswerEnvelopeV1(BaseModel):
     analysis: list[AnalysisItemV1]
     evidence: list[EvidenceRefV1]
     data_quality: DataQualityV1
+    release_context: ReleaseContextV1 = Field(default_factory=lambda: ReleaseContextV1(
+        release_ready=False,
+        manifest_available=False,
+        required_failures=["release_context_unavailable"],
+        degraded_features=[],
+        snapshot_version=None,
+    ))
     warnings: list[str]
     next_checks: list[str]
     answer_pack: dict[str, Any] | None = None
@@ -537,6 +556,13 @@ def _has_tool_purpose_result(tool_name: str, result: dict[str, Any]) -> bool:
 
 def _canonicalize_dcf_model_result(result: dict[str, Any]) -> dict[str, Any]:
     """Make enterprise-value availability authoritative over stale presentation."""
+    if "enterprise_value" not in result and "error" in result:
+        # Input-validation errors have no DCF payload to quarantine and must
+        # remain ordinary public validation errors.  A declared unavailable
+        # source, however, may carry stale model fields and is fail-closed.
+        if result.get("error_code") == "dcf_source_unavailable":
+            return _quarantine_unavailable_dcf_result(result)
+        return dict(result)
     if result.get("enterprise_value") is None:
         return _quarantine_unavailable_dcf_result(result)
     return dict(result)
@@ -791,6 +817,7 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
         )
     if (
         tool_name == _DCF_MODEL_TOOL
+        and "enterprise_value" in result
         and result.get("enterprise_value") is None
     ):
         raw_quality = result.get("data_quality")
@@ -1036,6 +1063,21 @@ def _evidence(result: dict[str, Any]) -> list[EvidenceRefV1]:
     return refs
 
 
+def _release_context(result: dict[str, Any]) -> ReleaseContextV1:
+    meta = result.get("_meta")
+    candidate = meta.get("release_context") if isinstance(meta, dict) else None
+    try:
+        return ReleaseContextV1.model_validate(candidate)
+    except Exception:
+        return ReleaseContextV1(
+            release_ready=False,
+            manifest_available=False,
+            required_failures=["release_context_unavailable"],
+            degraded_features=[],
+            snapshot_version=None,
+        )
+
+
 def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvelopeV1:
     """Adapt an existing MCP result without obscuring quality or error states."""
     if not isinstance(result, dict):
@@ -1049,9 +1091,13 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
     )
     dcf_unavailable = (
         tool_name == _DCF_MODEL_TOOL
+        and "enterprise_value" in normalized
         and normalized.get("enterprise_value") is None
     )
-    quarantined_error = peer_error or dcf_unavailable
+    # Unavailable DCF results are already canonicalized into a bounded,
+    # remediation-only payload.  Keep their public limitation visible rather
+    # than treating them as an opaque peer-comparison implementation error.
+    quarantined_error = peer_error
     warnings = list(quality.limitations)
     if quality.status == "missing" and not warnings:
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
@@ -1061,7 +1107,10 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         domain_verdict=normalized["domain_verdict"],
         answer=(
             "" if quarantined_error
-            else str(normalized.get("answer") or "")
+            else str(
+                normalized.get("answer")
+                or (_DCF_ERROR_LIMITATION if dcf_unavailable else "")
+            )
         ),
         confirmed_facts=(
             [] if quarantined_error
@@ -1073,6 +1122,7 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         analysis=[] if quarantined_error else _analysis(normalized),
         evidence=[] if quarantined_error else _evidence(normalized),
         data_quality=quality,
+        release_context=_release_context(normalized),
         warnings=warnings,
         next_checks=(
             [] if quarantined_error

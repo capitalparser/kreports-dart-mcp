@@ -25,6 +25,7 @@ from kreports.mcp.contracts import (
     build_answer_envelope,
     enrich_answer_response,
 )
+from kreports.mcp.resources import release_context
 
 _MAX_TOOL_NAME_LENGTH = 120
 
@@ -122,6 +123,7 @@ def _attach_meta(name: str, result: Any) -> Any:
                 "MCP 응답은 로컬 kreports.db에 수집된 DART/OpenDART 기반 캐시입니다.",
                 "중요 판단 전 data_freshness와 원 공시 접수번호를 확인하세요.",
             ],
+            "release_context": release_context(),
         }
     )
     corp_code = _extract_result_corp_code(enriched)
@@ -192,7 +194,10 @@ def _bounded_validation_message(exc: ValidationError) -> str:
 
 def _error_envelope(name: str, message: str) -> AnswerEnvelopeV1:
     bounded = str(message).replace("\n", " ")[:500]
-    return build_answer_envelope(name, {"error": bounded, "answer": bounded})
+    envelope = build_answer_envelope(name, {"error": bounded, "answer": bounded})
+    # Input validation messages are generated from the public schema, unlike
+    # handler errors that the peer/DCF quarantine must suppress.
+    return envelope.model_copy(update={"answer": bounded})
 
 
 def _safe_exception_message(

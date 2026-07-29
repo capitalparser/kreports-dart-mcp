@@ -394,7 +394,7 @@ def test_kam_section_answer_pack_keeps_semantic_coverage_table(temp_engine):
 
     assert out["quality_status"] == "limited"
     assert {table["id"] for table in out["answer_pack"]["tables"]} >= {
-        "audit_report_kam_items",
+        "audit_report_sections",
         "audit_report_kam_coverage",
     }
 

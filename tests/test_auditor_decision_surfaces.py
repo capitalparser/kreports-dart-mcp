@@ -882,6 +882,9 @@ def test_public_handler_accepts_real_sample_peers_shape_and_keeps_detail_tables(
     )
     monkeypatch.setattr(auditor, "build_audit_acceptance_pack", lambda **_: result)
     monkeypatch.setattr(auditor, "resolve_company", lambda company: company)
+    monkeypatch.setattr(auditor, "prepare_standard_audit_hours_inputs", lambda *_args, **_kwargs: {
+        "rows": _effort_rows(), "data_quality": {"status": "usable"},
+    })
 
     out = json.loads(call_tool(
         "build_audit_acceptance_pack",
@@ -891,11 +894,45 @@ def test_public_handler_accepts_real_sample_peers_shape_and_keeps_detail_tables(
     assert out["data_quality"]["section_statuses"]["peer_group"]["status"] == "usable"
     assert out["answer_pack"]["summary"]["status"] == "usable"
     assert {table["id"] for table in out["answer_pack"]["tables"]} >= {
-        "audit_acceptance_evidence",
+        "acceptance_requirements",
         "audit_acceptance_peer_group",
         "audit_acceptance_risk_metrics",
     }
     assert out["answer"].count("| Peer 그룹 |") == 1
+
+
+def test_public_acceptance_handler_calls_three_year_effort_helper_once(monkeypatch):
+    from kreports.mcp.handlers import auditor
+    from kreports.mcp.input_models import BuildAuditAcceptancePackInput
+
+    prepared = {
+        "requested_years": [2025, 2024, 2023],
+        "rows": _effort_rows(),
+        "data_quality": {"status": "limited"},
+    }
+    calls: list[tuple[str, int, str]] = []
+    received: dict = {}
+
+    def prepare(company: str, *, year: int, fs_strategy: str) -> dict:
+        calls.append((company, year, fs_strategy))
+        return prepared
+
+    def build(**kwargs) -> dict:
+        received.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(auditor, "resolve_company", lambda company: company)
+    monkeypatch.setattr(auditor, "prepare_standard_audit_hours_inputs", prepare)
+    monkeypatch.setattr(auditor, "build_audit_acceptance_pack", build)
+
+    out = auditor.handle_build_audit_acceptance_pack(
+        BuildAuditAcceptancePackInput(company="005930", year=2025, fs_strategy="CFS"),
+    )
+
+    assert out == {"ok": True}
+    assert calls == [("005930", 2025, "CFS")]
+    assert received["audit_effort_rows"] == prepared["rows"]
+    assert received["audit_effort_section"].status == "limited"
 
 
 def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):

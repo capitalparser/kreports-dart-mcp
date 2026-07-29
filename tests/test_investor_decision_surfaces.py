@@ -272,7 +272,7 @@ def test_public_peer_handler_binds_digest_to_full_selected_cohort_and_fs_basis(t
     envelope = build_answer_envelope("compare_to_industry_multi", enriched)
     pack = enriched["answer_pack"]
     resource = read_resource(pack["resource_uri"])
-    matrix = next(table for table in pack["tables"] if table["id"] == "peer_metric_matrix")
+    matrix = next(table for table in pack["tables"] if table["id"] == "industry_metrics")
     assert {row["year"]: row["source"] for row in matrix["rows"]} == {
         2023: "20240101000001",
         2024: "20250101000002",
@@ -341,7 +341,7 @@ def test_public_peer_handler_withholds_digest_when_full_cohort_identity_is_not_r
     envelope = build_answer_envelope("compare_to_industry_multi", enriched)
     pack = enriched["answer_pack"]
     resource = read_resource(pack["resource_uri"])
-    matrix = next(table for table in pack["tables"] if table["id"] == "peer_metric_matrix")
+    matrix = next(table for table in pack["tables"] if table["id"] == "industry_metrics")
     matrix_row = matrix["rows"][0]
     assert matrix["title"] == "비교군 지표 비교"
     labels = {column["field"]: column["label"] for column in matrix["columns"]}

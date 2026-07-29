@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from kreports.analysis.evidence import evidence_reference_fields
 from kreports.mcp.auditor_public import public_kam_lifecycle_events
+from kreports.mcp.contracts import ReleaseContextV1
 
 
 PACK_VERSION = "visualization_pack.v1"
@@ -61,6 +62,7 @@ _DCF_MISSING_FIELDS = {
 _DCF_REMEDIATION_SCHEMAS = {
     "dcf_assumptions": ("key", "value", "unit", "basis"),
     "dcf_missing_accounts": ("field", "year", "fs_div", "basis"),
+    "dcf_model_readiness": ("field", "status", "year", "fs_div", "basis"),
 }
 
 
@@ -425,6 +427,7 @@ class VisualizationPackV1(BaseModel):
     timelines: list[TimelineSpecV1] = Field(default_factory=list, max_length=8)
     sources: list[SourceSpecV1] = Field(default_factory=list, max_length=32)
     data_quality: VisualDataQualityV1 | None = None
+    release_context: ReleaseContextV1 | None = None
     status: Literal["usable", "limited", "missing", "error"]
     limitations: list[str] = Field(default_factory=list, max_length=64)
     warnings: list[str] = Field(default_factory=list, max_length=64)
@@ -656,6 +659,17 @@ class VisualizationPackV1(BaseModel):
                         ):
                             raise ValueError(
                                 "missing DCF assumption is not bounded"
+                            )
+                    elif table.id == "dcf_model_readiness":
+                        if (
+                            row["field"] not in _DCF_MISSING_FIELDS
+                            or row["status"] != "blocked"
+                            or row["year"] != self.request_context.base_year
+                            or row["fs_div"] != self.request_context.fs_div
+                            or row["basis"] != "requested_dcf_source_actual"
+                        ):
+                            raise ValueError(
+                                "missing DCF readiness row does not match request context"
                             )
                     elif (
                         row["field"] not in _DCF_MISSING_FIELDS
@@ -1250,6 +1264,11 @@ def _from_legacy_pack(raw: dict[str, Any]) -> VisualizationPackV1:
         "timelines": timelines,
         "sources": sources,
         "data_quality": safe_quality,
+        **(
+            {"release_context": raw.get("release_context")}
+            if isinstance(raw.get("release_context"), dict)
+            else {}
+        ),
         "status": status,
         "limitations": list(dict.fromkeys(limitations)),
         "warnings": list(dict.fromkeys(warnings)),
@@ -1686,6 +1705,22 @@ def render_visualization_markdown(
             "데이터 출처: "
             f"{_markdown_cell(_public_source_label(validated.data_quality.source))}"
         )
+    if validated.release_context is not None:
+        lines.extend([
+            "배포 준비 상태:",
+            f"- release_ready: {validated.release_context.release_ready}",
+            f"- manifest_available: {validated.release_context.manifest_available}",
+            f"- snapshot_version: {validated.release_context.snapshot_version or '-'}",
+            *[
+                f"- required_failure: {_markdown_cell(value)}"
+                for value in validated.release_context.required_failures
+            ],
+            *[
+                f"- degraded_feature: {_markdown_cell(value)}"
+                for value in validated.release_context.degraded_features
+            ],
+            "",
+        ])
     lines.append("")
     for table in validated.tables:
         lines.extend([f"### {_markdown_cell(table.title)}", ""])
@@ -1760,6 +1795,21 @@ def render_visualization_html(pack: VisualizationPackV1) -> str:
             "<p>데이터 출처: "
             f"{html.escape(_public_source_label(validated.data_quality.source))}</p>"
         )
+    if validated.release_context is not None:
+        context = validated.release_context
+        pieces.append("<section class=\"note\"><h2>배포 준비 상태</h2><ul>")
+        pieces.append(f"<li>release_ready: {html.escape(str(context.release_ready))}</li>")
+        pieces.append(f"<li>manifest_available: {html.escape(str(context.manifest_available))}</li>")
+        pieces.append(f"<li>snapshot_version: {html.escape(context.snapshot_version or '-')}</li>")
+        pieces.extend(
+            f"<li>required_failure: {html.escape(value)}</li>"
+            for value in context.required_failures
+        )
+        pieces.extend(
+            f"<li>degraded_feature: {html.escape(value)}</li>"
+            for value in context.degraded_features
+        )
+        pieces.append("</ul></section>")
     for table in validated.tables:
         pieces.append(f"<section><h2>{html.escape(table.title)}</h2><table><thead><tr>")
         for column in table.columns:
