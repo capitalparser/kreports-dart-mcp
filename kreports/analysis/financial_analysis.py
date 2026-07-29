@@ -357,6 +357,7 @@ def _financial_snapshot_from_compact(
 
     grouped: dict[int, dict[str, float | None]] = {}
     persisted_citations: dict[int, set[tuple[object, object, object]]] = {}
+    metric_provenance: dict[int, dict[str, dict[str, object]]] = {}
     provenance_limitations_by_year: dict[int, set[str]] = {}
     displayed_metric_keys = {
         *_COMPACT_FINANCIAL_FIELD_MAP,
@@ -370,6 +371,13 @@ def _financial_snapshot_from_compact(
         grouped.setdefault(year, {})
         grouped[year][metric] = (float(amount) / 1e8) if amount is not None else None
         if has_persisted_provenance:
+            metric_provenance.setdefault(year, {})[metric] = {
+                "unit": row.get("unit"),
+                "quality_status": row.get("quality_status"),
+                "citation_rcept_no": row.get("citation_rcept_no"),
+                "citation_report_nm": row.get("citation_report_nm"),
+                "citation_basis": row.get("citation_basis"),
+            }
             persisted_citations.setdefault(year, set()).add((
                 row.get("citation_rcept_no"),
                 row.get("citation_report_nm"),
@@ -390,7 +398,30 @@ def _financial_snapshot_from_compact(
                         else f"quality_unproven:{metric}"
                     )
 
+    def proven_metric_source(year: int, metric: str) -> dict | None:
+        provenance = metric_provenance.get(year, {}).get(metric)
+        if (
+            not provenance
+            or provenance.get("unit") != "KRW"
+            or provenance.get("quality_status") != "usable"
+            or not provenance.get("citation_rcept_no")
+            or provenance.get("citation_basis")
+            != "company_year_annual_filing_match"
+        ):
+            return None
+        return {
+            "corp_code": corp_code,
+            "corp_name": corp_name,
+            "report_nm": provenance.get("citation_report_nm"),
+            "bsns_year": year,
+            "rcept_no": provenance["citation_rcept_no"],
+            "section_title": "재무제표",
+            "source_table": "financial_facts_compact",
+            "citation_basis": provenance["citation_basis"],
+        }
+
     out_rows: list[dict] = []
+    previous_year: int | None = None
     previous_revenue: float | None = None
     for year in sorted(grouped):
         metrics = grouped[year]
@@ -408,10 +439,30 @@ def _financial_snapshot_from_compact(
         item["부채비율"] = _pct(item.get("부채총계"), item.get("자본총계"))
         item["ROE"] = _pct(item.get("순이익"), item.get("자본총계"))
         item["ROA"] = _pct(item.get("순이익"), item.get("자산총계"))
-        item["매출성장률"] = _pct(
-            (item.get("매출액") - previous_revenue) if previous_revenue not in (None, 0) and item.get("매출액") is not None else None,
-            previous_revenue,
-        )
+        current_revenue = item.get("매출액")
+        if (
+            previous_year is not None
+            and previous_revenue not in (None, 0)
+            and current_revenue is not None
+        ):
+            prior_source = proven_metric_source(previous_year, "revenue")
+            current_source = proven_metric_source(year, "revenue")
+            if prior_source and current_source:
+                item["매출성장률"] = _pct(
+                    current_revenue - previous_revenue,
+                    previous_revenue,
+                )
+                item["derived_sources"] = {
+                    "매출성장률": [prior_source, current_source],
+                }
+            else:
+                item["매출성장률"] = None
+                provenance_limitations_by_year.setdefault(year, set()).add(
+                    f"derived_input_unproven:revenue_growth:{previous_year}"
+                )
+        else:
+            item["매출성장률"] = None
+        previous_year = year
         previous_revenue = item.get("매출액")
         item["FCF"] = (
             item["영업CF"] - item["CapEx"]
@@ -462,6 +513,8 @@ def _financial_snapshot_from_compact(
     for serialized, source_row in zip(serialized_rows, out_rows):
         if source_row.get("source"):
             serialized["source"] = source_row["source"]
+        if source_row.get("derived_sources"):
+            serialized["derived_sources"] = source_row["derived_sources"]
     result = {
         "corp_code": corp_code,
         "fs_div": fs_div_used,
@@ -483,7 +536,17 @@ def _financial_snapshot_from_compact(
         },
     }
     if not has_persisted_provenance:
-        return _attach_annual_sources(result, source_table="financial_facts_compact")
+        result = _attach_annual_sources(
+            result,
+            source_table="financial_facts_compact",
+        )
+        if provenance_limitations:
+            result["data_quality"] = {
+                **result["data_quality"],
+                "status": "limited",
+                "limitations": sorted(provenance_limitations),
+            }
+        return result
     citation_limited = any(
         not row["source"].get("rcept_no") for row in serialized_rows
     )

@@ -343,3 +343,110 @@ def test_compact_snapshot_limits_provenance_to_returned_years_across_surfaces(
         "unit_unproven:assets",
         "quality_limited:assets",
     }.issubset(set(two_years["data_quality"]["limitations"]))
+
+
+def test_hidden_unproven_prior_revenue_suppresses_growth_across_surfaces(
+    temp_engine,
+):
+    """Revenue growth must fail closed when its hidden prior-year input is unproven."""
+    from sqlalchemy import text
+
+    from kreports.analysis.financial_analysis import (
+        _financial_snapshot_from_compact,
+        get_financial_snapshot,
+    )
+    from kreports.db.engine import get_session
+    from kreports.mcp.handlers.company import handle_get_financial_snapshot
+    from kreports.mcp.input_models import GetFinancialSnapshotInput
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+            ('00126380', 2023, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', NULL, 'duration', NULL, NULL,
+             'uncitable', 'limited', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 150000000,
+             'financial_facts', 'KRW', 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    results = (
+        _financial_snapshot_from_compact("00126380", "CFS", 1),
+        get_financial_snapshot("00126380", years=1),
+        handle_get_financial_snapshot(
+            GetFinancialSnapshotInput(company="00126380", years=1)
+        ),
+    )
+
+    for result in results:
+        row = result["rows"][0]
+        assert row["연도"] == 2024
+        assert row["매출성장률"] is None
+        assert result["unit"] == "억원"
+        assert result["data_quality"]["status"] == "limited"
+        assert (
+            "derived_input_unproven:revenue_growth:2023"
+            in result["data_quality"]["limitations"]
+        )
+        assert row["source"]["rcept_no"] == "20250318000001"
+
+
+def test_hidden_proven_prior_revenue_keeps_growth_and_exact_sources_across_surfaces(
+    temp_engine,
+):
+    """Revenue growth may use a hidden prior year only with both proven sources."""
+    from sqlalchemy import text
+
+    from kreports.analysis.financial_analysis import (
+        _financial_snapshot_from_compact,
+        get_financial_snapshot,
+    )
+    from kreports.db.engine import get_session
+    from kreports.mcp.handlers.company import handle_get_financial_snapshot
+    from kreports.mcp.input_models import GetFinancialSnapshotInput
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+            ('00126380', 2023, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', 'KRW', 'duration', '20240318000001',
+             '사업보고서 (2023.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 150000000,
+             'financial_facts', 'KRW', 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    results = (
+        _financial_snapshot_from_compact("00126380", "CFS", 1),
+        get_financial_snapshot("00126380", years=1),
+        handle_get_financial_snapshot(
+            GetFinancialSnapshotInput(company="00126380", years=1)
+        ),
+    )
+
+    for result in results:
+        row = result["rows"][0]
+        assert row["연도"] == 2024
+        assert row["매출성장률"] == 50.0
+        assert result["unit"] == "억원"
+        assert result["data_quality"]["status"] == "usable"
+        assert "limitations" not in result["data_quality"]
+        assert [
+            source["rcept_no"]
+            for source in row["derived_sources"]["매출성장률"]
+        ] == ["20240318000001", "20250318000001"]
