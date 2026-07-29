@@ -1026,7 +1026,7 @@ def test_peer_kam_wrapper_reloads_full_population_and_fails_on_incomplete_eleven
         "peer_section_samples": {},
         "subject_business_report_kam_summary": [],
         "audit_report_sections": {"subject_section_count": 11},
-        "data_quality": {"status": "usable"},
+        "data_quality": {"status": "usable", "subject_kam_body_count": 11},
     }
     full = [*complete, {
         "rcept_no": "20250101000002",
@@ -1056,5 +1056,104 @@ def test_peer_kam_wrapper_reloads_full_population_and_fails_on_incomplete_eleven
     result = auditor_decisions.compare_peer_kam_topics("001")
 
     assert len(result["subject_sections"]) == 11
+    assert result["audit_report_sections"]["semantic_complete"] is False
+    assert result["data_quality"]["status"] == "limited"
+
+
+def test_peer_kam_uses_kam_count_not_total_audit_section_count(monkeypatch):
+    from kreports.analysis import auditor_decisions
+
+    row = {
+        "rcept_no": "20250101000001",
+        "section_key": "kam",
+        "complete": True,
+    }
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_kam_topics",
+        lambda **_: {
+            "subject": {"corp_code": "001"},
+            "subject_sections": [row],
+            "peer_section_samples": {},
+            "audit_report_sections": {"subject_section_count": 11},
+            "data_quality": {
+                "status": "usable",
+                "subject_kam_body_count": 1,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_get_audit_report_sections",
+        lambda *_args, **_kwargs: {"sections": [row]},
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "attach_kam_item_semantics",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "kam_semantic_coverage",
+        lambda rows: {
+            "semantic_complete": len(rows) == 1 and rows[0]["complete"],
+            "topic_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "reason_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "procedure_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "source_coverage": {"available": 1, "total": 1, "status": "usable"},
+        },
+    )
+
+    result = auditor_decisions.compare_peer_kam_topics("001")
+
+    assert result["audit_report_sections"]["semantic_complete"] is True
+    assert result["data_quality"]["status"] == "usable"
+
+
+@pytest.mark.parametrize("kam_count", [None, 0])
+def test_peer_kam_missing_or_contradictory_specific_count_fails_closed(
+    monkeypatch,
+    kam_count,
+):
+    from kreports.analysis import auditor_decisions
+
+    quality = {"status": "usable"}
+    if kam_count is not None:
+        quality["subject_kam_body_count"] = kam_count
+    row = {
+        "rcept_no": "20250101000001",
+        "section_key": "kam",
+        "complete": True,
+    }
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_kam_topics",
+        lambda **_: {
+            "subject": {"corp_code": "001"},
+            "subject_sections": [row],
+            "peer_section_samples": {},
+            "audit_report_sections": {"subject_section_count": 1},
+            "data_quality": quality,
+        },
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "attach_kam_item_semantics",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "kam_semantic_coverage",
+        lambda _rows: {
+            "semantic_complete": True,
+            "topic_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "reason_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "procedure_coverage": {"available": 1, "total": 1, "status": "usable"},
+            "source_coverage": {"available": 1, "total": 1, "status": "usable"},
+        },
+    )
+
+    result = auditor_decisions.compare_peer_kam_topics("001")
+
     assert result["audit_report_sections"]["semantic_complete"] is False
     assert result["data_quality"]["status"] == "limited"

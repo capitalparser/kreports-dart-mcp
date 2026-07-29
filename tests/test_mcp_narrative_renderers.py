@@ -246,16 +246,20 @@ def test_direct_auditor_handlers_sanitize_uppercase_without_mutating_inputs(
         "subject_sections": [{
             "rcept_no": "20250101000001_001_xml",
             "topic_hints": ["SUSTAINABILITY"],
+            "kam_analysis": {"topics": ["SUSTAINABILITY"]},
             "kam_items": [{"topic": "SUSTAINABILITY", "lifecycle": "PENDING"}],
         }],
+        "topics": ["Board discussion"],
         "data_quality": {"status": "limited"},
     }
     section_payload = {
         "sections": [{
             "rcept_no": "20250101000001_001_xml",
             "topic_hints": ["SUSTAINABILITY"],
+            "kam_analysis": {"topics": ["SUSTAINABILITY"]},
             "kam_items": [{"topic": "SUSTAINABILITY", "lifecycle": "PENDING"}],
         }],
+        "topics": ["Board discussion"],
         "data_quality": {"status": "limited"},
     }
     originals = (deepcopy(peer_payload), deepcopy(section_payload))
@@ -275,6 +279,18 @@ def test_direct_auditor_handlers_sanitize_uppercase_without_mutating_inputs(
     assert peer["subject_sections"][0]["rcept_no"] == "20250101000001"
     assert sections["sections"][0]["rcept_no"] == "20250101000001"
     assert enriched["subject_sections"][0]["rcept_no"] == "20250101000001"
+    assert peer["subject_sections"][0]["kam_analysis"]["topics"] == [
+        "기타 핵심감사사항",
+    ]
+    assert sections["sections"][0]["kam_analysis"]["topics"] == [
+        "기타 핵심감사사항",
+    ]
+    assert enriched["subject_sections"][0]["kam_analysis"]["topics"] == [
+        "기타 핵심감사사항",
+    ]
+    assert peer["topics"] == sections["topics"] == enriched["topics"] == [
+        "Board discussion",
+    ]
     for payload in (peer, sections, enriched):
         public_text = str(payload)
         assert "SUSTAINABILITY" not in public_text

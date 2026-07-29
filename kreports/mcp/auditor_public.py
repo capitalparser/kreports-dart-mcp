@@ -96,11 +96,21 @@ def public_auditor_result(result: object) -> object:
     """Copy and sanitize auditor enum/receipt fields at the public boundary."""
     public = deepcopy(result)
 
-    def transform(value: object, key: str | None = None) -> object:
+    def transform(
+        value: object,
+        key: str | None = None,
+        *,
+        in_kam_analysis: bool = False,
+    ) -> object:
         if isinstance(value, list):
-            if key == "topic_hints":
+            if key == "topic_hints" or (
+                in_kam_analysis and key == "topics"
+            ):
                 return [public_kam_topic_label(item) for item in value]
-            return [transform(item) for item in value]
+            return [
+                transform(item, in_kam_analysis=in_kam_analysis)
+                for item in value
+            ]
         if not isinstance(value, dict):
             if key in {"topic", "kam_topic"}:
                 return public_kam_topic_label(value)
@@ -117,7 +127,13 @@ def public_auditor_result(result: object) -> object:
             if field == "rcept_no":
                 transformed[field] = parent_rcept_no(str(item or ""))
             else:
-                transformed[field] = transform(item, field)
+                transformed[field] = transform(
+                    item,
+                    field,
+                    in_kam_analysis=(
+                        in_kam_analysis or field == "kam_analysis"
+                    ),
+                )
         return transformed
 
     return transform(public)

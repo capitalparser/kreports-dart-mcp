@@ -332,7 +332,16 @@ def compare_peer_kam_topics(
         if isinstance(result.get("audit_report_sections"), dict)
         else {}
     )
-    material_count = int(section_summary.get("subject_section_count") or 0)
+    quality = dict(result.get("data_quality") or {})
+    raw_material_count = quality.get("subject_kam_body_count")
+    material_count_available = (
+        isinstance(raw_material_count, int)
+        and not isinstance(raw_material_count, bool)
+        and raw_material_count >= 0
+    )
+    material_count = (
+        raw_material_count if material_count_available else len(subject_sections)
+    )
     corp_code = str(subject.get("corp_code") or "")
     if material_count > len(subject_sections) and corp_code:
         reloaded = _get_audit_report_sections(
@@ -368,7 +377,10 @@ def compare_peer_kam_topics(
         if isinstance(row, dict):
             _canonical_receipt(row)
     semantic = kam_semantic_coverage(subject_sections)
-    population_proved = material_count <= len(subject_sections)
+    population_proved = (
+        material_count_available
+        and material_count == len(subject_sections)
+    )
     if not population_proved:
         semantic["semantic_complete"] = False
         for coverage_key in (
@@ -381,7 +393,6 @@ def compare_peer_kam_topics(
             coverage["total"] = max(int(coverage.get("total") or 0), material_count)
             coverage["status"] = "limited"
             semantic[coverage_key] = coverage
-    quality = dict(result.get("data_quality") or {})
     timeline_status = str(quality.get("status") or "missing")
     quality.update({
         "timeline_status": timeline_status,
