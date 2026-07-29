@@ -27,6 +27,16 @@ def test_financial_facts_compact_schema(temp_engine):
         "citation_basis",
         "quality_status",
     }.issubset(columns)
+    unique_constraints = {
+        item["name"]: item
+        for item in inspector.get_unique_constraints("financial_facts_compact")
+    }
+    assert unique_constraints["uq_financial_facts_compact"]["column_names"] == [
+        "corp_code",
+        "bsns_year",
+        "fs_div",
+        "metric_key",
+    ]
 
 
 def test_rebuild_financial_facts_compact_maps_core_metrics(temp_engine):

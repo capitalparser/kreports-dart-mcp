@@ -394,6 +394,77 @@ def test_financial_compact_provenance_migration_is_additive(temp_engine):
     assert columns["quality_status"]["default"].strip("'") == "limited"
 
 
+def test_financial_compact_provenance_migration_upgrades_legacy_table(tmp_path):
+    from kreports.db.migrations import (
+        MIGRATIONS,
+        _checksum,
+        apply_schema_migrations,
+    )
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'legacy-compact.db'}")
+    with legacy.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE financial_facts_compact (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fs_div VARCHAR(3) NOT NULL,
+              metric_key VARCHAR(50) NOT NULL,
+              metric_name VARCHAR(200) NOT NULL,
+              amount BIGINT,
+              source_account_id VARCHAR(200),
+              source_account_nm VARCHAR(300),
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_financial_facts_compact
+                UNIQUE (corp_code, bsns_year, fs_div, metric_key)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision VARCHAR(40) PRIMARY KEY,
+              checksum VARCHAR(64) NOT NULL,
+              description VARCHAR(300) NOT NULL,
+              applied_at DATETIME NOT NULL
+            )
+        """))
+        for migration in MIGRATIONS[:9]:
+            conn.execute(
+                text("""
+                    INSERT INTO schema_migrations
+                    (revision, checksum, description, applied_at)
+                    VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)
+                """),
+                {
+                    "revision": migration.revision,
+                    "checksum": _checksum(migration),
+                    "description": migration.description,
+                },
+            )
+
+    with legacy.begin() as conn:
+        assert apply_schema_migrations(conn) == [MIGRATIONS[9].revision]
+
+    columns = {
+        item["name"]: item
+        for item in inspect(legacy).get_columns("financial_facts_compact")
+    }
+    assert {
+        "source_table", "unit", "period_type", "citation_rcept_no",
+        "citation_report_nm", "citation_basis", "quality_status",
+    }.issubset(columns)
+    assert columns["citation_basis"]["default"].strip("'") == "uncitable"
+    assert columns["quality_status"]["default"].strip("'") == "limited"
+    assert (
+        "corp_code",
+        "bsns_year",
+        "fs_div",
+        "metric_key",
+    ) in {
+        tuple(item["column_names"])
+        for item in inspect(legacy).get_unique_constraints("financial_facts_compact")
+    }
+
+
 def test_audit_fee_observation_current_slot_allows_one_current_claim(
     temp_engine,
 ):
