@@ -98,6 +98,95 @@ def test_source_slot_identity_rejects_unbounded_identity(changes):
         source_slot_hash(_observation(**changes))
 
 
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"corp_code": "1" * 9}, "corp_code"),
+        ({"source_class": "s" * 41}, "source_class"),
+        ({"source_rcept_no": "r" * 81}, "source_rcept_no"),
+        ({"source_period": "p" * 81}, "source_period"),
+        ({"corp_code": 126380}, "corp_code"),
+        ({"source_class": 123}, "source_class"),
+        ({"source_rcept_no": 20260310}, "source_rcept_no"),
+        ({"source_period": 2025}, "source_period"),
+    ],
+)
+def test_source_slot_identity_enforces_schema_aligned_strings(changes, message):
+    with pytest.raises(ValueError, match=message):
+        source_slot_hash(_observation(**changes))
+
+
+def test_source_slot_identity_rejects_oversized_serialized_payload():
+    observation = _observation(
+        corp_code="😀" * 8,
+        source_class="😀" * 40,
+        source_rcept_no="😀" * 80,
+        source_period="😀" * 80,
+    )
+
+    with pytest.raises(ValueError, match="source slot payload"):
+        source_slot_hash(observation)
+
+
+def test_raw_value_keys_reject_conversion_collisions_in_any_order():
+    left_first = _observation(raw_values={1: "left", "1": "right"})
+    right_first = _observation(raw_values={"1": "right", 1: "left"})
+
+    for observation in (left_first, right_first):
+        with pytest.raises(ValueError, match="raw value keys must be strings"):
+            canonical_observation_payload(observation)
+
+
+def test_store_accepts_exact_schema_boundaries(temp_engine):
+    observation = _observation(
+        corp_code="c" * 8,
+        source_class="s" * 40,
+        source_rcept_no="r" * 80,
+        source_period="p" * 80,
+    )
+
+    with Session(temp_engine) as session:
+        result = persist_audit_fee_observations(session, [observation])
+        session.commit()
+        record = session.query(AuditFeeObservationRecord).one()
+
+    assert result.inserted == 1
+    assert record.corp_code == "c" * 8
+    assert record.source_class == "s" * 40
+    assert record.source_rcept_no == "r" * 80
+    assert record.source_period == "p" * 80
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"corp_code": "1" * 9},
+        {"source_class": "s" * 41},
+        {"source_rcept_no": "r" * 81},
+        {"source_period": "p" * 81},
+        {"corp_code": 126380},
+        {"source_class": 123},
+        {"source_rcept_no": 20260310},
+        {"source_period": 2025},
+        {
+            "corp_code": "😀" * 8,
+            "source_class": "😀" * 40,
+            "source_rcept_no": "😀" * 80,
+            "source_period": "😀" * 80,
+        },
+        {"raw_values": {1: "left", "1": "right"}},
+    ],
+)
+def test_store_rejects_invalid_identity_before_sqlite_persistence(
+    temp_engine,
+    changes,
+):
+    with Session(temp_engine) as session:
+        with pytest.raises(ValueError):
+            persist_audit_fee_observations(session, [_observation(**changes)])
+        assert session.query(AuditFeeObservationRecord).count() == 0
+
+
 def test_immutable_store_keeps_correction_history_and_independent_slots(temp_engine):
     first_claim = _observation()
     correction_claim = replace(first_claim, actual_fee_m=1_200)

@@ -1,10 +1,10 @@
 """Immutable persistence and current-claim reads for audit-fee evidence."""
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from kreports.collector.audit_fee_sources import (
     observation_from_dict,
     observation_hash,
     source_slot_hash,
+    validate_audit_fee_observation,
 )
 from kreports.db.models import AuditFeeObservationRecord
 
@@ -72,6 +73,9 @@ def persist_audit_fee_observations(
     inserted = unchanged = superseded = 0
     claim_time = observed_at or datetime.now(timezone.utc)
     for observation in observations:
+        # Keep validation explicit at the SQLite boundary. SQLite does not
+        # enforce declared VARCHAR lengths.
+        validate_audit_fee_observation(observation)
         semantic_hash = observation_hash(observation)
         slot_hash = source_slot_hash(observation)
         if session.get(AuditFeeObservationRecord, semantic_hash) is not None:

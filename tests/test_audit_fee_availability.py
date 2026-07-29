@@ -169,7 +169,7 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
     upsert_audit_fee_observations(
         [
             AuditFeeObservation(
-                corp_code="corrected",
+                corp_code="corr0001",
                 bsns_year=2024,
                 source_class="opendart_ds002",
                 source_period="2024",
@@ -182,7 +182,7 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
     upsert_audit_fee_observations(
         [
             AuditFeeObservation(
-                corp_code="corrected",
+                corp_code="corr0001",
                 bsns_year=2024,
                 source_class="opendart_ds002",
                 source_period="2024",
@@ -193,7 +193,7 @@ def test_latest_same_source_observation_controls_eligibility(temp_engine):
         ]
     )
 
-    out = audit_fee_availability("corrected", 2024)
+    out = audit_fee_availability("corr0001", 2024)
 
     assert out["availability_status"] == "not_available_from_endpoint"
     assert out["source_eligibility"] == "not_eligible"
@@ -212,7 +212,7 @@ def test_sequential_same_identity_correction_controls_canonical_values_after_rel
     first_value,
     corrected_value,
 ):
-    corp_code = f"correction-{first_value}"
+    corp_code = f"c{first_value:07d}"
     for value in (first_value, corrected_value):
         upsert_audit_fee_observations(
             [

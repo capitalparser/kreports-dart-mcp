@@ -19,6 +19,13 @@ _MAX_LIMITATIONS = 20
 _MAX_LIMITATION_LENGTH = 300
 _MAX_SOURCE_MESSAGE_LENGTH = 500
 _MAX_CANONICAL_OBSERVATION_BYTES = 32 * 1024
+_MAX_SOURCE_SLOT_BYTES = 768
+_SOURCE_SLOT_STRING_LIMITS = {
+    "corp_code": 8,
+    "source_class": 40,
+    "source_rcept_no": 80,
+    "source_period": 80,
+}
 
 
 def ds002_source_supported(year: int) -> bool:
@@ -69,17 +76,56 @@ def _canonical_json(value: object) -> str:
     )
 
 
-def _validate_observation_identity(observation: AuditFeeObservation) -> None:
-    if not observation.corp_code.strip():
-        raise ValueError("audit fee observation corp_code must not be blank")
-    if not observation.source_class.strip():
-        raise ValueError("audit fee observation source_class must not be blank")
+def _validate_source_slot_string(
+    value: object,
+    *,
+    field_name: str,
+    required: bool,
+) -> None:
+    if value is None and not required:
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"audit fee observation {field_name} must be a string")
+    if required and not value.strip():
+        raise ValueError(f"audit fee observation {field_name} must not be blank")
+    if len(value) > _SOURCE_SLOT_STRING_LIMITS[field_name]:
+        raise ValueError(
+            f"audit fee observation {field_name} exceeds schema length"
+        )
+
+
+def validate_audit_fee_observation(observation: AuditFeeObservation) -> None:
+    """Validate the bounded semantic and storage contract before hashing."""
+    _validate_source_slot_string(
+        observation.corp_code,
+        field_name="corp_code",
+        required=True,
+    )
+    _validate_source_slot_string(
+        observation.source_class,
+        field_name="source_class",
+        required=True,
+    )
+    _validate_source_slot_string(
+        observation.source_rcept_no,
+        field_name="source_rcept_no",
+        required=False,
+    )
+    _validate_source_slot_string(
+        observation.source_period,
+        field_name="source_period",
+        required=False,
+    )
     if int(observation.bsns_year) <= 0:
         raise ValueError("audit fee observation bsns_year must be positive")
+    if not isinstance(observation.raw_values, dict):
+        raise ValueError("raw values must be an object")
     if len(observation.raw_values) > _MAX_RAW_VALUES:
         raise ValueError("raw values exceed maximum key count")
     for key, value in observation.raw_values.items():
-        if len(str(key)) > _MAX_RAW_VALUE_KEY_LENGTH:
+        if not isinstance(key, str):
+            raise ValueError("raw value keys must be strings")
+        if len(key) > _MAX_RAW_VALUE_KEY_LENGTH:
             raise ValueError("raw value key exceeds maximum length")
         if value is not None and len(str(value)) > _MAX_RAW_VALUE_LENGTH:
             raise ValueError("raw value exceeds maximum length")
@@ -98,12 +144,12 @@ def canonical_observation_payload(
     observation: AuditFeeObservation,
 ) -> dict[str, object]:
     """Return the bounded semantic identity payload for one source claim."""
-    _validate_observation_identity(observation)
+    validate_audit_fee_observation(observation)
     payload: dict[str, object] = observation.to_dict()
     payload["limitations"] = sorted({str(item) for item in observation.limitations})
     payload["raw_values"] = {
-        str(key): None if value is None else str(value)
-        for key, value in sorted(observation.raw_values.items(), key=lambda item: str(item[0]))
+        key: None if value is None else str(value)
+        for key, value in sorted(observation.raw_values.items())
     }
     return payload
 
@@ -118,7 +164,7 @@ def observation_hash(observation: AuditFeeObservation) -> str:
 
 def source_slot_hash(observation: AuditFeeObservation) -> str:
     """Hash the stable source slot independently from claim contents."""
-    _validate_observation_identity(observation)
+    validate_audit_fee_observation(observation)
     slot = {
         "corp_code": observation.corp_code.strip(),
         "bsns_year": int(observation.bsns_year),
@@ -126,7 +172,10 @@ def source_slot_hash(observation: AuditFeeObservation) -> str:
         "source_rcept_no": (observation.source_rcept_no or "").strip(),
         "source_period": (observation.source_period or "").strip(),
     }
-    return hashlib.sha256(_canonical_json(slot).encode("utf-8")).hexdigest()
+    encoded_slot = _canonical_json(slot).encode("utf-8")
+    if len(encoded_slot) > _MAX_SOURCE_SLOT_BYTES:
+        raise ValueError("audit fee observation source slot payload is oversized")
+    return hashlib.sha256(encoded_slot).hexdigest()
 
 
 @dataclass(frozen=True)

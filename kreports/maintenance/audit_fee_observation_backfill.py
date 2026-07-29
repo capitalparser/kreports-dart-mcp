@@ -18,7 +18,6 @@ from kreports.db.engine import get_session
 from kreports.db.models import AuditFee
 from kreports.runtime import require_collector_mode
 
-
 _MAX_LEGACY_OBSERVATIONS = 20
 _VERIFIED_VALUE_FIELDS = (
     "contract_fee_m",
