@@ -67,6 +67,33 @@ def get_session():
     return configured_session()
 
 
+@app.command("backfill-audit-fee-observations")
+def backfill_audit_fee_observations_cmd(
+    year_from: Optional[int] = typer.Option(None, "--year-from"),
+    year_to: Optional[int] = typer.Option(None, "--year-to"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Explicitly promote local audit-fee provenance JSON into claim history."""
+    init_db()
+    from kreports.maintenance.audit_fee_observation_backfill import (
+        backfill_audit_fee_observations,
+    )
+
+    result = backfill_audit_fee_observations(
+        year_from=year_from,
+        year_to=year_to,
+        dry_run=dry_run,
+    )
+    typer.echo(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
 @app.command("rehearse-kam-schema-backfill")
 def rehearse_kam_schema_backfill_cmd(
     source_db: Path = typer.Option(..., "--source-db"),

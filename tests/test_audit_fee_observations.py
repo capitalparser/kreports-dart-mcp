@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 import json
 
 import pytest
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from kreports.collector.audit_fee_sources import (
     AuditFeeObservation,
@@ -18,7 +19,10 @@ from kreports.db.audit_fee_observation_store import (
     load_current_audit_fee_observations,
     persist_audit_fee_observations,
 )
-from kreports.db.models import AuditFee, AuditFeeObservationRecord
+from kreports.db.models import AuditFee, AuditFeeObservationRecord, Base
+from kreports.maintenance.audit_fee_observation_backfill import (
+    backfill_audit_fee_observations,
+)
 
 
 def _observation(**changes):
@@ -187,3 +191,77 @@ def test_collector_promotes_legacy_claims_before_projecting_current_claims(
     assert row.non_audit_fee_m == 77
     assert len(json.loads(row.source_observations_json)) == 2
     assert {item.actual_fee_m for item in current} == {900, 1_000}
+
+
+@pytest.fixture
+def file_audit_fee_db(tmp_path, monkeypatch):
+    database = create_engine(f"sqlite:///{tmp_path / 'audit-fee-backfill.db'}")
+    Base.metadata.create_all(database)
+    import kreports.db.engine as engine_module
+
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setattr(engine_module, "engine", database)
+    monkeypatch.setattr(engine_module, "SessionLocal", sessionmaker(bind=database))
+    return database
+
+
+def test_explicit_backfill_is_dry_run_safe_and_idempotent(file_audit_fee_db):
+    first = _observation(actual_fee_m=800, actual_hours=1_800)
+    correction = replace(first, actual_fee_m=900, actual_hours=1_900)
+    with Session(file_audit_fee_db) as session:
+        session.add(
+            AuditFee(
+                corp_code=first.corp_code,
+                bsns_year=first.bsns_year,
+                audit_fee_m=900,
+                audit_hours=1_900,
+                actual_fee_m=900,
+                actual_hours=1_900,
+                source_observations_json=json.dumps(
+                    [first.to_dict(), correction.to_dict()]
+                ),
+                fetched_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+    dry_run = backfill_audit_fee_observations(dry_run=True)
+    with Session(file_audit_fee_db) as session:
+        normalized_count_after_dry_run = session.query(
+            AuditFeeObservationRecord
+        ).count()
+    write = backfill_audit_fee_observations()
+    rerun = backfill_audit_fee_observations()
+
+    assert dry_run["dry_run"] is True
+    assert normalized_count_after_dry_run == 0
+    assert write["processed_company_years"] == 1
+    assert write["inserted_observations"] == 2
+    assert rerun["inserted_observations"] == 0
+    assert rerun["semantic_changes"] == 0
+
+
+def test_explicit_backfill_leaves_malformed_company_year_unchanged(file_audit_fee_db):
+    with Session(file_audit_fee_db) as session:
+        session.add(
+            AuditFee(
+                corp_code="malformed",
+                bsns_year=2025,
+                audit_fee_m=700,
+                audit_hours=1_700,
+                source_observations_json='{"not": "a list"}',
+                fetched_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+    result = backfill_audit_fee_observations()
+
+    with Session(file_audit_fee_db) as session:
+        row = session.query(AuditFee).one()
+        normalized_count = session.query(AuditFeeObservationRecord).count()
+    assert result["malformed_company_years"] == 1
+    assert result["failed_company_years"] == 1
+    assert row.audit_fee_m == 700
+    assert row.source_observations_json == '{"not": "a list"}'
+    assert normalized_count == 0
