@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import tempfile
 from typing import Literal
 
 
@@ -140,7 +141,7 @@ def invoke_worker(
     marker_path: Path,
     capability: str,
     invocation: WorkerInvocation,
-    repository_root: Path | None = None,
+    repository_root: Path,
 ) -> dict[str, object]:
     """Invoke one fresh worker with an explicit database and minimal env."""
     if (
@@ -164,6 +165,23 @@ def invoke_worker(
             "rehearsal_capability_invalid",
             "Worker rehearsal capability must be a 32-byte hex value.",
         )
+    if not repository_root.is_absolute() or repository_root.is_symlink():
+        raise RehearsalRunError(
+            "repository_root_invalid",
+            "Worker repository root must be an absolute real directory.",
+        )
+    try:
+        approved_repository = repository_root.resolve(strict=True)
+    except OSError as exc:
+        raise RehearsalRunError(
+            "repository_root_invalid",
+            "Worker repository root must be an absolute real directory.",
+        ) from exc
+    if not approved_repository.is_dir():
+        raise RehearsalRunError(
+            "repository_root_invalid",
+            "Worker repository root must be an absolute real directory.",
+        )
     command = [
         str(python_executable),
         "-m",
@@ -174,11 +192,7 @@ def invoke_worker(
         command.extend(["--year", str(invocation.year)])
     environment = {
         "PATH": os.environ.get("PATH", ""),
-        "PYTHONPATH": (
-            str(repository_root)
-            if repository_root is not None
-            else os.environ.get("PYTHONPATH", "")
-        ),
+        "PYTHONPATH": str(approved_repository),
         "DB_URL": f"sqlite:///{database}",
         "KREPORTS_RUNTIME_MODE": invocation.runtime_mode,
         "KREPORTS_REHEARSAL_MARKER": str(marker_path),
@@ -188,21 +202,38 @@ def invoke_worker(
         "DART_HEADLESS": "1",
     }
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            env=environment,
-            cwd=database.parent,
-            timeout=_WORKER_TIMEOUT_SECONDS.get(invocation.action, 900),
-        )
+        with tempfile.TemporaryFile() as stdout_buffer, tempfile.TemporaryFile() as stderr_buffer:
+            completed = subprocess.run(
+                command,
+                stdout=stdout_buffer,
+                stderr=stderr_buffer,
+                check=False,
+                env=environment,
+                cwd=approved_repository,
+                timeout=_WORKER_TIMEOUT_SECONDS.get(invocation.action, 900),
+            )
+            stdout_size = stdout_buffer.tell()
+            stderr_size = stderr_buffer.tell()
+            if (
+                stdout_size > MAX_WORKER_OUTPUT_BYTES
+                or stderr_size > MAX_WORKER_OUTPUT_BYTES
+            ):
+                raise RehearsalRunError(
+                    "worker_output_too_large",
+                    "Worker output exceeded the 2 MiB boundary.",
+                )
+            stdout_buffer.seek(0)
+            stderr_buffer.seek(0)
+            stdout = stdout_buffer.read().decode("utf-8", errors="replace")
+            stderr = stderr_buffer.read().decode("utf-8", errors="replace")
+    except RehearsalRunError:
+        raise
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RehearsalRunError(
             "worker_execution_failed",
             "Worker could not complete within its bounded execution window.",
         ) from exc
-    serialized_output = f"{completed.stdout}\n{completed.stderr}".lower()
+    serialized_output = f"{stdout}\n{stderr}".lower()
     if capability.lower() in serialized_output:
         raise RehearsalRunError(
             "worker_capability_disclosed",
@@ -213,12 +244,7 @@ def invoke_worker(
             "worker_exit_nonzero",
             "Worker exited unsuccessfully.",
         )
-    if len(completed.stdout.encode("utf-8")) > MAX_WORKER_OUTPUT_BYTES:
-        raise RehearsalRunError(
-            "worker_output_too_large",
-            "Worker JSON result exceeded the 2 MiB boundary.",
-        )
-    return _decode_worker_payload(completed.stdout)
+    return _decode_worker_payload(stdout)
 
 
 def _utc_now() -> datetime:
@@ -921,7 +947,10 @@ def run_kam_schema_backfill_rehearsal(
         idempotency_operation,
     ) is None:
         return _finalize_report(report, writer)
-    report["idempotency"] = idempotency_payload
+    report["idempotency"] = {
+        key: idempotency_payload[key]
+        for key in ("semantic_sha256", "semantic_sha256_equal", "integrity")
+    }
 
     mcp_payload: dict[str, object] = {}
 

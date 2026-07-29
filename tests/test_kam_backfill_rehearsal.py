@@ -146,6 +146,7 @@ print(json.dumps({
         ),
         capability=_TEST_CAPABILITY,
         invocation=WorkerInvocation("migrate", "collector"),
+        repository_root=tmp_path,
     )
     assert payload["capability_matches"] is True
     assert payload["observed_env"] == {
@@ -157,6 +158,75 @@ print(json.dumps({
         ),
     }
     assert _TEST_CAPABILITY not in json.dumps(payload, sort_keys=True)
+
+
+def test_invoke_worker_rejects_oversized_stderr_without_buffering_it(
+    tmp_path: Path,
+) -> None:
+    """Catch a child that can exhaust the parent through stderr alone."""
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        WorkerInvocation,
+        invoke_worker,
+    )
+
+    _install_fake_worker(
+        tmp_path,
+        "import json\nimport sys\n"
+        "print('x' * 2097152, file=sys.stderr)\n"
+        "print(json.dumps({'ok': True}))",
+    )
+
+    with pytest.raises(RehearsalRunError) as caught:
+        invoke_worker(
+            python_executable=Path(sys.executable),
+            database=tmp_path / "clone.db",
+            marker_path=tmp_path / "kam-schema-backfill-rehearsal-marker.json",
+            capability=_TEST_CAPABILITY,
+            invocation=WorkerInvocation("migrate", "collector"),
+            repository_root=tmp_path,
+        )
+
+    assert caught.value.code == "worker_output_too_large"
+
+
+# Break caught: a package planted next to the retained clone wins Python's CWD
+# import path before PYTHONPATH and executes instead of the approved worker.
+def test_invoke_worker_runs_from_approved_repository_not_rehearsal_directory(
+    tmp_path: Path,
+) -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        WorkerInvocation,
+        invoke_worker,
+    )
+
+    rehearsal_dir = tmp_path / "rehearsal"
+    approved_root = tmp_path / "approved-repository"
+    database = rehearsal_dir / "clone.db"
+    marker = rehearsal_dir / "kam-schema-backfill-rehearsal-marker.json"
+    for root, origin in ((rehearsal_dir, "foreign"), (approved_root, "approved")):
+        package = root / "kreports" / "maintenance"
+        package.mkdir(parents=True)
+        (package.parent / "__init__.py").write_text("", encoding="utf-8")
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "kam_rehearsal_worker.py").write_text(
+            "import json\n"
+            f"print(json.dumps({{'ok': True, 'origin': {origin!r}}}))\n",
+            encoding="utf-8",
+        )
+    database.write_bytes(b"temporary rehearsal database")
+    marker.write_text("{}", encoding="utf-8")
+
+    payload = invoke_worker(
+        python_executable=Path(sys.executable),
+        database=database,
+        marker_path=marker,
+        capability=_TEST_CAPABILITY,
+        invocation=WorkerInvocation("migrate", "collector"),
+        repository_root=approved_root,
+    )
+
+    assert payload["origin"] == "approved"
 
 
 @pytest.mark.parametrize(
@@ -200,6 +270,7 @@ def test_invoke_worker_rejects_failed_or_malformed_child_output(
             ),
             capability=_TEST_CAPABILITY,
             invocation=WorkerInvocation("migrate", "collector"),
+            repository_root=tmp_path,
         )
 
     assert caught.value.code == expected_code
@@ -249,6 +320,7 @@ def test_invoke_worker_rejects_capability_in_child_output(
             ),
             capability=_TEST_CAPABILITY,
             invocation=WorkerInvocation("migrate", "collector"),
+            repository_root=tmp_path,
         )
 
     assert caught.value.code == "worker_capability_disclosed"
@@ -295,6 +367,7 @@ print(json.dumps({{"ok": True, "disclosed": disclosed}}))
             ),
             capability=_TEST_CAPABILITY,
             invocation=WorkerInvocation("migrate", "collector"),
+            repository_root=tmp_path,
         )
 
     assert caught.value.code == "worker_capability_disclosed"
@@ -325,6 +398,7 @@ print(json.dumps({"ok": True, "argv": sys.argv[1:]}))
         ),
         capability=_TEST_CAPABILITY,
         invocation=WorkerInvocation("kam-rebuild", "collector", 2023),
+        repository_root=tmp_path,
     )
     unscoped = invoke_worker(
         python_executable=Path(sys.executable),
@@ -334,6 +408,7 @@ print(json.dumps({"ok": True, "argv": sys.argv[1:]}))
         ),
         capability=_TEST_CAPABILITY,
         invocation=WorkerInvocation("migrate", "collector"),
+        repository_root=tmp_path,
     )
 
     assert scoped["argv"] == ["kam-rebuild", "--year", "2023"]

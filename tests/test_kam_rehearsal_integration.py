@@ -39,6 +39,9 @@ def legacy_kam_source(tmp_path: Path) -> Path:
             DROP TABLE kam_items;
             DROP TABLE audit_procedure_items;
             DROP TABLE audit_fees;
+            DROP TABLE group_component_metrics;
+            DROP TABLE group_relationships;
+            DROP TABLE group_entities;
             CREATE TABLE audit_procedure_items (
               id INTEGER PRIMARY KEY,
               rcept_no TEXT NOT NULL,
@@ -159,6 +162,46 @@ def test_real_rehearsal_migrates_rebuilds_and_preserves_source(
     )
 
     source_before = _sha256_file(legacy_kam_source)
+    with sqlite3.connect(legacy_kam_source) as source_connection:
+        source_tables = {
+            row[0]
+            for row in source_connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "kam_items",
+            "group_entities",
+            "group_relationships",
+            "group_component_metrics",
+        }.isdisjoint(source_tables)
+        source_indexes = {
+            row[0]
+            for row in source_connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        assert {
+            "idx_kam_item_corp_year",
+            "idx_kam_item_quality_year",
+            "idx_kam_item_receipt",
+            "idx_audit_procedure_kam_item",
+            "idx_audit_procedure_method_year",
+            "idx_audit_fee_availability_year",
+            "idx_group_entity_parent_year",
+            "idx_group_relationship_parent_year",
+            "idx_group_metric_parent_year",
+        }.isdisjoint(source_indexes)
+        assert "kam_item_id" not in {
+            row[1]
+            for row in source_connection.execute(
+                "PRAGMA table_info(audit_procedure_items)"
+            )
+        }
+        assert "availability_status" not in {
+            row[1]
+            for row in source_connection.execute("PRAGMA table_info(audit_fees)")
+        }
     report = run_kam_schema_backfill_rehearsal(
         source_db=legacy_kam_source,
         rehearsal_dir=apfs_rehearsal_dir,
@@ -174,5 +217,45 @@ def test_real_rehearsal_migrates_rebuilds_and_preserves_source(
     assert report["mcp"]["tool_count"] == 17
     assert report["mcp"]["schema_error_closed"] is True
     assert report["idempotency"]["semantic_sha256_equal"] is True
+    assert set(report["idempotency"]) == {
+        "semantic_sha256",
+        "semantic_sha256_equal",
+        "integrity",
+    }
     assert _sha256_file(legacy_kam_source) == source_before
-    assert Path(report["clone"]["path"]).is_file()
+    clone_path = Path(report["clone"]["path"])
+    assert clone_path.is_file()
+    with sqlite3.connect(clone_path) as clone_connection:
+        clone_tables = {
+            row[0]
+            for row in clone_connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "kam_items",
+            "group_entities",
+            "group_relationships",
+            "group_component_metrics",
+        } <= clone_tables
+        assert {row[0] for row in clone_connection.execute(
+            "SELECT revision FROM schema_migrations"
+        )} == {
+            "20260711_01_quality_contract",
+            "20260711_02_company_year_quality",
+            "20260711_03_backfill_run_lifecycle",
+            "20260711_04_backfill_owner_identity",
+            "20260711_05_kam_items",
+            "20260711_06_audit_procedure_linkage",
+            "20260711_07_audit_fee_availability",
+            "20260711_08_group_audit_graph",
+        }
+        assert {row[1] for row in clone_connection.execute(
+            "PRAGMA table_info(group_component_metrics)"
+        )} >= {
+            "parent_corp_code",
+            "effective_year",
+            "metric_key",
+            "source_rcept_no",
+            "qsc_status",
+        }

@@ -231,7 +231,10 @@ def _filesystem_type(rehearsal_dir: Path) -> str:
         df_lines = df_completed.stdout.splitlines()
         if len(df_lines) < 2:
             raise ValueError("df did not report a filesystem device")
-        device = df_lines[-1].split(maxsplit=1)[0]
+        fields = df_lines[-1].split(maxsplit=1)
+        if not fields:
+            raise ValueError("df did not report a filesystem device")
+        device = fields[0]
         if not device.startswith("/dev/"):
             raise ValueError("df reported an unsafe filesystem device")
         diskutil_completed = subprocess.run(

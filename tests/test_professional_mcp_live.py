@@ -260,6 +260,17 @@ def test_samsung_fy2025_professional_public_result_matrix(immutable_live_databas
             resource = read_resource(resource_uri)
             resource_rendered = json.dumps(resource, ensure_ascii=False)
             assert output["data_quality"]["status"] in resource_rendered
+            assert all(
+                token not in resource_rendered
+                for token in (
+                    "no such table",
+                    "no such column",
+                    "OperationalError",
+                    "kam_items",
+                    "kam_item_id",
+                    "audit_procedure_items",
+                )
+            )
             for source in pack.get("sources") or []:
                 receipt = source.get("rcept_no") if isinstance(source, dict) else None
                 if receipt:

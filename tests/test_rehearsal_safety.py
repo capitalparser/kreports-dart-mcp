@@ -322,6 +322,34 @@ def test_preflight_resolves_apfs_through_df_device_and_diskutil_plist(
     ]
 
 
+def test_preflight_normalizes_whitespace_only_df_data_to_safety_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch malformed df output leaking an IndexError past the fail-closed API."""
+    paths = _valid_paths(tmp_path)
+    monkeypatch.setattr(rehearsal_safety.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        rehearsal_safety.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="Filesystem 512-blocks Used Available Capacity Mounted on\n   \n",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        preflight_rehearsal(
+            paths.source,
+            paths.rehearsal_dir,
+            repository_root=paths.repository_root,
+        )
+
+    assert caught.value.code == "filesystem_not_apfs"
+
+
 # Break caught: allowing a non-APFS destination would silently downgrade the
 # clone operation to a filesystem with different semantics.
 def test_preflight_requires_apfs_filesystem(
