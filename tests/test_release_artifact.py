@@ -292,7 +292,7 @@ def test_explicit_db_path_cannot_mix_with_global_engine(tmp_path, monkeypatch):
     assert evidence["release_gate"]["blockers"]
 
 
-def test_explicit_runtime_rebinds_import_time_analysis_engines_and_restores_them(
+def test_explicit_runtime_binds_analysis_queries_and_restores_central_engine(
     tmp_path,
     monkeypatch,
 ):
@@ -436,20 +436,9 @@ def test_explicit_runtime_rebinds_import_time_analysis_engines_and_restores_them
             raise AssertionError("explicit runtime touched a previous engine")
 
     stale_engine = RefusingEngine()
-    static_engine_modules = (
-        disclosure_events,
-        investor_quality,
-        kam_lifecycle,
-        peer,
-        policy_changes,
-        raw_coverage,
-        readiness,
-    )
     original_engine = engine_module.engine
     original_sessions = engine_module.SessionLocal
     stale_sessions = sessionmaker(bind=stale_engine)
-    for module in static_engine_modules:
-        monkeypatch.setattr(module, "engine", stale_engine)
     monkeypatch.setattr(engine_module, "engine", stale_engine)
     monkeypatch.setattr(engine_module, "SessionLocal", stale_sessions)
 
@@ -479,10 +468,57 @@ def test_explicit_runtime_rebinds_import_time_analysis_engines_and_restores_them
 
     assert engine_module.engine is stale_engine
     assert engine_module.SessionLocal is stale_sessions
-    assert all(module.engine is stale_engine for module in static_engine_modules)
     monkeypatch.undo()
     assert engine_module.engine is original_engine
     assert engine_module.SessionLocal is original_sessions
+
+
+def test_explicit_runtime_restores_a_lazily_imported_collector_engine(tmp_path):
+    """A module first imported in the context must not retain its disposed engine."""
+    import importlib
+    import sys
+
+    from sqlalchemy import text
+
+    from kreports import release_artifact
+    import kreports.db.engine as engine_module
+
+    db_path = tmp_path / "explicit-runtime.db"
+    _create_contract_db(db_path)
+    module_name = "kreports.collector.report_document_collector"
+    original_engine = engine_module.engine
+    sys.modules.pop(module_name, None)
+    try:
+        with release_artifact._bound_explicit_runtime(db_path):
+            collector = importlib.import_module(module_name)
+            assert collector._engine_module.engine is not original_engine
+            with collector.get_session() as session:
+                assert session.execute(text("SELECT 1")).scalar() == 1
+
+        assert collector._engine_module.engine is original_engine
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_runtime_bound_modules_have_no_static_engine_aliases():
+    """Adding a static engine import would bypass the explicit runtime boundary."""
+    import ast
+
+    package_root = Path(__file__).resolve().parents[1] / "kreports"
+    static_engine_imports: list[str] = []
+    for source_path in package_root.rglob("*.py"):
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "kreports.db.engine":
+                continue
+            if any(alias.name == "engine" for alias in node.names):
+                static_engine_imports.append(
+                    str(source_path.relative_to(package_root))
+                )
+
+    assert static_engine_imports == []
 
 
 def test_db_swap_or_nonempty_wal_during_proof_fails_without_replacing_manifest(

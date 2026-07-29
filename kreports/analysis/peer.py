@@ -19,7 +19,7 @@ from typing import Optional
 
 from sqlalchemy import create_engine, inspect, text
 
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 from kreports.semantic.metrics import METRICS, metric_definition
 
 
@@ -419,7 +419,7 @@ def resolve_fs_div_for_company(
         return strategy
     if strategy != "AUTO":
         return "CFS"
-    active_engine = read_engine or engine
+    active_engine = read_engine or _engine_module.engine
     with active_engine.connect() as conn:
         if year is None:
             row = conn.execute(
@@ -493,7 +493,7 @@ def resolve_peers(
 
     year=None이면 subject가 보유한 가장 최근 Q4/fs_div 연도를 사용한다.
     """
-    active_engine = read_engine or engine
+    active_engine = read_engine or _engine_module.engine
     with active_engine.connect() as conn:
         subject_row = conn.execute(
             text("SELECT induty_code FROM companies WHERE corp_code = :cc"),
@@ -653,7 +653,7 @@ def _build_note(
 @contextmanager
 def peer_read_engine():
     """Yield a schema-checked read engine without creating SQLite files/sidecars."""
-    source_engine = engine
+    source_engine = _engine_module.engine
     if source_engine.dialect.name == "sqlite":
         database = source_engine.url.database
         if database not in {None, "", ":memory:"}:

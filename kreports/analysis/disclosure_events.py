@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import bindparam, text
 
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 
 
 def search_disclosure_events(
@@ -44,7 +44,7 @@ def search_disclosure_events(
     """)
     if event_types:
         stmt = stmt.bindparams(bindparam("event_types", expanding=True))
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
     counts: dict[str, int] = {}
     for row in rows:

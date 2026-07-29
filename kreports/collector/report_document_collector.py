@@ -24,7 +24,7 @@ from kreports.collector.fetcher import (
 )
 from kreports.config import settings
 import kreports.db.engine as _engine_module
-from kreports.db.engine import engine, get_session
+from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingNoteChapter,
     AccountingPolicyItem,
@@ -1869,7 +1869,7 @@ def index_audit_procedures_from_sections(
         sql += " LIMIT :limit"
         params["limit"] = int(limit)
 
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         rows = [
             dict(row)
             for row in conn.execute(text(sql), params).mappings().all()

@@ -514,28 +514,11 @@ def _bound_explicit_runtime(db_path: Path):
     )
     old_engine = engine_module.engine
     old_sessions = engine_module.SessionLocal
-    module_engines: list[tuple[Any, Any]] = []
     engine_module.engine = explicit_engine
     engine_module.SessionLocal = explicit_sessions
     try:
-        for module_name in (
-            "kreports.analysis.disclosure_events",
-            "kreports.analysis.investor_quality",
-            "kreports.analysis.kam_lifecycle",
-            "kreports.analysis.peer",
-            "kreports.analysis.policy_changes",
-            "kreports.analysis.raw_coverage",
-            "kreports.analysis.readiness",
-            "kreports.analysis.search_adapter",
-        ):
-            module = __import__(module_name, fromlist=["engine"])
-            if hasattr(module, "engine"):
-                module_engines.append((module, module.engine))
-                module.engine = explicit_engine
         yield
     finally:
-        for module, previous in module_engines:
-            module.engine = previous
         engine_module.engine = old_engine
         engine_module.SessionLocal = old_sessions
         explicit_engine.dispose()

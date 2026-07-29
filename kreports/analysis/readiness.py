@@ -4,7 +4,7 @@ import re
 
 from sqlalchemy import text
 
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
 DEFAULT_YEARS_BACK = 5
@@ -91,7 +91,7 @@ def _empty_year_market_row(market: str, listed: int) -> dict:
 def auditor_readiness_snapshot(year: int = 2025, years_back: int = DEFAULT_YEARS_BACK) -> dict:
     years = required_years(year, years_back)
     start_year = years[0]
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         rows = conn.execute(
             text(
                 """
@@ -469,7 +469,7 @@ def dataset_completeness_snapshot(
     """
     years = required_years(year, years_back)
     start_year = years[0]
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         table_names = {
             row[0]
             for row in conn.execute(
@@ -690,7 +690,7 @@ def investor_dataset_readiness_snapshot(
     for idx, metric in enumerate(INVESTOR_CORE_METRICS):
         params[f"metric_{idx}"] = metric
 
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         listed = int(conn.execute(
             text(
                 "SELECT COUNT(*) FROM companies c "
@@ -874,7 +874,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
     if market:
         market_filter = " AND c.market=:market"
         params["market"] = market
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         table_names = {
             row[0]
             for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).all()
@@ -1245,7 +1245,7 @@ def audit_kam_quality_snapshot(
         "OR rs.body_text LIKE '%핵심감사사항이 없다고 결정%'"
     )
 
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         counts = conn.execute(
             text(
                 f"""

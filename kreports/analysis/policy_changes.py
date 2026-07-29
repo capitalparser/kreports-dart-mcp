@@ -5,7 +5,7 @@ from difflib import SequenceMatcher
 
 from sqlalchemy import text
 
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 
 
 def _similarity(a: str, b: str) -> float:
@@ -43,7 +43,7 @@ def accounting_policy_changes(
         WHERE {" AND ".join(where)}
         ORDER BY anc.fs_div, anc.note_no, anc.section_type, anc.bsns_year
     """)
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         rows = [dict(r) for r in conn.execute(stmt, params).mappings()]
 
     previous_by_key: dict[tuple[str, str, str], dict] = {}

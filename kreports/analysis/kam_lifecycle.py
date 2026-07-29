@@ -5,7 +5,7 @@ from difflib import SequenceMatcher
 
 from sqlalchemy import text
 
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 from kreports.processor.audit_report_parser import classify_kam_topics, summarize_kam_body
 
 
@@ -26,7 +26,7 @@ def kam_lifecycle_for_company(company: str, *, start_year: int, end_year: int) -
           AND rs.bsns_year BETWEEN :start_year AND :end_year
         ORDER BY rs.bsns_year, rs.ordinal
     """)
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         rows = [
             dict(r)
             for r in conn.execute(

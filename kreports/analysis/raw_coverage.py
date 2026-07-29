@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import bindparam, text
 
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 
 
 VALID_RCEPT_SQL = """
@@ -53,7 +53,7 @@ def raw_annual_report_coverage(
     GROUP BY 1,2
     ORDER BY 1,2
     """).bindparams(bindparam("markets", expanding=True))
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         rows = [
             dict(row)
             for row in conn.execute(

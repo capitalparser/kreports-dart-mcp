@@ -6,7 +6,7 @@ from statistics import pstdev
 from sqlalchemy import bindparam, text
 
 from kreports.analysis.evidence import dart_filing_url, parent_rcept_no
-from kreports.db.engine import engine
+import kreports.db.engine as _engine_module
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS, metric_output_key
 
 
@@ -33,7 +33,7 @@ def _financial_series(
         ORDER BY bsns_year, metric_key
     """).bindparams(bindparam("metric_keys", expanding=True))
     by_year: dict[int, dict] = {}
-    with engine.connect() as conn:
+    with _engine_module.engine.connect() as conn:
         for row in conn.execute(stmt, {
             "corp_code": company,
             "fs_div": fs_div,
@@ -68,7 +68,7 @@ def _audit_matter_summary(company: str, start_year: int, end_year: int) -> dict:
         ORDER BY bsns_year, rcept_no, matter_type, section_ordinal
     """)
     try:
-        with engine.connect() as conn:
+        with _engine_module.engine.connect() as conn:
             rows = [dict(row) for row in conn.execute(stmt, {
                 "corp_code": company,
                 "start_year": int(start_year),
@@ -118,7 +118,7 @@ def _audit_matter_flags(company: str, start_year: int, end_year: int) -> list[di
         ORDER BY bsns_year, matter_type
     """)
     try:
-        with engine.connect() as conn:
+        with _engine_module.engine.connect() as conn:
             return [dict(r) for r in conn.execute(stmt, {
                 "corp_code": company,
                 "start_year": int(start_year),
