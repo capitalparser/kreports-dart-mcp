@@ -1,22 +1,143 @@
-from datetime import date, datetime, timedelta, timezone
+import json
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, inspect
 
 from kreports.db.engine import get_session
 from kreports.db.models import (
-    AuditProcedureItem,
     AuditFee,
-    Company,
+    AuditProcedureItem,
     BusinessAffiliateAuditor,
-    FetchLog,
+    Company,
     Disclosure,
-    FinancialFactCompact,
     ExtractionRun,
+    FetchLog,
+    FinancialFactCompact,
     ReportSection,
     SourceDocument,
 )
+from kreports.quality.company_year_fingerprint import (
+    QUALITY_GRADE_KEYS,
+    QUALITY_STATUS_KEYS,
+    build_quality_evidence_summary,
+    quality_input_fingerprint,
+)
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
+
+
+def _quality_evidence_inputs() -> dict:
+    return {
+        "statuses": {
+            "financial_core": "available",
+            "auditor": "available",
+            "audit_fee": "partial",
+            "policy": "full_body",
+            "kam": "summary_only",
+            "audit_procedure": "missing",
+            "group_audit": "partial",
+        },
+        "grades": {
+            "investor_core": "A",
+            "auditor_full": "D",
+            "group_audit": "D",
+        },
+        "blockers": ("kam_summary_only", "procedure_missing"),
+        "quality_version": "v1",
+    }
+
+
+def test_quality_fingerprint_is_stable_across_mapping_and_blocker_order():
+    left = build_quality_evidence_summary(**_quality_evidence_inputs())
+    right = build_quality_evidence_summary(
+        statuses=dict(reversed(list(left["statuses"].items()))),
+        grades=dict(reversed(list(left["grades"].items()))),
+        blockers=("procedure_missing", "kam_summary_only", "kam_summary_only"),
+        quality_version="v1",
+    )
+
+    assert QUALITY_STATUS_KEYS == (
+        "financial_core",
+        "auditor",
+        "audit_fee",
+        "policy",
+        "kam",
+        "audit_procedure",
+        "group_audit",
+    )
+    assert QUALITY_GRADE_KEYS == (
+        "investor_core",
+        "auditor_full",
+        "group_audit",
+    )
+    assert left == right
+    assert quality_input_fingerprint(left) == quality_input_fingerprint(right)
+    assert len(quality_input_fingerprint(left)) == 64
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("statuses", {"financial_core": "partial"}),
+        ("grades", {"investor_core": "B"}),
+        ("blockers", ("new_blocker",)),
+        ("quality_version", "v2"),
+    ],
+)
+def test_quality_fingerprint_changes_for_each_semantic_input(
+    field,
+    replacement,
+):
+    baseline_inputs = _quality_evidence_inputs()
+    changed_inputs = _quality_evidence_inputs()
+    if field in {"statuses", "grades"}:
+        changed_inputs[field].update(replacement)
+    else:
+        changed_inputs[field] = replacement
+
+    baseline = build_quality_evidence_summary(**baseline_inputs)
+    changed = build_quality_evidence_summary(**changed_inputs)
+
+    assert quality_input_fingerprint(changed) != quality_input_fingerprint(
+        baseline
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "key_change"),
+    [
+        ("statuses", ("audit_fee", None)),
+        ("statuses", ("unknown_status", "missing")),
+        ("grades", ("group_audit", None)),
+        ("grades", ("unknown_grade", "D")),
+    ],
+)
+def test_quality_summary_rejects_missing_or_unknown_required_keys(
+    field,
+    key_change,
+):
+    inputs = _quality_evidence_inputs()
+    key, value = key_change
+    if value is None:
+        inputs[field].pop(key)
+    else:
+        inputs[field][key] = value
+
+    label = "status" if field == "statuses" else "grade"
+    with pytest.raises(ValueError, match=f"{label} keys must equal"):
+        build_quality_evidence_summary(**inputs)
+
+
+def test_quality_summary_serialization_contains_no_timestamp():
+    summary = build_quality_evidence_summary(**_quality_evidence_inputs())
+
+    assert "timestamp" not in json.dumps(summary, sort_keys=True)
+    assert set(summary) == {
+        "statuses",
+        "grades",
+        "blockers",
+        "quality_version",
+    }
 
 
 def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
@@ -751,7 +872,7 @@ def test_audit_fee_later_success_timestamp_recovers_older_error(
         rebuild_company_year_quality,
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with get_session() as session:
         session.add(
             Company(
@@ -815,7 +936,7 @@ def test_audit_fee_equal_timestamp_uses_later_fetch_log_id(
         rebuild_company_year_quality,
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with get_session() as session:
         session.add(
             Company(
