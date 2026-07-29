@@ -126,6 +126,62 @@ def test_dispose_engine_is_idempotent_on_temporary_database(
         assert connection.execute(text("SELECT 1")).scalar_one() == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("outcome", ["success", "cancelled", "error"])
+def test_signal_wrapper_restores_exact_previous_handlers(
+    monkeypatch,
+    outcome,
+):
+    import kreports.mcp.server as server_module
+
+    expected_error = RuntimeError("stdio failed")
+
+    async def fake_run():
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+        if outcome == "error":
+            raise expected_error
+
+    monkeypatch.setattr(server_module, "run", fake_run)
+
+    def previous_loop_callback(marker):
+        assert marker == "previous-loop-handler"
+
+    def previous_raw_handler(_signum, _frame):
+        return None
+
+    async def exercise_wrapper():
+        loop = asyncio.get_running_loop()
+        original_sigint = signal.getsignal(signal.SIGINT)
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        try:
+            loop.add_signal_handler(
+                signal.SIGINT,
+                previous_loop_callback,
+                "previous-loop-handler",
+            )
+            signal.signal(signal.SIGTERM, previous_raw_handler)
+
+            if outcome == "error":
+                with pytest.raises(RuntimeError) as captured:
+                    await server_module._run_with_signal_shutdown()
+                assert captured.value is expected_error
+            else:
+                await server_module._run_with_signal_shutdown()
+
+            restored = loop._signal_handlers[signal.SIGINT]
+            assert restored._callback is previous_loop_callback
+            assert restored._args == ("previous-loop-handler",)
+            assert signal.getsignal(signal.SIGTERM) is previous_raw_handler
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
+            loop.remove_signal_handler(signal.SIGTERM)
+            signal.signal(signal.SIGINT, original_sigint)
+            signal.signal(signal.SIGTERM, original_sigterm)
+
+    asyncio.run(exercise_wrapper())
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
