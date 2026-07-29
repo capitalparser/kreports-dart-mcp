@@ -1,10 +1,14 @@
-from datetime import date, datetime, timezone
 import hashlib
 import json
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import select
 
+from kreports.quality.company_year_fingerprint import (
+    build_quality_evidence_summary,
+    quality_input_fingerprint,
+)
 from tests.factories import (
     company_factory,
     disclosure_factory,
@@ -27,6 +31,8 @@ _QUALITY_CONTENT_FIELDS = (
     "group_audit_grade",
     "blockers_json",
     "quality_version",
+    "input_fingerprint",
+    "evidence_summary_json",
 )
 
 
@@ -37,6 +43,8 @@ def _expected_quality_digest(rows: list[dict]) -> str:
                 field: (
                     sorted(json.loads(row[field]))
                     if field == "blockers_json"
+                    else json.loads(row[field])
+                    if field == "evidence_summary_json"
                     else row[field]
                 )
                 for field in _QUALITY_CONTENT_FIELDS
@@ -61,8 +69,10 @@ def _quality_values(
     investor_grade: str = "A",
     quality_version: str = "v1",
     blockers_json: str = "[]",
+    input_fingerprint: str | None = None,
+    evidence_summary_json: str | None = None,
 ) -> dict:
-    return {
+    values = {
         "corp_code": corp_code,
         "bsns_year": bsns_year,
         "market": "KOSPI",
@@ -79,6 +89,45 @@ def _quality_values(
         "blockers_json": blockers_json,
         "quality_version": quality_version,
     }
+    if input_fingerprint is None or evidence_summary_json is None:
+        try:
+            blockers = json.loads(blockers_json)
+        except json.JSONDecodeError:
+            blockers = []
+        if not isinstance(blockers, list) or not all(
+            isinstance(blocker, str) for blocker in blockers
+        ):
+            blockers = []
+        summary = build_quality_evidence_summary(
+            statuses={
+                "financial_core": values["financial_core_status"],
+                "auditor": values["auditor_status"],
+                "audit_fee": values["audit_fee_status"],
+                "policy": values["policy_status"],
+                "kam": values["kam_status"],
+                "audit_procedure": values["audit_procedure_status"],
+                "group_audit": values["group_audit_status"],
+            },
+            grades={
+                "investor_core": values["investor_grade"],
+                "auditor_full": values["auditor_grade"],
+                "group_audit": values["group_audit_grade"],
+            },
+            blockers=blockers,
+            quality_version=quality_version,
+        )
+        if input_fingerprint is None:
+            input_fingerprint = quality_input_fingerprint(summary)
+        if evidence_summary_json is None:
+            evidence_summary_json = json.dumps(
+                summary,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+    values["input_fingerprint"] = input_fingerprint
+    values["evidence_summary_json"] = evidence_summary_json
+    return values
 
 
 def _apply_contract(temp_engine) -> None:
@@ -191,7 +240,7 @@ def test_dataset_manifest_includes_compact_only_financial_years(temp_engine):
                     metric_key="revenue",
                     metric_name="매출액",
                     amount=100,
-                    fetched_at=datetime.now(timezone.utc),
+                    fetched_at=datetime.now(UTC),
                 ),
                 FinancialFactCompact(
                     corp_code="00126380",
@@ -200,7 +249,7 @@ def test_dataset_manifest_includes_compact_only_financial_years(temp_engine):
                     metric_key="assets",
                     metric_name="자산총계",
                     amount=200,
-                    fetched_at=datetime.now(timezone.utc),
+                    fetched_at=datetime.now(UTC),
                 ),
             ]
         )
@@ -291,7 +340,7 @@ def test_manifest_uses_business_year_and_snapshots_quality_ledger(
         session.add(
             CompanyYearQuality(
                 **_quality_values("00126380", 2025),
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
 
@@ -327,11 +376,11 @@ def test_manifest_quality_digest_is_stable_across_row_and_timestamp_order(
             [
                 CompanyYearQuality(
                     **second_values,
-                    updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 1, 2, tzinfo=UTC),
                 ),
                 CompanyYearQuality(
                     **first_values,
-                    updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 1, 1, tzinfo=UTC),
                 ),
             ]
         )
@@ -347,11 +396,11 @@ def test_manifest_quality_digest_is_stable_across_row_and_timestamp_order(
             [
                 CompanyYearQuality(
                     **first_values,
-                    updated_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                    updated_at=datetime(2030, 1, 1, tzinfo=UTC),
                 ),
                 CompanyYearQuality(
                     **second_values,
-                    updated_at=datetime(2030, 1, 2, tzinfo=timezone.utc),
+                    updated_at=datetime(2030, 1, 2, tzinfo=UTC),
                 ),
             ]
         )
@@ -380,7 +429,7 @@ def test_dataset_manifest_rejects_unsupported_quality_version(temp_engine):
                     2025,
                     quality_version="v2",
                 ),
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
 
@@ -406,7 +455,7 @@ def test_manifest_digest_normalizes_blocker_order_but_detects_content_change(
                     2025,
                     blockers_json='["kam_error", "policy_error"]',
                 ),
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
 
@@ -428,6 +477,10 @@ def test_manifest_digest_normalizes_blocker_order_but_detects_content_change(
         row = session.get(CompanyYearQuality, ("00126380", 2025))
         assert row is not None
         row.blockers_json = '["policy_error", "audit_fee_error"]'
+        summary = json.loads(row.evidence_summary_json)
+        summary["blockers"] = ["audit_fee_error", "policy_error"]
+        row.evidence_summary_json = json.dumps(summary)
+        row.input_fingerprint = quality_input_fingerprint(summary)
     changed = json.loads(
         write_dataset_manifest("blockers-changed")[
             "quality_snapshot_json"
@@ -436,6 +489,172 @@ def test_manifest_digest_normalizes_blocker_order_but_detects_content_change(
 
     assert reordered["content_digest"] == first["content_digest"]
     assert changed["content_digest"] != first["content_digest"]
+
+
+def test_manifest_digest_canonicalizes_evidence_summary_json(temp_engine):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values("00126380", 2025),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    first = json.loads(
+        write_dataset_manifest("summary-first")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        summary = json.loads(row.evidence_summary_json)
+        row.evidence_summary_json = json.dumps(summary, indent=2)
+    reordered = json.loads(
+        write_dataset_manifest("summary-reordered")[
+            "quality_snapshot_json"
+        ]
+    )
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        row.input_fingerprint = "b" * 64
+    with pytest.raises(ValueError, match="quality freshness"):
+        write_dataset_manifest("fingerprint-changed")
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        summary = json.loads(row.evidence_summary_json)
+        summary["grades"]["investor_core"] = "B"
+        row.investor_grade = "B"
+        row.input_fingerprint = quality_input_fingerprint(summary)
+        row.evidence_summary_json = json.dumps(
+            summary,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    changed = json.loads(
+        write_dataset_manifest("summary-changed")[
+            "quality_snapshot_json"
+        ]
+    )
+
+    assert reordered["content_digest"] == first["content_digest"]
+    assert changed["content_digest"] != first["content_digest"]
+
+
+@pytest.mark.parametrize(
+    "evidence_summary_json",
+    [
+        "{not-json",
+        "[]",
+    ],
+)
+def test_dataset_manifest_rejects_invalid_evidence_summary_object(
+    temp_engine,
+    evidence_summary_json,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values(
+                    "00126380",
+                    2025,
+                    evidence_summary_json=evidence_summary_json,
+                ),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="evidence_summary_json must be a JSON object",
+    ):
+        write_dataset_manifest("invalid-evidence-summary")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "legacy_blank",
+        "extra_local_path",
+        "row_grade_mismatch",
+    ],
+)
+def test_dataset_manifest_rejects_unverified_quality_freshness(
+    temp_engine,
+    case,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+    from kreports.quality.company_year_fingerprint import (
+        build_quality_evidence_summary,
+        quality_input_fingerprint,
+    )
+
+    _apply_contract(temp_engine)
+    values = _quality_values("00126380", 2025)
+    if case == "legacy_blank":
+        values["input_fingerprint"] = ""
+        values["evidence_summary_json"] = "{}"
+    else:
+        summary = build_quality_evidence_summary(
+            statuses={
+                "financial_core": "available",
+                "auditor": "available",
+                "audit_fee": "available",
+                "policy": "full_body",
+                "kam": "full_body",
+                "audit_procedure": "available",
+                "group_audit": "missing",
+            },
+            grades={
+                "investor_core": (
+                    "B" if case == "row_grade_mismatch" else "A"
+                ),
+                "auditor_full": "A",
+                "group_audit": "D",
+            },
+            blockers=(),
+            quality_version="v1",
+        )
+        if case == "extra_local_path":
+            summary["local_path"] = "/private/tmp/quality.db"
+            payload = json.dumps(
+                summary,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            fingerprint = hashlib.sha256(
+                payload.encode("utf-8")
+            ).hexdigest()
+        else:
+            fingerprint = quality_input_fingerprint(summary)
+        values["input_fingerprint"] = fingerprint
+        values["evidence_summary_json"] = json.dumps(summary)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **values,
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="quality freshness",
+    ):
+        write_dataset_manifest(f"invalid-freshness-{case}")
 
 
 @pytest.mark.parametrize(
@@ -462,7 +681,7 @@ def test_dataset_manifest_rejects_invalid_blocker_array(
                     2025,
                     blockers_json=blockers_json,
                 ),
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
 

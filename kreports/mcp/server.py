@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
+from typing import Any
 
 from mcp.server import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
@@ -89,16 +91,93 @@ async def handle_call_tool(name: str, arguments: dict):
 
 
 async def run() -> None:
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+    finally:
+        from kreports.db.engine import dispose_engine
+
+        dispose_engine()
+
+
+def _loop_signal_handle(
+    loop: asyncio.AbstractEventLoop,
+    candidate: signal.Signals,
+) -> asyncio.Handle | None:
+    """Return the registered asyncio Handle when the loop exposes it."""
+    handlers = getattr(loop, "_signal_handlers", None)
+    if not isinstance(handlers, dict):
+        return None
+    handle = handlers.get(candidate)
+    return handle if isinstance(handle, asyncio.Handle) else None
+
+
+def _restore_signal_handler(
+    loop: asyncio.AbstractEventLoop,
+    candidate: signal.Signals,
+    previous_raw_handler: Any,
+    previous_loop_handle: asyncio.Handle | None,
+) -> None:
+    loop.remove_signal_handler(candidate)
+    if previous_loop_handle is None:
+        signal.signal(candidate, previous_raw_handler)
+        return
+
+    callback = previous_loop_handle._callback
+    args = previous_loop_handle._args
+    loop.add_signal_handler(candidate, callback, *args)
+    # add_signal_handler rebuilds a Handle with the current context. Reuse the
+    # original Handle so its callback, arguments, and context remain exact.
+    handlers = vars(loop)["_signal_handlers"]
+    handlers[candidate] = previous_loop_handle
+
+
+async def _run_with_signal_shutdown() -> None:
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    installed: list[
+        tuple[signal.Signals, Any, asyncio.Handle | None]
+    ] = []
+    if task is None:
+        raise RuntimeError("MCP signal wrapper requires a running task")
+    for candidate in (signal.SIGINT, signal.SIGTERM):
+        previous_raw_handler = signal.getsignal(candidate)
+        previous_loop_handle = _loop_signal_handle(loop, candidate)
+        try:
+            loop.add_signal_handler(candidate, task.cancel)
+        except (NotImplementedError, RuntimeError):
+            continue
+        installed.append(
+            (
+                candidate,
+                previous_raw_handler,
+                previous_loop_handle,
+            )
         )
+    try:
+        await run()
+    except asyncio.CancelledError:
+        return
+    finally:
+        for (
+            candidate,
+            previous_raw_handler,
+            previous_loop_handle,
+        ) in reversed(installed):
+            _restore_signal_handler(
+                loop,
+                candidate,
+                previous_raw_handler,
+                previous_loop_handle,
+            )
 
 
 def main() -> None:
-    asyncio.run(run())
+    asyncio.run(_run_with_signal_shutdown())
 
 
 if __name__ == "__main__":

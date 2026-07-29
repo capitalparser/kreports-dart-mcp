@@ -4,8 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from kreports.db.models import (
@@ -22,6 +21,10 @@ from kreports.mcp.resources import (
     list_resource_templates,
     list_resources,
     read_resource,
+)
+from kreports.quality.company_year_fingerprint import (
+    build_quality_evidence_summary,
+    quality_input_fingerprint,
 )
 
 
@@ -290,6 +293,24 @@ def test_company_resource_distinguishes_missing_cache_from_filing_absence(temp_e
 def test_company_resource_returns_manifest_quality_facts_and_dart_links(
     temp_engine,
 ):
+    summary = build_quality_evidence_summary(
+        statuses={
+            "financial_core": "available",
+            "auditor": "available",
+            "audit_fee": "available",
+            "policy": "summary_only",
+            "kam": "full_body",
+            "audit_procedure": "available",
+            "group_audit": "missing",
+        },
+        grades={
+            "investor_core": "A",
+            "auditor_full": "B",
+            "group_audit": "D",
+        },
+        blockers=("group_audit",),
+        quality_version="v1",
+    )
     with Session(temp_engine) as session:
         session.add(Company(corp_code="00126380", corp_name="표본회사"))
         session.add(
@@ -315,7 +336,7 @@ def test_company_resource_returns_manifest_quality_facts_and_dart_links(
                 auditor_status="available",
                 audit_fee_status="available",
                 policy_status="summary_only",
-                kam_status="available",
+                kam_status="full_body",
                 audit_procedure_status="available",
                 group_audit_status="missing",
                 investor_grade="A",
@@ -323,6 +344,8 @@ def test_company_resource_returns_manifest_quality_facts_and_dart_links(
                 group_audit_grade="D",
                 blockers_json='["group_audit"]',
                 quality_version="v1",
+                input_fingerprint=quality_input_fingerprint(summary),
+                evidence_summary_json=json.dumps(summary),
             )
         )
         session.add(
