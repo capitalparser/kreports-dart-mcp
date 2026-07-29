@@ -512,6 +512,9 @@ def _create_snapshot_database(path: Path) -> None:
             """
             CREATE TABLE kam_items (id INTEGER PRIMARY KEY, rcept_no TEXT NOT NULL, dcm_no TEXT, corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, source_type TEXT NOT NULL, ordinal INTEGER NOT NULL, title TEXT, normalized_topic TEXT, reason_text TEXT, audit_response_text TEXT, related_note_references_json TEXT NOT NULL, full_body_hash TEXT NOT NULL, full_body_length INTEGER NOT NULL, source_basis TEXT NOT NULL, parser_version TEXT NOT NULL, quality_status TEXT NOT NULL);
             CREATE TABLE audit_procedure_items (id INTEGER PRIMARY KEY, rcept_no TEXT NOT NULL, dcm_no TEXT, corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, source_type TEXT NOT NULL, kam_item_id INTEGER, kam_topic TEXT, method TEXT, procedure_type TEXT NOT NULL, procedure_text TEXT NOT NULL, procedure_hash TEXT, procedure_length INTEGER, assertion_hints_json TEXT, linked_metric_keys_json TEXT, linked_note_keys_json TEXT, linked_event_keys_json TEXT, parser_version TEXT, quality_status TEXT, section_ordinal INTEGER NOT NULL, procedure_ordinal INTEGER NOT NULL);
+            CREATE TABLE audit_fee_observations (observation_hash TEXT PRIMARY KEY, source_slot_hash TEXT NOT NULL, corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, source_class TEXT NOT NULL, source_rcept_no TEXT, source_period TEXT, contract_fee_m INTEGER, contract_hours INTEGER, actual_fee_m INTEGER, actual_hours INTEGER, availability_status TEXT NOT NULL, quality_status TEXT NOT NULL, parser_version TEXT NOT NULL, is_current BOOLEAN NOT NULL, supersedes_hash TEXT, observed_at DATETIME NOT NULL);
+            CREATE TABLE financial_facts_compact (corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, fs_div TEXT NOT NULL, metric_key TEXT NOT NULL, amount INTEGER, source_account_id TEXT, source_table TEXT, unit TEXT, period_type TEXT, citation_rcept_no TEXT, citation_report_nm TEXT, citation_basis TEXT NOT NULL, quality_status TEXT NOT NULL, fetched_at DATETIME NOT NULL);
+            CREATE TABLE company_year_quality (corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, input_fingerprint TEXT NOT NULL, evidence_summary_json TEXT NOT NULL, quality_version TEXT NOT NULL, updated_at DATETIME NOT NULL);
             """
         )
         connection.execute("INSERT INTO kam_items VALUES (1, '20260310000001', '1', '00126380', 2025, 'audit_report', 1, '수익', 'revenue', '추정', '검증', '{\"b\":2,\"a\":1}', 'abc', 10, 'full_body', 'v1', 'usable')")
@@ -882,6 +885,116 @@ def test_semantic_snapshot_binds_stable_ids_and_typed_linkage(tmp_path: Path) ->
     assert changed["semantic_sha256"] != before["semantic_sha256"]
     assert restored["semantic_sha256"] == before["semantic_sha256"]
     assert before["integrity"]["orphan_procedure_count"] == 0
+
+
+def test_semantic_snapshot_covers_evidence_semantics_but_not_timestamps(
+    revision08_evidence_database: Path,
+) -> None:
+    """Catch provenance or freshness changes hidden by an incomplete digest."""
+    migrated = run_worker(
+        revision08_evidence_database,
+        "migrate",
+        runtime_mode="collector",
+    )
+    assert migrated["ok"] is True
+    _seed_local_database_evidence(revision08_evidence_database)
+    marker = write_marker(revision08_evidence_database)
+    for action in (
+        "audit-fee-observation-backfill",
+        "financial-compact-rebuild",
+        "company-year-quality-rebuild",
+    ):
+        result = run_worker(
+            revision08_evidence_database,
+            action,
+            "--year",
+            "2025",
+            runtime_mode="collector",
+            marker=marker,
+        )
+        assert result["ok"] is True
+
+    first = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    second = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+
+    assert first["semantic_sha256"] == second["semantic_sha256"]
+    assert first["audit_fee_observations"]["current_count"] >= 1
+    assert first["audit_fee_observations"]["historical_count"] >= 0
+    assert first["financial_compact_provenance"]["uncitable_count"] >= 0
+    assert first["company_year_quality_freshness"]["blank_fingerprint_count"] == 0
+
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE audit_fee_observations SET actual_fee_m=actual_fee_m + 1"
+        )
+    changed_audit = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert changed_audit["semantic_sha256"] != first["semantic_sha256"]
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE audit_fee_observations SET actual_fee_m=actual_fee_m - 1"
+        )
+        original_basis = connection.execute(
+            "SELECT citation_basis FROM financial_facts_compact LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE financial_facts_compact SET citation_basis='changed-basis'"
+        )
+    changed_financial = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert changed_financial["semantic_sha256"] != first["semantic_sha256"]
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE financial_facts_compact SET citation_basis=?",
+            (original_basis,),
+        )
+        original_fingerprint = connection.execute(
+            "SELECT input_fingerprint FROM company_year_quality LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE company_year_quality SET input_fingerprint=?",
+            ("0" * 64,),
+        )
+    changed_quality = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert changed_quality["semantic_sha256"] != first["semantic_sha256"]
+    with sqlite3.connect(revision08_evidence_database) as connection:
+        connection.execute(
+            "UPDATE company_year_quality SET input_fingerprint=?",
+            (original_fingerprint,),
+        )
+        connection.execute(
+            "UPDATE audit_fee_observations SET observed_at='2099-01-01'"
+        )
+        connection.execute(
+            "UPDATE financial_facts_compact SET fetched_at='2099-01-01'"
+        )
+        connection.execute(
+            "UPDATE company_year_quality SET updated_at='2099-01-01'"
+        )
+    timestamp_only = run_worker(
+        revision08_evidence_database,
+        "semantic-snapshot",
+        marker=marker,
+    )
+    assert timestamp_only["semantic_sha256"] == first["semantic_sha256"]
 
 
 def test_kam_rebuild_and_procedure_index_use_local_evidence_only(

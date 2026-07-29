@@ -105,6 +105,22 @@ PROCEDURE_SNAPSHOT_COLUMNS = (
     "linked_metric_keys_json", "linked_note_keys_json", "linked_event_keys_json",
     "parser_version", "quality_status", "section_ordinal", "procedure_ordinal",
 )
+AUDIT_OBSERVATION_SEMANTIC_FIELDS = (
+    "observation_hash", "source_slot_hash", "corp_code", "bsns_year",
+    "source_class", "source_rcept_no", "source_period", "contract_fee_m",
+    "contract_hours", "actual_fee_m", "actual_hours", "availability_status",
+    "quality_status", "parser_version", "is_current", "supersedes_hash",
+)
+FINANCIAL_COMPACT_PROVENANCE_FIELDS = (
+    "corp_code", "bsns_year", "fs_div", "metric_key", "amount",
+    "source_account_id", "source_table", "unit", "period_type",
+    "citation_rcept_no", "citation_report_nm", "citation_basis",
+    "quality_status",
+)
+QUALITY_FRESHNESS_FIELDS = (
+    "corp_code", "bsns_year", "input_fingerprint",
+    "evidence_summary_json", "quality_version",
+)
 
 
 class WorkerActionError(RuntimeError):
@@ -617,11 +633,26 @@ def _quality_distribution(rows: list[dict[str, object]]) -> dict[str, dict[str, 
 
 
 def semantic_snapshot() -> dict[str, object]:
-    """Return a deterministic, typed KAM/procedure semantic identity snapshot."""
+    """Return a deterministic semantic identity snapshot without timestamps."""
     connection = _open_readonly_database()
     try:
         kam_rows = _snapshot_rows(connection, "kam_items", KAM_SNAPSHOT_COLUMNS)
         procedure_rows = _snapshot_rows(connection, "audit_procedure_items", PROCEDURE_SNAPSHOT_COLUMNS)
+        observation_rows = _snapshot_rows(
+            connection,
+            "audit_fee_observations",
+            AUDIT_OBSERVATION_SEMANTIC_FIELDS,
+        )
+        financial_rows = _snapshot_rows(
+            connection,
+            "financial_facts_compact",
+            FINANCIAL_COMPACT_PROVENANCE_FIELDS,
+        )
+        quality_rows = _snapshot_rows(
+            connection,
+            "company_year_quality",
+            QUALITY_FRESHNESS_FIELDS,
+        )
         duplicate_logical_identities = [
             dict(row) for row in connection.execute(
                 "SELECT rcept_no, source_type, ordinal, COUNT(*) AS count FROM kam_items GROUP BY rcept_no, source_type, ordinal HAVING COUNT(*) > 1"
@@ -632,7 +663,13 @@ def semantic_snapshot() -> dict[str, object]:
             "cross_receipt_source_ordinal_link_count": int(connection.execute("SELECT COUNT(*) FROM audit_procedure_items p JOIN kam_items k ON k.id=p.kam_item_id WHERE p.rcept_no != k.rcept_no OR p.source_type != k.source_type OR p.section_ordinal != k.ordinal").fetchone()[0]),
             "usable_response_without_procedure_count": int(connection.execute("SELECT COUNT(*) FROM kam_items k WHERE k.quality_status='usable' AND trim(COALESCE(k.audit_response_text, '')) != '' AND NOT EXISTS (SELECT 1 FROM audit_procedure_items p WHERE p.kam_item_id=k.id)").fetchone()[0]),
         }
-        payload = {"kam_items": kam_rows, "audit_procedure_items": procedure_rows}
+        payload = {
+            "kam_items": kam_rows,
+            "audit_procedure_items": procedure_rows,
+            "audit_fee_observations": observation_rows,
+            "financial_compact_provenance": financial_rows,
+            "company_year_quality_freshness": quality_rows,
+        }
         digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {
             "kam_count": len(kam_rows),
@@ -641,6 +678,29 @@ def semantic_snapshot() -> dict[str, object]:
             "procedure_quality_by_year": _quality_distribution(procedure_rows),
             "duplicate_logical_identities": duplicate_logical_identities,
             "integrity": integrity,
+            "audit_fee_observations": {
+                "row_count": len(observation_rows),
+                "current_count": sum(
+                    bool(row["is_current"]) for row in observation_rows
+                ),
+                "historical_count": sum(
+                    not bool(row["is_current"]) for row in observation_rows
+                ),
+            },
+            "financial_compact_provenance": {
+                "row_count": len(financial_rows),
+                "uncitable_count": sum(
+                    row["citation_basis"] == "uncitable"
+                    for row in financial_rows
+                ),
+            },
+            "company_year_quality_freshness": {
+                "row_count": len(quality_rows),
+                "blank_fingerprint_count": sum(
+                    not str(row["input_fingerprint"] or "").strip()
+                    for row in quality_rows
+                ),
+            },
             "semantic_sha256": digest,
         }
     finally:
