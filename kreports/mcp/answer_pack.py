@@ -386,6 +386,10 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(fact, dict):
             continue
         add_reference(fact.get("source"))
+        fact_sources = fact.get("sources")
+        if isinstance(fact_sources, list):
+            for source in fact_sources[:64]:
+                add_reference(source)
     for event in result.get("events") or []:
         if isinstance(event, dict):
             add(_source_from_rcept_no(event.get("rcept_no"), label=event.get("event_title") or event.get("report_nm")))

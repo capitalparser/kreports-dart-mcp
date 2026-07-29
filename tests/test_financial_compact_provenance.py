@@ -450,3 +450,120 @@ def test_hidden_proven_prior_revenue_keeps_growth_and_exact_sources_across_surfa
             source["rcept_no"]
             for source in row["derived_sources"]["매출성장률"]
         ] == ["20240318000001", "20250318000001"]
+
+
+def test_dispatch_promotes_exact_growth_sources_to_envelope_and_investor_pack(
+    temp_engine,
+):
+    """Dropping either growth input receipt from the public MCP result is a bug."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.mcp.dispatch import dispatch_tool
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+            ('00126380', 2023, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', 'KRW', 'duration', '20240318000001',
+             '사업보고서 (2023.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 150000000,
+             'financial_facts', 'KRW', 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    result = dispatch_tool(
+        "get_financial_snapshot",
+        {"company": "00126380", "years": 1},
+    ).model_dump(mode="json")
+
+    expected_receipts = {"20240318000001", "20250318000001"}
+    assert result["verdict"] == "usable"
+    assert {
+        evidence["rcept_no"] for evidence in result["evidence"]
+    } == expected_receipts
+    assert len(result["evidence"]) == 2
+
+    growth_fact = next(
+        fact
+        for fact in result["confirmed_facts"]
+        if "매출성장률" in fact["statement"]
+    )
+    assert "source" not in growth_fact
+    assert [
+        source["rcept_no"] for source in growth_fact["sources"]
+    ] == ["20240318000001", "20250318000001"]
+
+    pack = result["answer_pack"]
+    assert {
+        source["rcept_no"] for source in pack["sources"]
+    } == expected_receipts
+    assert len(pack["sources"]) == 2
+    growth_row = pack["tables"][0]["rows"][0]
+    assert growth_row["revenue_growth"] == 50.0
+    assert growth_row["source"] == "20250318000001"
+    assert growth_row["growth_sources"] == [
+        "20240318000001",
+        "20250318000001",
+    ]
+
+
+def test_dispatch_keeps_bad_prior_growth_suppressed_and_current_source_bounded(
+    temp_engine,
+):
+    """A public pack must not recover growth evidence from an unproven prior row."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.mcp.dispatch import dispatch_tool
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+            ('00126380', 2023, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', NULL, 'duration', NULL, NULL,
+             'uncitable', 'limited', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 150000000,
+             'financial_facts', 'KRW', 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    result = dispatch_tool(
+        "get_financial_snapshot",
+        {"company": "00126380", "years": 1},
+    ).model_dump(mode="json")
+
+    assert result["verdict"] == "limited"
+    assert (
+        "derived_input_unproven:revenue_growth:2023"
+        in result["data_quality"]["limitations"]
+    )
+    assert [evidence["rcept_no"] for evidence in result["evidence"]] == [
+        "20250318000001"
+    ]
+    assert all(
+        "매출성장률" not in fact["statement"]
+        for fact in result["confirmed_facts"]
+    )
+    growth_row = result["answer_pack"]["tables"][0]["rows"][0]
+    assert growth_row["revenue_growth"] is None
+    assert not growth_row.get("growth_sources")
+    assert growth_row["source"] == "20250318000001"
+    assert [
+        source["rcept_no"] for source in result["answer_pack"]["sources"]
+    ] == ["20250318000001"]
