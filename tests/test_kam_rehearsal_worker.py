@@ -5,6 +5,8 @@ missing a checked-out migration, or silently losing typed KAM linkage.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,8 @@ from kreports.db.migrations import MIGRATIONS, _checksum
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MARKER_SCHEMA = "kam-schema-backfill-rehearsal-marker.v1"
+MIN_FREE_BYTES = 10 * 1024**3
+TEST_CAPABILITY = "c" * 64
 EXPECTED_KAM_GATED_TOOLS = {
     "build_audit_acceptance_pack",
     "get_audit_report_sections",
@@ -49,26 +53,110 @@ EXPECTED_PROFESSIONAL_REHEARSAL_TOOLS = (
 )
 
 
-def write_marker(database: Path, *, database_path: Path | None = None, inode: int | None = None) -> Path:
-    """Create the explicit, non-secret rehearsal capability next to a real DB."""
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_marker(
+    database: Path,
+    *,
+    database_path: Path | None = None,
+    inode: int | None = None,
+    source_path: Path | None = None,
+    repository_root: Path | None = None,
+    clone_initial_sha256: str | None = None,
+    capability: str = TEST_CAPABILITY,
+    valid_hmac: bool = True,
+) -> Path:
+    """Create a signed Task1/Task3 clone receipt next to a real DB."""
+    database = database.resolve()
+    source = source_path or (
+        database.parent.parent
+        / f"{database.parent.name}-{database.stem}-source"
+        / "source.db"
+    )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    if not source.exists():
+        sqlite3.connect(source).close()
+    source = source.resolve()
+    repository = repository_root or (
+        database.parent.parent / f"{database.parent.name}-{database.stem}-repo"
+    )
+    repository.mkdir(parents=True, exist_ok=True)
+    repository = repository.resolve()
     stat = database.stat()
+    source_stat = source.stat()
     marker = database.parent / "kam-rehearsal-marker.json"
-    marker.write_text(json.dumps({
+    signed_fields = {
         "schema_version": MARKER_SCHEMA,
         "run_id": "test-run-20260729",
         "database_path": str((database_path or database).resolve()),
         "database_inode": stat.st_ino if inode is None else inode,
         "database_device": stat.st_dev,
+        "source_path": str(source),
+        "source_inode": source_stat.st_ino,
+        "source_device": source_stat.st_dev,
+        "source_sha256": _sha256_file(source),
+        "clone_initial_sha256": clone_initial_sha256 or _sha256_file(database),
+        "repository_root": str(repository),
+        "rehearsal_dir": str(database.parent),
+        "filesystem_type": "apfs",
+        "min_free_bytes": MIN_FREE_BYTES,
+    }
+    canonical = json.dumps(
+        signed_fields,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    signature = hmac.new(
+        bytes.fromhex(capability),
+        canonical,
+        hashlib.sha256,
+    ).hexdigest()
+    marker.write_text(
+        json.dumps({**signed_fields, "hmac_sha256": signature if valid_hmac else "0" * 64}),
+        encoding="utf-8",
+    )
+    return marker
+
+
+def write_unsigned_self_asserted_marker(database: Path) -> Path:
+    """Create the forgeable round-1 marker to prove it is no longer trusted."""
+    stat = database.stat()
+    marker = database.parent / "kam-rehearsal-marker.json"
+    marker.write_text(json.dumps({
+        "schema_version": MARKER_SCHEMA,
+        "run_id": "forged-marker",
+        "database_path": str(database.resolve()),
+        "database_inode": stat.st_ino,
+        "database_device": stat.st_dev,
         "source_sha256": "a" * 64,
-        "clone_initial_sha256": "b" * 64,
+        "clone_initial_sha256": _sha256_file(database),
     }), encoding="utf-8")
     return marker
 
 
-def _child_env(database: Path, *, runtime_mode: str, marker: Path | None = None) -> dict[str, str]:
+def _child_env(
+    database: Path,
+    *,
+    runtime_mode: str,
+    marker: Path | None = None,
+    capability: str | None = None,
+) -> dict[str, str]:
     """Bind only an explicit temporary database in the fresh child process."""
     env = os.environ.copy()
-    for name in ("DB_URL", "DART_API_KEY", "KREPORTS_RUNTIME_MODE", "KREPORTS_REHEARSAL_MARKER"):
+    for name in (
+        "DB_URL",
+        "DART_API_KEY",
+        "KREPORTS_RUNTIME_MODE",
+        "KREPORTS_REHEARSAL_MARKER",
+        "KREPORTS_REHEARSAL_CAPABILITY",
+    ):
         env.pop(name, None)
     env.update(
         {
@@ -80,19 +168,25 @@ def _child_env(database: Path, *, runtime_mode: str, marker: Path | None = None)
     )
     if marker is not None:
         env["KREPORTS_REHEARSAL_MARKER"] = str(marker)
+        env["KREPORTS_REHEARSAL_CAPABILITY"] = capability or TEST_CAPABILITY
     return env
 
 
 def run_worker_process(
     database: Path, action: str, *arguments: str, runtime_mode: str = "readonly", marker: Path | None = None,
-    with_marker: bool = True,
+    with_marker: bool = True, capability: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if marker is None and with_marker:
         marker = write_marker(database)
     return subprocess.run(
         [sys.executable, "-m", "kreports.maintenance.kam_rehearsal_worker", action, *arguments],
         cwd=REPOSITORY_ROOT,
-        env=_child_env(database, runtime_mode=runtime_mode, marker=marker),
+        env=_child_env(
+            database,
+            runtime_mode=runtime_mode,
+            marker=marker,
+            capability=capability,
+        ),
         text=True,
         capture_output=True,
         check=False,
@@ -210,6 +304,17 @@ def test_migrate_applies_every_pending_checked_out_revision(legacy_database: Pat
         procedure_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(audit_procedure_items)")
         }
+        kam_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(kam_items)")
+        }
+        assert {
+            "id", "rcept_no", "dcm_no", "corp_code", "bsns_year",
+            "source_type", "ordinal", "title", "normalized_topic",
+            "reason_text", "audit_response_text",
+            "related_note_references_json", "full_body_hash",
+            "full_body_length", "source_basis", "parser_version",
+            "quality_status", "fetched_at",
+        } <= kam_columns
         assert {"kam_item_id", "method", "assertion_hints_json", "linked_metric_keys_json", "linked_note_keys_json", "linked_event_keys_json", "parser_version", "quality_status"} <= procedure_columns
         fee_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_fees)")}
         assert {"contract_fee_m", "actual_fee_m", "availability_status", "quality_status", "source_observations_json"} <= fee_columns
@@ -219,6 +324,33 @@ def test_migrate_applies_every_pending_checked_out_revision(legacy_database: Pat
             )
         }
         assert {"idx_kam_item_corp_year", "idx_audit_procedure_kam_item", "idx_audit_fee_availability_year", "idx_group_entity_parent_year", "idx_group_relationship_parent_year", "idx_group_metric_parent_year"} <= indexes
+
+
+def test_migrate_fails_closed_on_recorded_checksum_mismatch(
+    legacy_database: Path,
+) -> None:
+    """Catch a checked-out migration ledger whose recorded checksum was mutated."""
+    with sqlite3.connect(legacy_database) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum=? WHERE revision=?",
+            ("0" * 64, MIGRATIONS[0].revision),
+        )
+    result = run_worker_process(
+        legacy_database,
+        "migrate",
+        runtime_mode="collector",
+    )
+    payload = json.loads(result.stdout)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "migration_failed"
+    with sqlite3.connect(legacy_database) as connection:
+        recorded = dict(
+            connection.execute(
+                "SELECT revision, checksum FROM schema_migrations ORDER BY revision"
+            )
+        )
+    assert set(recorded) == {migration.revision for migration in MIGRATIONS[:4]}
+    assert recorded[MIGRATIONS[0].revision] == "0" * 64
 
 
 def _create_snapshot_database(path: Path) -> None:
@@ -235,6 +367,93 @@ def _create_snapshot_database(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def test_valid_signed_marker_allows_readonly_snapshot(tmp_path: Path) -> None:
+    """Catch a verifier that rejects the Task1/Task3 signed receipt interface."""
+    database = tmp_path / "rehearsal" / "snapshot.db"
+    database.parent.mkdir()
+    _create_snapshot_database(database)
+    marker = write_marker(database)
+    result = run_worker_process(database, "semantic-snapshot", marker=marker)
+    assert result.returncode == 0, result.stdout
+
+
+def test_unsigned_self_asserted_marker_is_rejected(tmp_path: Path) -> None:
+    """Catch a forgeable marker whose identity fields are not authenticated."""
+    database = tmp_path / "rehearsal" / "snapshot.db"
+    database.parent.mkdir()
+    _create_snapshot_database(database)
+    marker = write_unsigned_self_asserted_marker(database)
+    result = run_worker_process(database, "semantic-snapshot", marker=marker)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "rehearsal_binding_required"
+
+
+def test_signed_marker_rejects_database_equal_to_source(tmp_path: Path) -> None:
+    """Catch a signed receipt that relabels the live source itself as the clone."""
+    database = tmp_path / "rehearsal" / "snapshot.db"
+    database.parent.mkdir()
+    _create_snapshot_database(database)
+    control = write_marker(database)
+    assert run_worker_process(database, "semantic-snapshot", marker=control).returncode == 0
+    marker = write_marker(database, source_path=database)
+    result = run_worker_process(database, "semantic-snapshot", marker=marker)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "rehearsal_binding_required"
+
+
+def test_signed_marker_rejects_database_inside_protected_repository(tmp_path: Path) -> None:
+    """Catch a signed receipt that puts the mutable clone under a protected repository root."""
+    database = tmp_path / "rehearsal" / "snapshot.db"
+    database.parent.mkdir()
+    _create_snapshot_database(database)
+    control = write_marker(database)
+    assert run_worker_process(database, "semantic-snapshot", marker=control).returncode == 0
+    marker = write_marker(database, repository_root=database.parent)
+    result = run_worker_process(database, "semantic-snapshot", marker=marker)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "rehearsal_binding_required"
+
+
+def test_migrate_rejects_clone_digest_changed_after_receipt(
+    legacy_database: Path,
+) -> None:
+    """Catch writable migration starting after the signed clone bytes changed."""
+    marker = write_marker(legacy_database)
+    with sqlite3.connect(legacy_database) as connection:
+        connection.execute("CREATE TABLE post_clone_mutation (id INTEGER PRIMARY KEY)")
+    result = run_worker_process(
+        legacy_database,
+        "migrate",
+        runtime_mode="collector",
+        marker=marker,
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "rehearsal_binding_required"
+    with sqlite3.connect(legacy_database) as connection:
+        revisions = {
+            row[0] for row in connection.execute("SELECT revision FROM schema_migrations")
+        }
+    assert revisions == {migration.revision for migration in MIGRATIONS[:4]}
+
+
+def test_rehearsal_capability_is_redacted_from_failure_output(tmp_path: Path) -> None:
+    """Catch the HMAC capability leaking through bounded stdout or diagnostics."""
+    database = tmp_path / "rehearsal" / "snapshot.db"
+    database.parent.mkdir()
+    _create_snapshot_database(database)
+    marker = write_unsigned_self_asserted_marker(database)
+    secret = "d" * 64
+    result = run_worker_process(
+        database,
+        "semantic-snapshot",
+        marker=marker,
+        capability=secret,
+    )
+    assert result.returncode == 2
+    assert secret not in result.stdout
+    assert secret not in result.stderr
 
 
 def test_semantic_snapshot_binds_stable_ids_and_typed_linkage(tmp_path: Path) -> None:
@@ -304,6 +523,7 @@ def _bind_direct_rehearsal_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     marker = write_marker(database)
     monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
     monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
 
 

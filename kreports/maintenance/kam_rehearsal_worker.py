@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -70,10 +71,19 @@ _MARKER_FIELDS = {
     "database_path",
     "database_inode",
     "database_device",
+    "source_path",
+    "source_inode",
+    "source_device",
     "source_sha256",
     "clone_initial_sha256",
+    "repository_root",
+    "rehearsal_dir",
+    "filesystem_type",
+    "min_free_bytes",
+    "hmac_sha256",
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MIN_FREE_BYTES = 10 * 1024**3
 
 KAM_SNAPSHOT_COLUMNS = (
     "id", "rcept_no", "dcm_no", "corp_code", "bsns_year", "source_type",
@@ -120,12 +130,28 @@ def _configured_database_path() -> Path:
     return path
 
 
-def _require_rehearsal_binding() -> Path:
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _require_rehearsal_binding(*, require_initial_digest: bool) -> Path:
     """Validate the pre-import clone capability for every database action."""
     database = _configured_database_path()
     raw_marker = os.environ.get("KREPORTS_REHEARSAL_MARKER", "")
-    if not raw_marker:
-        raise WorkerActionError("rehearsal_binding_required", "rehearsal marker is required")
+    capability = os.environ.get("KREPORTS_REHEARSAL_CAPABILITY", "")
+    if not raw_marker or not _SHA256.fullmatch(capability):
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "signed rehearsal capability is required",
+        )
     marker = Path(raw_marker)
     if not marker.is_absolute() or marker.is_symlink() or not marker.is_file():
         raise WorkerActionError("rehearsal_binding_required", "rehearsal marker must be a regular absolute file")
@@ -136,7 +162,30 @@ def _require_rehearsal_binding() -> Path:
         payload = json.loads(marker.read_text(encoding="utf-8"))
         if not isinstance(payload, dict) or set(payload) != _MARKER_FIELDS:
             raise ValueError("marker schema is invalid")
-        marker_database = Path(str(payload["database_path"]))
+        signature = payload["hmac_sha256"]
+        if not isinstance(signature, str) or not _SHA256.fullmatch(signature):
+            raise ValueError("marker signature is invalid")
+        signed_fields = {
+            field: value
+            for field, value in payload.items()
+            if field != "hmac_sha256"
+        }
+        canonical = json.dumps(
+            signed_fields,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        expected_signature = hmac.new(
+            bytes.fromhex(capability),
+            canonical,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("marker signature mismatch")
+        if not isinstance(payload["database_path"], str):
+            raise ValueError("marker database path is invalid")
+        marker_database = Path(payload["database_path"])
         if not marker_database.is_absolute() or marker_database.resolve(strict=True) != database:
             raise ValueError("marker database path is invalid")
         if payload["schema_version"] != _MARKER_SCHEMA:
@@ -146,9 +195,52 @@ def _require_rehearsal_binding() -> Path:
         stat = database.stat()
         if payload["database_inode"] != stat.st_ino or payload["database_device"] != stat.st_dev:
             raise ValueError("marker database identity is invalid")
+        if not isinstance(payload["source_path"], str):
+            raise ValueError("marker source path is invalid")
+        source = Path(payload["source_path"])
+        if not source.is_absolute() or source.is_symlink() or not source.is_file():
+            raise ValueError("marker source path is invalid")
+        source = source.resolve(strict=True)
+        source_stat = source.stat()
+        if (
+            payload["source_inode"] != source_stat.st_ino
+            or payload["source_device"] != source_stat.st_dev
+        ):
+            raise ValueError("marker source identity is invalid")
+        if database == source or (stat.st_ino, stat.st_dev) == (
+            source_stat.st_ino,
+            source_stat.st_dev,
+        ):
+            raise ValueError("source database cannot be the rehearsal clone")
+        repository = Path(str(payload["repository_root"]))
+        rehearsal_dir = Path(str(payload["rehearsal_dir"]))
+        if (
+            not repository.is_absolute()
+            or not repository.is_dir()
+            or not rehearsal_dir.is_absolute()
+            or not rehearsal_dir.is_dir()
+        ):
+            raise ValueError("marker protected paths are invalid")
+        repository = repository.resolve(strict=True)
+        rehearsal_dir = rehearsal_dir.resolve(strict=True)
+        if rehearsal_dir != database.parent:
+            raise ValueError("marker rehearsal directory is invalid")
+        if _is_within(database, source.parent) or _is_within(database, repository):
+            raise ValueError("rehearsal database is inside a protected root")
+        if payload["filesystem_type"] != "apfs":
+            raise ValueError("marker filesystem type is invalid")
+        min_free_bytes = payload["min_free_bytes"]
+        if (
+            not isinstance(min_free_bytes, int)
+            or isinstance(min_free_bytes, bool)
+            or min_free_bytes < _MIN_FREE_BYTES
+        ):
+            raise ValueError("marker free-space floor is invalid")
         for field in ("source_sha256", "clone_initial_sha256"):
             if not isinstance(payload[field], str) or not _SHA256.fullmatch(payload[field]):
                 raise ValueError("marker digest is invalid")
+        if require_initial_digest and _sha256_file(database) != payload["clone_initial_sha256"]:
+            raise ValueError("rehearsal clone changed before migration")
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise WorkerActionError("rehearsal_binding_required", "rehearsal marker does not bind this database") from exc
     return database
@@ -425,7 +517,7 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
         _require_mode("collector", action)
     else:
         _require_mode("readonly", action)
-    _require_rehearsal_binding()
+    _require_rehearsal_binding(require_initial_digest=action == "migrate")
 
     if action == "migrate":
         before = migration_state()
