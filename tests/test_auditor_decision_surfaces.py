@@ -741,6 +741,8 @@ def test_real_acceptance_wrapper_chain_binds_risk_and_renders_all_selected_peers
         "get_audit_history",
         lambda *_: legacy["audit_history"],
     )
+    monkeypatch.setattr(auditor_decisions, "compare_peer_kam_topics", lambda **_: {"error": "fixture"})
+    monkeypatch.setattr(auditor_decisions, "compare_peer_audit_report_matters", lambda **_: {"error": "fixture"})
 
     result = auditor_decisions.build_audit_acceptance_pack(
         "005930",
@@ -798,6 +800,8 @@ def test_acceptance_wrapper_fails_closed_when_legacy_cohort_identity_differs(
         "get_audit_history",
         lambda *_: legacy["audit_history"],
     )
+    monkeypatch.setattr(auditor_decisions, "compare_peer_kam_topics", lambda **_: {"error": "fixture"})
+    monkeypatch.setattr(auditor_decisions, "compare_peer_audit_report_matters", lambda **_: {"error": "fixture"})
 
     result = auditor_decisions.build_audit_acceptance_pack("005930", year=2025)
     peer_section = result["data_quality"]["section_statuses"]["peer_group"]
@@ -846,6 +850,8 @@ def test_peer_table_denominator_uses_selected_rows_not_legacy_count(
         "get_audit_history",
         lambda *_: legacy["audit_history"],
     )
+    monkeypatch.setattr(auditor_decisions, "compare_peer_kam_topics", lambda **_: {"error": "fixture"})
+    monkeypatch.setattr(auditor_decisions, "compare_peer_audit_report_matters", lambda **_: {"error": "fixture"})
 
     result = auditor_decisions.build_audit_acceptance_pack("005930", year=2025)
     out = enrich_answer_response("build_audit_acceptance_pack", result)
@@ -888,3 +894,57 @@ def test_public_handler_accepts_real_sample_peers_shape_and_keeps_detail_tables(
         "audit_acceptance_risk_metrics",
     }
     assert out["answer"].count("| Peer 그룹 |") == 1
+
+
+def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):
+    from kreports.analysis import auditor_decisions
+    from kreports.mcp.handlers import auditor as auditor_handlers
+
+    receipt = "20250101000001"
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_kam_topics",
+        lambda **_: {
+            "subject": {"corp_code": "001"},
+            "subject_sections": [{
+                "rcept_no": f"{receipt}_001_xml",
+                "section_key": "kam",
+            }],
+            "peer_sections": [],
+            "audit_report_sections": {},
+            "data_quality": {"status": "usable"},
+        },
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "attach_kam_item_semantics",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_audit_report_matters",
+        lambda **_: {
+            "subject_matters": [{
+                "rcept_no": f"{receipt}_001_xml",
+                "section_key": "emphasis",
+                "matter_category": "emphasis",
+                "body_excerpt": "감사인의 책임과 경영진과의 커뮤니케이션 사항",
+            }],
+            "peer_matters": [],
+            "matter_counts": {"emphasis": {"subject_count": 1}},
+        },
+    )
+
+    kam = auditor_decisions.compare_peer_kam_topics("001")
+    matters = auditor_decisions.compare_peer_audit_report_matters("001")
+
+    assert kam["data_quality"]["status"] == "limited"
+    assert kam["subject_sections"][0]["rcept_no"] == receipt
+    assert kam["audit_report_sections"]["semantic_complete"] is False
+    assert matters["subject_matters"][0]["rcept_no"] == receipt
+    assert matters["matter_counts"]["emphasis"]["subject_signal_count"] == 0
+    assert auditor_handlers.compare_peer_kam_topics is auditor_decisions.compare_peer_kam_topics
+    assert (
+        auditor_handlers.compare_peer_audit_report_matters
+        is auditor_decisions.compare_peer_audit_report_matters
+    )

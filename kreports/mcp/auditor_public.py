@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _KAM_TOPIC_LABELS = {
     "revenue": "수익인식",
     "revenue_recognition": "수익인식",
@@ -42,6 +41,8 @@ def _is_machine_enum(text: str) -> bool:
     if not _MACHINE_TOKEN.fullmatch(text):
         return False
     return (
+        text.isupper()
+        or
         any(separator in text for separator in "_.-")
         or _ACRONYM_BOUNDARY.search(text) is not None
         or _CAMEL_BOUNDARY.search(text) is not None

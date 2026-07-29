@@ -1198,6 +1198,7 @@ def test_published_visual_resource_is_fetchable_through_actual_mcp_read_path():
         ("ITSystem", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
         ("KAMLifecycle", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
         ("REVENUERecognition", "NEWLYRepeated", "수익인식", "상태 미분류"),
+        ("SUSTAINABILITY", "PENDING", "기타 핵심감사사항", "상태 미분류"),
     ],
 )
 def test_raw_kam_lifecycle_visual_fallback_maps_public_labels(

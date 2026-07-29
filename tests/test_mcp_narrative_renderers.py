@@ -158,6 +158,7 @@ def test_auditor_public_tokenization_distinguishes_machine_and_reader_labels(
         ("ITSystem", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
         ("KAMLifecycle", "NEWLYRepeated", "기타 핵심감사사항", "상태 미분류"),
         ("REVENUERecognition", "NEWLYRepeated", "수익인식", "상태 미분류"),
+        ("SUSTAINABILITY", "PENDING", "기타 핵심감사사항", "상태 미분류"),
     ],
 )
 def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values(

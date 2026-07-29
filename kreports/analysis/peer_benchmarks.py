@@ -25,11 +25,9 @@ from kreports.analysis.audit_procedure_evidence import (
     procedure_read_engine,
 )
 from kreports.analysis.company_profile import get_industry_name, resolve_corp_code
-from kreports.analysis.evidence import parent_rcept_no
 from kreports.analysis.audit_reporting import (
     AUDIT_MATTER_KEYS,
     KAM_TOPIC_KEYWORDS,
-    attach_kam_item_semantics,
     cache_quality_status,
     cached_years_for_sections,
     classify_audit_matter,
@@ -37,7 +35,6 @@ from kreports.analysis.audit_reporting import (
     evidence_years_for_sections,
     full_body_kam_procedure_rows,
     kam_hint_coverage,
-    kam_semantic_coverage,
     topic_hits,
 )
 
@@ -1542,16 +1539,6 @@ def compare_peer_kam_topics(
         for topic in topics:
             body_topic_counts[topic] = body_topic_counts.get(topic, 0) + 1
         sections_by_corp.setdefault(row["corp_code"], []).append(row)
-    for item_corp_code, company_rows in sections_by_corp.items():
-        attach_kam_item_semantics(
-            company_rows,
-            corp_code=item_corp_code,
-            year=year,
-        )
-        for row in company_rows:
-            row["rcept_no"] = parent_rcept_no(
-                str(row.get("rcept_no") or ""),
-            )
 
     summary_stmt = text(
         f"""
@@ -1574,9 +1561,6 @@ def compare_peer_kam_topics(
     for row in summary_rows:
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
-        row["rcept_no"] = parent_rcept_no(
-            str(row.get("rcept_no") or ""),
-        )
         row.pop("body_text", None)
 
     business_summary_by_corp: dict[str, list[dict]] = {}
@@ -1590,9 +1574,9 @@ def compare_peer_kam_topics(
         if sections_by_corp.get(cc)
     }
     kam_body_rows = [r for r in section_rows if r.get("section_key") == "kam"]
-    all_section_rows = [row for company_rows in sections_by_corp.values() for row in company_rows]
-    kam_coverage = kam_hint_coverage(all_section_rows)
-    subject_kam_semantics = kam_semantic_coverage(subject_sections)
+    kam_coverage = kam_hint_coverage(
+        [row for company_rows in sections_by_corp.values() for row in company_rows]
+    )
     has_body = bool(kam_body_rows)
     limitations = (
         ["KAM paragraphs are based on cached audit_report body sections, not business-report summary tables."]
@@ -1612,16 +1596,11 @@ def compare_peer_kam_topics(
             "Peer audit-report KAM body coverage is limited for the selected peer group; compare topics cautiously."
         )
 
-    timeline_status = cache_quality_status(
-        subject_count=len([r for r in subject_sections if r.get("section_key") == "kam"]),
-        peer_total=len(peer_codes),
-        peer_covered=len(peer_sections),
-    )
     data_quality = {
-        "status": (
-            "limited"
-            if timeline_status == "usable" and not subject_kam_semantics["semantic_complete"]
-            else timeline_status
+        "status": cache_quality_status(
+            subject_count=len([r for r in subject_sections if r.get("section_key") == "kam"]),
+            peer_total=len(peer_codes),
+            peer_covered=len(peer_sections),
         ),
         "source": section_source,
         "requested_year": year,
@@ -1632,12 +1611,6 @@ def compare_peer_kam_topics(
         "total_kam_body_count": len(kam_body_rows),
         "kam_reason_coverage": kam_coverage["reason"],
         "kam_procedure_coverage": kam_coverage["procedure"],
-        "timeline_status": timeline_status,
-        "semantic_complete": subject_kam_semantics["semantic_complete"],
-        "topic_coverage": subject_kam_semantics["topic_coverage"],
-        "reason_coverage": subject_kam_semantics["reason_coverage"],
-        "procedure_coverage": subject_kam_semantics["procedure_coverage"],
-        "source_coverage": subject_kam_semantics["source_coverage"],
         "business_report_summary_sections": len(summary_rows),
         "available_subject_kam_years": sorted(set(
             cached_years_for_sections(corp_code, "audit_report", "kam")
@@ -1674,12 +1647,6 @@ def compare_peer_kam_topics(
             "kam_body_count": len(kam_body_rows),
             "kam_reason_coverage": kam_coverage["reason"],
             "kam_procedure_coverage": kam_coverage["procedure"],
-            "timeline_status": timeline_status,
-            "semantic_complete": subject_kam_semantics["semantic_complete"],
-            "topic_coverage": subject_kam_semantics["topic_coverage"],
-            "reason_coverage": subject_kam_semantics["reason_coverage"],
-            "procedure_coverage": subject_kam_semantics["procedure_coverage"],
-            "source_coverage": subject_kam_semantics["source_coverage"],
             "source": audit_report_sections_source if has_body else "disclosure_events_only",
         },
         "data_quality": data_quality,
@@ -1771,22 +1738,16 @@ def compare_peer_audit_report_matters(
         key = row["section_key"]
         body = _display_text(row.get("body_text"))
         row["body_excerpt"] = body[:1200]
-        row["rcept_no"] = parent_rcept_no(
-            str(row.get("rcept_no") or ""),
-        )
         row.update(classify_audit_matter(body, key))
         row.pop("body_text", None)
         counts[key]["total_sections"] += 1
         if row["corp_code"] == corp_code:
             counts[key]["subject_count"] += 1
-            if row.get("acceptance_signal"):
-                counts[key]["subject_signal_count"] = counts[key].get("subject_signal_count", 0) + 1
         elif row["corp_code"] in peer_codes:
             peer_corp_by_key[key].add(row["corp_code"])
         by_corp.setdefault(row["corp_code"], []).append(row)
 
     for key in AUDIT_MATTER_KEYS:
-        counts[key].setdefault("subject_signal_count", 0)
         counts[key]["peer_companies_with_section"] = len(peer_corp_by_key[key])
         counts[key]["peer_coverage_pct"] = (
             round(100.0 * len(peer_corp_by_key[key]) / len(peer_codes), 1)
@@ -2272,19 +2233,19 @@ def build_audit_acceptance_pack(
             "signal": "high_public_data_complexity_proxy",
         })
     matter_counts = matter_pack.get("matter_counts") or {}
-    if (matter_counts.get("emphasis") or {}).get("subject_signal_count"):
+    if (matter_counts.get("emphasis") or {}).get("subject_count"):
         acceptance_signals.append({
             "area": "audit_report_matters",
             "severity": "review",
             "signal": "audit_report_emphasis_paragraph_present",
         })
-    if (matter_counts.get("going_concern") or {}).get("subject_signal_count"):
+    if (matter_counts.get("going_concern") or {}).get("subject_count"):
         acceptance_signals.append({
             "area": "going_concern",
             "severity": "review",
             "signal": "audit_report_going_concern_paragraph_present",
         })
-    if (matter_counts.get("other_matter") or {}).get("subject_signal_count"):
+    if (matter_counts.get("other_matter") or {}).get("subject_count"):
         acceptance_signals.append({
             "area": "audit_report_matters",
             "severity": "info",
@@ -2302,7 +2263,6 @@ def build_audit_acceptance_pack(
     kam_body_count = kam_section_quality.get("kam_body_count") or 0
     kam_reason_coverage = kam_section_quality.get("kam_reason_coverage") or {}
     kam_procedure_coverage = kam_section_quality.get("kam_procedure_coverage") or {}
-    kam_semantic_complete = kam_section_quality.get("semantic_complete") is True
     data_quality = {
         "policy_cache": {
             "subject_policy_count": policy_pack.get("subject_policy_count"),
@@ -2325,19 +2285,11 @@ def build_audit_acceptance_pack(
             "subject_section_count": kam_section_quality.get("subject_section_count"),
             "kam_reason_coverage": kam_reason_coverage,
             "kam_procedure_coverage": kam_procedure_coverage,
-            "timeline_status": kam_section_quality.get("timeline_status"),
-            "semantic_complete": kam_semantic_complete,
-            "topic_coverage": kam_section_quality.get("topic_coverage"),
-            "reason_coverage": kam_section_quality.get("reason_coverage"),
-            "procedure_coverage": kam_section_quality.get("procedure_coverage"),
-            "source_coverage": kam_section_quality.get("source_coverage"),
             "source": kam_section_quality.get("source"),
             "available_subject_kam_years": (kam_pack.get("data_quality") or {}).get("available_subject_kam_years"),
             "status": (
                 "not_persisted"
                 if not kam_body_count
-                else "limited"
-                if not kam_semantic_complete
                 else "subject_missing"
                 if not (kam_section_quality.get("subject_section_count") or 0)
                 else "subject_only"
@@ -2376,12 +2328,6 @@ def build_audit_acceptance_pack(
             "area": "data_coverage",
             "severity": "info",
             "signal": "subject_kam_body_missing_for_requested_year",
-        })
-    elif data_quality["kam_body"]["status"] == "limited":
-        acceptance_signals.append({
-            "area": "data_coverage",
-            "severity": "info",
-            "signal": "kam_semantic_coverage_incomplete",
         })
 
     recommended_review_areas = sorted({
@@ -2431,21 +2377,6 @@ def build_audit_acceptance_pack(
             "kam_topics": kam_pack.get("kam_topics"),
             "audit_report_sections": kam_pack.get("audit_report_sections"),
             "subject_sections": (kam_pack.get("subject_sections") or [])[:3],
-            "source": next((
-                {
-                    "rcept_no": section.get("rcept_no"),
-                    "bsns_year": year,
-                    "section_title": section.get("section_title") or "핵심감사사항",
-                }
-                for section in (kam_pack.get("subject_sections") or [])
-                if isinstance(section, dict) and section.get("rcept_no")
-            ), None),
-            "semantic_complete": kam_semantic_complete,
-            "timeline_status": kam_section_quality.get("timeline_status"),
-            "topic_coverage": kam_section_quality.get("topic_coverage"),
-            "reason_coverage": kam_section_quality.get("reason_coverage"),
-            "procedure_coverage": kam_section_quality.get("procedure_coverage"),
-            "source_coverage": kam_section_quality.get("source_coverage"),
             "subject_business_report_kam_summary": (
                 kam_pack.get("subject_business_report_kam_summary") or []
             )[:3],
@@ -2454,20 +2385,6 @@ def build_audit_acceptance_pack(
         "audit_report_matter_summary": {
             "matter_counts": matter_counts,
             "subject_matters": (matter_pack.get("subject_matters") or [])[:5],
-            "source": next((
-                {
-                    "rcept_no": section.get("rcept_no"),
-                    "bsns_year": year,
-                    "section_title": section.get("section_title") or "감사보고서 사항",
-                }
-                for section in (matter_pack.get("subject_matters") or [])
-                if isinstance(section, dict) and section.get("rcept_no")
-            ), None),
-            "classification_complete": all(
-                isinstance(section, dict)
-                and section.get("matter_category") in AUDIT_MATTER_KEYS
-                for section in (matter_pack.get("subject_matters") or [])
-            ),
             "data_quality": matter_pack.get("data_quality"),
             "limitations": matter_pack.get("limitations"),
         },

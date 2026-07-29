@@ -5,18 +5,31 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from kreports.analysis.audit_reporting import get_audit_history
+from kreports.analysis.audit_reporting import (
+    AUDIT_MATTER_KEYS,
+    attach_kam_item_semantics,
+    classify_audit_matter,
+    get_audit_history,
+    kam_semantic_coverage,
+)
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
 from kreports.analysis.filing_provenance import annual_filing_source
 from kreports.analysis.peer_benchmarks import (
     build_audit_acceptance_pack as _legacy_build_audit_acceptance_pack,
 )
 from kreports.analysis.peer_benchmarks import (
+    compare_peer_audit_report_matters as _legacy_compare_peer_audit_report_matters,
+)
+from kreports.analysis.peer_benchmarks import (
+    compare_peer_kam_topics as _legacy_compare_peer_kam_topics,
+)
+from kreports.analysis.peer_benchmarks import (
     compare_peer_risk_profile as _legacy_compare_peer_risk_profile,
 )
-from kreports.analysis.peer_benchmarks import select_peer_group as _legacy_select_peer_group
+from kreports.analysis.peer_benchmarks import (
+    select_peer_group as _legacy_select_peer_group,
+)
 from kreports.mcp.contracts import SectionStatusV1
-
 
 PUBLIC_ACCEPTANCE_LABELS = {
     "non_audit_fee_exceeds_audit_fee": "비감사보수가 감사보수를 초과하여 독립성 검토가 필요합니다.",
@@ -286,6 +299,101 @@ def compare_peer_risk_profile(
         *(result.get("limitations") or []),
         "Percentile and peer quantiles are comparison evidence, not an audit-risk conclusion.",
     ]))
+    return result
+
+
+def _canonical_receipt(row: dict[str, Any]) -> None:
+    row["rcept_no"] = parent_rcept_no(str(row.get("rcept_no") or ""))
+
+
+def compare_peer_kam_topics(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict[str, Any]:
+    """Add Task-5 KAM semantics without altering the shared peer collector."""
+    result = _legacy_compare_peer_kam_topics(
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+    )
+    if not isinstance(result, dict) or "error" in result:
+        return result
+    subject = result.get("subject") if isinstance(result.get("subject"), dict) else {}
+    subject_sections = [
+        row for row in (result.get("subject_sections") or []) if isinstance(row, dict)
+    ]
+    corp_code = str(subject.get("corp_code") or "")
+    if corp_code:
+        attach_kam_item_semantics(subject_sections, corp_code=corp_code, year=year)
+    for row in subject_sections:
+        _canonical_receipt(row)
+    for row in result.get("peer_sections") or []:
+        if isinstance(row, dict):
+            _canonical_receipt(row)
+    semantic = kam_semantic_coverage(subject_sections)
+    quality = dict(result.get("data_quality") or {})
+    timeline_status = str(quality.get("status") or "missing")
+    quality.update({
+        "timeline_status": timeline_status,
+        "semantic_complete": semantic["semantic_complete"],
+        "topic_coverage": semantic["topic_coverage"],
+        "reason_coverage": semantic["reason_coverage"],
+        "procedure_coverage": semantic["procedure_coverage"],
+        "source_coverage": semantic["source_coverage"],
+        "status": "limited"
+        if timeline_status == "usable" and not semantic["semantic_complete"]
+        else timeline_status,
+    })
+    sections = dict(result.get("audit_report_sections") or {})
+    sections.update({
+        "timeline_status": timeline_status,
+        "semantic_complete": semantic["semantic_complete"],
+        "topic_coverage": semantic["topic_coverage"],
+        "reason_coverage": semantic["reason_coverage"],
+        "procedure_coverage": semantic["procedure_coverage"],
+        "source_coverage": semantic["source_coverage"],
+    })
+    result["subject_sections"] = subject_sections
+    result["data_quality"] = quality
+    result["audit_report_sections"] = sections
+    return result
+
+
+def compare_peer_audit_report_matters(
+    company: str,
+    year: int = 2025,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+) -> dict[str, Any]:
+    """Apply receipt and boilerplate guards after the shared peer query."""
+    result = _legacy_compare_peer_audit_report_matters(
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+    )
+    if not isinstance(result, dict) or "error" in result:
+        return result
+    subject_matters = [
+        row for row in (result.get("subject_matters") or []) if isinstance(row, dict)
+    ]
+    for row in subject_matters:
+        _canonical_receipt(row)
+        row.update(classify_audit_matter(
+            str(row.get("body_excerpt") or ""),
+            str(row.get("matter_category") or row.get("section_key") or ""),
+        ))
+    for row in result.get("peer_matters") or []:
+        if isinstance(row, dict):
+            _canonical_receipt(row)
+    counts = dict(result.get("matter_counts") or {})
+    for key in AUDIT_MATTER_KEYS:
+        bucket = dict(counts.get(key) or {})
+        bucket["subject_signal_count"] = sum(
+            row.get("matter_category") == key
+            and row.get("acceptance_signal") is True
+            for row in subject_matters
+        )
+        counts[key] = bucket
+    result["subject_matters"] = subject_matters
+    result["matter_counts"] = counts
     return result
 
 
@@ -904,6 +1012,56 @@ def build_audit_acceptance_pack(
             "source": source,
             "confirmed_facts": confirmed_facts,
             "data_quality": risk.get("data_quality"),
+        }
+    kam = compare_peer_kam_topics(
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+    )
+    if isinstance(kam, dict) and "error" not in kam:
+        sections = kam.get("audit_report_sections")
+        sections = dict(sections) if isinstance(sections, dict) else {}
+        source = next((
+            {
+                "rcept_no": row.get("rcept_no"),
+                "bsns_year": year,
+                "section_title": row.get("section_title") or "핵심감사사항",
+            }
+            for row in (kam.get("subject_sections") or [])
+            if isinstance(row, dict) and row.get("rcept_no")
+        ), None)
+        legacy["kam_summary"] = {
+            **(legacy.get("kam_summary") or {}),
+            "source": source,
+            "semantic_complete": sections.get("semantic_complete") is True,
+            "timeline_status": sections.get("timeline_status"),
+            "topic_coverage": sections.get("topic_coverage"),
+            "reason_coverage": sections.get("reason_coverage"),
+            "procedure_coverage": sections.get("procedure_coverage"),
+            "source_coverage": sections.get("source_coverage"),
+        }
+    matters = compare_peer_audit_report_matters(
+        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+    )
+    if isinstance(matters, dict) and "error" not in matters:
+        subject_matters = matters.get("subject_matters") or []
+        source = next((
+            {
+                "rcept_no": row.get("rcept_no"),
+                "bsns_year": year,
+                "section_title": row.get("section_title") or "감사보고서 사항",
+            }
+            for row in subject_matters
+            if isinstance(row, dict) and row.get("rcept_no")
+        ), None)
+        legacy["audit_report_matter_summary"] = {
+            **(legacy.get("audit_report_matter_summary") or {}),
+            "matter_counts": matters.get("matter_counts") or {},
+            "subject_matters": subject_matters[:5],
+            "source": source,
+            "classification_complete": all(
+                isinstance(row, dict)
+                and row.get("matter_category") in AUDIT_MATTER_KEYS
+                for row in subject_matters
+            ),
         }
     return build_acceptance_evidence(
         legacy_payload={**legacy, "audit_history": history},
