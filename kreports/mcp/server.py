@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 
 from mcp.server import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
@@ -102,8 +103,29 @@ async def run() -> None:
         dispose_engine()
 
 
+async def _run_with_signal_shutdown() -> None:
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    installed: list[signal.Signals] = []
+    if task is None:
+        raise RuntimeError("MCP signal wrapper requires a running task")
+    for candidate in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(candidate, task.cancel)
+        except (NotImplementedError, RuntimeError):
+            continue
+        installed.append(candidate)
+    try:
+        await run()
+    except asyncio.CancelledError:
+        return
+    finally:
+        for candidate in installed:
+            loop.remove_signal_handler(candidate)
+
+
 def main() -> None:
-    asyncio.run(run())
+    asyncio.run(_run_with_signal_shutdown())
 
 
 if __name__ == "__main__":
