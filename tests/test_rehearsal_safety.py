@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import os
 import shutil
@@ -16,6 +16,7 @@ from kreports.maintenance.rehearsal_safety import (
     MIN_FREE_BYTES,
     RehearsalSafetyError,
     SourcePreflight,
+    assert_free_space,
     assert_source_unchanged,
     create_apfs_clone,
     inspect_source_database,
@@ -100,11 +101,19 @@ def _valid_preflight(
     commands: list[list[str]] = []
     monkeypatch.setattr(rehearsal_safety.sys, "platform", "darwin")
     monkeypatch.setattr(rehearsal_safety.subprocess, "run", _apfs_runner(commands))
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            2 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+        ),
+    )
     preflight = preflight_rehearsal(
         paths.source,
         paths.rehearsal_dir,
         repository_root=paths.repository_root,
-        min_free_bytes=1,
     )
     return paths, preflight, commands
 
@@ -136,7 +145,6 @@ def test_preflight_rejects_unsafe_source(
             source,
             rehearsal_dir,
             repository_root=repository_root,
-            min_free_bytes=1,
         )
 
     assert caught.value.code == expected_code
@@ -201,7 +209,6 @@ def test_preflight_rejects_unsafe_rehearsal_directory(
             paths.source,
             unsafe,
             repository_root=paths.repository_root,
-            min_free_bytes=1,
         )
 
     assert caught.value.code == "unsafe_rehearsal_directory"
@@ -234,7 +241,6 @@ def test_preflight_rejects_different_filesystem(
             paths.source,
             paths.rehearsal_dir,
             repository_root=paths.repository_root,
-            min_free_bytes=1,
         )
 
     assert caught.value.code == "different_filesystem"
@@ -261,7 +267,6 @@ def test_preflight_requires_apfs_filesystem(
             paths.source,
             paths.rehearsal_dir,
             repository_root=paths.repository_root,
-            min_free_bytes=1,
         )
 
     assert caught.value.code == "filesystem_not_apfs"
@@ -283,7 +288,6 @@ def test_preflight_requires_darwin_for_apfs_clone(
             paths.source,
             paths.rehearsal_dir,
             repository_root=paths.repository_root,
-            min_free_bytes=1,
         )
 
     assert caught.value.code == "filesystem_not_apfs"
@@ -315,6 +319,92 @@ def test_preflight_requires_exact_free_space_floor(
     assert caught.value.code == "insufficient_free_space"
 
 
+# Break caught: a caller-provided reserve below 10 GiB could bypass the global
+# safety floor even when the current filesystem has ample free space.
+def test_assert_free_space_rejects_below_global_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            3 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+            2 * MIN_FREE_BYTES,
+        ),
+    )
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        assert_free_space(
+            tmp_path,
+            min_free_bytes=MIN_FREE_BYTES - 1,
+        )
+
+    assert caught.value.code == "insufficient_free_space"
+
+
+# Break caught: preflight must not mint an approval with a caller-weakened
+# reserve even when the filesystem currently has exactly 10 GiB free.
+def test_preflight_rejects_below_global_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _valid_paths(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(rehearsal_safety.sys, "platform", "darwin")
+    monkeypatch.setattr(rehearsal_safety.subprocess, "run", _apfs_runner(commands))
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            2 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+        ),
+    )
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        preflight_rehearsal(
+            paths.source,
+            paths.rehearsal_dir,
+            repository_root=paths.repository_root,
+            min_free_bytes=MIN_FREE_BYTES - 1,
+        )
+    assert caught.value.code == "insufficient_free_space"
+
+
+# Break caught: using `<` instead of `<=` at the reserve boundary must preserve
+# an exact 10 GiB approval and its enforcement provenance.
+def test_preflight_accepts_exact_global_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _valid_paths(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(rehearsal_safety.sys, "platform", "darwin")
+    monkeypatch.setattr(rehearsal_safety.subprocess, "run", _apfs_runner(commands))
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            2 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+        ),
+    )
+
+    approved = preflight_rehearsal(
+        paths.source,
+        paths.rehearsal_dir,
+        repository_root=paths.repository_root,
+        min_free_bytes=MIN_FREE_BYTES,
+    )
+    assert approved.free_bytes == MIN_FREE_BYTES
+    assert approved.enforced_min_free_bytes == MIN_FREE_BYTES
+    assert approved.repository_root == paths.repository_root
+
+
 # Break caught: a pre-existing destination could be overwritten by the clone.
 def test_preflight_rejects_existing_target(
     tmp_path: Path,
@@ -325,13 +415,21 @@ def test_preflight_rejects_existing_target(
     commands: list[list[str]] = []
     monkeypatch.setattr(rehearsal_safety.sys, "platform", "darwin")
     monkeypatch.setattr(rehearsal_safety.subprocess, "run", _apfs_runner(commands))
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            2 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+            MIN_FREE_BYTES,
+        ),
+    )
 
     with pytest.raises(RehearsalSafetyError) as caught:
         preflight_rehearsal(
             paths.source,
             paths.rehearsal_dir,
             repository_root=paths.repository_root,
-            min_free_bytes=1,
         )
 
     assert caught.value.code == "target_exists"
@@ -350,7 +448,97 @@ def test_create_apfs_clone_uses_clone_only_and_returns_file_identity(
     assert clone.path == paths.rehearsal_dir / "kreports-rehearsal.db"
     assert clone.sha256 == preflight.source.sha256
     assert clone.inode != preflight.source.inode
-    assert ["/bin/cp", "-c", str(paths.source), str(clone.path)] in commands
+    assert clone.path.stat().st_nlink == 1
+    clone_commands = [command for command in commands if command[0] == "/bin/cp"]
+    assert len(clone_commands) == 1
+    assert clone_commands[0][:3] == ["/bin/cp", "-c", str(paths.source)]
+    staged_target = Path(clone_commands[0][3])
+    assert staged_target.parent.parent == paths.rehearsal_dir
+    assert staged_target.parent.name.startswith(".kreports-clone-")
+
+
+# Break caught: creating the final name between preflight and installation must
+# never let this process overwrite or unlink the competing file.
+def test_create_apfs_clone_preserves_target_won_by_racer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, preflight, _ = _valid_preflight(tmp_path, monkeypatch)
+    final_target = paths.rehearsal_dir / "kreports-rehearsal.db"
+    real_link = os.link
+    staging_modes: list[int] = []
+
+    def race_before_link(staged: Path, target: Path) -> None:
+        staging_modes.append(stat.S_IMODE(Path(staged).parent.stat().st_mode))
+        Path(target).write_bytes(b"competing process owns this target")
+        real_link(staged, target)
+
+    monkeypatch.setattr(rehearsal_safety.os, "link", race_before_link)
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(preflight)
+
+    assert caught.value.code == "target_exists"
+    assert final_target.read_bytes() == b"competing process owns this target"
+    assert staging_modes == [0o700]
+    assert not list(paths.rehearsal_dir.glob(".kreports-clone-*"))
+
+
+# Break caught: cached free-space values in a forged approval must not suppress
+# a fresh reserve check immediately before cloning.
+def test_create_apfs_clone_rechecks_forged_preflight_free_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, preflight, commands = _valid_preflight(tmp_path, monkeypatch)
+    forged = replace(preflight, free_bytes=99 * MIN_FREE_BYTES)
+    monkeypatch.setattr(
+        rehearsal_safety.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(
+            2 * MIN_FREE_BYTES,
+            MIN_FREE_BYTES + 1,
+            MIN_FREE_BYTES - 1,
+        ),
+    )
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(forged)
+
+    assert caught.value.code == "insufficient_free_space"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
+
+
+# Break caught: replacing the approved rehearsal path with a protected source
+# directory must be rejected instead of trusting a forgeable dataclass.
+def test_create_apfs_clone_rejects_forged_unsafe_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, preflight, commands = _valid_preflight(tmp_path, monkeypatch)
+    forged = replace(preflight, rehearsal_dir=paths.source.parent)
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(forged)
+
+    assert caught.value.code == "unsafe_rehearsal_directory"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
+
+
+# Break caught: a source sidecar that appears after approval must stop cloning
+# before `/bin/cp -c` is invoked.
+def test_create_apfs_clone_rechecks_sidecars_before_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, preflight, commands = _valid_preflight(tmp_path, monkeypatch)
+    Path(f"{paths.source}-wal").write_bytes(b"late writer")
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(preflight)
+
+    assert caught.value.code == "source_sidecar_present"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
 # Break caught: source writes between preflight and clone can make the clone
@@ -359,14 +547,15 @@ def test_create_apfs_clone_rejects_changed_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths, preflight, _ = _valid_preflight(tmp_path, monkeypatch)
+    paths, preflight, commands = _valid_preflight(tmp_path, monkeypatch)
     with sqlite3.connect(paths.source) as connection:
         connection.execute("CREATE TABLE changed_after_preflight(value TEXT)")
 
     with pytest.raises(RehearsalSafetyError) as caught:
         create_apfs_clone(preflight)
 
-    assert caught.value.code in {"clone_identity_mismatch", "source_changed"}
+    assert caught.value.code == "source_changed"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
 # Break caught: accepting a failed clone command would permit fallback behavior
@@ -428,7 +617,6 @@ def test_create_apfs_clone_with_real_cp_on_apfs(tmp_path: Path) -> None:
         paths.source,
         paths.rehearsal_dir,
         repository_root=paths.repository_root,
-        min_free_bytes=1,
     )
     clone = create_apfs_clone(preflight)
 

@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 
 MIN_FREE_BYTES = 10 * 1024**3
@@ -38,8 +39,10 @@ class FileIdentity:
 class SourcePreflight:
     source: FileIdentity
     rehearsal_dir: Path
+    repository_root: Path
     free_bytes: int
     filesystem_type: str
+    enforced_min_free_bytes: int
 
 
 def sha256_file(path: Path) -> str:
@@ -195,6 +198,11 @@ def assert_free_space(
     *,
     min_free_bytes: int = MIN_FREE_BYTES,
 ) -> int:
+    if min_free_bytes < MIN_FREE_BYTES:
+        raise RehearsalSafetyError(
+            "insufficient_free_space",
+            "free-space reserve cannot be lower than the global minimum",
+        )
     free_bytes = shutil.disk_usage(rehearsal_dir).free
     if free_bytes < min_free_bytes:
         raise RehearsalSafetyError(
@@ -212,6 +220,11 @@ def preflight_rehearsal(
     min_free_bytes: int = MIN_FREE_BYTES,
 ) -> SourcePreflight:
     """Approve only a safely isolated APFS clone destination."""
+    if min_free_bytes < MIN_FREE_BYTES:
+        raise RehearsalSafetyError(
+            "insufficient_free_space",
+            "free-space reserve cannot be lower than the global minimum",
+        )
     source = inspect_source_database(source_db)
     resolved_rehearsal_dir = _resolve_rehearsal_directory(rehearsal_dir)
     source_parent = source.path.parent.resolve(strict=True)
@@ -253,8 +266,10 @@ def preflight_rehearsal(
     return SourcePreflight(
         source=source,
         rehearsal_dir=resolved_rehearsal_dir,
+        repository_root=repository,
         free_bytes=free_bytes,
         filesystem_type=filesystem_type,
+        enforced_min_free_bytes=min_free_bytes,
     )
 
 
@@ -285,32 +300,96 @@ def create_apfs_clone(
             "unsafe_rehearsal_directory",
             "clone target must remain inside the rehearsal directory",
         )
-    if os.path.lexists(target):
+    refreshed = preflight_rehearsal(
+        preflight.source.path,
+        preflight.rehearsal_dir,
+        repository_root=preflight.repository_root,
+        min_free_bytes=preflight.enforced_min_free_bytes,
+    )
+    if refreshed.source != preflight.source:
         raise RehearsalSafetyError(
-            "target_exists",
-            "rehearsal clone target already exists",
+            "source_changed",
+            "source database identity changed after preflight",
         )
-    try:
-        subprocess.run(
-            ["/bin/cp", "-c", str(preflight.source.path), str(target)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
+    if (
+        refreshed.rehearsal_dir != preflight.rehearsal_dir
+        or refreshed.repository_root != preflight.repository_root
+    ):
         raise RehearsalSafetyError(
-            "clonefile_unsupported",
-            "APFS clonefile operation is unavailable",
-        ) from exc
+            "unsafe_rehearsal_directory",
+            "rehearsal approval paths do not match strict resolution",
+        )
+    if refreshed.filesystem_type != preflight.filesystem_type:
+        raise RehearsalSafetyError(
+            "filesystem_not_apfs",
+            "rehearsal filesystem identity changed after preflight",
+        )
 
-    clone = _inspect_clone_target(target, preflight.source)
-    if clone.sha256 != preflight.source.sha256:
-        raise RehearsalSafetyError(
-            "clone_identity_mismatch",
-            "clone digest does not match the approved source digest",
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=".kreports-clone-",
+            dir=refreshed.rehearsal_dir,
         )
-    assert_source_unchanged(preflight.source)
-    return clone
+    )
+    os.chmod(staging_dir, 0o700)
+    staged_clone = staging_dir / target_name
+    try:
+        current_source = inspect_source_database(preflight.source.path)
+        if current_source != preflight.source:
+            raise RehearsalSafetyError(
+                "source_changed",
+                "source database identity changed immediately before clone",
+            )
+        try:
+            subprocess.run(
+                [
+                    "/bin/cp",
+                    "-c",
+                    str(preflight.source.path),
+                    str(staged_clone),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RehearsalSafetyError(
+                "clonefile_unsupported",
+                "APFS clonefile operation is unavailable",
+            ) from exc
+
+        staged_identity = _inspect_clone_target(staged_clone, preflight.source)
+        if staged_identity.sha256 != preflight.source.sha256:
+            raise RehearsalSafetyError(
+                "clone_identity_mismatch",
+                "clone digest does not match the approved source digest",
+            )
+        assert_source_unchanged(preflight.source)
+        try:
+            os.link(staged_clone, target)
+        except FileExistsError as exc:
+            raise RehearsalSafetyError(
+                "target_exists",
+                "rehearsal clone target already exists",
+            ) from exc
+        except OSError as exc:
+            raise RehearsalSafetyError(
+                "clone_identity_mismatch",
+                "clone target could not be installed atomically",
+            ) from exc
+        staged_clone.unlink()
+
+        clone = _inspect_clone_target(target, preflight.source)
+        if clone.sha256 != preflight.source.sha256:
+            raise RehearsalSafetyError(
+                "clone_identity_mismatch",
+                "installed clone digest does not match the approved source",
+            )
+        return clone
+    finally:
+        if os.path.lexists(staged_clone):
+            staged_clone.unlink()
+        staging_dir.rmdir()
 
 
 def assert_source_unchanged(expected: FileIdentity) -> FileIdentity:
