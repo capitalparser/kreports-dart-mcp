@@ -99,3 +99,73 @@ def test_compact_citation_anchors_reject_nonpositive_batch_size(temp_engine):
 
     with pytest.raises(ValueError, match="batch_size"):
         compact_citation_anchors([("00126380", 2025, "CFS")], batch_size=0)
+
+
+def test_compact_rebuild_persists_authoritative_and_uncitable_provenance(temp_engine):
+    """A rebuilt amount without its own citation anchor must remain explicitly limited."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.add(Disclosure(
+            rcept_no="20250318000001",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2025, 3, 18),
+            disc_type="A",
+            report_nm="사업보고서 (2024.12)",
+            flr_nm="삼성전자",
+        ))
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, account_nm,
+             ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126380', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 100, CURRENT_TIMESTAMP),
+            ('00126380', 2024, '11011', 'CFS', 'BS', 'ifrs-full_Assets', '자산총계', 2, 200, CURRENT_TIMESTAMP),
+            ('00126381', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 100, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        rows = {
+            (row["corp_code"], row["metric_key"]): dict(row)
+            for row in session.execute(text("""
+                SELECT corp_code, metric_key, amount, source_table, unit, period_type,
+                       citation_rcept_no, citation_report_nm, citation_basis, quality_status
+                FROM financial_facts_compact
+                ORDER BY corp_code, metric_key
+            """)).mappings()
+        }
+
+    assert rows[("00126380", "revenue")] == {
+        "corp_code": "00126380",
+        "metric_key": "revenue",
+        "amount": 100,
+        "source_table": "financial_facts",
+        "unit": "KRW",
+        "period_type": "duration",
+        "citation_rcept_no": "20250318000001",
+        "citation_report_nm": "사업보고서 (2024.12)",
+        "citation_basis": "company_year_annual_filing_match",
+        "quality_status": "usable",
+    }
+    assert rows[("00126380", "assets")]["period_type"] == "instant"
+    assert rows[("00126381", "revenue")]["amount"] == 100
+    assert rows[("00126381", "revenue")]["citation_rcept_no"] is None
+    assert rows[("00126381", "revenue")]["citation_basis"] == "uncitable"
+    assert rows[("00126381", "revenue")]["quality_status"] == "limited"
+
+
+def test_compact_provenance_rejects_unsupported_source_or_period():
+    """An invented source or non-financial period cannot be written as compact provenance."""
+    from kreports.maintenance.financial_compact import _compact_provenance
+
+    with pytest.raises(ValueError, match="source table"):
+        _compact_provenance(metric_key="revenue", source_table="invented", citation=None)
+    with pytest.raises(ValueError, match="period type"):
+        _compact_provenance(metric_key="audit_fee", source_table="financials", citation=None)

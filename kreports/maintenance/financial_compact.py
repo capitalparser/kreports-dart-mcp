@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from kreports.analysis.filing_provenance import compact_citation_anchors
 from kreports.db.engine import get_session
-from kreports.semantic.metrics import FINANCIAL_SUMMARY_FIELD_METRICS, compact_metric_definitions, metric_definition
-
+from kreports.processor.fin_parser import FINANCIAL_AMOUNT_STORAGE_UNIT
+from kreports.semantic.metrics import (
+    FINANCIAL_SUMMARY_FIELD_METRICS,
+    compact_metric_definitions,
+    metric_definition,
+)
 
 METRIC_MAP = {
     account_id: (definition.key, definition.label_ko)
@@ -17,6 +22,39 @@ SUMMARY_METRIC_MAP = {
 }
 
 _COMPACT_METRICS = {definition.key: definition for definition in compact_metric_definitions()}
+
+
+def _compact_provenance(
+    *,
+    metric_key: str,
+    source_table: str,
+    citation: dict | None,
+) -> dict[str, str | None]:
+    """Derive safe compact provenance from explicit metric and storage contracts."""
+    if source_table not in {"financial_facts", "financials"}:
+        raise ValueError(f"unsupported compact source table: {source_table}")
+    definition = metric_definition(metric_key)
+    if definition.period_type not in {"instant", "duration"}:
+        raise ValueError(f"unsupported compact period type: {definition.period_type}")
+    unit = (
+        FINANCIAL_AMOUNT_STORAGE_UNIT
+        if definition.unit == "KRW"
+        and definition.source_unit == "KRW"
+        and definition.source_multiplier == 1
+        else None
+    )
+    cited = citation is not None
+    return {
+        "source_table": source_table,
+        "unit": unit,
+        "period_type": definition.period_type,
+        "citation_rcept_no": citation["rcept_no"] if cited else None,
+        "citation_report_nm": citation["report_nm"] if cited else None,
+        "citation_basis": (
+            "company_year_annual_filing_match" if cited else "uncitable"
+        ),
+        "quality_status": "usable" if cited and unit else "limited",
+    }
 
 
 def _statement_preferred_row(definition, rows: list[dict]) -> dict | None:
@@ -90,6 +128,7 @@ def _compact_rows(rows: list[dict]) -> list[dict]:
             "amount": amount,
             "source_account_id": source_account_id,
             "source_account_nm": source_account_nm,
+            "source_table": "financial_facts",
         })
     return compact_rows
 
@@ -117,6 +156,12 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
     """)
     inserted_or_updated = 0
     summary_inserted_or_updated = 0
+    for metric_key in _COMPACT_METRICS:
+        _compact_provenance(
+            metric_key=metric_key,
+            source_table="financial_facts",
+            citation=None,
+        )
     with get_session() as session:
         rows = session.execute(sql, params).mappings().all()
         compact_rows = _compact_rows(rows)
@@ -147,6 +192,16 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
             WHERE {" AND ".join(summary_where)}
         """), summary_params).mappings().all()
 
+        citation_scopes = {
+            (row["corp_code"], int(row["bsns_year"]), row["fs_div"])
+            for row in compact_rows
+        }
+        citation_scopes.update(
+            (row["corp_code"], int(row["bsns_year"]), row["fs_div"])
+            for row in summary_rows
+        )
+        citations = compact_citation_anchors(citation_scopes)
+
         metric_params = {
             f"metric_key_{index}": metric_key
             for index, metric_key in enumerate(_COMPACT_METRICS)
@@ -169,20 +224,39 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
         """), delete_params).rowcount or 0)
 
         for row in compact_rows:
+            citation = citations.get(
+                (row["corp_code"], int(row["bsns_year"]), row["fs_div"])
+            )
             session.execute(text("""
                 INSERT INTO financial_facts_compact
                 (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
-                 source_account_id, source_account_nm, fetched_at)
+                 source_account_id, source_account_nm, source_table, unit, period_type,
+                 citation_rcept_no, citation_report_nm, citation_basis, quality_status,
+                 fetched_at)
                 VALUES
                 (:corp_code, :bsns_year, :fs_div, :metric_key, :metric_name, :amount,
-                 :source_account_id, :source_account_nm, CURRENT_TIMESTAMP)
+                 :source_account_id, :source_account_nm, :source_table, :unit, :period_type,
+                 :citation_rcept_no, :citation_report_nm, :citation_basis, :quality_status,
+                 CURRENT_TIMESTAMP)
                 ON CONFLICT(corp_code, bsns_year, fs_div, metric_key) DO UPDATE SET
                   amount=excluded.amount,
                   source_account_id=excluded.source_account_id,
                   source_account_nm=excluded.source_account_nm,
+                  source_table=excluded.source_table,
+                  unit=excluded.unit,
+                  period_type=excluded.period_type,
+                  citation_rcept_no=excluded.citation_rcept_no,
+                  citation_report_nm=excluded.citation_report_nm,
+                  citation_basis=excluded.citation_basis,
+                  quality_status=excluded.quality_status,
                   fetched_at=excluded.fetched_at
             """), {
                 **row,
+                **_compact_provenance(
+                    metric_key=row["metric_key"],
+                    source_table=row["source_table"],
+                    citation=citation,
+                ),
             })
             inserted_or_updated += 1
 
@@ -199,17 +273,31 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
                 )
                 if scope in authoritative_scopes:
                     continue
+                citation = citations.get(
+                    (row["corp_code"], int(row["bsns_year"]), row["fs_div"])
+                )
                 result = session.execute(text("""
                     INSERT INTO financial_facts_compact
                     (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
-                     source_account_id, source_account_nm, fetched_at)
+                     source_account_id, source_account_nm, source_table, unit, period_type,
+                     citation_rcept_no, citation_report_nm, citation_basis, quality_status,
+                     fetched_at)
                     VALUES
                     (:corp_code, :bsns_year, :fs_div, :metric_key, :metric_name, :amount,
-                     :source_account_id, :source_account_nm, CURRENT_TIMESTAMP)
+                     :source_account_id, :source_account_nm, :source_table, :unit, :period_type,
+                     :citation_rcept_no, :citation_report_nm, :citation_basis, :quality_status,
+                     CURRENT_TIMESTAMP)
                     ON CONFLICT(corp_code, bsns_year, fs_div, metric_key) DO UPDATE SET
                       amount=excluded.amount,
                       source_account_id=excluded.source_account_id,
                       source_account_nm=excluded.source_account_nm,
+                      source_table=excluded.source_table,
+                      unit=excluded.unit,
+                      period_type=excluded.period_type,
+                      citation_rcept_no=excluded.citation_rcept_no,
+                      citation_report_nm=excluded.citation_report_nm,
+                      citation_basis=excluded.citation_basis,
+                      quality_status=excluded.quality_status,
                       fetched_at=excluded.fetched_at
                     WHERE financial_facts_compact.amount IS NULL
                        OR financial_facts_compact.source_account_id LIKE 'financials.%'
@@ -222,6 +310,11 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
                     "amount": amount,
                     "source_account_id": f"financials.{source_field}",
                     "source_account_nm": metric_name,
+                    **_compact_provenance(
+                        metric_key=metric_key,
+                        source_table="financials",
+                        citation=citation,
+                    ),
                 })
                 summary_inserted_or_updated += int(result.rowcount or 0)
         session.commit()
