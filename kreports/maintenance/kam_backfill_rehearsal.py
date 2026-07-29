@@ -890,6 +890,7 @@ def run_kam_schema_backfill_rehearsal(
             min_free_bytes=min_free_bytes,
         )
         years = year_loop("procedure-index", "collector")
+        safety.assert_source_unchanged(expected_source)
         snapshot_after_first = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )
@@ -917,6 +918,7 @@ def run_kam_schema_backfill_rehearsal(
             min_free_bytes=min_free_bytes,
         )
         procedures = year_loop("procedure-index", "collector")
+        safety.assert_source_unchanged(expected_source)
         snapshot_after_second = run_worker(
             WorkerInvocation("semantic-snapshot", "readonly"),
         )

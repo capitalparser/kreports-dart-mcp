@@ -593,7 +593,7 @@ def test_rehearsal_runs_exact_phases_and_ascending_year_order(
         year for action, year in worker_calls if action == "procedure-index"
     ] == [*REHEARSAL_YEARS, *REHEARSAL_YEARS]
     assert sum(call[0] == "free-space" for call in calls) == 5
-    assert sum(call[0] == "source-unchanged" for call in calls) == 6
+    assert sum(call[0] == "source-unchanged" for call in calls) == 8
     assert Path(report["report_path"]).exists()
     persisted = __import__("json").loads(
         Path(report["report_path"]).read_text(encoding="utf-8"),
@@ -800,6 +800,84 @@ def test_source_change_always_classifies_live_digest_changed(
 
     assert report["status"] == "live_digest_changed"
     assert report["last_phase"] == expected_phase
+
+
+@pytest.mark.parametrize(
+    (
+        "source_change_check",
+        "expected_phase",
+        "expected_action_counts",
+    ),
+    [
+        pytest.param(
+            4,
+            "procedure_reconcile_complete",
+            {
+                "kam-rebuild": 5,
+                "procedure-index": 5,
+                "semantic-snapshot": 1,
+                "mcp-validate": 0,
+            },
+            id="first-procedure-loop",
+        ),
+        pytest.param(
+            6,
+            "idempotency_verified",
+            {
+                "kam-rebuild": 10,
+                "procedure-index": 10,
+                "semantic-snapshot": 2,
+                "mcp-validate": 0,
+            },
+            id="second-procedure-loop",
+        ),
+    ],
+)
+def test_source_change_after_procedure_loop_stops_before_next_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_change_check: int,
+    expected_phase: str,
+    expected_action_counts: dict[str, int],
+) -> None:
+    """Catch either procedure loop advancing before source revalidation."""
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        run_kam_schema_backfill_rehearsal,
+    )
+
+    source, rehearsal_dir, repository_root, calls = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+        source_change_check=source_change_check,
+    )
+    report = run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+    )
+    worker_actions = [
+        call[1]
+        for call in calls
+        if call[0] == "worker"
+    ]
+    failed_check_index = max(
+        index
+        for index, call in enumerate(calls)
+        if call[0] == "source-unchanged"
+    )
+
+    assert report["status"] == "live_digest_changed"
+    assert report["last_phase"] == expected_phase
+    assert report["phases"][-1]["status"] == "failed"
+    assert {
+        action: worker_actions.count(action)
+        for action in expected_action_counts
+    } == expected_action_counts
+    assert all(
+        call[0] != "worker"
+        for call in calls[failed_check_index + 1:]
+    )
 
 
 @pytest.mark.parametrize(
