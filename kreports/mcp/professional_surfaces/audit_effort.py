@@ -15,9 +15,30 @@ def _is_numeric_measure(value: Any) -> bool:
         return False
 
 
-def _base_pack(title: str, result: dict[str, Any]) -> dict[str, Any]:
+def _public_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep top-level and per-year audit-effort receipts in the public pack."""
     from kreports.mcp.answer_pack import _collect_sources
 
+    sources = _collect_sources(result)
+    seen = {str(source.get("rcept_no") or source.get("url")) for source in sources}
+    for row in result.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        for field in ("financial_source", "audit_source"):
+            source = row.get(field)
+            if not isinstance(source, dict):
+                continue
+            for candidate in _collect_sources({
+                "confirmed_facts": [{"source": source}],
+            }):
+                key = str(candidate.get("rcept_no") or candidate.get("url"))
+                if key not in seen:
+                    seen.add(key)
+                    sources.append(candidate)
+    return sources
+
+
+def _base_pack(title: str, result: dict[str, Any]) -> dict[str, Any]:
     quality = result.get("data_quality") or {}
     subject = result.get("subject") or {}
     return {
@@ -32,7 +53,7 @@ def _base_pack(title: str, result: dict[str, Any]) -> dict[str, Any]:
         "charts": [],
         "diagrams": [],
         "timelines": [],
-        "sources": _collect_sources(result),
+        "sources": _public_sources(result),
         "data_quality": quality,
     }
 

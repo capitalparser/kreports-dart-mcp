@@ -310,6 +310,7 @@ WORKFLOWS = (
     ("prepare_standard_audit_hours_inputs", "standard_audit_hours_inputs"),
     ("build_audit_acceptance_pack", "acceptance_requirements"),
     ("get_audit_history", "audit_history"),
+    ("get_financial_snapshot", "financial_trend"),
     ("compare_to_industry_multi", "industry_metrics"),
     ("get_investor_signals", "investor_checks"),
     ("get_quality_of_earnings_pack", "quality_of_earnings"),
@@ -375,6 +376,9 @@ def test_synthetic_professional_workflows_match_across_call_dispatch_and_stdio(t
     assert legacy["data_quality"]["status"] in resource["text"]
     table = next(table for table in legacy["answer_pack"]["tables"] if table["id"] == table_id)
     assert len(table["rows"]) >= 1
+    if tool_name == "get_financial_snapshot":
+        assert len(table["rows"]) == 5
+        assert {row["year"] for row in table["rows"]} == set(range(2021, 2026))
     assert all(phrase not in legacy["answer"] for phrase in ("승인", "거절", "매수", "매도", "적정 의견"))
 
 
@@ -490,3 +494,31 @@ def test_prepared_audit_hours_parity_across_every_public_boundary(monkeypatch):
     assert len(table["rows"]) == 3
     assert "최근 3개년 공개자료 입력" in legacy["answer"]
     assert legacy["data_quality"]["section_statuses"] == envelope["data_quality"]["section_statuses"]
+
+
+def test_prepared_audit_hours_pack_keeps_every_annual_public_receipt(monkeypatch):
+    """A three-year usable table cannot collapse its provenance to one receipt."""
+    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.dispatch import dispatch_tool
+    from kreports.mcp.resources import read_resource
+    from kreports.mcp.server import handle_call_tool
+    from kreports.mcp.tools import call_tool
+
+    original = TOOL_CATALOG["prepare_standard_audit_hours_inputs"]
+    monkeypatch.setitem(
+        TOOL_CATALOG,
+        "prepare_standard_audit_hours_inputs",
+        replace(original, handler=lambda _args: deepcopy(_prepared_hours_result())),
+    )
+    arguments = {"company": "005930", "year": 2025}
+    legacy = json.loads(call_tool("prepare_standard_audit_hours_inputs", arguments))
+    envelope = dispatch_tool("prepare_standard_audit_hours_inputs", arguments).model_dump(mode="json")
+    content, stdio = asyncio.run(handle_call_tool("prepare_standard_audit_hours_inputs", arguments))
+
+    expected_receipts = {_source(year)["rcept_no"] for year in (2023, 2024, 2025)}
+    assert legacy["data_quality"]["status"] == "usable"
+    assert legacy["answer"] == envelope["answer"] == content[0].text
+    assert legacy["answer_pack"] == envelope["answer_pack"] == stdio["answer_pack"]
+    assert {source["rcept_no"] for source in legacy["answer_pack"]["sources"]} == expected_receipts
+    resource = read_resource(legacy["answer_pack"]["resource_uri"])["text"]
+    assert all(receipt in resource for receipt in expected_receipts)
