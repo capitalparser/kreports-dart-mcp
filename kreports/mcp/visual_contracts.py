@@ -661,12 +661,17 @@ class VisualizationPackV1(BaseModel):
                                 "missing DCF assumption is not bounded"
                             )
                     elif table.id == "dcf_model_readiness":
+                        expected_basis = (
+                            "analyst_input"
+                            if row["field"] in _DCF_ASSUMPTION_KEYS
+                            else "requested_dcf_source_actual"
+                        )
                         if (
                             row["field"] not in _DCF_MISSING_FIELDS
                             or row["status"] != "blocked"
                             or row["year"] != self.request_context.base_year
                             or row["fs_div"] != self.request_context.fs_div
-                            or row["basis"] != "requested_dcf_source_actual"
+                            or row["basis"] != expected_basis
                         ):
                             raise ValueError(
                                 "missing DCF readiness row does not match request context"
@@ -958,6 +963,22 @@ def _validate_raw_missing_dcf_remediation(raw: dict[str, Any]) -> None:
                 ):
                     raise ValueError(
                         "missing DCF remediation assumption is invalid"
+                    )
+            elif table_id == "dcf_model_readiness":
+                expected_basis = (
+                    "analyst_input"
+                    if row["field"] in _DCF_ASSUMPTION_KEYS
+                    else "requested_dcf_source_actual"
+                )
+                if (
+                    row["field"] not in _DCF_MISSING_FIELDS
+                    or row["status"] != "blocked"
+                    or row["year"] != context["base_year"]
+                    or row["fs_div"] != context["fs_div"]
+                    or row["basis"] != expected_basis
+                ):
+                    raise ValueError(
+                        "missing DCF remediation readiness context is invalid"
                     )
             elif (
                 row["field"] not in _DCF_MISSING_FIELDS

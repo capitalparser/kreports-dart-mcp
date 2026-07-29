@@ -826,3 +826,159 @@ def test_priority_pack_uses_exact_public_table_id(
     pack = build_answer_pack(tool_name, result)
 
     assert any(table["id"] == required_table_id for table in pack["tables"])
+
+
+def test_audit_report_sections_pack_keeps_classified_non_kam_rows():
+    """Dropping non-KAM rows behind the KAM-only adapter breaks the public table."""
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_audit_report_sections", {
+        "subject": {"corp_name": "대상회사"},
+        "sections": [{
+            "bsns_year": 2025,
+            "section_key": "audit_opinion",
+            "section_title": "감사의견",
+            "source_type": "audit_report",
+            "body_excerpt": "재무제표는 중요성의 관점에서 적정하게 표시되어 있습니다.",
+            "rcept_no": "20260310002820_001_xml",
+        }],
+        "data_quality": {"status": "limited"},
+    })
+
+    assert pack is not None
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "audit_report_sections"
+    )
+    assert table["rows"] == [{
+        "year": 2025,
+        "section_type": "감사의견",
+        "section_title": "감사의견",
+        "source_type": "감사보고서",
+        "rcept_no": "20260310002820",
+    }]
+    assert all(table["id"] != "availability" for table in pack["tables"])
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "result", "table_id"),
+    [
+        (
+            "compare_peer_kam_topics",
+            {
+                "subject": {"corp_name": "대상회사"},
+                "subject_sections": [{
+                    "corp_name": "대상회사",
+                    "bsns_year": 2025,
+                    "section_key": "kam",
+                    "rcept_no": "20260310002820_001_xml",
+                    "kam_analysis": {
+                        "topics": ["revenue"],
+                        "has_reason_hint": True,
+                        "has_procedure_hint": True,
+                    },
+                }],
+                "peer_section_samples": {
+                    "internal-peer-code": [{
+                        "corp_name": "비교회사",
+                        "bsns_year": 2025,
+                        "section_key": "kam",
+                        "rcept_no": "20260310002821_001_xml",
+                        "kam_analysis": {
+                            "topics": ["inventory"],
+                            "has_reason_hint": True,
+                            "has_procedure_hint": False,
+                        },
+                    }],
+                },
+                "audit_report_sections": {},
+                "data_quality": {"status": "limited"},
+            },
+            "peer_kam_topics",
+        ),
+        (
+            "compare_peer_audit_report_matters",
+            {
+                "subject": {"corp_name": "대상회사"},
+                "subject_matters": [{
+                    "corp_name": "대상회사",
+                    "section_key": "emphasis",
+                    "matter_category": "emphasis",
+                    "acceptance_signal": True,
+                    "rcept_no": "20260310002820_001_xml",
+                }],
+                "peer_matter_samples": {
+                    "internal-peer-code": [{
+                        "corp_name": "비교회사",
+                        "section_key": "other_matter",
+                        "matter_category": "other_matter",
+                        "acceptance_signal": False,
+                        "rcept_no": "20260310002821_001_xml",
+                    }],
+                },
+                "data_quality": {"status": "limited"},
+            },
+            "peer_audit_report_matters",
+        ),
+    ],
+)
+def test_peer_priority_tables_keep_subject_and_public_peer_evidence_rows(
+    tool_name,
+    result,
+    table_id,
+):
+    """Ignoring peer sample maps makes an exact-ID peer table materially empty."""
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack(tool_name, result)
+
+    assert pack is not None
+    table = next(table for table in pack["tables"] if table["id"] == table_id)
+    assert len(table["rows"]) == 2
+    assert {row["role"] for row in table["rows"]} == {"대상회사", "비교회사"}
+    assert {row["corp_name"] for row in table["rows"]} == {"대상회사", "비교회사"}
+    assert {row["rcept_no"] for row in table["rows"]} == {
+        "20260310002820",
+        "20260310002821",
+    }
+    assert "internal-peer-code" not in str(pack)
+
+
+@pytest.mark.parametrize(
+    ("missing_input", "basis"),
+    [
+        ("revenue", "requested_dcf_source_actual"),
+        ("wacc", "analyst_input"),
+    ],
+)
+def test_missing_input_only_dcf_pack_emits_material_readiness_blocker(
+    missing_input,
+    basis,
+):
+    """Depending only on missing_accounts erases a real missing-input blocker."""
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("build_dcf_model_pack", {
+        "company": "대상회사",
+        "base_year": 2025,
+        "fs_div": "CFS",
+        "enterprise_value": None,
+        "calculation_status": "unavailable",
+        "domain_verdict": "calculation_unavailable",
+        "missing_inputs": [missing_input],
+        "missing_accounts": [],
+        "data_quality": {"status": "missing"},
+    })
+
+    assert pack is not None
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "dcf_model_readiness"
+    )
+    assert table["rows"] == [{
+        "field": missing_input,
+        "status": "blocked",
+        "year": 2025,
+        "fs_div": "CFS",
+        "basis": basis,
+    }]

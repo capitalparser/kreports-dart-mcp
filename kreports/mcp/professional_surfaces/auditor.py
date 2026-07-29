@@ -37,6 +37,18 @@ _MATTER_CATEGORY_LABELS = {
     "emphasis": "강조사항",
     "going_concern": "계속기업 관련 문단",
 }
+_REPORT_SECTION_TYPE_LABELS = {
+    "kam": "핵심감사사항",
+    "audit_opinion": "감사의견",
+    "basis_for_opinion": "의견근거",
+    "emphasis": "강조사항",
+    "going_concern": "계속기업 관련 문단",
+    "other_matter": "기타사항",
+}
+_REPORT_SOURCE_TYPE_LABELS = {
+    "audit_report": "감사보고서",
+    "business_report": "사업보고서",
+}
 _COVERAGE_LABELS = {
     "selection_basis": "선정기준",
     "included_peers": "포함 Peer 수",
@@ -291,7 +303,12 @@ def _kam_coverage_rows(quality: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _kam_rows(rows: object) -> list[dict[str, Any]]:
+def _kam_rows(
+    rows: object,
+    *,
+    role: str | None = None,
+    default_corp_name: str | None = None,
+) -> list[dict[str, Any]]:
     table_rows = []
     for section in rows if isinstance(rows, list) else []:
         if not isinstance(section, dict) or section.get("section_key") != "kam":
@@ -308,7 +325,7 @@ def _kam_rows(rows: object) -> list[dict[str, Any]]:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            table_rows.append({
+            table_row = {
                 "year": section.get("bsns_year") or section.get("year"),
                 "topic": public_kam_topic_label(item.get("topic")),
                 "lifecycle": public_kam_lifecycle_label(
@@ -319,7 +336,44 @@ def _kam_rows(rows: object) -> list[dict[str, Any]]:
                 "rcept_no": parent_rcept_no(
                     str(item.get("rcept_no") or section.get("rcept_no") or ""),
                 ) or "-",
-            })
+            }
+            if role is not None:
+                table_row["role"] = role
+                table_row["corp_name"] = str(
+                    item.get("corp_name")
+                    or section.get("corp_name")
+                    or default_corp_name
+                    or role
+                )
+            table_rows.append(table_row)
+    return table_rows
+
+
+def _classified_section_rows(rows: object) -> list[dict[str, Any]]:
+    """Expose every persisted public audit-report classification once."""
+    table_rows = []
+    for section in rows if isinstance(rows, list) else []:
+        if not isinstance(section, dict):
+            continue
+        section_key = str(section.get("section_key") or "")
+        section_type = _REPORT_SECTION_TYPE_LABELS.get(
+            section_key,
+            "기타 감사보고서 섹션",
+        )
+        table_rows.append({
+            "year": section.get("bsns_year") or section.get("year"),
+            "section_type": section_type,
+            "section_title": str(
+                section.get("section_title") or section_type
+            ),
+            "source_type": _REPORT_SOURCE_TYPE_LABELS.get(
+                str(section.get("source_type") or ""),
+                "출처 문서 미확인",
+            ),
+            "rcept_no": parent_rcept_no(
+                str(section.get("rcept_no") or ""),
+            ) or "-",
+        })
     return table_rows
 
 
@@ -327,13 +381,30 @@ def _audit_report_sections_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
 
     pack = _base_pack(f"{_subject_label(result)} 감사보고서 섹션", result)
+    classified_rows = _classified_section_rows(result.get("sections"))
     kam_rows = _kam_rows(result.get("sections"))
+    if classified_rows:
+        pack["tables"].append(_table(
+            "audit_report_sections", "감사보고서 분류 섹션",
+            [
+                ("year", "연도"),
+                ("section_type", "섹션 분류"),
+                ("section_title", "섹션 제목"),
+                ("source_type", "출처 문서"),
+                ("rcept_no", "접수번호"),
+            ],
+            classified_rows,
+        ))
     if kam_rows:
         pack["tables"].append(_table(
-            "audit_report_sections", "KAM 의미 근거",
-            [("year", "연도"), ("topic", "KAM 주제"), ("lifecycle", "반복/신규"),
-             ("reason_available", "선정 이유 확보"), ("procedure_available", "감사절차 확보"),
-             ("rcept_no", "접수번호")],
+            "audit_report_kam_items", "KAM 의미 근거",
+            [
+                ("year", "연도"), ("topic", "KAM 주제"),
+                ("lifecycle", "반복/신규"),
+                ("reason_available", "선정 이유 확보"),
+                ("procedure_available", "감사절차 확보"),
+                ("rcept_no", "접수번호"),
+            ],
             kam_rows,
         ))
     if kam_rows or result.get("section_key") == "kam":
@@ -351,14 +422,31 @@ def _peer_kam_pack(result: dict[str, Any]) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
 
     pack = _base_pack(f"{_subject_label(result)} Peer KAM", result)
-    rows = _kam_rows(result.get("subject_sections"))
+    rows = _kam_rows(
+        result.get("subject_sections"),
+        role="대상회사",
+        default_corp_name=_subject_label(result),
+    )
+    peer_samples = result.get("peer_section_samples")
+    if isinstance(peer_samples, dict):
+        for peer_sections in peer_samples.values():
+            rows.extend(_kam_rows(
+                peer_sections,
+                role="비교회사",
+                default_corp_name="비교회사",
+            ))
     quality = result.get("audit_report_sections") if isinstance(result.get("audit_report_sections"), dict) else {}
     if rows:
         pack["tables"].append(_table(
-            "peer_kam_topics", "대상회사 KAM 의미 근거",
-            [("year", "연도"), ("topic", "KAM 주제"), ("lifecycle", "반복/신규"),
-             ("reason_available", "선정 이유 확보"), ("procedure_available", "감사절차 확보"),
-             ("rcept_no", "접수번호")],
+            "peer_kam_topics", "대상회사·비교회사 KAM 의미 근거",
+            [
+                ("role", "구분"), ("corp_name", "회사"),
+                ("year", "연도"), ("topic", "KAM 주제"),
+                ("lifecycle", "반복/신규"),
+                ("reason_available", "선정 이유 확보"),
+                ("procedure_available", "감사절차 확보"),
+                ("rcept_no", "접수번호"),
+            ],
             rows,
         ))
     pack["tables"].append(_table(
@@ -374,6 +462,7 @@ def _matter_pack(
     result: dict[str, Any],
     *,
     table_id: str = "audit_report_matters",
+    include_peer_samples: bool = False,
 ) -> dict[str, Any]:
     from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
 
@@ -388,28 +477,82 @@ def _matter_pack(
             for section in company.get("sections") or []
             if isinstance(section, dict)
         ]
-    for section in matter_sections:
-        if isinstance(section, dict):
-            rows.append({
+    def append_rows(
+        sections: object,
+        *,
+        role: str | None = None,
+        default_corp_name: str | None = None,
+    ) -> None:
+        for section in sections if isinstance(sections, list) else []:
+            if not isinstance(section, dict):
+                continue
+            row = {
                 "category": _MATTER_CATEGORY_LABELS.get(
-                    str(section.get("matter_category") or section.get("section_key") or ""),
+                    str(
+                        section.get("matter_category")
+                        or section.get("section_key")
+                        or ""
+                    ),
                     "기타 감사보고서 사항",
                 ),
-                "signal": "검토 신호" if section.get("acceptance_signal") else "근거 보존 (신호 아님)",
+                "signal": (
+                    "검토 신호"
+                    if section.get("acceptance_signal")
+                    else "근거 보존 (신호 아님)"
+                ),
                 "rcept_no": parent_rcept_no(
                     str(section.get("rcept_no") or ""),
                 ) or "-",
-            })
+            }
+            if role is not None:
+                row["role"] = role
+                row["corp_name"] = str(
+                    section.get("corp_name")
+                    or default_corp_name
+                    or role
+                )
+            rows.append(row)
+
+    append_rows(
+        matter_sections,
+        role="대상회사" if include_peer_samples else None,
+        default_corp_name=_subject_label(result),
+    )
+    if include_peer_samples:
+        peer_samples = result.get("peer_matter_samples")
+        if isinstance(peer_samples, dict):
+            for peer_sections in peer_samples.values():
+                append_rows(
+                    peer_sections,
+                    role="비교회사",
+                    default_corp_name="비교회사",
+                )
     if rows:
         pack["tables"].append(_table(
             table_id, "감사보고서 사항 분류",
-            [("category", "분류"), ("signal", "수임 검토 신호"), ("rcept_no", "접수번호")], rows,
+            (
+                [
+                    ("role", "구분"), ("corp_name", "회사"),
+                    ("category", "분류"), ("signal", "수임 검토 신호"),
+                    ("rcept_no", "접수번호"),
+                ]
+                if include_peer_samples
+                else [
+                    ("category", "분류"), ("signal", "수임 검토 신호"),
+                    ("rcept_no", "접수번호"),
+                ]
+            ),
+            rows,
         ))
     return pack
 
 
 def _peer_matter_pack(result: dict[str, Any]) -> dict[str, Any]:
-    return _matter_pack(result, table_id="peer_audit_report_matters")
+    return _matter_pack(
+        result,
+        table_id="peer_audit_report_matters",
+        include_peer_samples=True,
+    )
 
 
 def _history_detail(result: dict[str, Any]) -> str:

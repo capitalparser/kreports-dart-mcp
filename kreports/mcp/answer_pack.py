@@ -35,6 +35,36 @@ _DCF_CANDIDATE_METRICS = {
     "normalized_revenue": ("정규화 매출", "KRW"),
     "normalized_operating_profit": ("정규화 영업이익", "KRW"),
 }
+_DCF_READINESS_FIELDS = {
+    "revenue_growth",
+    "operating_margin",
+    "tax_rate",
+    "da_to_revenue",
+    "capex_to_revenue",
+    "nwc_to_revenue",
+    "wacc",
+    "terminal_growth",
+    "revenue",
+    "operating_profit",
+    "depreciation_amortization",
+    "purchase_ppe",
+    "purchase_intangible_assets",
+    "trade_receivables",
+    "inventories",
+    "trade_payables",
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+}
+_DCF_ANALYST_INPUT_FIELDS = {
+    "revenue_growth",
+    "operating_margin",
+    "tax_rate",
+    "da_to_revenue",
+    "capex_to_revenue",
+    "nwc_to_revenue",
+    "wacc",
+    "terminal_growth",
+}
 
 
 def _is_numeric_measure(value: Any) -> bool:
@@ -591,6 +621,31 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
         }
         pack["sources"] = []
         missing_accounts = _safe_dcf_rows(result.get("missing_accounts"), limit=20)
+        missing_input_fields = [
+            str(field)
+            for field in result.get("missing_inputs") or []
+            if isinstance(field, str) and field in _DCF_READINESS_FIELDS
+        ]
+        accounted_fields = {
+            str(row.get("field") or "")
+            for row in missing_accounts
+            if isinstance(row, dict)
+        }
+        readiness_records = list(missing_accounts)
+        for field in missing_input_fields:
+            if field in accounted_fields:
+                continue
+            readiness_records.append({
+                "field": field,
+                "year": result.get("base_year"),
+                "fs_div": result.get("fs_div"),
+                "basis": (
+                    "analyst_input"
+                    if field in _DCF_ANALYST_INPUT_FIELDS
+                    else "requested_dcf_source_actual"
+                ),
+            })
+            accounted_fields.add(field)
         readiness_rows = [
             {
                 "field": row.get("field"),
@@ -599,7 +654,7 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
                 "fs_div": row.get("fs_div"),
                 "basis": row.get("basis"),
             }
-            for row in missing_accounts
+            for row in readiness_records
         ]
         pack["tables"].extend([
             _table(
