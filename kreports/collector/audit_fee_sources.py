@@ -1,13 +1,12 @@
 """Typed source observations for audit fee and audit-hour evidence."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import re
+from dataclasses import asdict, dataclass, field
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Iterable
-
 
 _MISSING_TOKENS = {"", "-", "n/a", "na", "해당없음", "없음"}
 _DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
