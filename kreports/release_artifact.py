@@ -520,7 +520,11 @@ def _bound_explicit_runtime(db_path: Path):
     try:
         for module_name in (
             "kreports.analysis.disclosure_events",
+            "kreports.analysis.investor_quality",
+            "kreports.analysis.kam_lifecycle",
             "kreports.analysis.peer",
+            "kreports.analysis.policy_changes",
+            "kreports.analysis.raw_coverage",
             "kreports.analysis.readiness",
             "kreports.analysis.search_adapter",
         ):

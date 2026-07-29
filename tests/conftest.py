@@ -24,13 +24,21 @@ def temp_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(engine_module, "engine", test_engine)
     monkeypatch.setattr(engine_module, "SessionLocal", new_session_maker)
 
-    import kreports.analysis.search_adapter as search_adapter_module
     import kreports.analysis.disclosure_events as disclosure_events_module
+    import kreports.analysis.investor_quality as investor_quality_module
+    import kreports.analysis.kam_lifecycle as kam_lifecycle_module
     import kreports.analysis.peer as peer_module
+    import kreports.analysis.policy_changes as policy_changes_module
+    import kreports.analysis.raw_coverage as raw_coverage_module
     import kreports.analysis.readiness as readiness_module
+    import kreports.analysis.search_adapter as search_adapter_module
 
     monkeypatch.setattr(disclosure_events_module, "engine", test_engine)
+    monkeypatch.setattr(investor_quality_module, "engine", test_engine)
+    monkeypatch.setattr(kam_lifecycle_module, "engine", test_engine)
     monkeypatch.setattr(peer_module, "engine", test_engine)
+    monkeypatch.setattr(policy_changes_module, "engine", test_engine)
+    monkeypatch.setattr(raw_coverage_module, "engine", test_engine)
     monkeypatch.setattr(readiness_module, "engine", test_engine)
 
     # Raw-document tests must never spill fixture artifacts into the repository's

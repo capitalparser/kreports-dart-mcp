@@ -292,6 +292,199 @@ def test_explicit_db_path_cannot_mix_with_global_engine(tmp_path, monkeypatch):
     assert evidence["release_gate"]["blockers"]
 
 
+def test_explicit_runtime_rebinds_import_time_analysis_engines_and_restores_them(
+    tmp_path,
+    monkeypatch,
+):
+    """Removing any legacy engine rebinding must not reach the default database."""
+    from datetime import UTC, date, datetime
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import kreports.db.engine as engine_module
+
+    from kreports import release_artifact
+    from kreports.analysis import (
+        disclosure_events,
+        investor_quality,
+        kam_lifecycle,
+        peer,
+        policy_changes,
+        raw_coverage,
+        readiness,
+    )
+    from kreports.analysis.financial_timeseries import (
+        get_financial_timeseries_quality,
+    )
+    from kreports.db.models import (
+        AccountingNoteChapter,
+        AccountingPolicyItem,
+        AuditFee,
+        Auditor,
+        Base,
+        Company,
+        Disclosure,
+        DisclosureEvent,
+        Financial,
+        FinancialFactCompact,
+        ReportSection,
+        SourceDocument,
+    )
+    db_path = tmp_path / "explicit-runtime.db"
+    fixture_engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=fixture_engine)
+    fixture_session = sessionmaker(bind=fixture_engine)()
+    try:
+        fixture_session.add_all(
+            [
+                Company(
+                    corp_code="900001",
+                    stock_code="900001",
+                    corp_name="Explicit Runtime Co",
+                    market="KOSPI",
+                    induty_code="10101",
+                ),
+                Financial(
+                    corp_code="900001",
+                    year=2025,
+                    quarter=4,
+                    fs_div="CFS",
+                    revenue=100,
+                    operating_profit=10,
+                    net_income=8,
+                    total_assets=200,
+                    total_debt=50,
+                    total_equity=150,
+                    operating_cf=12,
+                ),
+                Disclosure(
+                    rcept_no="20250331000001",
+                    corp_code="900001",
+                    corp_name="Explicit Runtime Co",
+                    disc_date=date(2025, 3, 31),
+                    disc_type="A",
+                    report_nm="사업보고서",
+                ),
+                DisclosureEvent(
+                    rcept_no="20250331000001",
+                    corp_code="900001",
+                    event_date=datetime(2025, 3, 31, tzinfo=UTC),
+                    event_type="audit",
+                    event_title="synthetic event",
+                    source_report_nm="사업보고서",
+                ),
+                FinancialFactCompact(
+                    corp_code="900001",
+                    bsns_year=2025,
+                    fs_div="CFS",
+                    metric_key="revenue",
+                    metric_name="매출액",
+                    amount=100,
+                ),
+                AuditFee(corp_code="900001", bsns_year=2025),
+                Auditor(
+                    corp_code="900001",
+                    bsns_year=2025,
+                    fs_div="CFS",
+                    auditor_nm="Synthetic Auditor",
+                ),
+                SourceDocument(
+                    rcept_no="20250331000001",
+                    corp_code="900001",
+                    bsns_year=2025,
+                    source_type="business_report",
+                    report_nm="사업보고서",
+                    raw_content="synthetic",
+                    doc_hash="a" * 40,
+                ),
+                AccountingPolicyItem(
+                    corp_code="900001",
+                    bsns_year=2025,
+                    fs_div="CFS",
+                    rcept_no="20250331000001",
+                    item_key="revenue",
+                    body="synthetic policy",
+                ),
+                ReportSection(
+                    rcept_no="20250331000001",
+                    corp_code="900001",
+                    bsns_year=2025,
+                    source_type="audit_report",
+                    section_key="kam",
+                    section_title="KAM",
+                    body_text="핵심감사사항으로 결정 감사절차를 수행하였습니다",
+                ),
+                AccountingNoteChapter(
+                    corp_code="900001",
+                    bsns_year=2025,
+                    fs_div="CFS",
+                    rcept_no="20250331000001",
+                    note_no="2",
+                    section_type="policy",
+                    body="synthetic policy",
+                ),
+            ]
+        )
+        fixture_session.commit()
+    finally:
+        fixture_session.close()
+        fixture_engine.dispose()
+
+    class RefusingEngine:
+        def connect(self):
+            raise AssertionError("explicit runtime touched a previous engine")
+
+    stale_engine = RefusingEngine()
+    static_engine_modules = (
+        disclosure_events,
+        investor_quality,
+        kam_lifecycle,
+        peer,
+        policy_changes,
+        raw_coverage,
+        readiness,
+    )
+    original_engine = engine_module.engine
+    original_sessions = engine_module.SessionLocal
+    stale_sessions = sessionmaker(bind=stale_engine)
+    for module in static_engine_modules:
+        monkeypatch.setattr(module, "engine", stale_engine)
+    monkeypatch.setattr(engine_module, "engine", stale_engine)
+    monkeypatch.setattr(engine_module, "SessionLocal", stale_sessions)
+
+    with release_artifact._bound_explicit_runtime(db_path):
+        assert kam_lifecycle.kam_lifecycle_for_company(
+            "900001", start_year=2025, end_year=2025
+        )["event_count"] == 1
+        assert disclosure_events.search_disclosure_events(company="900001")[
+            "total_events"
+        ] == 1
+        assert peer.resolve_fs_div_for_company("900001", 2025) == "CFS"
+        assert readiness.auditor_readiness_snapshot(2025, 1)["markets"]["KOSPI"][
+            "listed"
+        ] == 1
+        assert raw_coverage.raw_annual_report_coverage(
+            start_filing_year=2025, end_filing_year=2025
+        )["totals"]["latest_reports"] == 1
+        assert investor_quality.quality_of_earnings_pack(
+            "900001", start_year=2025, end_year=2025
+        )["company"] == "900001"
+        assert policy_changes.accounting_policy_changes(
+            "900001", start_year=2025, end_year=2025
+        )["changes"]
+        assert get_financial_timeseries_quality("900001", year=2025, years_back=1)[
+            "rows"
+        ]
+
+    assert engine_module.engine is stale_engine
+    assert engine_module.SessionLocal is stale_sessions
+    assert all(module.engine is stale_engine for module in static_engine_modules)
+    monkeypatch.undo()
+    assert engine_module.engine is original_engine
+    assert engine_module.SessionLocal is original_sessions
+
+
 def test_db_swap_or_nonempty_wal_during_proof_fails_without_replacing_manifest(
     tmp_path,
     monkeypatch,
