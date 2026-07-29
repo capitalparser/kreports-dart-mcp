@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import weakref
 
 
 MIN_FREE_BYTES = 10 * 1024**3
@@ -39,10 +40,51 @@ class FileIdentity:
 class SourcePreflight:
     source: FileIdentity
     rehearsal_dir: Path
-    repository_root: Path
     free_bytes: int
     filesystem_type: str
+
+
+@dataclass(frozen=True)
+class _PreflightApproval:
+    reference: weakref.ReferenceType[SourcePreflight]
+    repository_root: Path
     enforced_min_free_bytes: int
+
+
+_PREFLIGHT_APPROVALS: dict[int, _PreflightApproval] = {}
+
+
+def _register_preflight_approval(
+    preflight: SourcePreflight,
+    *,
+    repository_root: Path,
+    enforced_min_free_bytes: int,
+) -> None:
+    approval_id = id(preflight)
+
+    def remove_dead_approval(
+        dead_reference: weakref.ReferenceType[SourcePreflight],
+    ) -> None:
+        current = _PREFLIGHT_APPROVALS.get(approval_id)
+        if current is not None and current.reference is dead_reference:
+            _PREFLIGHT_APPROVALS.pop(approval_id, None)
+
+    reference = weakref.ref(preflight, remove_dead_approval)
+    _PREFLIGHT_APPROVALS[approval_id] = _PreflightApproval(
+        reference=reference,
+        repository_root=repository_root,
+        enforced_min_free_bytes=enforced_min_free_bytes,
+    )
+
+
+def _require_preflight_approval(preflight: SourcePreflight) -> _PreflightApproval:
+    approval = _PREFLIGHT_APPROVALS.get(id(preflight))
+    if approval is None or approval.reference() is not preflight:
+        raise RehearsalSafetyError(
+            "untrusted_preflight",
+            "preflight must be the exact object approved in this process",
+        )
+    return approval
 
 
 def sha256_file(path: Path) -> str:
@@ -263,14 +305,18 @@ def preflight_rehearsal(
             "target_exists",
             "rehearsal clone target already exists",
         )
-    return SourcePreflight(
+    preflight = SourcePreflight(
         source=source,
         rehearsal_dir=resolved_rehearsal_dir,
-        repository_root=repository,
         free_bytes=free_bytes,
         filesystem_type=filesystem_type,
+    )
+    _register_preflight_approval(
+        preflight,
+        repository_root=repository,
         enforced_min_free_bytes=min_free_bytes,
     )
+    return preflight
 
 
 def _inspect_clone_target(target: Path, expected: FileIdentity) -> FileIdentity:
@@ -294,6 +340,7 @@ def create_apfs_clone(
     target_name: str = "kreports-rehearsal.db",
 ) -> FileIdentity:
     """Create one APFS clone with no copy fallback and verify both identities."""
+    approval = _require_preflight_approval(preflight)
     target = preflight.rehearsal_dir / target_name
     if target.name != target_name or target.parent != preflight.rehearsal_dir:
         raise RehearsalSafetyError(
@@ -303,18 +350,15 @@ def create_apfs_clone(
     refreshed = preflight_rehearsal(
         preflight.source.path,
         preflight.rehearsal_dir,
-        repository_root=preflight.repository_root,
-        min_free_bytes=preflight.enforced_min_free_bytes,
+        repository_root=approval.repository_root,
+        min_free_bytes=approval.enforced_min_free_bytes,
     )
     if refreshed.source != preflight.source:
         raise RehearsalSafetyError(
             "source_changed",
             "source database identity changed after preflight",
         )
-    if (
-        refreshed.rehearsal_dir != preflight.rehearsal_dir
-        or refreshed.repository_root != preflight.repository_root
-    ):
+    if refreshed.rehearsal_dir != preflight.rehearsal_dir:
         raise RehearsalSafetyError(
             "unsafe_rehearsal_directory",
             "rehearsal approval paths do not match strict resolution",

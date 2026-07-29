@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, replace
+import gc
 from pathlib import Path
 import os
 import shutil
@@ -8,6 +10,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import weakref
 
 import pytest
 
@@ -165,6 +168,25 @@ def test_inspect_source_returns_post_check_identity(tmp_path: Path) -> None:
     assert identity.device == source.stat().st_dev
     assert identity.mtime_ns == source.stat().st_mtime_ns
     assert len(identity.sha256) == 64
+
+
+# Break caught: adding hidden authority fields to the public dataclass breaks
+# the exact four-argument constructor promised to callers.
+def test_source_preflight_preserves_four_field_constructor(tmp_path: Path) -> None:
+    paths = _valid_paths(tmp_path)
+    source = inspect_source_database(paths.source)
+
+    approval = SourcePreflight(
+        source,
+        paths.rehearsal_dir,
+        MIN_FREE_BYTES,
+        "apfs",
+    )
+
+    assert approval.source == source
+    assert approval.rehearsal_dir == paths.rehearsal_dir
+    assert approval.free_bytes == MIN_FREE_BYTES
+    assert approval.filesystem_type == "apfs"
 
 
 # Break caught: writing a rehearsal clone into an operational or broad directory
@@ -401,8 +423,6 @@ def test_preflight_accepts_exact_global_floor(
         min_free_bytes=MIN_FREE_BYTES,
     )
     assert approved.free_bytes == MIN_FREE_BYTES
-    assert approved.enforced_min_free_bytes == MIN_FREE_BYTES
-    assert approved.repository_root == paths.repository_root
 
 
 # Break caught: a pre-existing destination could be overwritten by the clone.
@@ -484,14 +504,13 @@ def test_create_apfs_clone_preserves_target_won_by_racer(
     assert not list(paths.rehearsal_dir.glob(".kreports-clone-*"))
 
 
-# Break caught: cached free-space values in a forged approval must not suppress
-# a fresh reserve check immediately before cloning.
-def test_create_apfs_clone_rechecks_forged_preflight_free_space(
+# Break caught: a genuine approval must still enforce fresh free-space evidence
+# immediately before cloning instead of trusting its cached observation.
+def test_create_apfs_clone_rechecks_approved_preflight_free_space(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, preflight, commands = _valid_preflight(tmp_path, monkeypatch)
-    forged = replace(preflight, free_bytes=99 * MIN_FREE_BYTES)
+    _, approved, commands = _valid_preflight(tmp_path, monkeypatch)
     monkeypatch.setattr(
         rehearsal_safety.shutil,
         "disk_usage",
@@ -503,9 +522,58 @@ def test_create_apfs_clone_rechecks_forged_preflight_free_space(
     )
 
     with pytest.raises(RehearsalSafetyError) as caught:
-        create_apfs_clone(forged)
+        create_apfs_clone(approved)
 
     assert caught.value.code == "insufficient_free_space"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
+
+
+# Break caught: reconstructing an equal four-field value must not inherit the
+# process-local authority of the exact object returned by preflight.
+def test_create_apfs_clone_rejects_reconstructed_equal_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, approved, commands = _valid_preflight(tmp_path, monkeypatch)
+    reconstructed = SourcePreflight(
+        approved.source,
+        approved.rehearsal_dir,
+        approved.free_bytes,
+        approved.filesystem_type,
+    )
+    assert reconstructed == approved
+    assert reconstructed is not approved
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(reconstructed)
+
+    assert caught.value.code == "untrusted_preflight"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
+
+
+# Break caught: dataclass and shallow-copy duplication must not copy the exact
+# object identity that carries process-local approval authority.
+@pytest.mark.parametrize(
+    "duplicate",
+    [
+        pytest.param(copy.copy, id="copy"),
+        pytest.param(lambda value: replace(value), id="dataclasses-replace"),
+    ],
+)
+def test_create_apfs_clone_rejects_copied_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    duplicate,
+) -> None:
+    _, approved, commands = _valid_preflight(tmp_path, monkeypatch)
+    copied = duplicate(approved)
+    assert copied == approved
+    assert copied is not approved
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(copied)
+
+    assert caught.value.code == "untrusted_preflight"
     assert not [command for command in commands if command[0] == "/bin/cp"]
 
 
@@ -521,8 +589,43 @@ def test_create_apfs_clone_rejects_forged_unsafe_directory(
     with pytest.raises(RehearsalSafetyError) as caught:
         create_apfs_clone(forged)
 
-    assert caught.value.code == "unsafe_rehearsal_directory"
+    assert caught.value.code == "untrusted_preflight"
     assert not [command for command in commands if command[0] == "/bin/cp"]
+
+
+# Break caught: swapping in the real repository root must not turn an unrelated
+# reconstructed value into authority to create files there.
+def test_create_apfs_clone_rejects_repository_root_forgery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, approved, commands = _valid_preflight(tmp_path, monkeypatch)
+    forged = replace(approved, rehearsal_dir=paths.repository_root)
+
+    with pytest.raises(RehearsalSafetyError) as caught:
+        create_apfs_clone(forged)
+
+    assert caught.value.code == "untrusted_preflight"
+    assert not [command for command in commands if command[0] == "/bin/cp"]
+
+
+# Break caught: retaining a dead weakref registry entry permits a later object
+# that reuses the same integer id to acquire stale approval authority.
+def test_preflight_approval_registry_removes_dead_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, approved, _ = _valid_preflight(tmp_path, monkeypatch)
+    approval_id = id(approved)
+    approved_reference = weakref.ref(approved)
+    registry = getattr(rehearsal_safety, "_PREFLIGHT_APPROVALS", {})
+    assert approval_id in registry
+
+    del approved
+    gc.collect()
+
+    assert approved_reference() is None
+    assert approval_id not in registry
 
 
 # Break caught: a source sidecar that appears after approval must stop cloning
