@@ -176,6 +176,25 @@ maintenance questions that usually force analysts and auditors back into DART:
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
+### Professional response contract
+
+Professional MCP answers always begin with `판정:`. This is the canonical
+availability status (`usable`, `limited`, `missing`, or `error`), not an audit,
+investment, approval, or valuation conclusion. A domain verdict may state a
+bounded result such as DCF `산출 불가`; it never overrides the availability
+status.
+
+Read responses in this order: the Korean chatbot `answer`, then the complete
+structured `answer_pack`, then its detailed visualization resource. The pack
+retains rows and provenance that the concise answer may summarize.
+
+`prepare_standard_audit_hours_inputs` prepares three years of public inputs;
+its `not_assessed` boundary means it does not calculate a standard audit-hour
+conclusion. Similarly, DCF candidates are inputs for review, whereas valuation
+readiness decides whether a value can be calculated. Missing cache data is not
+evidence that the underlying filing does not exist. A question can therefore be
+usable while a deployment release remains unready; release context is separate.
+
 ### For Python developers
 
 ```bash

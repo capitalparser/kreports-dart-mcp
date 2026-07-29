@@ -1287,7 +1287,7 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     if envelope.data_quality.status in {"missing", "error"}:
         rendered = _render_professional_envelope(presentation_envelope)
         if dcf_opening:
-            rendered = dcf_opening + "\n\n" + rendered
+            rendered = rendered + "\n\n" + dcf_opening
         return _append_visual_table(tool_name, result, rendered)
     if tool_name in PROFESSIONAL_DETAIL_RENDERERS:
         detail = PROFESSIONAL_DETAIL_RENDERERS[tool_name](legacy_result)
@@ -1330,9 +1330,9 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         detail=_sanitize_legacy_detail(detail) if detail else None,
     )
     if candidate_opening:
-        rendered = candidate_opening + "\n\n" + rendered
+        rendered = rendered + "\n\n" + candidate_opening
     if dcf_opening:
-        rendered = dcf_opening + "\n\n" + rendered
+        rendered = rendered + "\n\n" + dcf_opening
     return _append_visual_table(tool_name, result, rendered)
 
 

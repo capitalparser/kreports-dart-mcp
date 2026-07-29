@@ -200,6 +200,39 @@ def _error_envelope(name: str, message: str) -> AnswerEnvelopeV1:
     return envelope.model_copy(update={"answer": bounded})
 
 
+_HANDLER_FAILURE_MESSAGE = (
+    "로컬 캐시 스키마 또는 준비된 데이터에 접근할 수 없습니다. "
+    "이는 원 공시 부재를 뜻하지 않습니다. "
+    "민감한 내부 오류 정보는 [REDACTED] 처리되었습니다."
+)
+
+
+def _handler_failure_result(name: str) -> dict[str, Any]:
+    """Return a bounded canonical result without leaking an internal exception."""
+    from kreports.mcp.contracts import enrich_answer_response
+
+    result = enrich_answer_response(name, {
+        "data_quality": {
+            "status": "error",
+            "limitations": [_HANDLER_FAILURE_MESSAGE],
+        },
+        "next_checks": [
+            "로컬 캐시 스키마와 준비된 데이터 artifact를 확인한 뒤 다시 배포하세요.",
+        ],
+    })
+    # Retain the legacy error key for compatibility, but never expose an
+    # exception string, SQL, path, table, or column name.
+    result["error"] = _HANDLER_FAILURE_MESSAGE
+    return result
+
+
+def _handler_failure_envelope(name: str) -> AnswerEnvelopeV1:
+    result = _handler_failure_result(name)
+    result.pop("error", None)
+    envelope = build_answer_envelope(name, result)
+    return envelope.model_copy(update={"answer_pack": result.get("answer_pack")})
+
+
 def _safe_exception_message(
     exc: Exception,
     arguments: dict[str, Any] | None,
@@ -294,15 +327,8 @@ def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelope
     except (LookupError, ArgumentValidationError) as exc:
         return _error_envelope(public_name, str(exc))
     except HandlerExecutionError as exc:
-        safe_message = _safe_exception_message(
-            exc.original,
-            arguments,
-            validated_secret=exc.validated_secret,
-        )
-        return _error_envelope(
-            public_name,
-            f"Internal error: {safe_message}",
-        )
+        del exc
+        return _handler_failure_envelope(public_name)
     except Exception as exc:
         return _error_envelope(
             public_name,
@@ -324,12 +350,8 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
     except ArgumentValidationError as exc:
         return {"error": str(exc)}
     except HandlerExecutionError as exc:
-        safe_message = _safe_exception_message(
-            exc.original,
-            arguments,
-            validated_secret=exc.validated_secret,
-        )
-        return {"error": f"Internal error: {safe_message}"}
+        del exc
+        return _handler_failure_result(name)
     except Exception as exc:
         return {
             "error": f"Internal error: {_safe_exception_message(exc, arguments)}"

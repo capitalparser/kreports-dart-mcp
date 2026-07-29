@@ -1101,6 +1101,13 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
     warnings = list(quality.limitations)
     if quality.status == "missing" and not warnings:
         warnings.append("로컬 캐시 미확보는 원 공시 부재를 의미하지 않습니다.")
+    rendered_answer = result.get("answer")
+    canonical_answer = (
+        rendered_answer
+        if isinstance(rendered_answer, str)
+        and rendered_answer.startswith("판정:")
+        else normalized.get("answer")
+    )
     return AnswerEnvelopeV1(
         tool_name=tool_name,
         verdict=quality.status,
@@ -1108,7 +1115,7 @@ def build_answer_envelope(tool_name: str, result: dict[str, Any]) -> AnswerEnvel
         answer=(
             "" if quarantined_error
             else str(
-                normalized.get("answer")
+                canonical_answer
                 or (_DCF_ERROR_LIMITATION if dcf_unavailable else "")
             )
         ),

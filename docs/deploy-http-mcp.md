@@ -55,6 +55,19 @@ Structured JSON can remain available for tests, API clients, and future UI
 renderers, but public MCP users should receive narrative output that can be used
 directly in audit, investment, or disclosure review workflows.
 
+Every professional answer begins with `판정:` and its canonical availability is
+one of `usable`, `limited`, `missing`, or `error`. This is distinct from a
+domain verdict: for example, DCF input candidates can be available while a
+valuation is blocked, and `산출 불가` is not a valuation result. Standard-audit-
+hour input preparation likewise has a `not_assessed` boundary and must not be
+presented as a calculated standard-hour conclusion.
+
+Clients should display the concise chatbot `answer` first, then the complete
+`answer_pack`, then its detailed visualization resource. Keep release readiness
+separate from question usability: a release warning cannot downgrade or upgrade
+the evidence status of a particular answer. Also distinguish cache absence from
+filing absence; an uncached local result does not prove that DART has no filing.
+
 ## On-Demand Disclosure Fetch Contract
 
 The hosted endpoint is cache-first by default. If a public MCP user requests an
