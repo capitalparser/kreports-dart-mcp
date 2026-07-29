@@ -55,6 +55,18 @@ class CompanyYearQuality(Base):
     group_audit_grade = Column(String(1), nullable=False)
     blockers_json = Column(Text, nullable=False, default="[]")
     quality_version = Column(String(20), nullable=False, default="v1")
+    input_fingerprint = Column(
+        String(64),
+        nullable=False,
+        default="",
+        server_default="",
+    )
+    evidence_summary_json = Column(
+        Text,
+        nullable=False,
+        default="{}",
+        server_default="{}",
+    )
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,

@@ -28,6 +28,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_08_group_audit_graph",
         "20260711_09_audit_fee_observations",
         "20260711_10_financial_compact_provenance",
+        "20260711_11_company_year_quality_freshness",
     ]
     assert second == []
 
@@ -394,7 +395,11 @@ def test_financial_compact_provenance_migration_is_additive(temp_engine):
     assert columns["quality_status"]["default"].strip("'") == "limited"
 
 
-def test_financial_compact_provenance_migration_upgrades_legacy_table(tmp_path):
+def test_financial_compact_provenance_migration_upgrades_legacy_table(
+    tmp_path,
+    monkeypatch,
+):
+    import kreports.db.migrations as migrations_module
     from kreports.db.migrations import (
         MIGRATIONS,
         _checksum,
@@ -441,6 +446,7 @@ def test_financial_compact_provenance_migration_upgrades_legacy_table(tmp_path):
                 },
             )
 
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:10])
     with legacy.begin() as conn:
         assert apply_schema_migrations(conn) == [MIGRATIONS[9].revision]
 
@@ -463,6 +469,112 @@ def test_financial_compact_provenance_migration_upgrades_legacy_table(tmp_path):
         tuple(item["column_names"])
         for item in inspect(legacy).get_unique_constraints("financial_facts_compact")
     }
+
+
+def test_company_year_quality_freshness_migration_is_additive(temp_engine):
+    from kreports.db.migrations import MIGRATIONS
+
+    assert MIGRATIONS[10].revision == (
+        "20260711_11_company_year_quality_freshness"
+    )
+    columns = {
+        item["name"]: item
+        for item in inspect(temp_engine).get_columns("company_year_quality")
+    }
+    assert columns["input_fingerprint"]["nullable"] is False
+    assert columns["evidence_summary_json"]["nullable"] is False
+
+
+def test_company_year_quality_freshness_migration_upgrades_revision_10_row(
+    tmp_path,
+):
+    from kreports.db.migrations import (
+        MIGRATIONS,
+        _checksum,
+        apply_schema_migrations,
+    )
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'revision-10-quality.db'}")
+    with legacy.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE company_year_quality (
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              market VARCHAR(10),
+              financial_core_status VARCHAR(24) NOT NULL,
+              auditor_status VARCHAR(24) NOT NULL,
+              audit_fee_status VARCHAR(24) NOT NULL,
+              policy_status VARCHAR(24) NOT NULL,
+              kam_status VARCHAR(24) NOT NULL,
+              audit_procedure_status VARCHAR(24) NOT NULL,
+              group_audit_status VARCHAR(24) NOT NULL,
+              investor_grade VARCHAR(1) NOT NULL,
+              auditor_grade VARCHAR(1) NOT NULL,
+              group_audit_grade VARCHAR(1) NOT NULL,
+              blockers_json TEXT NOT NULL DEFAULT '[]',
+              quality_version VARCHAR(20) NOT NULL DEFAULT 'v1',
+              updated_at DATETIME NOT NULL,
+              PRIMARY KEY (corp_code, bsns_year)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision VARCHAR(40) PRIMARY KEY,
+              checksum VARCHAR(64) NOT NULL,
+              description VARCHAR(300) NOT NULL,
+              applied_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO company_year_quality (
+              corp_code, bsns_year, financial_core_status, auditor_status,
+              audit_fee_status, policy_status, kam_status,
+              audit_procedure_status, group_audit_status, investor_grade,
+              auditor_grade, group_audit_grade, updated_at
+            ) VALUES (
+              '00126380', 2025, 'available', 'available', 'available',
+              'available', 'available', 'available', 'available', 'A', 'B',
+              'C', '2026-07-29 00:00:00'
+            )
+        """))
+        for migration in MIGRATIONS[:10]:
+            conn.execute(
+                text("""
+                    INSERT INTO schema_migrations
+                    (revision, checksum, description, applied_at)
+                    VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)
+                """),
+                {
+                    "revision": migration.revision,
+                    "checksum": _checksum(migration),
+                    "description": migration.description,
+                },
+            )
+
+    with legacy.begin() as conn:
+        assert apply_schema_migrations(conn) == [MIGRATIONS[10].revision]
+        assert apply_schema_migrations(conn) == []
+        upgraded = conn.execute(
+            text("""
+                SELECT corp_code, bsns_year, investor_grade,
+                       input_fingerprint, evidence_summary_json
+                FROM company_year_quality
+            """)
+        ).one()
+
+    columns = {
+        item["name"]: item
+        for item in inspect(legacy).get_columns("company_year_quality")
+    }
+    assert upgraded == ("00126380", 2025, "A", "", "{}")
+    assert columns["input_fingerprint"]["nullable"] is False
+    assert columns["input_fingerprint"]["default"].strip("'") == ""
+    assert columns["evidence_summary_json"]["nullable"] is False
+    assert columns["evidence_summary_json"]["default"].strip("'") == "{}"
+    assert tuple(
+        inspect(legacy)
+        .get_pk_constraint("company_year_quality")["constrained_columns"]
+    ) == ("corp_code", "bsns_year")
 
 
 def test_audit_fee_observation_current_slot_allows_one_current_claim(

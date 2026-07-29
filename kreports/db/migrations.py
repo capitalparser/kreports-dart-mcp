@@ -460,6 +460,20 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260711_11_company_year_quality_freshness",
+        description="Add company-year quality freshness fields",
+        statements=(
+            """
+            ALTER TABLE company_year_quality
+            ADD COLUMN input_fingerprint VARCHAR(64) NOT NULL DEFAULT ''
+            """,
+            """
+            ALTER TABLE company_year_quality
+            ADD COLUMN evidence_summary_json TEXT NOT NULL DEFAULT '{}'
+            """,
+        ),
+    ),
 )
 
 
