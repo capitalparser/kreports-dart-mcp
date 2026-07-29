@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any
+
+from kreports.analysis.evidence import parent_rcept_no
 
 _KAM_TOPIC_LABELS = {
     "revenue": "수익인식",
@@ -87,3 +90,34 @@ def public_kam_lifecycle_events(events: object) -> list[dict[str, Any]]:
             )
         public_events.append(public_event)
     return public_events
+
+
+def public_auditor_result(result: object) -> object:
+    """Copy and sanitize auditor enum/receipt fields at the public boundary."""
+    public = deepcopy(result)
+
+    def transform(value: object, key: str | None = None) -> object:
+        if isinstance(value, list):
+            if key == "topic_hints":
+                return [public_kam_topic_label(item) for item in value]
+            return [transform(item) for item in value]
+        if not isinstance(value, dict):
+            if key in {"topic", "kam_topic"}:
+                return public_kam_topic_label(value)
+            if key == "lifecycle":
+                return public_kam_lifecycle_label(value)
+            return value
+        if key == "kam_topics":
+            return {
+                public_kam_topic_label(topic): transform(count)
+                for topic, count in value.items()
+            }
+        transformed = {}
+        for field, item in value.items():
+            if field == "rcept_no":
+                transformed[field] = parent_rcept_no(str(item or ""))
+            else:
+                transformed[field] = transform(item, field)
+        return transformed
+
+    return transform(public)

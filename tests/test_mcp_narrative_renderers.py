@@ -228,6 +228,61 @@ def test_public_kam_lifecycle_fails_closed_for_unknown_enum_values(
         assert raw_status.strip() not in public_text
 
 
+def test_direct_auditor_handlers_sanitize_uppercase_without_mutating_inputs(
+    monkeypatch,
+):
+    from copy import deepcopy
+
+    from kreports.mcp.contracts import enrich_answer_response
+    from kreports.mcp.handlers import auditor
+    from kreports.mcp.input_models import (
+        ComparePeerKamTopicsInput,
+        GetAuditReportSectionsInput,
+    )
+
+    peer_payload = {
+        "subject": {"corp_name": "A"},
+        "kam_topics": {"SUSTAINABILITY": 1},
+        "subject_sections": [{
+            "rcept_no": "20250101000001_001_xml",
+            "topic_hints": ["SUSTAINABILITY"],
+            "kam_items": [{"topic": "SUSTAINABILITY", "lifecycle": "PENDING"}],
+        }],
+        "data_quality": {"status": "limited"},
+    }
+    section_payload = {
+        "sections": [{
+            "rcept_no": "20250101000001_001_xml",
+            "topic_hints": ["SUSTAINABILITY"],
+            "kam_items": [{"topic": "SUSTAINABILITY", "lifecycle": "PENDING"}],
+        }],
+        "data_quality": {"status": "limited"},
+    }
+    originals = (deepcopy(peer_payload), deepcopy(section_payload))
+    monkeypatch.setattr(auditor, "compare_peer_kam_topics", lambda **_: peer_payload)
+    monkeypatch.setattr(auditor, "get_audit_report_sections", lambda **_: section_payload)
+    monkeypatch.setattr(auditor, "resolve_company", lambda value: value)
+
+    peer = auditor.handle_compare_peer_kam_topics(
+        ComparePeerKamTopicsInput(company="A", year=2025),
+    )
+    sections = auditor.handle_get_audit_report_sections(
+        GetAuditReportSectionsInput(company="A", year=2025, section_key="kam"),
+    )
+    enriched = enrich_answer_response("compare_peer_kam_topics", peer)
+
+    assert (peer_payload, section_payload) == originals
+    assert peer["subject_sections"][0]["rcept_no"] == "20250101000001"
+    assert sections["sections"][0]["rcept_no"] == "20250101000001"
+    assert enriched["subject_sections"][0]["rcept_no"] == "20250101000001"
+    for payload in (peer, sections, enriched):
+        public_text = str(payload)
+        assert "SUSTAINABILITY" not in public_text
+        assert "PENDING" not in public_text
+        assert "기타 핵심감사사항" in public_text
+        assert "상태 미분류" in public_text
+
+
 def test_render_new_tools_have_answers():
     cases = [
         ("get_kam_lifecycle", {"events": [{"year": 2024, "topic": "revenue", "status": "new"}], "start_year": 2021, "end_year": 2025, "data_quality": {"status": "usable"}}),

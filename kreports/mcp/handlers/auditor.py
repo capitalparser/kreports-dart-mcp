@@ -23,6 +23,7 @@ from kreports.analysis.peer_benchmarks import (
     compare_peer_audit_procedures,
     estimate_audit_hours_proxy,
 )
+from kreports.mcp.auditor_public import public_auditor_result
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     BuildAuditAcceptancePackInput,
@@ -104,12 +105,12 @@ def handle_compare_peer_accounting_policies(
 
 
 def handle_compare_peer_kam_topics(args: ComparePeerKamTopicsInput) -> dict:
-    return compare_peer_kam_topics(
+    return public_auditor_result(compare_peer_kam_topics(
         company=resolve_company(args.company),
         year=args.year,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
-    )
+    ))
 
 
 def handle_compare_peer_audit_report_matters(
@@ -180,13 +181,13 @@ def handle_get_accounting_policy_changes(
 
 
 def handle_get_audit_report_sections(args: GetAuditReportSectionsInput) -> dict:
-    return get_audit_report_sections(
+    return public_auditor_result(get_audit_report_sections(
         company=resolve_company(args.company),
         year=args.year,
         section_key=args.section_key,
         source_type=args.source_type,
         limit=args.limit,
-    )
+    ))
 
 
 def handle_estimate_audit_hours_proxy(args: EstimateAuditHoursProxyInput) -> dict:

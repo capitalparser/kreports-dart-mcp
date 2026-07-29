@@ -1,6 +1,8 @@
 """Public decision surfaces for professional auditor MCP tools."""
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pandas as pd
 import pytest
 
@@ -901,19 +903,38 @@ def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):
     from kreports.mcp.handlers import auditor as auditor_handlers
 
     receipt = "20250101000001"
+    kam_legacy = {
+        "subject": {"corp_code": "001"},
+        "subject_sections": [{
+            "rcept_no": f"{receipt}_001_xml",
+            "section_key": "kam",
+        }],
+        "peer_section_samples": {
+            "002": [{"rcept_no": f"{receipt}_002_xml", "section_key": "kam"}],
+        },
+        "subject_business_report_kam_summary": [{
+            "rcept_no": f"{receipt}_003_xml",
+        }],
+        "audit_report_sections": {"subject_section_count": 1},
+        "data_quality": {"status": "usable"},
+    }
+    matter_legacy = {
+        "subject_matters": [{
+            "rcept_no": f"{receipt}_001_xml",
+            "section_key": "emphasis",
+            "matter_category": "emphasis",
+            "body_excerpt": "감사인의 책임과 경영진과의 커뮤니케이션 사항",
+        }],
+        "peer_matter_samples": {
+            "002": [{"rcept_no": f"{receipt}_004_xml"}],
+        },
+        "matter_counts": {"emphasis": {"subject_count": 1}},
+    }
+    originals = (deepcopy(kam_legacy), deepcopy(matter_legacy))
     monkeypatch.setattr(
         auditor_decisions,
         "_legacy_compare_peer_kam_topics",
-        lambda **_: {
-            "subject": {"corp_code": "001"},
-            "subject_sections": [{
-                "rcept_no": f"{receipt}_001_xml",
-                "section_key": "kam",
-            }],
-            "peer_sections": [],
-            "audit_report_sections": {},
-            "data_quality": {"status": "usable"},
-        },
+        lambda **_: kam_legacy,
     )
     monkeypatch.setattr(
         auditor_decisions,
@@ -923,16 +944,7 @@ def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):
     monkeypatch.setattr(
         auditor_decisions,
         "_legacy_compare_peer_audit_report_matters",
-        lambda **_: {
-            "subject_matters": [{
-                "rcept_no": f"{receipt}_001_xml",
-                "section_key": "emphasis",
-                "matter_category": "emphasis",
-                "body_excerpt": "감사인의 책임과 경영진과의 커뮤니케이션 사항",
-            }],
-            "peer_matters": [],
-            "matter_counts": {"emphasis": {"subject_count": 1}},
-        },
+        lambda **_: matter_legacy,
     )
 
     kam = auditor_decisions.compare_peer_kam_topics("001")
@@ -940,11 +952,109 @@ def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):
 
     assert kam["data_quality"]["status"] == "limited"
     assert kam["subject_sections"][0]["rcept_no"] == receipt
+    assert kam["peer_section_samples"]["002"][0]["rcept_no"] == receipt
+    assert kam["subject_business_report_kam_summary"][0]["rcept_no"] == receipt
     assert kam["audit_report_sections"]["semantic_complete"] is False
     assert matters["subject_matters"][0]["rcept_no"] == receipt
+    assert matters["peer_matter_samples"]["002"][0]["rcept_no"] == receipt
     assert matters["matter_counts"]["emphasis"]["subject_signal_count"] == 0
+    assert (kam_legacy, matter_legacy) == originals
     assert auditor_handlers.compare_peer_kam_topics is auditor_decisions.compare_peer_kam_topics
     assert (
         auditor_handlers.compare_peer_audit_report_matters
         is auditor_decisions.compare_peer_audit_report_matters
     )
+
+
+def test_acceptance_recomputes_matter_signals_from_hardened_counts(monkeypatch):
+    from kreports.analysis import auditor_decisions
+
+    legacy = _acceptance_payload()
+    legacy["acceptance_signals"] = [{
+        "area": "audit_report_matters",
+        "severity": "review",
+        "signal": "audit_report_emphasis_paragraph_present",
+    }]
+    selected = {
+        "subject": legacy["subject"],
+        "peer_count": 5,
+        "peers": legacy["peer_group"]["sample_peers"],
+        "selection_policy": legacy["peer_group"]["selection_policy"],
+    }
+    monkeypatch.setattr(auditor_decisions, "_legacy_select_peer_group", lambda **_: selected)
+    monkeypatch.setattr(auditor_decisions, "_legacy_build_audit_acceptance_pack", lambda **_: legacy)
+    monkeypatch.setattr(auditor_decisions, "_legacy_compare_peer_risk_profile", lambda **_: {"error": "fixture"})
+    monkeypatch.setattr(auditor_decisions, "get_audit_history", lambda *_: legacy["audit_history"])
+    monkeypatch.setattr(auditor_decisions, "compare_peer_kam_topics", lambda **_: {"error": "fixture"})
+    monkeypatch.setattr(
+        auditor_decisions,
+        "compare_peer_audit_report_matters",
+        lambda **_: {
+            "subject_matters": [{
+                "rcept_no": "20250101000001",
+                "matter_category": "emphasis",
+                "acceptance_signal": False,
+            }],
+            "matter_counts": {"emphasis": {"subject_count": 1, "subject_signal_count": 0}},
+        },
+    )
+
+    result = auditor_decisions.build_audit_acceptance_pack("005930", year=2025)
+
+    assert all(
+        signal.get("label") != "감사보고서 강조사항 문단이 확인됩니다."
+        for signal in result["acceptance_signals"]
+    )
+
+
+def test_peer_kam_wrapper_reloads_full_population_and_fails_on_incomplete_eleventh(
+    monkeypatch,
+):
+    from copy import deepcopy
+
+    from kreports.analysis import auditor_decisions
+
+    receipt = "20250101000001"
+    complete = [{
+        "rcept_no": receipt,
+        "section_key": "kam",
+        "complete": True,
+    } for _ in range(10)]
+    legacy = {
+        "subject": {"corp_code": "001"},
+        "subject_sections": deepcopy(complete),
+        "peer_section_samples": {},
+        "subject_business_report_kam_summary": [],
+        "audit_report_sections": {"subject_section_count": 11},
+        "data_quality": {"status": "usable"},
+    }
+    full = [*complete, {
+        "rcept_no": "20250101000002",
+        "section_key": "kam",
+        "complete": False,
+    }]
+    monkeypatch.setattr(auditor_decisions, "_legacy_compare_peer_kam_topics", lambda **_: legacy)
+    monkeypatch.setattr(auditor_decisions, "attach_kam_item_semantics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_get_audit_report_sections",
+        lambda *_args, **_kwargs: {"sections": deepcopy(full)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "kam_semantic_coverage",
+        lambda rows: {
+            "semantic_complete": len(rows) == 11 and all(row["complete"] for row in rows),
+            "topic_coverage": {"available": len(rows), "total": 11, "status": "usable"},
+            "reason_coverage": {"available": len(rows), "total": 11, "status": "usable"},
+            "procedure_coverage": {"available": sum(row["complete"] for row in rows), "total": 11, "status": "limited"},
+            "source_coverage": {"available": len(rows), "total": 11, "status": "usable"},
+        },
+    )
+
+    result = auditor_decisions.compare_peer_kam_topics("001")
+
+    assert len(result["subject_sections"]) == 11
+    assert result["audit_report_sections"]["semantic_complete"] is False
+    assert result["data_quality"]["status"] == "limited"

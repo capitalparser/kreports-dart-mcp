@@ -1,6 +1,7 @@
 """Decision-ready public auditor evidence without changing legacy collectors."""
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -11,6 +12,9 @@ from kreports.analysis.audit_reporting import (
     classify_audit_matter,
     get_audit_history,
     kam_semantic_coverage,
+)
+from kreports.analysis.audit_reporting import (
+    get_audit_report_sections as _get_audit_report_sections,
 )
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
 from kreports.analysis.filing_provenance import annual_filing_source
@@ -313,24 +317,70 @@ def compare_peer_kam_topics(
     fs_strategy: str = "auto",
 ) -> dict[str, Any]:
     """Add Task-5 KAM semantics without altering the shared peer collector."""
-    result = _legacy_compare_peer_kam_topics(
+    legacy_result = _legacy_compare_peer_kam_topics(
         company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
     )
-    if not isinstance(result, dict) or "error" in result:
-        return result
+    if not isinstance(legacy_result, dict) or "error" in legacy_result:
+        return legacy_result
+    result = deepcopy(legacy_result)
     subject = result.get("subject") if isinstance(result.get("subject"), dict) else {}
     subject_sections = [
         row for row in (result.get("subject_sections") or []) if isinstance(row, dict)
     ]
+    section_summary = (
+        result.get("audit_report_sections")
+        if isinstance(result.get("audit_report_sections"), dict)
+        else {}
+    )
+    material_count = int(section_summary.get("subject_section_count") or 0)
     corp_code = str(subject.get("corp_code") or "")
+    if material_count > len(subject_sections) and corp_code:
+        reloaded = _get_audit_report_sections(
+            corp_code,
+            year=year,
+            section_key="kam",
+            source_type="audit_report",
+            limit=max(material_count, 20),
+        )
+        reloaded_sections = (
+            reloaded.get("sections")
+            if isinstance(reloaded, dict) and isinstance(reloaded.get("sections"), list)
+            else []
+        )
+        if len(reloaded_sections) > len(subject_sections):
+            subject_sections = [
+                deepcopy(row) for row in reloaded_sections if isinstance(row, dict)
+            ]
     if corp_code:
         attach_kam_item_semantics(subject_sections, corp_code=corp_code, year=year)
     for row in subject_sections:
         _canonical_receipt(row)
-    for row in result.get("peer_sections") or []:
+    peer_samples = result.get("peer_section_samples")
+    if isinstance(peer_samples, dict):
+        for peer_code, rows in peer_samples.items():
+            if not isinstance(rows, list):
+                continue
+            peer_rows = [row for row in rows if isinstance(row, dict)]
+            attach_kam_item_semantics(peer_rows, corp_code=str(peer_code), year=year)
+            for row in peer_rows:
+                _canonical_receipt(row)
+    for row in result.get("subject_business_report_kam_summary") or []:
         if isinstance(row, dict):
             _canonical_receipt(row)
     semantic = kam_semantic_coverage(subject_sections)
+    population_proved = material_count <= len(subject_sections)
+    if not population_proved:
+        semantic["semantic_complete"] = False
+        for coverage_key in (
+            "topic_coverage",
+            "reason_coverage",
+            "procedure_coverage",
+            "source_coverage",
+        ):
+            coverage = dict(semantic[coverage_key])
+            coverage["total"] = max(int(coverage.get("total") or 0), material_count)
+            coverage["status"] = "limited"
+            semantic[coverage_key] = coverage
     quality = dict(result.get("data_quality") or {})
     timeline_status = str(quality.get("status") or "missing")
     quality.update({
@@ -344,7 +394,7 @@ def compare_peer_kam_topics(
         if timeline_status == "usable" and not semantic["semantic_complete"]
         else timeline_status,
     })
-    sections = dict(result.get("audit_report_sections") or {})
+    sections = dict(section_summary)
     sections.update({
         "timeline_status": timeline_status,
         "semantic_complete": semantic["semantic_complete"],
@@ -366,11 +416,12 @@ def compare_peer_audit_report_matters(
     fs_strategy: str = "auto",
 ) -> dict[str, Any]:
     """Apply receipt and boilerplate guards after the shared peer query."""
-    result = _legacy_compare_peer_audit_report_matters(
+    legacy_result = _legacy_compare_peer_audit_report_matters(
         company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
     )
-    if not isinstance(result, dict) or "error" in result:
-        return result
+    if not isinstance(legacy_result, dict) or "error" in legacy_result:
+        return legacy_result
+    result = deepcopy(legacy_result)
     subject_matters = [
         row for row in (result.get("subject_matters") or []) if isinstance(row, dict)
     ]
@@ -380,9 +431,12 @@ def compare_peer_audit_report_matters(
             str(row.get("body_excerpt") or ""),
             str(row.get("matter_category") or row.get("section_key") or ""),
         ))
-    for row in result.get("peer_matters") or []:
-        if isinstance(row, dict):
-            _canonical_receipt(row)
+    peer_samples = result.get("peer_matter_samples")
+    if isinstance(peer_samples, dict):
+        for rows in peer_samples.values():
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict):
+                    _canonical_receipt(row)
     counts = dict(result.get("matter_counts") or {})
     for key in AUDIT_MATTER_KEYS:
         bucket = dict(counts.get(key) or {})
@@ -1041,6 +1095,19 @@ def build_audit_acceptance_pack(
     matters = compare_peer_audit_report_matters(
         company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
     )
+    matter_signal_names = {
+        "audit_report_emphasis_paragraph_present",
+        "audit_report_going_concern_paragraph_present",
+        "audit_report_other_matter_paragraph_present",
+    }
+    legacy["acceptance_signals"] = [
+        signal
+        for signal in (legacy.get("acceptance_signals") or [])
+        if not (
+            isinstance(signal, dict)
+            and signal.get("signal") in matter_signal_names
+        )
+    ]
     if isinstance(matters, dict) and "error" not in matters:
         subject_matters = matters.get("subject_matters") or []
         source = next((
@@ -1063,6 +1130,19 @@ def build_audit_acceptance_pack(
                 for row in subject_matters
             ),
         }
+        matter_signal_by_key = {
+            "emphasis": ("audit_report_matters", "review", "audit_report_emphasis_paragraph_present"),
+            "going_concern": ("going_concern", "review", "audit_report_going_concern_paragraph_present"),
+            "other_matter": ("audit_report_matters", "info", "audit_report_other_matter_paragraph_present"),
+        }
+        for matter_key, (area, severity, signal_name) in matter_signal_by_key.items():
+            count = (matters.get("matter_counts") or {}).get(matter_key) or {}
+            if count.get("subject_signal_count"):
+                legacy["acceptance_signals"].append({
+                    "area": area,
+                    "severity": severity,
+                    "signal": signal_name,
+                })
     return build_acceptance_evidence(
         legacy_payload={**legacy, "audit_history": history},
         audit_effort_section=None,
