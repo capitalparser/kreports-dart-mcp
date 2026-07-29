@@ -317,18 +317,28 @@ def _financial_snapshot_from_compact(
                 text("PRAGMA table_info(financial_facts_compact)")
             ).mappings()
         }
-        has_persisted_citations = {
+        has_persisted_provenance = {
+            "unit",
             "citation_rcept_no",
             "citation_report_nm",
             "citation_basis",
             "quality_status",
         }.issubset(compact_columns)
         provenance_select = (
-            "citation_rcept_no, citation_report_nm, citation_basis, quality_status"
-            if has_persisted_citations
-            else "NULL AS citation_rcept_no, NULL AS citation_report_nm, "
+            "unit, citation_rcept_no, citation_report_nm, "
+            "citation_basis, quality_status"
+            if has_persisted_provenance
+            else "NULL AS unit, NULL AS citation_rcept_no, NULL AS citation_report_nm, "
             "NULL AS citation_basis, NULL AS quality_status"
         )
+        corp_name = conn.execute(
+            text("""
+                SELECT corp_name
+                FROM companies
+                WHERE corp_code=:corp_code
+            """),
+            {"corp_code": corp_code},
+        ).scalar_one_or_none() or corp_code
         rows = conn.execute(text("""
             SELECT bsns_year, fs_div, metric_key, amount, """ + provenance_select + """
             FROM financial_facts_compact
@@ -346,20 +356,35 @@ def _financial_snapshot_from_compact(
                 fs_div_used = "OFS"
 
     grouped: dict[int, dict[str, float | None]] = {}
-    persisted_sources: dict[int, set[tuple[object, object, object, object]]] = {}
+    persisted_citations: dict[int, set[tuple[object, object, object]]] = {}
+    provenance_limitations: set[str] = set()
+    displayed_metric_keys = {
+        *_COMPACT_FINANCIAL_FIELD_MAP,
+        "purchase_ppe",
+        "purchase_intangible_assets",
+    }
     for row in rows:
         year = int(row["bsns_year"])
         metric = str(row["metric_key"])
         amount = row["amount"]
         grouped.setdefault(year, {})
         grouped[year][metric] = (float(amount) / 1e8) if amount is not None else None
-        if has_persisted_citations:
-            persisted_sources.setdefault(year, set()).add((
+        if has_persisted_provenance:
+            persisted_citations.setdefault(year, set()).add((
                 row.get("citation_rcept_no"),
                 row.get("citation_report_nm"),
                 row.get("citation_basis"),
-                row.get("quality_status"),
             ))
+            if amount is not None and metric in displayed_metric_keys:
+                if row.get("unit") != "KRW":
+                    provenance_limitations.add(f"unit_unproven:{metric}")
+                quality_status = str(row.get("quality_status") or "").strip()
+                if quality_status != "usable":
+                    provenance_limitations.add(
+                        f"quality_limited:{metric}"
+                        if quality_status == "limited"
+                        else f"quality_unproven:{metric}"
+                    )
 
     out_rows: list[dict] = []
     previous_revenue: float | None = None
@@ -392,16 +417,16 @@ def _financial_snapshot_from_compact(
         item["FCF마진"] = _pct(item.get("FCF"), item.get("매출액"))
         item["CapEx_OCF"] = _pct(item.get("CapEx"), item.get("영업CF"))
         item["CFO_NI"] = _ratio(item.get("영업CF"), item.get("순이익"))
-        if has_persisted_citations:
-            sources = persisted_sources.get(year, set())
+        if has_persisted_provenance:
+            sources = persisted_citations.get(year, set())
             if len(sources) == 1:
-                receipt, report_nm, basis, _quality_status = next(iter(sources))
+                receipt, report_nm, basis = next(iter(sources))
             else:
-                receipt = report_nm = basis = _quality_status = None
+                receipt = report_nm = basis = None
             if receipt and basis == "company_year_annual_filing_match":
                 item["source"] = {
                     "corp_code": corp_code,
-                    "corp_name": corp_code,
+                    "corp_name": corp_name,
                     "report_nm": report_nm,
                     "bsns_year": year,
                     "rcept_no": receipt,
@@ -428,7 +453,14 @@ def _financial_snapshot_from_compact(
     result = {
         "corp_code": corp_code,
         "fs_div": fs_div_used,
-        "unit": "억원",
+        "unit": (
+            "억원"
+            if not any(
+                limitation.startswith("unit_")
+                for limitation in provenance_limitations
+            )
+            else None
+        ),
         "rows": serialized_rows,
         "row_count": len(out_rows),
         "data_quality": {
@@ -438,15 +470,18 @@ def _financial_snapshot_from_compact(
             "coverage_note": "Compact runtime DB uses annual core metrics; full account-level financial_facts are not bundled.",
         },
     }
-    if not has_persisted_citations:
+    if not has_persisted_provenance:
         return _attach_annual_sources(result, source_table="financial_facts_compact")
-    if any(not row["source"].get("rcept_no") for row in serialized_rows):
+    citation_limited = any(
+        not row["source"].get("rcept_no") for row in serialized_rows
+    )
+    if citation_limited:
+        provenance_limitations.add("citation_unproven_or_conflicting")
+    if provenance_limitations:
         result["data_quality"] = {
             **result["data_quality"],
             "status": "limited",
-            "limitations": [
-                "일부 compact 재무 값은 저장된 사업보고서 인용 앵커가 없거나 서로 일치하지 않습니다."
-            ],
+            "limitations": sorted(provenance_limitations),
         }
     return result
 

@@ -179,6 +179,7 @@ def test_compact_snapshot_prefers_persisted_citation_over_newer_disclosure(temp_
     from kreports.db.engine import get_session
 
     with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
         session.execute(text("""
             INSERT INTO financial_facts_compact
             (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
@@ -204,3 +205,83 @@ def test_compact_snapshot_prefers_persisted_citation_over_newer_disclosure(temp_
 
     assert result["rows"][0]["source"]["rcept_no"] == "20250318000001"
     assert result["rows"][0]["source"]["report_nm"] == "사업보고서 (2024.12)"
+    assert result["rows"][0]["source"]["corp_name"] == "삼성전자"
+    assert result["unit"] == "억원"
+    assert result["data_quality"]["status"] == "usable"
+
+
+@pytest.mark.parametrize(
+    ("rows_sql", "expected_limitations"),
+    [
+        (
+            """
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', 'KRW', 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'usable', CURRENT_TIMESTAMP),
+            ('00126380', 2024, 'CFS', 'assets', '자산총계', 200000000,
+             'financial_facts', NULL, 'instant', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'limited', CURRENT_TIMESTAMP)
+            """,
+            {"unit_unproven:assets", "quality_limited:assets"},
+        ),
+        (
+            """
+            ('00126380', 2024, 'CFS', 'revenue', '매출액', 100000000,
+             'financial_facts', NULL, 'duration', '20250318000001',
+             '사업보고서 (2024.12)', 'company_year_annual_filing_match',
+             'limited', CURRENT_TIMESTAMP)
+            """,
+            {"unit_unproven:revenue", "quality_limited:revenue"},
+        ),
+    ],
+    ids=["mixed", "all-limited"],
+)
+def test_compact_snapshot_does_not_confirm_converted_unit_for_unproven_values(
+    temp_engine,
+    rows_sql,
+    expected_limitations,
+):
+    """One displayed unproven value must fail the snapshot unit and quality closed."""
+    from sqlalchemy import text
+
+    from kreports.analysis.financial_analysis import _financial_snapshot_from_compact
+    from kreports.db.engine import get_session
+    from kreports.mcp.contracts import build_answer_envelope
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.execute(text("""
+            INSERT INTO financial_facts_compact
+            (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+             source_table, unit, period_type, citation_rcept_no,
+             citation_report_nm, citation_basis, quality_status, fetched_at)
+            VALUES
+        """ + rows_sql))
+        session.commit()
+
+    result = _financial_snapshot_from_compact("00126380", "CFS", None)
+
+    assert result["unit"] is None
+    assert result["data_quality"]["status"] == "limited"
+    assert expected_limitations.issubset(
+        set(result["data_quality"]["limitations"])
+    )
+    assert (
+        build_answer_envelope(
+            "get_financial_snapshot",
+            result,
+        ).data_quality.status
+        == "limited"
+    )
+    assert result["rows"][0]["source"] == {
+        "corp_code": "00126380",
+        "corp_name": "삼성전자",
+        "report_nm": "사업보고서 (2024.12)",
+        "bsns_year": 2024,
+        "rcept_no": "20250318000001",
+        "section_title": "재무제표",
+        "source_table": "financial_facts_compact",
+        "citation_basis": "company_year_annual_filing_match",
+    }
