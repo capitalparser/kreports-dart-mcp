@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 33  # approved catalog including audit-effort input preparation
+EXPECTED_TOOL_COUNT = 34  # approved catalog including audit materiality preparation
 
 
 class TestToolRegistryConsistency:
@@ -333,6 +333,7 @@ class TestStdioE2E:
         assert "search_company" in names
         assert "score_going_concern" in names
         assert "compare_to_industry" in names
+        assert "prepare_audit_materiality_inputs" in names
 
     def test_stdio_call_search_company(self):
         text = asyncio.run(
@@ -400,6 +401,7 @@ class TestStreamableHttpE2E:
             assert len(names) == EXPECTED_TOOL_COUNT
             assert "search_company" in names
             assert "get_business_overview" in names
+            assert "prepare_audit_materiality_inputs" in names
         finally:
             proc.terminate()
             try:
