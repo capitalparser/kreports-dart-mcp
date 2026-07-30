@@ -32,6 +32,19 @@
   - retained-clone/MCP/materiality regression suite → `194 passed`
   - Ruff and `git diff --check` passed.
 
+### Review remediation
+
+- RED reproduced conflicting value and provenance duplicates, nonnumeric text
+  and infinite SQLite values, an older-but-matching annual receipt, absent
+  derived PBT support, invalid/conflicting derivation operands, an implausibly
+  late receipt date, and missing compact schema.
+- The SQL now resolves the latest annual filing using production order,
+  rejects any non-identical row within a company/year/fs/metric group, admits
+  identical duplicates deterministically, and constructs PBT only from proven
+  compatible `profit_loss + tax_expense` operands.
+- Fresh focused and retained-clone/MCP regression verification after the review
+  fix: `285 passed in 14.44s`; Ruff and `git diff --check` passed.
+
 ## Safety and tradeoff
 
 - The aggregation is a bounded, read-only SQL CTE; it does not invoke MCP per
@@ -44,3 +57,4 @@
 ## Commit
 
 - `e8d33314c2ea8ad8bb099b691c0b9549f6b82518`
+- Review remediation: `725e8207f96bd146f1ea7d2577e64beb67485f44`
