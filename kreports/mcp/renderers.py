@@ -419,10 +419,7 @@ def _render_acceptance_pack(result: dict) -> str:
     year = result.get("year")
     signals = result.get("acceptance_signals") or []
     data_quality = result.get("data_quality") or {}
-    status = "usable"
-    if isinstance(data_quality, dict):
-        if any((v or {}).get("status") in {"missing", "limited"} for v in data_quality.values() if isinstance(v, dict)):
-            status = "limited"
+    status = _status(result)
 
     lines = [
         f"판정: {status}",
@@ -1158,6 +1155,7 @@ def _append_visual_table(
         "get_subsidiary_auditors",
         "get_audit_history",
         "compare_peer_audit_fees",
+        "build_audit_acceptance_pack",
         "get_kam_lifecycle",
         "search_disclosure_events",
     }

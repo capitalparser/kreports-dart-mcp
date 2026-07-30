@@ -830,6 +830,33 @@
           "peer_count": 2,
           "status": "limited"
         }
+      },
+      "subject_scale_history": {
+        "complete_years": [
+          2024
+        ],
+        "covered_years": [
+          2024,
+          2023
+        ],
+        "missing_by_year": {
+          "2022": [
+            "total_assets",
+            "revenue",
+            "audit_fee_m",
+            "audit_hours"
+          ],
+          "2023": [
+            "audit_fee_m",
+            "audit_hours"
+          ]
+        },
+        "requested_years": [
+          2024,
+          2023,
+          2022
+        ],
+        "status": "limited"
       }
     },
     "fs_div_used": "CFS",
@@ -893,6 +920,52 @@
       "non_audit_fee_m": 10,
       "total_assets": 200000000000
     },
+    "subject_scale_history": [
+      {
+        "audit_fee_m": 120,
+        "audit_fee_m_per_trillion_assets": 600.0,
+        "audit_fee_m_per_trillion_revenue": 1000.0,
+        "audit_fee_per_hour_m": 0.109091,
+        "audit_hours": 1100,
+        "audit_hours_per_trillion_assets": 5500.0,
+        "audit_hours_per_trillion_revenue": 9166.67,
+        "auditor_nm": "패리티회계법인1",
+        "fs_div": "CFS",
+        "metric_basis": "legacy_inferred",
+        "missing_fields": [],
+        "nas_ratio": 0.0833,
+        "non_audit_fee_m": 10,
+        "revenue": 120000000000,
+        "revenue_100m": 1200.0,
+        "total_assets": 200000000000,
+        "total_assets_100m": 2000.0,
+        "year": 2024
+      },
+      {
+        "fs_div": "CFS",
+        "missing_fields": [
+          "audit_fee_m",
+          "audit_hours"
+        ],
+        "missing_fields_label": "감사보수, 감사시간",
+        "revenue": 100000000000,
+        "revenue_100m": 1000.0,
+        "total_assets": 180000000000,
+        "total_assets_100m": 1800.0,
+        "year": 2023
+      },
+      {
+        "fs_div": "CFS",
+        "missing_fields": [
+          "total_assets",
+          "revenue",
+          "audit_fee_m",
+          "audit_hours"
+        ],
+        "missing_fields_label": "총자산, 매출액, 감사보수, 감사시간",
+        "year": 2022
+      }
+    ],
     "year": 2024
   },
   "peer_kam": {

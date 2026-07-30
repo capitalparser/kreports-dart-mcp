@@ -44,6 +44,61 @@ def test_build_audit_acceptance_pack_returns_user_facing_narrative():
     assert "근거" in out["answer"]
 
 
+def test_acceptance_narrative_includes_three_year_scale_table_for_plain_chatbots():
+    text = render_answer("build_audit_acceptance_pack", {
+        "subject": {"corp_name": "대상회사"},
+        "year": 2024,
+        "subject_scale_history": [
+            {
+                "year": 2024,
+                "fs_div": "CFS",
+                "total_assets_100m": 40_000.0,
+                "revenue_100m": 20_000.0,
+                "audit_fee_m": 800,
+                "audit_hours": 8_000,
+                "audit_hours_per_trillion_assets": 2_000.0,
+                "audit_hours_per_trillion_revenue": 4_000.0,
+                "audit_source_rcept_no": "20250318000123",
+                "missing_fields": [],
+            },
+            {
+                "year": 2023,
+                "fs_div": "CFS",
+                "total_assets_100m": 30_000.0,
+                "revenue_100m": 15_000.0,
+                "audit_fee_m": 600,
+                "audit_hours": 6_000,
+                "missing_fields": [],
+            },
+            {
+                "year": 2022,
+                "fs_div": "CFS",
+                "missing_fields": [
+                    "total_assets",
+                    "revenue",
+                    "audit_fee_m",
+                    "audit_hours",
+                ],
+                "missing_fields_label": "총자산, 매출액, 감사보수, 감사시간",
+            },
+        ],
+        "acceptance_signals": [],
+        "data_quality": {"status": "limited"},
+        "limitations": [
+            "This pack supports acceptance/continuance screening only.",
+        ],
+    })
+
+    assert text is not None
+    assert "### 대상회사 3개년 규모·감사투입 추이" in text
+    assert "| 연도 | 재무제표 기준 | 총자산 (억원) | 매출액 (억원)" in text
+    assert "| 2024 | CFS | 40000.0 | 20000.0 | 800 | 8000" in text
+    assert "총자산, 매출액, 감사보수, 감사시간" in text
+    assert "표준감사시간 결론이 아닙니다." in text
+    assert "판정: usable" not in text
+    assert "세부 결과:\n판정: limited" in text
+
+
 def test_search_audit_report_matters_returns_user_facing_narrative():
     out = json.loads(call_tool("search_audit_report_matters", {"company": "005930", "year": 2024, "limit": 3}))
 
