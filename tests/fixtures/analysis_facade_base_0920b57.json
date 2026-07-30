@@ -540,7 +540,8 @@
     "corp_code": "00000001",
     "data_quality": {
       "limitations": [
-        "일부 연도는 동일 사업연도 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다."
+        "일부 연도는 동일 사업연도 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다.",
+        "전기와 당기의 사업보고서 접수번호를 모두 확인하지 못한 매출성장률은 표시하지 않았습니다."
       ],
       "source": "financials",
       "status": "limited"
@@ -612,6 +613,7 @@
           "bsns_year": 2024,
           "corp_code": "00000001",
           "corp_name": "패리티대상",
+          "fs_div": "CFS",
           "rcept_no": "20250331000001",
           "report_nm": "사업보고서 (2024.12)",
           "section_title": "재무제표",
@@ -619,7 +621,7 @@
         },
         "구분": "CFS",
         "매입채무": null,
-        "매출성장률": 19.999999999999996,
+        "매출성장률": null,
         "매출액": 1200.0,
         "매출원가": null,
         "매출채권": null,
@@ -739,6 +741,7 @@
           "bsns_year": 2024,
           "corp_code": "00000001",
           "corp_name": "패리티대상",
+          "fs_div": "OFS",
           "rcept_no": "20250331000001",
           "report_nm": "사업보고서 (2024.12)",
           "section_title": "재무제표",
@@ -801,7 +804,7 @@
     ],
     "confirmed_facts": [
       {
-        "excerpt": "latest_snapshot={'연도': 2024, '분기': 4, '구분': 'CFS', '매출액': 1200.0, '영업이익': 120.0, '순이익': 90.0, '자산총계': 2000.0, '부채총계': 800.0, '자본총계': 1200.0, '영업CF': 110.0, '영업이익률': 10.0, '순이익률': 7.5, '부채비율': 66.7, 'ROE': 7.5, 'ROA': 4.5, '매출성장률': 19.999999999999996, 'CapEx': None, '재고자산': None, '매출채권': None, '매입채무': None, '매출원가': None, '이자비용': None, '현금성자산': None, 'FCF': None, 'FCF마진': None, 'CapEx_OCF': None, 'CFO_NI': None, '투하자본': None, 'ROIC': None, '이자보상배율': None, 'DIO': None, 'DSO': None, 'DPO': None, 'CCC': None, 'source': {'corp_code': '00000001', 'corp_name': '패리티대상', 'report_nm': '사업보고서 (2024.12)', 'bsns_year': 2024, 'rcept_no': '20250331000001', 'section_title': '재무제표', 'source_table': 'financials'}}",
+        "excerpt": "latest_snapshot={'연도': 2024, '분기': 4, '구분': 'CFS', '매출액': 1200.0, '영업이익': 120.0, '순이익': 90.0, '자산총계': 2000.0, '부채총계': 800.0, '자본총계': 1200.0, '영업CF': 110.0, '영업이익률': 10.0, '순이익률': 7.5, '부채비율': 66.7, 'ROE': 7.5, 'ROA': 4.5, '매출성장률': None, 'CapEx': None, '재고자산': None, '매출채권': None, '매입채무': None, '매출원가': None, '이자비용': None, '현금성자산': None, 'FCF': None, 'FCF마진': None, 'CapEx_OCF': None, 'CFO_NI': None, '투하자본': None, 'ROIC': None, '이자보상배율': None, 'DIO': None, 'DSO': None, 'DPO': None, 'CCC': None, 'source': {'corp_code': '00000001', 'corp_name': '패리티대상', 'report_nm': '사업보고서 (2024.12)', 'bsns_year': 2024, 'rcept_no': '20250331000001', 'section_title': '재무제표', 'source_table': 'financials', 'fs_div': 'CFS'}}",
         "source": {
           "bsns_year": 2024,
           "corp_code": "00000001",
@@ -848,7 +851,7 @@
     ],
     "quality_snapshot": {
       "avg_operating_margin": 9.5,
-      "avg_revenue_growth": 19.999999999999996,
+      "avg_revenue_growth": null,
       "avg_roe": 6.95,
       "checks": {
         "cfo_covers_net_income": {
@@ -884,19 +887,19 @@
         "positive_revenue_growth": {
           "meaning": "매출 성장 지속성을 확인합니다.",
           "name": "평균 매출성장률",
-          "status": "pass",
-          "value": 19.999999999999996
+          "status": "unknown",
+          "value": null
         }
       },
       "coverage_status": "limited",
-      "evaluated_count": 4,
+      "evaluated_count": 3,
       "latest_cfo_ni": null,
       "latest_debt_ratio": 66.7,
       "latest_fcf": null,
       "latest_year": 2024,
-      "passed_checks": 3,
+      "passed_checks": 2,
       "total_checks": 6,
-      "unknown_count": 2
+      "unknown_count": 3
     },
     "recent_events": [],
     "subject": {
