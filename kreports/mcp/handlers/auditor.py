@@ -1,6 +1,8 @@
 """Auditor evidence, peer-comparison, and engagement-planning handlers."""
 from __future__ import annotations
 
+import re
+
 from kreports.analysis.audit_reporting import (
     get_accounting_policy,
     get_accounting_policy_changes,
@@ -174,12 +176,78 @@ def handle_get_kam_lifecycle(args: GetKamLifecycleInput) -> dict:
 def handle_get_accounting_policy_changes(
     args: GetAccountingPolicyChangesInput,
 ) -> dict:
-    return get_accounting_policy_changes(
+    result = get_accounting_policy_changes(
         company=resolve_company(args.company),
         start_year=args.start_year,
         end_year=args.end_year,
         fs_div=args.fs_div,
     )
+    return _enrich_policy_change_evidence(result)
+
+
+_DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
+
+
+def _enrich_policy_change_evidence(result: dict) -> dict:
+    """Expose each public text-change candidate with its filing receipt."""
+    enriched = dict(result)
+    facts: list[dict] = []
+    changed_items = enriched.get("changed_items")
+    if not isinstance(changed_items, list):
+        changed_items = []
+
+    for item in changed_items[:20]:
+        if not isinstance(item, dict):
+            continue
+        receipt = str(item.get("rcept_no") or "").strip()
+        if not _DART_RECEIPT_NO.fullmatch(receipt):
+            continue
+        year = item.get("year")
+        fs_div = str(item.get("fs_div") or "재무제표")
+        note_no = str(item.get("note_no") or "").strip()
+        note_title = str(item.get("note_title") or "회계정책 주석").strip()
+        facts.append({
+            "statement": (
+                f"{year}년 {fs_div} 주석 {note_no or '-'} "
+                f"'{note_title}'에서 텍스트 변경 후보가 확인되었습니다."
+            ),
+            "source": {
+                "source_label": "DART 사업보고서",
+                "source_url": (
+                    "https://dart.fss.or.kr/dsaf001/main.do?"
+                    f"rcpNo={receipt}"
+                ),
+                "rcept_no": receipt,
+                "section_title": f"주석 {note_no} {note_title}".strip(),
+            },
+            "excerpt": str(item.get("body_excerpt") or "")[:600] or None,
+        })
+
+    if facts:
+        enriched["confirmed_facts"] = facts
+        return enriched
+
+    if changed_items:
+        raw_quality = (
+            enriched.get("data_quality")
+            if isinstance(enriched.get("data_quality"), dict)
+            else {}
+        )
+        limitations = [
+            str(item)
+            for item in raw_quality.get("limitations") or []
+            if str(item).strip()
+        ]
+        limitations.append(
+            "회계정책 변경 후보의 DART 접수번호를 확인하지 못해 원문 근거를 "
+            "직접 연결할 수 없습니다."
+        )
+        enriched["data_quality"] = {
+            **raw_quality,
+            "status": "limited",
+            "limitations": list(dict.fromkeys(limitations)),
+        }
+    return enriched
 
 
 def handle_get_audit_report_sections(args: GetAuditReportSectionsInput) -> dict:

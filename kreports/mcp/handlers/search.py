@@ -91,10 +91,19 @@ def handle_search_dataset(args: SearchDatasetInput) -> dict:
     result = search_dataset(**args.model_dump())
     if args.dataset == "accounting_note_chapters":
         return _enrich_accounting_note_search(result)
-    return result
+    return _enrich_search_dataset_evidence(result)
 
 
 _DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
+_SOURCE_REQUIRED_SEARCH_DATASETS = {
+    "source_documents",
+    "report_sections",
+    "accounting_policies",
+    "evidence_documents",
+    "disclosures",
+    "audit_fees",
+    "financials",
+}
 _NOTE_AUDIT_GUIDANCE = (
     (
         ("수익", "revenue"),
@@ -121,6 +130,92 @@ _NOTE_AUDIT_GUIDANCE = (
         "우발사항 관련 문구는 의무의 존재, 발생가능성 및 공시 충분성을 점검할 스크리닝 근거입니다. 이는 감사 결론이 아닙니다.",
     ),
 )
+
+
+def _enrich_search_dataset_evidence(result: dict) -> dict:
+    """Bind generic search rows to filing receipts or limit the public claim."""
+    enriched = dict(result)
+    query = enriched.get("query") if isinstance(enriched.get("query"), dict) else {}
+    dataset = str(query.get("dataset") or "")
+    facts: list[dict] = []
+
+    for company in enriched.get("companies") or []:
+        if not isinstance(company, dict):
+            continue
+        corp_name = str(
+            company.get("corp_name")
+            or company.get("stock_code")
+            or company.get("corp_code")
+            or "대상 회사"
+        )
+        for record in company.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            receipt = str(record.get("rcept_no") or "").strip()
+            if not _DART_RECEIPT_NO.fullmatch(receipt):
+                continue
+            year = record.get("year")
+            section_title = (
+                record.get("section_title")
+                or record.get("note_title")
+                or record.get("report_nm")
+                or dataset
+            )
+            facts.append({
+                "statement": (
+                    f"{corp_name}의 {year}년 {dataset} 조회 레코드를 "
+                    "공시 접수번호와 연결했습니다."
+                    if year is not None
+                    else f"{corp_name}의 {dataset} 조회 레코드를 공시 접수번호와 연결했습니다."
+                ),
+                "source": {
+                    "source_label": "DART 공시",
+                    "source_url": (
+                        "https://dart.fss.or.kr/dsaf001/main.do?"
+                        f"rcpNo={receipt}"
+                    ),
+                    "rcept_no": receipt,
+                    "section_title": str(section_title),
+                },
+                "excerpt": str(
+                    record.get("body_excerpt")
+                    or record.get("excerpt")
+                    or ""
+                )[:600] or None,
+            })
+            if len(facts) >= 20:
+                break
+        if len(facts) >= 20:
+            break
+
+    if facts:
+        enriched["confirmed_facts"] = facts
+        return enriched
+
+    if (
+        dataset in _SOURCE_REQUIRED_SEARCH_DATASETS
+        and int(enriched.get("total_records") or 0) > 0
+    ):
+        raw_quality = (
+            enriched.get("data_quality")
+            if isinstance(enriched.get("data_quality"), dict)
+            else {}
+        )
+        limitations = [
+            str(item)
+            for item in raw_quality.get("limitations") or []
+            if str(item).strip()
+        ]
+        limitations.append(
+            "조회 레코드의 DART 접수번호를 확인하지 못해 수치와 공시 원문을 "
+            "직접 연결할 수 없습니다."
+        )
+        enriched["data_quality"] = {
+            **raw_quality,
+            "status": "limited",
+            "limitations": list(dict.fromkeys(limitations)),
+        }
+    return enriched
 
 
 def _note_audit_implication(topic: str) -> str:

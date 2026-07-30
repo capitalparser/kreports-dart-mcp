@@ -698,6 +698,39 @@ def test_missing_table_index_inline_raw_and_duplicate_keys_are_named_blockers(
     assert "duplicate_key:financial_facts_compact" in blockers
 
 
+def test_missing_kam_runtime_tables_and_linkage_columns_block_release(tmp_path):
+    """Catches a revision-04 artifact passing despite revision-05/06 KAM needs."""
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE audit_procedure_items ("
+            "id INTEGER PRIMARY KEY, corp_code TEXT, bsns_year INTEGER)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+
+    blockers = evidence["release_gate"]["blockers"]
+    assert "missing_required_table:kam_items" in blockers
+    assert (
+        "missing_required_column:audit_procedure_items.kam_item_id"
+        in blockers
+    )
+    assert (
+        "missing_required_column:audit_procedure_items.method"
+        in blockers
+    )
+
+
 def test_inline_raw_count_excludes_derived_sections_and_blocks_original_bodies(
     tmp_path,
 ):

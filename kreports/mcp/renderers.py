@@ -1228,6 +1228,16 @@ def _on_demand_presentation_envelope(
     })
 
 
+def _qoe_presentation_envelope(
+    envelope: AnswerEnvelopeV1,
+) -> AnswerEnvelopeV1:
+    """Keep the chatbot summary compact while the answer pack retains all groups."""
+    return envelope.model_copy(update={
+        "confirmed_facts": envelope.confirmed_facts[:3],
+        "evidence": envelope.evidence[:3],
+    })
+
+
 def _is_accounting_note_search(tool_name: str, result: dict[str, Any]) -> bool:
     query = result.get("query")
     return (
@@ -1251,28 +1261,6 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     # canonical state before this renderer or its visual-table helper reads
     # any legacy presentation fields.
     result = normalize_answer_result(tool_name, result)
-    candidate_opening: str | None = None
-    if tool_name == "get_dcf_input_candidates":
-        lines = [
-            "DCF 입력 후보 상태: " + str(
-                result.get("candidate_status")
-                or (result.get("data_quality") or {}).get("candidate_status")
-                or (result.get("data_quality") or {}).get("status")
-                or "missing"
-            ),
-            "가치평가 준비도: " + str(
-                result.get("valuation_readiness")
-                or (result.get("data_quality") or {}).get("valuation_readiness")
-                or "blocked"
-            ),
-        ]
-        for blocker in result.get("valuation_blockers") or []:
-            if isinstance(blocker, dict):
-                lines.append(
-                    "- " + str(blocker.get("impact") or blocker.get("field"))
-                    + ": " + str(blocker.get("next_action") or "추가 확인이 필요합니다.")
-                )
-        candidate_opening = "\n".join(lines)
     dcf_unavailable = (
         tool_name == "build_dcf_model_pack"
         and "enterprise_value" in result
@@ -1294,6 +1282,8 @@ def render_answer(tool_name: str, result: Any) -> str | None:
     presentation_envelope = envelope
     if _is_accounting_note_search(tool_name, result):
         presentation_envelope = _note_search_presentation_envelope(envelope)
+    elif tool_name == "get_quality_of_earnings_pack":
+        presentation_envelope = _qoe_presentation_envelope(envelope)
     elif (
         tool_name == "fetch_disclosure_on_demand"
         and result.get("error") == "user_dart_api_key is required"
@@ -1350,8 +1340,6 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         presentation_envelope,
         detail=_sanitize_legacy_detail(detail) if detail else None,
     )
-    if candidate_opening:
-        rendered = rendered + "\n\n" + candidate_opening
     if dcf_opening:
         rendered = rendered + "\n\n" + dcf_opening
     return _append_visual_table(tool_name, result, rendered)
@@ -1369,6 +1357,7 @@ def _append_visual_table(
         "compare_to_industry_multi",
         "get_subsidiary_auditors",
         "get_audit_history",
+        "get_accounting_policy_changes",
         "compare_peer_audit_fees",
         "build_audit_acceptance_pack",
         "get_kam_lifecycle",
@@ -1415,7 +1404,8 @@ def _append_visual_table(
             "resource_uri": None,
         })
     if tool_name == "search_dataset" and not any(
-        table.id == "accounting_note_evidence" for table in pack.tables
+        table.id in {"accounting_note_evidence", "search_results"}
+        for table in pack.tables
     ):
         return narrative
     table_markdown = render_visualization_markdown(pack, mermaid=False)

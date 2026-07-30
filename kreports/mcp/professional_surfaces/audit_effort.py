@@ -170,8 +170,25 @@ def _build_hours_proxy_pack(result: dict[str, Any]) -> dict[str, Any]:
                 {"field": "audit_fee_m", "label": "감사보수(백만원)"},
                 {"field": "audit_hours", "label": "감사시간"},
                 {"field": "total_assets", "label": "총자산"},
+                {
+                    "field": "audit_source_rcept_no",
+                    "label": "감사보수·시간 접수번호",
+                },
+                {
+                    "field": "financial_source_rcept_no",
+                    "label": "재무제표 접수번호",
+                },
             ],
-            "rows": [{key: metrics.get(key) for key in ("audit_fee_m", "audit_hours", "total_assets")}],
+            "rows": [{
+                key: metrics.get(key)
+                for key in (
+                    "audit_fee_m",
+                    "audit_hours",
+                    "total_assets",
+                    "audit_source_rcept_no",
+                    "financial_source_rcept_no",
+                )
+            }],
             "status": (result.get("data_quality") or {}).get("status", "limited"),
         })
     return pack

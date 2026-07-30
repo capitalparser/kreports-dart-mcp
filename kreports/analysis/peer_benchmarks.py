@@ -2284,6 +2284,48 @@ def estimate_audit_hours_proxy(
     subject_metrics = fee_pack.get("subject_metrics") or {}
     risk_metrics = risk_pack.get("subject_metrics") or {}
     benchmarks = fee_pack.get("benchmarks") or {}
+    scale_row = next(
+        (
+            row
+            for row in fee_pack.get("subject_scale_history") or []
+            if isinstance(row, dict) and row.get("year") == year
+        ),
+        {},
+    )
+    audit_receipt = str(
+        scale_row.get("audit_source_rcept_no") or ""
+    ).strip()
+    financial_source = (
+        scale_row.get("financial_source")
+        if isinstance(scale_row.get("financial_source"), dict)
+        else {}
+    )
+    financial_receipt = str(
+        financial_source.get("rcept_no")
+        or scale_row.get("financial_source_rcept_no")
+        or ""
+    ).strip()
+
+    input_sources: list[dict] = []
+    for receipt, section_title in (
+        (audit_receipt, "감사보수 및 감사시간"),
+        (financial_receipt, "재무제표"),
+    ):
+        if not (len(receipt) == 14 and receipt.isdigit()):
+            continue
+        input_sources.append({
+            "source_label": "DART 사업보고서",
+            "source_url": (
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                f"rcpNo={receipt}"
+            ),
+            "rcept_no": receipt,
+            "section_title": section_title,
+        })
+    input_sources = list({
+        source["rcept_no"]: source
+        for source in input_sources
+    }.values())
 
     drivers = []
     score = 0
@@ -2351,6 +2393,19 @@ def estimate_audit_hours_proxy(
     else:
         band = "low"
 
+    limitations = [
+        "This is not a standard audit hour calculation.",
+        "It is a public DART data proxy for planning discussion and peer comparison.",
+    ]
+    if not audit_receipt:
+        limitations.append(
+            "감사보수·감사시간 입력의 공시 접수번호를 확인하지 못했습니다."
+        )
+    if not financial_receipt:
+        limitations.append(
+            "총자산 입력의 공시 접수번호를 확인하지 못했습니다."
+        )
+
     return _clean_dict({
         "subject": fee_pack["subject"],
         "year": year,
@@ -2371,15 +2426,34 @@ def estimate_audit_hours_proxy(
             "audit_hours": audit_hours,
             "audit_fee_m": subject_metrics.get("audit_fee_m"),
             "total_assets": total_assets,
+            "audit_source_rcept_no": (
+                audit_receipt
+                if len(audit_receipt) == 14 and audit_receipt.isdigit()
+                else None
+            ),
+            "financial_source_rcept_no": (
+                financial_receipt
+                if len(financial_receipt) == 14
+                and financial_receipt.isdigit()
+                else None
+            ),
             "op_cf_divergence_flag": risk_metrics.get("op_cf_divergence_flag"),
             "going_concern_flag": risk_metrics.get("going_concern_flag"),
             "beneish_m_score": risk_metrics.get("beneish_m_score"),
         },
+        "confirmed_facts": (
+            [{
+                "statement": (
+                    f"{year}년 공개 감사보수·감사시간 및 재무 규모 입력을 "
+                    "공시 접수번호와 연결했습니다."
+                ),
+                "sources": input_sources,
+            }]
+            if input_sources
+            else []
+        ),
         "selection_policy": fee_pack.get("selection_policy"),
-        "limitations": [
-            "This is not a standard audit hour calculation.",
-            "It is a public DART data proxy for planning discussion and peer comparison.",
-        ],
+        "limitations": limitations,
     })
 
 

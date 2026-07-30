@@ -169,6 +169,8 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         )
 
     builders = {
+        "search_dataset": _build_search_dataset_pack,
+        "get_accounting_policy_changes": _build_policy_changes_pack,
         "get_dcf_input_candidates": _build_dcf_pack,
         "build_dcf_model_pack": _build_dcf_model_pack,
         "get_quality_of_earnings_pack": _build_quality_pack,
@@ -414,7 +416,6 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("year", "연도"),
                 ("revenue", "매출(원)", "KRW"),
                 ("operating_profit", "영업이익(원)", "KRW"),
-                ("profit_loss", "순이익(원)", "KRW"),
                 ("net_income", "순이익(원)", "KRW"),
                 ("operating_cf", "영업현금흐름(원)", "KRW"),
                 ("purchase_ppe", "유형자산 취득(원)", "KRW"),
@@ -1601,6 +1602,117 @@ def _build_generic_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any
             [("statement", "확인 내용"), ("source", "출처")],
             facts,
         ))
+    return pack
+
+
+_SEARCH_TABLE_FIELDS: dict[str, list[tuple[str, str, str | None]]] = {
+    "audit_fees": [
+        ("corp_name", "회사", None),
+        ("year", "연도", None),
+        ("auditor_nm", "감사인", None),
+        ("audit_fee_m", "감사보수(백만원)", "KRW million"),
+        ("audit_hours", "감사시간", "hours"),
+        ("rcept_no", "접수번호", None),
+    ],
+    "financials": [
+        ("corp_name", "회사", None),
+        ("year", "연도", None),
+        ("quarter", "분기", None),
+        ("fs_div", "재무제표 기준", None),
+        ("revenue", "매출", "KRW"),
+        ("operating_profit", "영업이익", "KRW"),
+        ("total_assets", "총자산", "KRW"),
+        ("rcept_no", "접수번호", None),
+    ],
+}
+_DEFAULT_SEARCH_TABLE_FIELDS = [
+    ("corp_name", "회사", None),
+    ("year", "연도", None),
+    ("report_nm", "보고서", None),
+    ("section_title", "섹션", None),
+    ("note_title", "주석", None),
+    ("rcept_no", "접수번호", None),
+]
+
+
+def _build_search_dataset_pack(result: dict[str, Any]) -> dict[str, Any]:
+    query = result.get("query") if isinstance(result.get("query"), dict) else {}
+    dataset = str(query.get("dataset") or "dataset")
+    fields = _SEARCH_TABLE_FIELDS.get(dataset, _DEFAULT_SEARCH_TABLE_FIELDS)
+    rows: list[dict[str, Any]] = []
+    for company in result.get("companies") or []:
+        if not isinstance(company, dict):
+            continue
+        for record in company.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            merged = {
+                "corp_name": company.get("corp_name"),
+                **record,
+            }
+            rows.append({
+                field: merged.get(field)
+                for field, _label, _unit in fields
+            })
+            if len(rows) >= 50:
+                break
+        if len(rows) >= 50:
+            break
+    pack = _base_pack(
+        f"{_subject_label(result)} {dataset} 검색 결과",
+        result,
+    )
+    pack["tables"].append(_table(
+        "search_results",
+        "공시 데이터 검색 결과",
+        fields,
+        rows,
+        note=(
+            "접수번호가 없는 행은 원 공시와 직접 연결되지 않은 로컬 캐시 "
+            "결과이므로 제한적으로만 사용하세요."
+        ),
+    ))
+    return pack
+
+
+def _build_policy_changes_pack(result: dict[str, Any]) -> dict[str, Any]:
+    rows = [
+        {
+            "year": item.get("year"),
+            "fs_div": item.get("fs_div"),
+            "note_no": item.get("note_no"),
+            "note_title": item.get("note_title"),
+            "section_type": item.get("section_type"),
+            "change_type": item.get("change_type"),
+            "similarity_to_previous": item.get("similarity_to_previous"),
+            "rcept_no": item.get("rcept_no"),
+        }
+        for item in result.get("changed_items") or []
+        if isinstance(item, dict)
+    ][:50]
+    pack = _base_pack(
+        f"{_subject_label(result)} 회계정책 변경 후보",
+        result,
+    )
+    pack["tables"].append(_table(
+        "accounting_policy_changes",
+        "회계정책 텍스트 변경 후보",
+        [
+            ("year", "연도"),
+            ("fs_div", "재무제표 기준"),
+            ("note_no", "주석"),
+            ("note_title", "주석명"),
+            ("section_type", "구분"),
+            ("change_type", "변경 후보 유형"),
+            ("similarity_to_previous", "전기 유사도"),
+            ("rcept_no", "접수번호"),
+        ],
+        rows,
+        note=(
+            "텍스트 차이는 회계정책 변경 스크리닝 후보이며 실제 정책 변경 "
+            "결론은 원문 비교와 감사인 검토가 필요합니다."
+        ),
+    ))
     return pack
 
 

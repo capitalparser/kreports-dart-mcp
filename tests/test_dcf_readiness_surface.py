@@ -175,9 +175,110 @@ def test_dcf_candidate_public_answer_and_pack_keep_readiness_separate():
 
     assert answer.startswith("판정:")
     assert "DCF 입력 후보 상태: usable\n가치평가 준비도: blocked" in answer
+    assert answer.count("DCF 입력 후보 상태:") == 1
+    assert answer.count("가치평가 준비도:") == 1
+    assert answer.count("기업가치 할인 계산 불가") == 1
     assert pack is not None
     assert pack["summary"]["domain_status"] == "blocked"
     assert any(table["id"] == "valuation_blockers" for table in pack["tables"])
+
+
+def test_dcf_historical_table_has_one_populated_net_income_column():
+    """Catches duplicate 순이익 columns where one field is always blank."""
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    result = {
+        "subject": {"corp_name": "A"},
+        "historical_actuals": [{
+            "year": 2024,
+            "revenue": 100,
+            "operating_profit": 10,
+            "net_income": 7,
+            "operating_cf": 8,
+        }],
+        "candidate_assumptions": {
+            "revenue_growth": {
+                "value": 0.1,
+                "basis": "historical_median",
+            },
+        },
+        "candidate_status": "usable",
+        "valuation_readiness": "blocked",
+        "valuation_blockers": [],
+        "data_quality": {"status": "usable"},
+    }
+
+    pack = build_answer_pack("get_dcf_input_candidates", result)
+    assert pack is not None
+    table = next(
+        item for item in pack["tables"]
+        if item["id"] == "historical_actuals"
+    )
+    fields = [column["field"] for column in table["columns"]]
+    labels = [column["label"] for column in table["columns"]]
+
+    assert len(fields) == len(set(fields))
+    assert labels.count("순이익(원)") == 1
+    assert "net_income" in fields
+    assert "profit_loss" not in fields
+
+
+def test_qoe_chatbot_answer_summarizes_groups_and_keeps_full_table():
+    """Catches dozens of receipt URLs overwhelming the default chatbot answer."""
+    from kreports.mcp.contracts import enrich_answer_response
+
+    groups = [
+        {
+            "year": 2024,
+            "matter_type": matter_type,
+            "severity": "info",
+            "excerpt": excerpt,
+            "section_count": 1,
+            "source": {"rcept_no": receipt},
+        }
+        for matter_type, excerpt, receipt in (
+            ("basis_for_opinion", "감사의견근거 A", "20250311001081"),
+            ("other_matter", "기타사항 B", "20250311001082"),
+            ("emphasis", "강조사항 C", "20250311001083"),
+            ("going_concern", "계속기업 D", "20250311001084"),
+        )
+    ]
+    result = {
+        "company": "001",
+        "start_year": 2024,
+        "end_year": 2024,
+        "fs_div": "CFS",
+        "verdict": "monitor",
+        "metrics": {"years": 1},
+        "signals": [{"signal": "audit_matter_present"}],
+        "audit_matter_summary": {
+            "unique_receipt_count": 4,
+            "section_count": 4,
+            "dedupe_basis": (
+                "parent_rcept_no + matter_type + normalized_excerpt"
+            ),
+            "groups": groups,
+        },
+        "data_quality": {
+            "status": "usable",
+            "source": "audit_matter_items",
+        },
+    }
+
+    enriched = enrich_answer_response(
+        "get_quality_of_earnings_pack",
+        result,
+    )
+
+    assert enriched["answer"].count(
+        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
+    ) <= 3
+    assert "나머지 1개 그룹은 표에서 확인하세요." in enriched["answer"]
+    table = next(
+        item for item in enriched["answer_pack"]["tables"]
+        if item["id"] == "audit_matter_groups"
+    )
+    assert len(table["rows"]) == 4
 
 
 def test_enriched_dcf_candidate_keeps_public_readiness_and_input_immutable():

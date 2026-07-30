@@ -490,7 +490,12 @@ def _render_quality_of_earnings(result: dict[str, Any]) -> str:
             f"{summary.get('dedupe_basis') or '확인 불가'}"
         ),
     ]
-    for group in summary.get("groups") or []:
+    groups = [
+        group
+        for group in summary.get("groups") or []
+        if isinstance(group, dict)
+    ]
+    for group in groups[:3]:
         if not isinstance(group, dict):
             continue
         receipt = str((group.get("source") or {}).get("rcept_no") or "")
@@ -498,9 +503,11 @@ def _render_quality_of_earnings(result: dict[str, Any]) -> str:
             continue
         lines.append(
             f"- {group.get('year')}년 {group.get('matter_type')}: "
-            f"감사보고서 접수번호 {receipt} "
-            f"(https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt})"
+            f"감사보고서 접수번호 {receipt}"
         )
+    omitted = max(len(groups) - 3, 0)
+    if omitted:
+        lines.append(f"- 나머지 {omitted}개 그룹은 표에서 확인하세요.")
     return "\n".join(lines)
 
 

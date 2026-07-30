@@ -56,12 +56,58 @@ REQUIRED_TABLES = (
     "audit_fee_observations",
     "report_sections",
     "evidence_documents",
+    "kam_items",
+    "audit_procedure_items",
     "backfill_runs",
     "company_year_quality",
     "schema_migrations",
     "dataset_manifest",
     "source_documents",
 )
+REQUIRED_COLUMN_SPECS = {
+    "kam_items": (
+        "id",
+        "rcept_no",
+        "dcm_no",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+        "ordinal",
+        "title",
+        "normalized_topic",
+        "reason_text",
+        "audit_response_text",
+        "related_note_references_json",
+        "full_body_hash",
+        "full_body_length",
+        "source_basis",
+        "parser_version",
+        "quality_status",
+    ),
+    "audit_procedure_items": (
+        "id",
+        "rcept_no",
+        "dcm_no",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+        "kam_item_id",
+        "kam_topic",
+        "method",
+        "procedure_type",
+        "procedure_text",
+        "procedure_hash",
+        "procedure_length",
+        "assertion_hints_json",
+        "linked_metric_keys_json",
+        "linked_note_keys_json",
+        "linked_event_keys_json",
+        "parser_version",
+        "quality_status",
+        "section_ordinal",
+        "procedure_ordinal",
+    ),
+}
 REQUIRED_INDEXES = (
     "idx_company_year_quality_year_market",
     "uq_backfill_runs_active_lease",
@@ -851,6 +897,24 @@ def _index_contract_blockers(
     return blockers
 
 
+def _column_contract_blockers(
+    connection: sqlite3.Connection,
+    table_names: set[str],
+) -> list[str]:
+    """Name every current-runtime column absent from an otherwise present table."""
+    blockers: list[str] = []
+    for table_name, required_columns in REQUIRED_COLUMN_SPECS.items():
+        if table_name not in table_names:
+            continue
+        actual_columns = _table_columns(connection, table_name)
+        blockers.extend(
+            f"missing_required_column:{table_name}.{column}"
+            for column in required_columns
+            if column not in actual_columns
+        )
+    return blockers
+
+
 def _duplicate_key_blockers(
     connection: sqlite3.Connection,
     table_names: set[str],
@@ -1321,6 +1385,10 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
             connection,
             table_names,
         )
+        column_blockers = _column_contract_blockers(
+            connection,
+            table_names,
+        )
 
     def session_scope():
         return _explicit_session_scope(database)
@@ -1337,6 +1405,7 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
         if name not in table_names
     )
     blockers.extend(index_blockers)
+    blockers.extend(column_blockers)
     blockers.extend(duplicate_blockers)
     if inline_raw_count > 0:
         blockers.append("inline_raw_bodies_present")
