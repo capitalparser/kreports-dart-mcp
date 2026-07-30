@@ -14,19 +14,38 @@
     }
   },
   "audit_history": {
+    "confirmed_facts": [
+      {
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "00000001",
+          "rcept_no": "20250401000001",
+          "report_nm": "감사인 이력",
+          "section_title": "감사인·감사의견",
+          "source_table": "auditors"
+        },
+        "statement": "2024년 CFS 감사인은 패리티회계법인1이며 감사의견은 적정입니다."
+      }
+    ],
     "corp_code": "00000001",
     "count": 1,
+    "data_quality": {
+      "limitations": [],
+      "status": "usable"
+    },
     "history": [
       {
-        "감사의견": "적정",
-        "감사인": "패리티회계법인1",
-        "교체여부": "최초",
-        "구분": "CFS",
-        "연속연수": 1,
-        "접수번호": "20250401000001",
-        "회계연도": 2024
+        "audit_opinion": "적정",
+        "auditor_changed": false,
+        "auditor_nm": "패리티회계법인1",
+        "consecutive_years": 1,
+        "fs_div": "CFS",
+        "rcept_no": "20250401000001",
+        "year": 2024
       }
-    ]
+    ],
+    "next_checks": []
   },
   "audit_matters": {
     "analysis": [
@@ -49,10 +68,13 @@
         },
         "sections": [
           {
+            "acceptance_signal": true,
             "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
             "body_length": 32,
             "bsns_year": 2024,
             "dcm_no": null,
+            "matter_category": "other_matter",
+            "non_boilerplate": true,
             "rcept_no": "20250401000001",
             "section_key": "other_matter",
             "section_title": "기타사항",
@@ -235,7 +257,11 @@
     "analysis": [
       {
         "perspective": "auditor",
-        "statement": "감사보고서 본문 섹션은 감사위험 식별, KAM 선정 이유, 감사절차 대응을 확인하는 1차 증거입니다."
+        "statement": "KAM 선정 이유와 수행 감사절차를 구분해 확인해야 합니다."
+      },
+      {
+        "perspective": "auditor",
+        "statement": "감사보고서 해당 문단의 성격과 원문 근거를 확인해야 합니다."
       }
     ],
     "confirmed_facts": [
@@ -278,6 +304,7 @@
         2024
       ],
       "interpretation": "No rows means the local cache lacks the requested section/year. It does not prove the filing lacks that audit report section.",
+      "item_population_proven": false,
       "kam_procedure_coverage": {
         "coverage_pct": 100.0,
         "with_procedure_hint": 1
@@ -287,16 +314,44 @@
         "with_reason_hint": 0
       },
       "latest_available_year": 2024,
+      "opinion_conclusion_coverage": {
+        "available": 0,
+        "status": "missing",
+        "total": 0
+      },
+      "procedure_coverage": {
+        "available": 0,
+        "status": "limited",
+        "total": 1
+      },
+      "reason_coverage": {
+        "available": 0,
+        "status": "limited",
+        "total": 1
+      },
       "requested_section_key": null,
       "requested_source_type": "audit_report",
       "requested_year": 2024,
       "section_count": 2,
+      "semantic_complete": false,
+      "semantic_source_eligible": true,
       "source": "report_sections",
-      "status": "usable"
+      "source_coverage": {
+        "available": 0,
+        "status": "limited",
+        "total": 1
+      },
+      "status": "limited",
+      "timeline_status": "usable",
+      "topic_coverage": {
+        "available": 1,
+        "status": "usable",
+        "total": 1
+      }
     },
     "next_checks": [
-      "KAM 본문에서는 선정 이유와 수행한 감사절차가 모두 추출되었는지 확인하세요.",
-      "사업보고서 주석의 회계정책·추정 문단과 감사보고서 KAM 대응절차를 대조하세요."
+      "관련 주석, 금액, 경영진 추정 및 절차 대응을 대조하세요.",
+      "문단 제목, 접수번호 및 인접 문단을 함께 확인하세요."
     ],
     "section_count": 2,
     "section_key": null,
@@ -319,6 +374,17 @@
             "revenue"
           ]
         },
+        "kam_items": [
+          {
+            "ordinal": 1,
+            "procedure_available": false,
+            "rcept_no": "20250401000001",
+            "reason_available": false,
+            "segmentation_status": "single_item_body",
+            "title": "핵심감사사항",
+            "topic": "revenue"
+          }
+        ],
         "ordinal": 0,
         "rcept_no": "20250401000001",
         "related_audit_procedure_count": 1,
@@ -326,6 +392,7 @@
         "related_audit_procedures": [
           {
             "dcm_no": null,
+            "kam_item_id": null,
             "kam_topic": "revenue",
             "procedure_excerpt": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
             "procedure_length": 40,
@@ -471,6 +538,13 @@
   },
   "financial_cfs": {
     "corp_code": "00000001",
+    "data_quality": {
+      "limitations": [
+        "일부 연도는 동일 사업연도 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다."
+      ],
+      "source": "financials",
+      "status": "limited"
+    },
     "fs_div": "CFS",
     "row_count": 2,
     "rows": [
@@ -487,6 +561,17 @@
         "ROA": 3.9,
         "ROE": 6.4,
         "ROIC": null,
+        "source": {
+          "bsns_year": 2023,
+          "corp_code": "00000001",
+          "corp_name": "00000001",
+          "provenance_gap": "요청 사업연도 2023의 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다. 다른 사업연도 공시를 대체 인용하지 않았습니다.",
+          "provenance_status": "requested_annual_report_not_cached",
+          "rcept_no": null,
+          "report_nm": "DART 연간 재무 데이터",
+          "section_title": "재무제표",
+          "source_table": "financials"
+        },
         "구분": "CFS",
         "매입채무": null,
         "매출성장률": null,
@@ -523,6 +608,15 @@
         "ROA": 4.5,
         "ROE": 7.5,
         "ROIC": null,
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250331000001",
+          "report_nm": "사업보고서 (2024.12)",
+          "section_title": "재무제표",
+          "source_table": "financials"
+        },
         "구분": "CFS",
         "매입채무": null,
         "매출성장률": 19.999999999999996,
@@ -551,6 +645,13 @@
   },
   "financial_cfs_fallback": {
     "corp_code": "00000004",
+    "data_quality": {
+      "limitations": [
+        "일부 연도는 동일 사업연도 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다."
+      ],
+      "source": "financials",
+      "status": "limited"
+    },
     "fs_div": "OFS",
     "row_count": 1,
     "rows": [
@@ -567,6 +668,17 @@
         "ROA": 3.0,
         "ROE": 4.6,
         "ROIC": null,
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000004",
+          "corp_name": "00000004",
+          "provenance_gap": "요청 사업연도 2024의 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다. 다른 사업연도 공시를 대체 인용하지 않았습니다.",
+          "provenance_status": "requested_annual_report_not_cached",
+          "rcept_no": null,
+          "report_nm": "DART 연간 재무 데이터",
+          "section_title": "재무제표",
+          "source_table": "financials"
+        },
         "구분": "OFS",
         "매입채무": null,
         "매출성장률": null,
@@ -603,6 +715,10 @@
   },
   "financial_ofs": {
     "corp_code": "00000001",
+    "data_quality": {
+      "source": "financials",
+      "status": "usable"
+    },
     "fs_div": "OFS",
     "row_count": 1,
     "rows": [
@@ -619,6 +735,15 @@
         "ROA": 4.4,
         "ROE": 7.0,
         "ROIC": null,
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250331000001",
+          "report_nm": "사업보고서 (2024.12)",
+          "section_title": "재무제표",
+          "source_table": "financials"
+        },
         "구분": "OFS",
         "매입채무": null,
         "매출성장률": null,
@@ -676,13 +801,15 @@
     ],
     "confirmed_facts": [
       {
-        "excerpt": "latest_snapshot={'연도': 2024, '분기': 4, '구분': 'CFS', '매출액': 1200.0, '영업이익': 120.0, '순이익': 90.0, '자산총계': 2000.0, '부채총계': 800.0, '자본총계': 1200.0, '영업CF': 110.0, '영업이익률': 10.0, '순이익률': 7.5, '부채비율': 66.7, 'ROE': 7.5, 'ROA': 4.5, '매출성장률': 19.999999999999996, 'CapEx': None, '재고자산': None, '매출채권': None, '매입채무': None, '매출원가': None, '이자비용': None, '현금성자산': None, 'FCF': None, 'FCF마진': None, 'CapEx_OCF': None, 'CFO_NI': None, '투하자본': None, 'ROIC': None, '이자보상배율': None, 'DIO': None, 'DSO': None, 'DPO': None, 'CCC': None}",
+        "excerpt": "latest_snapshot={'연도': 2024, '분기': 4, '구분': 'CFS', '매출액': 1200.0, '영업이익': 120.0, '순이익': 90.0, '자산총계': 2000.0, '부채총계': 800.0, '자본총계': 1200.0, '영업CF': 110.0, '영업이익률': 10.0, '순이익률': 7.5, '부채비율': 66.7, 'ROE': 7.5, 'ROA': 4.5, '매출성장률': 19.999999999999996, 'CapEx': None, '재고자산': None, '매출채권': None, '매입채무': None, '매출원가': None, '이자비용': None, '현금성자산': None, 'FCF': None, 'FCF마진': None, 'CapEx_OCF': None, 'CFO_NI': None, '투하자본': None, 'ROIC': None, '이자보상배율': None, 'DIO': None, 'DSO': None, 'DPO': None, 'CCC': None, 'source': {'corp_code': '00000001', 'corp_name': '패리티대상', 'report_nm': '사업보고서 (2024.12)', 'bsns_year': 2024, 'rcept_no': '20250331000001', 'section_title': '재무제표', 'source_table': 'financials'}}",
         "source": {
           "bsns_year": 2024,
           "corp_code": "00000001",
           "corp_name": "패리티대상",
-          "rcept_no": "20250331000001",
-          "report_nm": "사업보고서 (2024.12)",
+          "provenance_gap": "요청 사업연도 2024의 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다. 다른 사업연도 공시를 대체 인용하지 않았습니다.",
+          "provenance_status": "requested_annual_report_not_cached",
+          "rcept_no": null,
+          "report_nm": "DART 연간 재무 데이터",
           "section_title": "재무제표",
           "source_table": "financial_facts"
         },
@@ -724,19 +851,52 @@
       "avg_revenue_growth": 19.999999999999996,
       "avg_roe": 6.95,
       "checks": {
-        "cfo_covers_net_income": false,
-        "debt_ratio_under_100": true,
-        "positive_avg_op_margin": true,
-        "positive_avg_roe": false,
-        "positive_latest_fcf": false,
-        "positive_revenue_growth": true
+        "cfo_covers_net_income": {
+          "meaning": "이익의 현금 뒷받침을 확인합니다.",
+          "name": "현금흐름/순이익",
+          "status": "unknown",
+          "value": null
+        },
+        "debt_ratio_under_100": {
+          "meaning": "재무 레버리지를 확인합니다.",
+          "name": "부채비율",
+          "status": "pass",
+          "value": 66.7
+        },
+        "positive_avg_op_margin": {
+          "meaning": "영업 수익성을 확인합니다.",
+          "name": "평균 영업이익률",
+          "status": "pass",
+          "value": 9.5
+        },
+        "positive_avg_roe": {
+          "meaning": "수익성 지속성을 확인합니다.",
+          "name": "평균 ROE",
+          "status": "fail",
+          "value": 6.95
+        },
+        "positive_latest_fcf": {
+          "meaning": "현금전환을 확인합니다.",
+          "name": "잉여현금흐름",
+          "status": "unknown",
+          "value": null
+        },
+        "positive_revenue_growth": {
+          "meaning": "매출 성장 지속성을 확인합니다.",
+          "name": "평균 매출성장률",
+          "status": "pass",
+          "value": 19.999999999999996
+        }
       },
+      "coverage_status": "limited",
+      "evaluated_count": 4,
       "latest_cfo_ni": null,
       "latest_debt_ratio": 66.7,
       "latest_fcf": null,
       "latest_year": 2024,
       "passed_checks": 3,
-      "total_checks": 6
+      "total_checks": 6,
+      "unknown_count": 2
     },
     "recent_events": [],
     "subject": {
@@ -1204,24 +1364,28 @@
         "peer_companies_with_section": 0,
         "peer_coverage_pct": 0.0,
         "subject_count": 0,
+        "subject_signal_count": 0,
         "total_sections": 0
       },
       "emphasis": {
         "peer_companies_with_section": 0,
         "peer_coverage_pct": 0.0,
         "subject_count": 0,
+        "subject_signal_count": 0,
         "total_sections": 0
       },
       "going_concern": {
         "peer_companies_with_section": 0,
         "peer_coverage_pct": 0.0,
         "subject_count": 0,
+        "subject_signal_count": 0,
         "total_sections": 0
       },
       "other_matter": {
         "peer_companies_with_section": 2,
         "peer_coverage_pct": 100.0,
         "subject_count": 1,
+        "subject_signal_count": 1,
         "total_sections": 3
       }
     },
@@ -1229,11 +1393,14 @@
     "peer_matter_samples": {
       "00000002": [
         {
+          "acceptance_signal": true,
           "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 2.",
           "body_length": 32,
           "corp_code": "00000002",
           "corp_name": "패리티피어A",
           "dcm_no": null,
+          "matter_category": "other_matter",
+          "non_boilerplate": true,
           "ordinal": 0,
           "rcept_no": "20250401000002",
           "section_key": "other_matter",
@@ -1245,11 +1412,14 @@
       ],
       "00000003": [
         {
+          "acceptance_signal": true,
           "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 3.",
           "body_length": 32,
           "corp_code": "00000003",
           "corp_name": "패리티피어B",
           "dcm_no": null,
+          "matter_category": "other_matter",
+          "non_boilerplate": true,
           "ordinal": 0,
           "rcept_no": "20250401000003",
           "section_key": "other_matter",
@@ -1285,11 +1455,14 @@
     },
     "subject_matters": [
       {
+        "acceptance_signal": true,
         "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
         "body_length": 32,
         "corp_code": "00000001",
         "corp_name": "패리티대상",
         "dcm_no": null,
+        "matter_category": "other_matter",
+        "non_boilerplate": true,
         "ordinal": 0,
         "rcept_no": "20250401000001",
         "section_key": "other_matter",

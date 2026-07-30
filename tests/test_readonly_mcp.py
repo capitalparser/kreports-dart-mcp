@@ -97,11 +97,17 @@ def test_readonly_cache_miss_message_does_not_request_dart_key():
 
 
 def test_mcp_smoke_cli_works_without_dart_key():
+    environment = {
+        "PATH": os.environ["PATH"],
+        "KREPORTS_RUNTIME_MODE": "readonly",
+    }
+    if db_url := os.environ.get("DB_URL"):
+        environment["DB_URL"] = db_url
     proc = subprocess.run(
         [".venv/bin/kreports", "mcp-smoke", "--company", "005930"],
         text=True,
         capture_output=True,
-        env={"PATH": os.environ["PATH"], "KREPORTS_RUNTIME_MODE": "readonly"},
+        env=environment,
     )
     assert proc.returncode == 0
     assert "RESULT: OK" in proc.stdout

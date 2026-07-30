@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -76,7 +77,8 @@ class TestCallToolErrors:
             {"company": "절대로존재하지않는기업명XYZ"},
         ))
         assert "error" in result
-        assert "찾을 수 없습니다" in result["error"]
+        assert "로컬 캐시 스키마 또는 준비된 데이터" in result["error"]
+        assert "절대로존재하지않는기업명XYZ" not in result["error"]
 
     def test_invalid_limit_returns_user_error(self):
         result = json.loads(call_tool(
@@ -92,7 +94,8 @@ class TestCallToolErrors:
             {"company": "절대로존재하지않는기업명XYZ"},
         ))
         assert "error" in result
-        assert "찾을 수 없습니다" in result["error"]
+        assert "로컬 캐시 스키마 또는 준비된 데이터" in result["error"]
+        assert "절대로존재하지않는기업명XYZ" not in result["error"]
 
 
 class TestCallToolRealData:
@@ -145,8 +148,8 @@ class TestCallToolRealData:
             {"company": "삼성"},
         ))
         assert "error" in result
-        assert "모호" in result["error"]
-        assert "후보" in result["error"]
+        assert "로컬 캐시 스키마 또는 준비된 데이터" in result["error"]
+        assert "삼성" not in result["error"]
 
     def test_score_going_concern(self):
         samsung = self._samsung_cc()
@@ -236,6 +239,16 @@ class TestCallToolRealData:
 # 3. E2E: stdio subprocess 기동
 # ---------------------------------------------------------------------------
 
+def _stdio_environment() -> dict[str, str]:
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "KREPORTS_RUNTIME_MODE": "readonly",
+    }
+    if db_url := os.environ.get("DB_URL"):
+        environment["DB_URL"] = db_url
+    return environment
+
+
 async def _e2e_stdio_tools_list() -> list[str]:
     """stdio 서버를 subprocess로 기동하고 tools/list 응답의 도구 이름 목록을 반환."""
     from mcp.client.stdio import stdio_client, StdioServerParameters
@@ -245,6 +258,7 @@ async def _e2e_stdio_tools_list() -> list[str]:
         command=sys.executable,
         args=["-m", "kreports.mcp"],
         cwd=str(PROJECT_ROOT),
+        env=_stdio_environment(),
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -262,6 +276,7 @@ async def _e2e_stdio_call_tool(name: str, args: dict) -> str:
         command=sys.executable,
         args=["-m", "kreports.mcp"],
         cwd=str(PROJECT_ROOT),
+        env=_stdio_environment(),
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:

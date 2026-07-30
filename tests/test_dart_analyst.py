@@ -197,9 +197,9 @@ class TestSamsungIntegration:
         assert len(hist["history"]) == hist["count"]
         # 각 엔트리에 핵심 필드
         for row in hist["history"]:
-            assert "회계연도" in row
-            assert "감사인" in row
-            assert "감사의견" in row
+            assert "year" in row
+            assert "auditor_nm" in row
+            assert "audit_opinion" in row
 
     def test_audit_history_json_serializable(self, samsung_corp_code):
         import json

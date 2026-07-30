@@ -1205,7 +1205,7 @@ def execute_golden_contracts(
             ),
             "receipt_preserved": (
                 bool(opinion_history)
-                and opinion_history[0].get("접수번호")
+                and opinion_history[0].get("rcept_no")
                 == "20260331000001"
             ),
             "provenance_or_limitation": _has_public_provenance(
