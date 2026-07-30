@@ -448,6 +448,7 @@ def test_migrate_applies_every_pending_checked_out_revision(legacy_database: Pat
     assert first["after"]["foreign_key_violations"] == []
     assert second["applied_revisions"] == []
     with sqlite3.connect(legacy_database) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         tables = {
             row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1077,7 +1078,7 @@ def test_evidence_rebuild_actions_are_bounded_to_local_year_and_never_network(
         runtime_mode="collector",
     )
     assert migrated["applied_revisions"] == [
-        migration.revision for migration in MIGRATIONS[8:11]
+        migration.revision for migration in MIGRATIONS[8:]
     ]
     _seed_local_database_evidence(revision08_evidence_database)
     marker = write_marker(revision08_evidence_database)

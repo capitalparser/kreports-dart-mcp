@@ -442,6 +442,7 @@ def _open_pinned_database(
     binding: RehearsalBinding,
     *,
     collector: bool,
+    allow_file_wal: bool = False,
 ):
     """Hold and verify one file identity while opening the action DBAPI handle."""
     if not hasattr(os, "O_NOFOLLOW"):
@@ -486,10 +487,10 @@ def _open_pinned_database(
         # The writable connection now owns a descriptor whose inode was
         # authenticated against the pinned receipt. Release the outer flock
         # only after that proof so SQLite can acquire its normal locks and
-        # switch to the per-connection memory journal.
+        # switch to the per-connection journal policy.
         fcntl.flock(file_descriptor, fcntl.LOCK_UN)
         flock_held = False
-        if collector:
+        if collector and not allow_file_wal:
             configured_journal_mode = str(
                 connection.execute("PRAGMA journal_mode=MEMORY").fetchone()[0]
             ).lower()
@@ -500,7 +501,7 @@ def _open_pinned_database(
                 )
             _require_memory_journal(connection)
             connection.execute("PRAGMA foreign_keys=ON")
-        else:
+        elif not collector:
             connection.execute("PRAGMA query_only=ON")
         _verify_binding_identity(binding, file_descriptor)
         if collector:
@@ -536,11 +537,16 @@ def _bound_database_runtime(
     binding: RehearsalBinding,
     *,
     collector: bool,
+    allow_file_wal: bool = False,
 ):
     """Bind every KReports database consumer to one already-open DBAPI handle."""
     global _ACTIVE_DBAPI_CONNECTION
 
-    with _open_pinned_database(binding, collector=collector) as connection:
+    with _open_pinned_database(
+        binding,
+        collector=collector,
+        allow_file_wal=allow_file_wal,
+    ) as connection:
         from sqlalchemy import create_engine, event
         from sqlalchemy.orm import sessionmaker
         from sqlalchemy.pool import StaticPool
@@ -567,7 +573,7 @@ def _bound_database_runtime(
             _context,
             _executemany,
         ):
-            if collector and re.match(
+            if collector and not allow_file_wal and re.match(
                 r"\s*pragma\s+journal_mode\s*=",
                 str(statement),
                 flags=re.IGNORECASE,
@@ -592,7 +598,7 @@ def _bound_database_runtime(
         _ACTIVE_DBAPI_CONNECTION = connection
         try:
             yield connection
-            if collector:
+            if collector and not allow_file_wal:
                 _require_memory_journal(connection)
         finally:
             _ACTIVE_DBAPI_CONNECTION = None
@@ -953,7 +959,11 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
         require_initial_digest=action == "migrate",
     )
 
-    with _bound_database_runtime(binding, collector=collector):
+    with _bound_database_runtime(
+        binding,
+        collector=collector,
+        allow_file_wal=action == "migrate",
+    ):
         if action == "migrate":
             before = migration_state()
             try:

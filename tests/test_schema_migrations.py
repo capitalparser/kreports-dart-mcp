@@ -58,6 +58,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_11_company_year_quality_freshness",
         "20260731_12_accounting_note_chapter_contract",
         "20260731_13_accounting_note_chapter_storage_contract",
+        "20260731_14_schema_contract_repair",
     ]
     assert second == []
 
@@ -225,6 +226,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         "20260711_11_company_year_quality_freshness",
         "20260731_12_accounting_note_chapter_contract",
         "20260731_13_accounting_note_chapter_storage_contract",
+        "20260731_14_schema_contract_repair",
     ]
     assert second_applied == []
     assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)
@@ -827,9 +829,7 @@ def test_company_year_quality_freshness_migration_upgrades_revision_10_row(
 
     with legacy.begin() as conn:
         assert apply_schema_migrations(conn) == [
-            MIGRATIONS[10].revision,
-            MIGRATIONS[11].revision,
-            MIGRATIONS[12].revision,
+            migration.revision for migration in MIGRATIONS[10:]
         ]
         assert apply_schema_migrations(conn) == []
         upgraded = conn.execute(
@@ -899,8 +899,7 @@ def test_accounting_note_chapter_contract_migration_adds_named_identity_index(
 
     with legacy.begin() as conn:
         assert apply_schema_migrations(conn) == [
-            MIGRATIONS[11].revision,
-            MIGRATIONS[12].revision,
+            migration.revision for migration in MIGRATIONS[11:]
         ]
         assert conn.execute(text("SELECT body FROM accounting_note_chapters")).scalar_one() == "본문"
 

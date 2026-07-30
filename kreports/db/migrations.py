@@ -547,6 +547,55 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260731_14_schema_contract_repair",
+        description="Repair required SQLite indexes and policy item storage",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS accounting_policy_items (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fs_div VARCHAR(3) NOT NULL,
+              rcept_no VARCHAR(14) NOT NULL,
+              item_key VARCHAR(50) NOT NULL,
+              heading VARCHAR(500),
+              body TEXT NOT NULL,
+              body_hash VARCHAR(40),
+              body_length INTEGER,
+              fetched_at DATETIME NOT NULL,
+              CONSTRAINT uq_policy_item
+                UNIQUE (corp_code, bsns_year, fs_div, item_key)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_company_year_quality_year_market ON company_year_quality (bsns_year, market)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_backfill_runs_active_lease ON backfill_runs (lease_key) WHERE status = 'running'",
+            "CREATE INDEX IF NOT EXISTS idx_kam_item_corp_year ON kam_items (corp_code, bsns_year)",
+            "CREATE INDEX IF NOT EXISTS idx_kam_item_quality_year ON kam_items (bsns_year, quality_status)",
+            "CREATE INDEX IF NOT EXISTS idx_kam_item_receipt ON kam_items (rcept_no, source_type)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_procedure_kam_item ON audit_procedure_items (kam_item_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_procedure_method_year ON audit_procedure_items (method, bsns_year)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_fee_availability_year ON audit_fees (bsns_year, availability_status)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_fee_observation_corp_year ON audit_fee_observations (corp_code, bsns_year)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_fee_observation_receipt ON audit_fee_observations (source_rcept_no)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_fee_observation_year_quality ON audit_fee_observations (bsns_year, quality_status)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_fee_observation_current_slot ON audit_fee_observations (source_slot_hash) WHERE is_current = 1",
+            "CREATE INDEX IF NOT EXISTS idx_group_entity_parent_year ON group_entities (parent_corp_code, effective_year)",
+            "CREATE INDEX IF NOT EXISTS idx_group_entity_resolved_year ON group_entities (resolved_corp_code, effective_year)",
+            "CREATE INDEX IF NOT EXISTS idx_group_relationship_parent_year ON group_relationships (parent_corp_code, effective_year)",
+            "CREATE INDEX IF NOT EXISTS idx_group_relationship_nodes ON group_relationships (parent_entity_key, child_entity_key)",
+            "CREATE INDEX IF NOT EXISTS idx_group_metric_parent_year ON group_component_metrics (parent_corp_code, effective_year)",
+            "CREATE INDEX IF NOT EXISTS idx_group_metric_entity_kind ON group_component_metrics (entity_key, metric_key)",
+            "CREATE INDEX IF NOT EXISTS idx_group_metric_qsc_year ON group_component_metrics (effective_year, qsc_status)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_accounting_note_chapter_identity ON accounting_note_chapters (corp_code, bsns_year, fs_div, note_no, section_type)",
+            "CREATE INDEX IF NOT EXISTS idx_note_chapter_corp_year ON accounting_note_chapters (corp_code, bsns_year, fs_div)",
+            "CREATE INDEX IF NOT EXISTS idx_note_chapter_section_type ON accounting_note_chapters (section_type)",
+            "CREATE INDEX IF NOT EXISTS idx_note_chapter_full_text_uri ON accounting_note_chapters (full_text_uri)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_item ON accounting_policy_items (corp_code, bsns_year, fs_div, item_key)",
+            "CREATE INDEX IF NOT EXISTS idx_policy_item_corp_year ON accounting_policy_items (corp_code, bsns_year)",
+            "CREATE INDEX IF NOT EXISTS idx_policy_item_key ON accounting_policy_items (item_key)",
+        ),
+    ),
 )
 
 
@@ -584,11 +633,6 @@ def _configure_sqlite_migration_connection(connection: Connection) -> None:
     """Set bounded lock policy and preserve WAL before schema serialization."""
     connection.exec_driver_sql(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     if not _sqlite_main_database_is_file_backed(connection):
-        return
-    # The retained-clone rehearsal binds one authenticated connection to a
-    # per-connection MEMORY journal and independently verifies that invariant.
-    # Never override it with a persistent WAL sidecar during a clone rehearsal.
-    if str(connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()).lower() == "memory":
         return
     for attempt in range(_SQLITE_WAL_RETRY_ATTEMPTS):
         try:
@@ -644,7 +688,13 @@ def apply_schema_migrations(connection: Connection) -> list[str]:
                 continue
 
             for statement in migration.statements:
-                _execute_statement(connection, statement)
+                _execute_statement(
+                    connection,
+                    statement,
+                    tolerate_missing_index_table=(
+                        migration.revision == "20260731_14_schema_contract_repair"
+                    ),
+                )
             connection.execute(
                 text(
                     "INSERT INTO schema_migrations "
@@ -667,7 +717,12 @@ def apply_schema_migrations(connection: Connection) -> list[str]:
     return applied
 
 
-def _execute_statement(connection: Connection, statement: str) -> None:
+def _execute_statement(
+    connection: Connection,
+    statement: str,
+    *,
+    tolerate_missing_index_table: bool = False,
+) -> None:
     """Execute one statement, tolerating columns already created by metadata.
 
     Test and fresh-database bootstraps create the current ORM schema before
@@ -689,6 +744,17 @@ def _execute_statement(connection: Connection, statement: str) -> None:
             for column in inspect(connection).get_columns(table_name)
         }
         if column_name in existing:
+            return
+    if tolerate_missing_index_table and tokens[:2] == ["CREATE", "INDEX"]:
+        table_name = tokens[tokens.index("ON") + 1].lstrip('"`[').rstrip('"`](')
+        if not inspect(connection).has_table(table_name):
+            return
+    if (
+        tolerate_missing_index_table
+        and tokens[:3] == ["CREATE", "UNIQUE", "INDEX"]
+    ):
+        table_name = tokens[tokens.index("ON") + 1].lstrip('"`[').rstrip('"`](')
+        if not inspect(connection).has_table(table_name):
             return
     connection.execute(text(statement))
 

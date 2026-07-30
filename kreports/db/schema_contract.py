@@ -24,6 +24,7 @@ REQUIRED_TABLES = (
     "schema_migrations",
     "dataset_manifest",
     "source_documents",
+    "accounting_policy_items",
     "accounting_note_chapters",
 )
 
@@ -61,6 +62,10 @@ REQUIRED_COLUMN_SPECS = {
         "body_hash", "body_length", "full_text_uri", "full_text_hash",
         "full_text_length", "full_text_compressed_length",
         "full_text_storage_status", "fetched_at",
+    ),
+    "accounting_policy_items": (
+        "id", "corp_code", "bsns_year", "fs_div", "rcept_no", "item_key",
+        "heading", "body", "body_hash", "body_length", "fetched_at",
     ),
 }
 
@@ -103,6 +108,15 @@ REQUIRED_INDEX_SPECS = {
     ),
     "idx_note_chapter_full_text_uri": (
         "accounting_note_chapters", ("full_text_uri",), False, None
+    ),
+    "uq_policy_item": (
+        "accounting_policy_items", ("corp_code", "bsns_year", "fs_div", "item_key"), True, None
+    ),
+    "idx_policy_item_corp_year": (
+        "accounting_policy_items", ("corp_code", "bsns_year"), False, None
+    ),
+    "idx_policy_item_key": (
+        "accounting_policy_items", ("item_key",), False, None
     ),
 }
 REQUIRED_INDEXES = tuple(REQUIRED_INDEX_SPECS)
