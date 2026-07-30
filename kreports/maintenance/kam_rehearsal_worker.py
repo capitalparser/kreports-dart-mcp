@@ -348,6 +348,85 @@ def _require_fd_database_binding(
         )
 
 
+def _open_file_identities() -> dict[int, tuple[int, int]]:
+    """Snapshot open process descriptors without retaining the /dev/fd handle."""
+    identities: dict[int, tuple[int, int]] = {}
+    try:
+        descriptor_names = os.listdir("/dev/fd")
+    except OSError as exc:
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "could not inspect SQLite database descriptors",
+        ) from exc
+    for descriptor_name in descriptor_names:
+        if not descriptor_name.isdigit():
+            continue
+        descriptor = int(descriptor_name)
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError:
+            # os.listdir may include its own already-closed directory handle.
+            continue
+        identities[descriptor] = (metadata.st_dev, metadata.st_ino)
+    return identities
+
+
+def _require_sqlite_path_binding(
+    connection: sqlite3.Connection,
+    binding: RehearsalBinding,
+    *,
+    descriptors_before: dict[int, tuple[int, int]],
+) -> int:
+    """Prove a pathname open retained the already-authenticated database inode."""
+    main_path = next(
+        (
+            str(row[2])
+            for row in connection.execute("PRAGMA database_list")
+            if str(row[1]) == "main"
+        ),
+        None,
+    )
+    if main_path != str(binding.database_path):
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "SQLite opened an unexpected database path",
+        )
+    expected = (binding.database_device, binding.database_inode)
+    descriptors_after = _open_file_identities()
+    sqlite_descriptors = [
+        descriptor
+        for descriptor, identity in descriptors_after.items()
+        if descriptor not in descriptors_before and identity == expected
+    ]
+    if len(sqlite_descriptors) != 1:
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "SQLite did not retain the authenticated database inode",
+        )
+    return sqlite_descriptors[0]
+
+
+def _verify_sqlite_descriptor_identity(
+    binding: RehearsalBinding,
+    file_descriptor: int,
+) -> None:
+    try:
+        metadata = os.fstat(file_descriptor)
+    except OSError as exc:
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "SQLite database descriptor is no longer available",
+        ) from exc
+    if (metadata.st_dev, metadata.st_ino) != (
+        binding.database_device,
+        binding.database_inode,
+    ):
+        raise WorkerActionError(
+            "rehearsal_binding_required",
+            "SQLite database descriptor identity changed",
+        )
+
+
 def _require_memory_journal(connection: sqlite3.Connection) -> None:
     journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
     if journal_mode != "memory":
@@ -372,6 +451,7 @@ def _open_pinned_database(
     flags = (os.O_RDWR if collector else os.O_RDONLY) | os.O_NOFOLLOW
     flags |= getattr(os, "O_CLOEXEC", 0)
     file_descriptor = -1
+    sqlite_descriptor = -1
     flock_held = False
     connection: sqlite3.Connection | None = None
     try:
@@ -380,19 +460,32 @@ def _open_pinned_database(
         fcntl.flock(file_descriptor, lock_kind | fcntl.LOCK_NB)
         flock_held = True
         _verify_binding_identity(binding, file_descriptor)
-        query = "mode=rw" if collector else "mode=ro&immutable=1"
-        connection = sqlite3.connect(
-            f"file:/dev/fd/{file_descriptor}?{query}",
-            uri=True,
-            check_same_thread=False,
-        )
+        if collector:
+            descriptors_before = _open_file_identities()
+            connection = sqlite3.connect(
+                f"{binding.database_path.as_uri()}?mode=rw",
+                uri=True,
+                check_same_thread=False,
+            )
+        else:
+            connection = sqlite3.connect(
+                f"file:/dev/fd/{file_descriptor}?mode=ro&immutable=1",
+                uri=True,
+                check_same_thread=False,
+            )
         connection.row_factory = sqlite3.Row
-        _require_fd_database_binding(connection, file_descriptor)
-        # The connection now uses a duplicate of the verified descriptor.  On
-        # APFS, retaining flock prevents SQLite's normal VFS from acquiring
-        # the locks it needs to switch to its per-connection memory journal.
-        # Release it only after the FD binding is proven; SQLite's normal
-        # locking protocol protects the action from this point onward.
+        if collector:
+            sqlite_descriptor = _require_sqlite_path_binding(
+                connection,
+                binding,
+                descriptors_before=descriptors_before,
+            )
+        else:
+            _require_fd_database_binding(connection, file_descriptor)
+        # The writable connection now owns a descriptor whose inode was
+        # authenticated against the pinned receipt. Release the outer flock
+        # only after that proof so SQLite can acquire its normal locks and
+        # switch to the per-connection memory journal.
         fcntl.flock(file_descriptor, fcntl.LOCK_UN)
         flock_held = False
         if collector:
@@ -409,6 +502,8 @@ def _open_pinned_database(
         else:
             connection.execute("PRAGMA query_only=ON")
         _verify_binding_identity(binding, file_descriptor)
+        if collector:
+            _verify_sqlite_descriptor_identity(binding, sqlite_descriptor)
         try:
             yield connection
         finally:

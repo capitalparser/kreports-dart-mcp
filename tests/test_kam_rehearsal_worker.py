@@ -705,7 +705,7 @@ def test_writable_open_fd_binding_survives_aba_swap_restore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catch SQLite reopening a replacement pathname during an ABA window."""
+    """Catch SQLite opening a replacement inode during an ABA window."""
     import kreports.maintenance.kam_rehearsal_worker as worker
 
     database = tmp_path / "rehearsal" / "clone.db"
@@ -731,21 +731,23 @@ def test_writable_open_fd_binding_survives_aba_swap_restore(
             os.replace(held_original, database)
 
     monkeypatch.setattr(worker.sqlite3, "connect", aba_connect)
-    with worker._open_pinned_database(binding, collector=True) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("UPDATE action_probe SET value='written' WHERE id=1")
-        connection.commit()
+    with (
+        pytest.raises(worker.WorkerActionError) as caught,
+        worker._open_pinned_database(binding, collector=True),
+    ):
+        pytest.fail("an ABA-swapped SQLite descriptor must not reach the action")
 
     monkeypatch.setattr(worker.sqlite3, "connect", real_connect)
-    assert _probe_value(database) == "written"
+    assert caught.value.code == "rehearsal_binding_required"
+    assert _probe_value(database) == "original"
     assert _probe_value(replacement) == "replacement"
 
 
-def test_writable_open_uses_authenticated_fd_normal_vfs_and_memory_journal(
+def test_writable_open_authenticates_sqlite_fd_and_uses_memory_journal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catch a pathname/lockless DBAPI open or rollback/WAL sidecar policy."""
+    """Catch an unauthenticated DBAPI open or rollback/WAL sidecar policy."""
     import kreports.maintenance.kam_rehearsal_worker as worker
 
     database = tmp_path / "rehearsal" / "clone.db"
@@ -768,8 +770,8 @@ def test_writable_open_uses_authenticated_fd_normal_vfs_and_memory_journal(
         main_path = str(
             connection.execute("PRAGMA database_list").fetchone()[2]
         )
-        assert opened_uris == [f"file:/dev/fd/{main_path.rsplit('/', 1)[-1]}?mode=rw"]
-        assert main_path.startswith("/dev/fd/")
+        assert opened_uris == [f"{database.as_uri()}?mode=rw"]
+        assert main_path == str(database)
         assert "vfs=unix-none" not in opened_uris[0]
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
 
