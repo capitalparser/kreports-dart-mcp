@@ -1,6 +1,7 @@
 """Industry and peer selection, comparisons, and engagement benchmarks."""
 from __future__ import annotations
 
+import math
 import statistics
 from typing import Optional
 
@@ -37,6 +38,8 @@ from kreports.analysis.audit_reporting import (
     kam_hint_coverage,
     topic_hits,
 )
+from kreports.analysis.evidence import dart_filing_url
+from kreports.analysis.filing_provenance import valid_annual_filing_receipt
 
 
 _METRIC_SQL = {
@@ -1509,12 +1512,152 @@ def compare_peer_risk_profile(
     })
 
 
+_POLICY_SELECTION_WEIGHTS = {
+    "auditor": {"size": 0.45, "leverage": 0.30, "profitability": 0.15, "growth": 0.10},
+    "investor": {"size": 0.40, "leverage": 0.05, "profitability": 0.35, "growth": 0.20},
+    "balanced": {"size": 0.40, "leverage": 0.20, "profitability": 0.20, "growth": 0.20},
+}
+_POLICY_SELECTION_KEYS = frozenset({"size", "leverage", "profitability", "growth"})
+_POLICY_EXCERPT_LIMIT = 400
+
+
+def _policy_peer_code_map(selectors: list[str]) -> dict[str, dict]:
+    """Resolve explicit overrides exactly; ambiguity and unknown selectors fail closed."""
+    if not selectors:
+        return {}
+    values = [str(value).strip() for value in selectors if str(value).strip()]
+    if not values:
+        return {}
+    with _engine_module.engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT corp_code, stock_code, corp_name, market, induty_code
+            FROM companies
+            WHERE corp_code IN :values OR stock_code IN :values OR corp_name IN :values
+            ORDER BY corp_code
+        """).bindparams(bindparam("values", expanding=True)), {"values": values}).mappings().all()
+    by_selector: dict[str, dict] = {}
+    for selector in values:
+        matches = [dict(row) for row in rows if selector in {
+            str(row.get("corp_code") or ""), str(row.get("stock_code") or ""), str(row.get("corp_name") or ""),
+        }]
+        if len(matches) != 1:
+            raise ValueError(f"명시적 peer selector를 정확히 해석할 수 없습니다: {selector}")
+        by_selector[selector] = matches[0]
+    return by_selector
+
+
+def _policy_similarity(subject: float | None, candidate: float | None, *, logarithmic: bool = False) -> float | None:
+    if subject is None or candidate is None:
+        return None
+    if logarithmic:
+        if subject <= 0 or candidate <= 0:
+            return None
+        distance = abs(math.log10(float(candidate) / float(subject)))
+    else:
+        distance = abs(float(candidate) - float(subject))
+    return round(1.0 / (1.0 + distance), 4)
+
+
+def _policy_selection_financials(
+    corp_codes: list[str], *, year: int, fs_div: str,
+) -> tuple[dict[str, dict], set[str]]:
+    if not corp_codes:
+        return {}, set()
+    stmt = text("""
+        SELECT id, corp_code, revenue, total_assets, total_debt, total_equity,
+               operating_profit, revenue_yoy
+        FROM financials
+        WHERE corp_code IN :ccs AND year=:year AND quarter=4 AND fs_div=:fs_div
+        ORDER BY corp_code, id DESC
+    """).bindparams(bindparam("ccs", expanding=True))
+    with _engine_module.engine.connect() as conn:
+        rows = conn.execute(
+            stmt, {"ccs": corp_codes, "year": year, "fs_div": fs_div}
+        ).mappings().all()
+    resolved: dict[str, dict] = {}
+    duplicate_codes: set[str] = set()
+    for row in rows:
+        corp_code = str(row["corp_code"])
+        if corp_code in resolved:
+            duplicate_codes.add(corp_code)
+            continue
+        resolved[corp_code] = dict(row)
+    return resolved, duplicate_codes
+
+
+def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float | None], dict[str, float | None]]:
+    subject_assets, candidate_assets = subject.get("total_assets"), candidate.get("total_assets")
+    subject_revenue, candidate_revenue = subject.get("revenue"), candidate.get("revenue")
+    size_parts = [
+        _policy_similarity(subject_assets, candidate_assets, logarithmic=True),
+        _policy_similarity(subject_revenue, candidate_revenue, logarithmic=True),
+    ]
+    size_values = [value for value in size_parts if value is not None]
+    values = {
+        "size": round(sum(size_values) / len(size_values), 4) if size_values else None,
+        "leverage": _policy_similarity(
+            float(subject["total_debt"]) / float(subject["total_equity"])
+            if subject.get("total_debt") is not None and subject.get("total_equity") not in {None, 0} else None,
+            float(candidate["total_debt"]) / float(candidate["total_equity"])
+            if candidate.get("total_debt") is not None and candidate.get("total_equity") not in {None, 0} else None,
+        ),
+        "profitability": _policy_similarity(
+            float(subject["operating_profit"]) / float(subject["revenue"])
+            if subject.get("operating_profit") is not None and subject.get("revenue") not in {None, 0} else None,
+            float(candidate["operating_profit"]) / float(candidate["revenue"])
+            if candidate.get("operating_profit") is not None and candidate.get("revenue") not in {None, 0} else None,
+        ),
+        "growth": _policy_similarity(subject.get("revenue_yoy"), candidate.get("revenue_yoy")),
+    }
+    metrics = {
+        "revenue": candidate.get("revenue"), "total_assets": candidate.get("total_assets"),
+        "leverage": (float(candidate["total_debt"]) / float(candidate["total_equity"])
+                     if candidate.get("total_debt") is not None and candidate.get("total_equity") not in {None, 0} else None),
+        "profitability": (float(candidate["operating_profit"]) / float(candidate["revenue"])
+                           if candidate.get("operating_profit") is not None and candidate.get("revenue") not in {None, 0} else None),
+        "growth": candidate.get("revenue_yoy"),
+    }
+    return values, metrics
+
+
+def _policy_annual_sources(corp_codes: list[str], *, year: int) -> dict[str, str]:
+    """Return only the latest exact annual filing receipt per company/year."""
+    if not corp_codes:
+        return {}
+    stmt = text("""
+        SELECT corp_code, rcept_no, disc_date, report_nm
+        FROM disclosures
+        WHERE corp_code IN :ccs AND report_nm LIKE :annual
+        ORDER BY corp_code, disc_date DESC, rcept_no DESC
+    """).bindparams(bindparam("ccs", expanding=True))
+    with _engine_module.engine.connect() as conn:
+        rows = conn.execute(stmt, {"ccs": corp_codes, "annual": f"%사업보고서 ({year}.%"}).mappings().all()
+    latest: dict[str, str] = {}
+    for row in rows:
+        corp_code = str(row["corp_code"])
+        if corp_code in latest:
+            continue
+        raw = row.get("rcept_no")
+        receipt = valid_annual_filing_receipt(raw, year)
+        date = str(row.get("disc_date") or "")[:10].replace("-", "")
+        # Do not trim or extract digits from a contaminated local DB receipt.
+        latest[corp_code] = receipt if isinstance(raw, str) and raw == receipt and receipt and receipt[:8] == date else ""
+    return latest
+
+
 def compare_peer_accounting_policies(
     company: str,
     year: int = 2025,
     peer_limit: int = 30,
     fs_div: str = "CFS",
     fs_strategy: str = "auto",
+    item_key: str | None = None,
+    keyword: str | None = None,
+    selection_profile: str = "balanced",
+    peer_weights: dict[str, float] | None = None,
+    size_bucket_decade: float | None = None,
+    include_peers: list[str] | None = None,
+    exclude_peers: list[str] | None = None,
     _peer_group: dict | None = None,
 ) -> dict:
     """Compare cached accounting policy item coverage across selected peers.
@@ -1522,18 +1665,130 @@ def compare_peer_accounting_policies(
     This is intentionally cache-only. It does not fetch DART documents at MCP
     runtime, so external users do not need a DART API key.
     """
+    if not 1 <= peer_limit <= 200:
+        raise ValueError("peer_limit은 1~200 범위여야 합니다.")
+    if selection_profile not in _POLICY_SELECTION_WEIGHTS:
+        raise ValueError("selection_profile은 auditor/investor/balanced 중 하나여야 합니다.")
+    include_peers, exclude_peers = include_peers or [], exclude_peers or []
+    if set(include_peers) & set(exclude_peers):
+        raise ValueError("include_peers와 exclude_peers는 중복될 수 없습니다.")
+    if peer_weights is not None and (
+        not peer_weights or set(peer_weights) - _POLICY_SELECTION_KEYS
+        or any(not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1 for value in peer_weights.values())
+        or sum(peer_weights.values()) <= 0
+    ):
+        raise ValueError("peer_weights는 size/leverage/profitability/growth의 0~1 가중치여야 합니다.")
+    if size_bucket_decade is not None and not 0.1 <= size_bucket_decade <= 3.0:
+        raise ValueError("size_bucket_decade는 0.1~3.0 범위여야 합니다.")
+    custom_selection = bool(include_peers or exclude_peers or peer_weights or size_bucket_decade is not None or selection_profile != "balanced")
+    presentation_mode = custom_selection or item_key is not None or keyword is not None
     base = _peer_group if _peer_group is not None else select_peer_group(
-        company=company, peer_limit=peer_limit, fs_strategy=fs_strategy, year=year
+        company=company, peer_limit=200 if custom_selection else peer_limit,
+        fs_strategy=fs_strategy, year=year, size_bucket_decade=size_bucket_decade,
     )
     if "error" in base:
         return base
 
     corp_code = base["subject"]["corp_code"]
-    peer_codes = [p["corp_code"] for p in base["peers"]]
+    included_map = _policy_peer_code_map(include_peers)
+    excluded_map = _policy_peer_code_map(exclude_peers)
+    if corp_code in {row["corp_code"] for row in [*included_map.values(), *excluded_map.values()]}:
+        raise ValueError("대상회사는 peer override로 지정할 수 없습니다.")
+    included_codes = {row["corp_code"] for row in included_map.values()}
+    excluded_codes = {row["corp_code"] for row in excluded_map.values()}
+    if included_codes & excluded_codes:
+        raise ValueError("해석된 include/exclude peer가 중복됩니다.")
+
+    candidate_by_code = {row["corp_code"]: dict(row) for row in base["peers"]}
+    for row in included_map.values():
+        candidate_by_code.setdefault(row["corp_code"], dict(row))
+    candidate_codes = sorted(candidate_by_code)
+    selection_year = int(base["selection_policy"].get("resolved_year") or year)
+    financial_rows, duplicate_financial_codes = _policy_selection_financials(
+        [corp_code, *candidate_codes], year=selection_year, fs_div=base["selection_policy"]["fs_div_used"]
+    )
+    weights = dict(_POLICY_SELECTION_WEIGHTS[selection_profile])
+    weights.update(peer_weights or {})
+    subject_financials = financial_rows.get(corp_code, {})
+    peer_selection: list[dict] = []
+    ranked_candidates: list[tuple[float, str]] = []
+    for candidate_code in candidate_codes:
+        candidate = candidate_by_code[candidate_code]
+        components, metric_values = _policy_components(subject_financials, financial_rows.get(candidate_code, {}))
+        available_weights = {key: weights[key] for key, value in components.items() if value is not None}
+        weight_total = sum(available_weights.values())
+        algorithmic_score = (
+            round(sum(components[key] * weight for key, weight in available_weights.items()) / weight_total, 4)
+            if weight_total else None
+        )
+        component_contributions = {
+            key: round(components[key] * weights[key] / weight_total, 4)
+            if components[key] is not None and weight_total else None
+            for key in _POLICY_SELECTION_KEYS
+        }
+        limitations = [f"missing_financial_dimensions:{key}" for key, value in components.items() if value is None]
+        if candidate_code in duplicate_financial_codes:
+            limitations.append("duplicate_financial_rows_resolved_by_latest_id")
+        direct = candidate_code in included_codes
+        excluded = candidate_code in excluded_codes
+        if excluded:
+            status, reason = "excluded", "user_exclude_override"
+        elif direct:
+            status, reason = "included", "direct_include_override"
+        else:
+            status, reason = "candidate", "industry_sector_candidate"
+            ranked_candidates.append((algorithmic_score if algorithmic_score is not None else -1.0, candidate_code))
+        peer_selection.append({
+            "corp_code": candidate_code,
+            "corp_name": candidate.get("corp_name"),
+            "market": candidate.get("market"),
+            "induty_code": candidate.get("induty_code"),
+            "selection_status": status,
+            "selection_reason": reason,
+            "algorithmic_score": None if direct else algorithmic_score,
+            "score_components": components,
+            "component_contributions": component_contributions,
+            "weights": weights,
+            "financial_values": metric_values,
+            "data_year": selection_year,
+            "fs_div": base["selection_policy"]["fs_div_used"],
+            "limitations": limitations,
+        })
+    # Explicit inclusions are visible overrides and occupy peer_limit first;
+    # the remaining slots use deterministic score then company-code ordering.
+    direct_codes = sorted(included_codes - excluded_codes)
+    ranked_codes = [code for _score, code in sorted(ranked_candidates, key=lambda pair: (-pair[0], pair[1]))]
+    peer_codes = (direct_codes + [code for code in ranked_codes if code not in direct_codes])[:peer_limit]
+    if not presentation_mode:
+        # Exact legacy defaults retain the pre-extension peer ordering and
+        # response shape; richer presentation fields are opt-in.
+        peer_codes = [row["corp_code"] for row in base["peers"]]
+    for row in peer_selection:
+        if row["selection_status"] == "candidate":
+            if row["corp_code"] in peer_codes:
+                row["selection_status"] = "included"
+                row["selection_reason"] = "algorithmic_financial_similarity"
+            else:
+                row["selection_status"] = "excluded"
+                row["selection_reason"] = "outside_peer_limit"
+    for candidate in excluded_map.values():
+        if candidate["corp_code"] not in candidate_by_code:
+            peer_selection.append({
+                "corp_code": candidate["corp_code"], "corp_name": candidate.get("corp_name"),
+                "market": candidate.get("market"), "induty_code": candidate.get("induty_code"),
+                "selection_status": "excluded", "selection_reason": "user_exclude_override",
+                "algorithmic_score": None, "score_components": {},
+                "component_contributions": {key: None for key in _POLICY_SELECTION_KEYS}, "weights": weights,
+                "financial_values": {}, "data_year": selection_year,
+                "fs_div": base["selection_policy"]["fs_div_used"],
+                "limitations": ["explicitly_excluded_before_candidate_scoring"],
+            })
+    peer_selection.sort(key=lambda row: (row["selection_status"] != "included", row["corp_code"]))
     all_codes = [corp_code] + peer_codes
     stmt = text(
         """
-        SELECT p.corp_code, c.corp_name, p.item_key, p.heading, p.body_length, p.body_hash
+        SELECT p.corp_code, c.corp_name, p.rcept_no, p.item_key, p.heading, p.body,
+               p.body_length, p.body_hash
         FROM accounting_policy_items p
         JOIN companies c ON c.corp_code = p.corp_code
         WHERE p.corp_code IN :ccs
@@ -1588,6 +1843,62 @@ def compare_peer_accounting_policies(
         })
 
     peer_coverage_pct = round(100.0 * len(peer_summaries) / len(peer_codes), 1) if peer_codes else 0.0
+    selected_topic = {"item_key": item_key, "keyword": keyword}
+    selected_rows = [
+        row for row in rows
+        if (item_key is None or row["item_key"] == item_key)
+        and (keyword is None or keyword.lower() in str(row.get("heading") or "").lower()
+             or keyword.lower() in str(row.get("body") or "").lower())
+    ]
+    annual_sources = _policy_annual_sources(all_codes, year=year)
+    note_presentations: list[dict] = []
+    rows_by_company = {code: [] for code in all_codes}
+    for row in selected_rows:
+        rows_by_company.setdefault(row["corp_code"], []).append(row)
+        raw_receipt = row.get("rcept_no")
+        receipt = valid_annual_filing_receipt(raw_receipt, year)
+        proven = (
+            isinstance(raw_receipt, str) and raw_receipt == receipt
+            and bool(receipt) and annual_sources.get(row["corp_code"]) == receipt
+        )
+        provenance_status = (
+            "proven_annual_filing" if proven else "invalid_receipt"
+            if not isinstance(raw_receipt, str) or raw_receipt != receipt else "unproven_annual_filing"
+        )
+        body = str(row.get("body") or "")
+        note_presentations.append(_clean_dict({
+            "corp_code": row["corp_code"], "corp_name": row["corp_name"], "item_key": row["item_key"],
+            "heading": row.get("heading"), "body_excerpt": body[:_POLICY_EXCERPT_LIMIT],
+            "body_length": row.get("body_length") if row.get("body_length") is not None else len(body),
+            "body_hash": row.get("body_hash"), "data_year": year, "fs_div": fs_div,
+            "provenance_status": provenance_status,
+            "rcept_no": receipt if proven else None,
+            "source_url": dart_filing_url(receipt) if proven else None,
+        }))
+    if item_key is not None or keyword is not None:
+        presentation_codes = {row["corp_code"] for row in note_presentations}
+        names = {corp_code: base["subject"].get("corp_name")}
+        names.update({row["corp_code"]: row.get("corp_name") for row in peer_selection})
+        for code in all_codes:
+            if code not in presentation_codes:
+                note_presentations.append({
+                    "corp_code": code, "corp_name": names.get(code),
+                    "item_key": item_key, "heading": None, "body_excerpt": None,
+                    "data_year": year, "fs_div": fs_div,
+                    "provenance_status": "cache_missing_not_filing_absence",
+                })
+    note_presentations.sort(key=lambda row: (all_codes.index(row["corp_code"]), row["item_key"], str(row.get("heading") or "")))
+    topic_coverage = []
+    if item_key is not None or keyword is not None:
+        names = {corp_code: base["subject"].get("corp_name")}
+        names.update({row["corp_code"]: row.get("corp_name") for row in peer_selection})
+        for code in all_codes:
+            topic_coverage.append({
+                "corp_code": code, "corp_name": names.get(code),
+                "status": "topic_cached" if rows_by_company.get(code) else "cache_missing_not_filing_absence",
+                "matched_item_count": len(rows_by_company.get(code, [])),
+            })
+    subject_topic_available = bool(rows_by_company.get(corp_code)) if (item_key is not None or keyword is not None) else bool(subject_items)
     data_quality = {
         "status": cache_quality_status(
             subject_count=len(subject_items),
@@ -1605,8 +1916,14 @@ def compare_peer_accounting_policies(
             "as absence of accounting policy disclosure."
         ),
     }
+    if not subject_topic_available:
+        data_quality["status"] = "limited"
+        data_quality["limitations"] = ["subject_topic_cache_missing_not_filing_absence"]
+    elif (item_key is not None or keyword is not None) and not any(row.get("provenance_status") == "proven_annual_filing" for row in note_presentations if row["corp_code"] == corp_code):
+        data_quality["status"] = "limited"
+        data_quality["limitations"] = ["subject_topic_receipt_not_proven_against_latest_annual_filing"]
 
-    return _clean_dict({
+    result = {
         "subject": base["subject"],
         "year": year,
         "fs_div": fs_div,
@@ -1616,13 +1933,65 @@ def compare_peer_accounting_policies(
         "peers_with_policy": len(peer_summaries),
         "peer_item_coverage": peer_item_coverage,
         "peer_summaries": peer_summaries[:peer_limit],
-        "selection_policy": base["selection_policy"],
+        "selection_policy": {
+            **base["selection_policy"],
+            "selection_profile": selection_profile,
+            "weights": weights,
+            "weight_provenance": "custom" if peer_weights else "profile_default",
+            "override_provenance": "custom" if include_peers or exclude_peers else "default",
+            "candidate_universe": "industry/business-market candidates from adaptive KSIC and sector filters",
+            "preselection_criteria": {
+                "candidate_universe": "initial industry/business/market pool from adaptive KSIC prefix and sector separation",
+                "industry_business_market": {
+                    "matched_prefix_len": base["selection_policy"].get("matched_prefix_len"),
+                    "exclude_other_sectors": base["selection_policy"].get("exclude_other_sectors"),
+                    "subject_market": base["subject"].get("market"),
+                    "business_context": "not indexed for peer scoring; no business-overlap score is fabricated",
+                    "market_context": "reported for each candidate; market is not a default exclusion rule",
+                },
+                "financial_similarity": {
+                    "components": ["size", "leverage", "profitability", "growth"],
+                    "size_basis": "revenue and total_assets only when both cached values are positive",
+                    "missing_value_policy": "missing components receive no score or contribution; no value is fabricated",
+                },
+                "supported_customization": {
+                    "selection_profile": ["auditor", "investor", "balanced"],
+                    "peer_weights": sorted(_POLICY_SELECTION_KEYS),
+                    "size_bucket_decade_range": [0.1, 3.0],
+                    "include_exclude": "exact corp_code, stock_code, or company name",
+                },
+                "unsupported_customization": ["business-text threshold", "market-cap threshold", "unreliable financial field scoring"],
+            },
+        },
         "data_quality": data_quality,
         "coverage_note": (
             "Accounting policy comparison uses cached accounting_policy_items only; "
             "low coverage means dataset refresh is required, not that peers lack policy disclosures."
         ),
-    })
+    }
+    if presentation_mode:
+        result.update({
+            "candidate_universe": {
+                "candidate_count": len(candidate_by_code),
+                "algorithmic_candidate_count": len(ranked_candidates),
+                "final_peer_count": len(peer_codes),
+                "description": "Candidate universe is separate from final peers; see peer_selection for every returned candidate/override status.",
+            },
+            "peer_selection": peer_selection,
+            "selected_topic": selected_topic,
+            "note_presentations": note_presentations,
+            "topic_coverage": topic_coverage,
+            "methodology": {
+            "selection_profile": selection_profile,
+            "candidate_universe": "industry/sector candidate universe; direct includes are overrides, not algorithmic matches",
+            "financial_similarity": "size uses revenue/total_assets where cached; leverage, profitability, and growth are scored only when both sides have reliable fields",
+            "comparison_limitations": "Heading, placement and text differences are screening signals only; they are not an accounting treatment conclusion.",
+            "source_rule": "DART links appear only when the cached exact 14-digit receipt matches the latest same-company, same-year annual filing.",
+            },
+        })
+    else:
+        result["selection_policy"] = base["selection_policy"]
+    return _clean_dict(result)
 
 
 def compare_peer_kam_topics(

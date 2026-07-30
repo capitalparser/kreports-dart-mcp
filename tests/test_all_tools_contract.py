@@ -94,7 +94,7 @@ def test_all_tool_contract_is_derived_from_catalog_and_covers_all_34_tools(
 
     assert result == {"passed": True, "checks": 34}
     assert FROZEN_TOOL_WIRE_SHA256 == (
-        "c485e77c6aac77ffbe25be5a1309290cbcec869700bf50468642a0f7b9182a93"
+        "4436599d6d3a1a36b5866e4c5843a1ea46612f254d63a02281f64538f21e01c7"
     )
 
 

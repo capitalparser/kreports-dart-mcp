@@ -214,6 +214,40 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
     peer_limit: int = Field(30, ge=1, le=200)
     fs_div: FsDiv = "CFS"
     fs_strategy: FsStrategy = "auto"
+    item_key: str | None = Field(None, max_length=50, description="선택. 표준 회계정책 item_key")
+    keyword: str | None = Field(None, max_length=100, description="선택. 제목/본문 주제 검색어")
+    selection_profile: Literal["auditor", "investor", "balanced"] = "balanced"
+    peer_weights: dict[str, float] | None = Field(
+        None, description="선택. size/leverage/profitability/growth 가중치(0~1)"
+    )
+    size_bucket_decade: float | None = Field(None, ge=0.1, le=3.0)
+    include_peers: list[str] = Field(default_factory=list, max_length=50)
+    exclude_peers: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("peer_weights")
+    @classmethod
+    def validate_peer_weights(cls, value):
+        if value is None:
+            return value
+        supported = {"size", "leverage", "profitability", "growth"}
+        unknown = sorted(set(value) - supported)
+        if unknown:
+            raise ValueError(f"지원하지 않는 peer weight: {', '.join(unknown)}")
+        if not value or any(not 0 <= weight <= 1 for weight in value.values()):
+            raise ValueError("peer_weights는 0~1 범위의 하나 이상의 값이어야 합니다.")
+        if sum(value.values()) <= 0:
+            raise ValueError("peer_weights 합계는 0보다 커야 합니다.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_peer_overrides(self):
+        included = set(self.include_peers)
+        overlap = sorted(included & set(self.exclude_peers))
+        if overlap:
+            raise ValueError(f"include_peers와 exclude_peers가 중복됩니다: {', '.join(overlap)}")
+        if self.company in included or self.company in set(self.exclude_peers):
+            raise ValueError("대상회사는 include_peers 또는 exclude_peers에 넣을 수 없습니다.")
+        return self
 
 
 class ComparePeerKamTopicsInput(ComparePeerRiskProfileInput):

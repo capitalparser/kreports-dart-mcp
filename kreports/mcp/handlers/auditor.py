@@ -105,6 +105,13 @@ def handle_compare_peer_accounting_policies(
         peer_limit=args.peer_limit,
         fs_div=args.fs_div,
         fs_strategy=args.fs_strategy,
+        item_key=args.item_key,
+        keyword=args.keyword,
+        selection_profile=args.selection_profile,
+        peer_weights=args.peer_weights,
+        size_bucket_decade=args.size_bucket_decade,
+        include_peers=args.include_peers,
+        exclude_peers=args.exclude_peers,
     )
 
 

@@ -85,7 +85,7 @@ _DESCRIPTIONS = {
     "prepare_standard_audit_hours_inputs": "표준감사시간 산정 전 공개자료 입력 준비 도구. 최근 3개년 총자산, 매출액, 감사보수, 감사시간과 누락·출처 상태를 반환하며 표준감사시간 또는 법정 산정값을 계산하지 않는다.",
     "prepare_audit_materiality_inputs": "감사 중요성 기준 후보 준비 도구. 3년 또는 5년 공시 재무계열의 변동성 관찰값, 기준별 후보 비율·금액, 방법론 근거를 반환한다. 중요성 기준·비율의 선택 또는 감사 결론은 내리지 않는다.",
     "compare_peer_risk_profile": "감사인 관점 재무 위험 신호팩. peer group 기준 현금흐름/발생액/Beneish 신호와 정정·주요사항 공시 카운트를 반환하며 감사 리스크 판단 자체는 수행하지 않는다.",
-    "compare_peer_accounting_policies": "감사인 관점 회계정책 peer 비교. local DB에 캐시된 accounting_policy_items만 사용해 subject item 보유 현황과 peer item_key coverage를 반환한다. DART key 없이 동작하며, coverage가 낮으면 dataset refresh 필요성을 명시한다.",
+    "compare_peer_accounting_policies": "회계정책 주석 peer 비교. local DB 캐시의 item_key/키워드별 heading·제한된 본문 excerpt를 대상회사와 peer에 나란히 보여준다. auditor/investor/balanced 선정 프로필, 안전한 재무 가중치·규모범위, 명시적 peer 포함/제외를 지원하며 선정 근거와 캐시 누락을 구분한다. 정확히 검증된 해당 회사·연도 사업보고서 접수번호만 DART 링크로 제공한다.",
     "compare_peer_kam_topics": "동종업종 감사보고서/KAM screening. 로컬 DB에 영속화된 독립감사보고서 본문 섹션이 있으면 KAM 본문 topic hint, 핵심감사사항 선정 이유 hint, 감사절차/대응 절차 excerpt를 우선 반환하고, 사업보고서 KAM은 요약 정보로만 별도 표시한다. 본문 coverage가 부족하면 감사보고서 제출·정정·지연 공시 기반 screening으로 graceful degradation한다.",
     "compare_peer_audit_report_matters": "감사보고서의 기타사항, 강조사항, 계속기업 관련 문단, 감사의견 근거 문단을 peer group 기준으로 비교한다. 수임/유지 검토와 감사보고서 이슈 screening용 evidence pack이며 감사의견 판단을 대체하지 않는다.",
     "search_dataset": "주요 로컬 캐시 데이터셋을 회사, 연도, 시장, 업종, 키워드 기준으로 공통 검색한다. 감사보고서 섹션(KAM/강조/기타/계속기업), 회계정책, 주석 2/3/4번 챕터, 공시목록, 감사보수·시간, 재무요약을 동일한 응답 구조로 반환하여 '어느 회사/업종/연도에 해당 이슈가 있는가' 유형의 질문에 사용한다.",

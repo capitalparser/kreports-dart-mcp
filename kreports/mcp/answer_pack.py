@@ -179,6 +179,7 @@ def build_answer_pack(tool_name: str, result: dict[str, Any]) -> dict[str, Any] 
         "get_subsidiary_auditors": _build_subsidiary_pack,
         "get_audit_history": _build_audit_fee_trend_pack,
         "compare_peer_audit_fees": _build_audit_fee_benchmark_pack,
+        "compare_peer_accounting_policies": _build_peer_policy_presentation_pack,
         "get_kam_lifecycle": _build_kam_lifecycle_pack,
         "search_disclosure_events": _build_disclosure_events_pack,
         "search_audit_procedures": _build_audit_procedure_pack,
@@ -401,6 +402,12 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
             add(_source_from_rcept_no(
                 row.get("audit_source_rcept_no"),
                 label=f"{row.get('year') or ''}년 감사보수·시간 공시".strip(),
+            ))
+    for row in result.get("note_presentations") or []:
+        if isinstance(row, dict) and row.get("provenance_status") == "proven_annual_filing":
+            add(_source_from_rcept_no(
+                row.get("rcept_no"),
+                label=f"{row.get('corp_name') or row.get('corp_code') or ''} 사업보고서".strip(),
             ))
     return sources
 
@@ -1809,6 +1816,79 @@ def _build_policy_changes_pack(result: dict[str, Any]) -> dict[str, Any]:
             "결론은 원문 비교와 감사인 검토가 필요합니다."
         ),
     ))
+    return pack
+
+
+def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, Any]:
+    """Render the extended policy comparison without treating cache misses as absence."""
+    pack = _base_pack(f"{_subject_label(result)} 회계정책 주석 비교", result)
+    criteria = (result.get("selection_policy") or {}).get("preselection_criteria")
+    if isinstance(criteria, dict):
+        pack["tables"].append(_table(
+            "peer_policy_methodology", "Peer 선정 기준과 범위",
+            [("candidate_universe", "초기 후보군"),
+             ("financial_similarity", "재무 유사도 기준"),
+             ("supported_customization", "지원 사용자 지정"),
+             ("unsupported_customization", "미지원/제한 기준")],
+            [{
+                "candidate_universe": criteria.get("candidate_universe"),
+                "financial_similarity": criteria.get("financial_similarity"),
+                "supported_customization": criteria.get("supported_customization"),
+                "unsupported_customization": criteria.get("unsupported_customization"),
+            }],
+        ))
+    selection_rows = []
+    for row in result.get("peer_selection") or []:
+        if not isinstance(row, dict):
+            continue
+        selection_rows.append({
+            "company": row.get("corp_name") or row.get("corp_code"),
+            "corp_code": row.get("corp_code"),
+            "status": row.get("selection_status"),
+            "reason": row.get("selection_reason"),
+            "score": row.get("algorithmic_score"),
+            "score_components": row.get("score_components"),
+            "component_contributions": row.get("component_contributions"),
+            "limitations": ", ".join(row.get("limitations") or []),
+        })
+    pack["tables"].append(_table(
+        "peer_policy_selection", "Peer 선정 근거",
+        [("company", "회사"), ("corp_code", "회사코드"), ("status", "선정 상태"),
+         ("reason", "선정 사유"), ("score", "유사도 점수"),
+         ("score_components", "지표별 점수"), ("component_contributions", "가중 기여도"),
+         ("limitations", "데이터 한계")],
+        selection_rows,
+        note="직접 포함은 사용자의 명시적 override이며 알고리즘 유사성 매칭이 아닙니다.",
+    ))
+    presentation_rows = []
+    for row in result.get("note_presentations") or []:
+        if not isinstance(row, dict):
+            continue
+        presentation_rows.append({
+            "company": row.get("corp_name") or row.get("corp_code"),
+            "item_key": row.get("item_key"), "heading": row.get("heading"),
+            "excerpt": row.get("body_excerpt"), "body_length": row.get("body_length"),
+            "receipt": row.get("rcept_no"), "provenance": row.get("provenance_status"),
+        })
+    pack["tables"].append(_table(
+        "peer_note_presentations", "회계정책 주석 표시 비교",
+        [("company", "회사"), ("item_key", "주제"), ("heading", "주석 제목/위치"),
+         ("excerpt", "본문 발췌"), ("body_length", "본문 길이"),
+         ("receipt", "검증된 접수번호"), ("provenance", "출처 검증")],
+        presentation_rows,
+        note="텍스트/표시 차이는 스크리닝 신호일 뿐 회계처리 결론이 아닙니다.",
+    ))
+    coverage_rows = [row for row in result.get("topic_coverage") or [] if isinstance(row, dict)]
+    pack["tables"].append(_table(
+        "peer_policy_topic_coverage", "주제 캐시 가용성",
+        [("corp_name", "회사"), ("corp_code", "회사코드"), ("status", "상태"),
+         ("matched_item_count", "일치 항목 수")],
+        coverage_rows,
+        note="cache_missing_not_filing_absence는 로컬 캐시 미확보이며 공시 부재를 뜻하지 않습니다.",
+    ))
+    methodology = result.get("methodology")
+    if isinstance(methodology, dict):
+        pack["methodology"] = methodology
     return pack
 
 
