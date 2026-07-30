@@ -131,11 +131,103 @@ Acceptance:
 - A malformed, wrong-company, or wrong-year receipt cannot yield `usable`.
 - Existing similarity/change classification semantics remain unchanged.
 
+## Task 4: Expose Materiality Conflict Provenance
+
+Model lane: Luna-high.
+
+Mutable paths:
+
+- `kreports/analysis/materiality_benchmark.py`
+- `kreports/mcp/professional_surfaces/audit_effort.py`
+- `tests/test_materiality_benchmark.py`
+
+Requirements:
+
+1. Preserve `source_account_id` and `source_table` in bounded rejected-row
+   diagnostics and the chatbot answer-pack table.
+2. Continue withholding every rejected amount.
+
+## Task 5: Unify Policy Chapter Schema Contracts
+
+Model lane: Terra-high.
+
+Requirements:
+
+1. Use one exact table, column, and index-definition contract for release and
+   retained-clone rehearsal.
+2. Contract the full `accounting_note_chapters` ORM shape and deterministic
+   identity indexes through an idempotent, concurrent-safe SQLite migration.
+3. Treat duplicate logical chapters as a fail-closed migration precondition;
+   never choose or delete a row automatically.
+4. Measure policy-change readiness from at least two receipt-proven comparable
+   annual chapter years, separately from policy-item readiness.
+
+## Task 6: Prove Every QoE Financial Year
+
+Model lane: Terra-high.
+
+Requirements:
+
+1. Admit a QoE year only when all required metrics have finite values,
+   compatible explicit units and duration periods, usable quality, and exact
+   company-year annual-filing receipts.
+2. Reject conflicting duplicates, incomplete metric sets, contaminated
+   receipts, and legacy rows without provenance columns.
+3. Keep unproven years inspectable without money-backed signals or conclusions.
+4. Preserve every proven year's receipt in the public provenance table and
+   answer-pack sources even when the overall result is limited.
+
+## Task 7: Gate Auditor Materiality Readiness
+
+Model lane: Terra-high.
+
+Requirements:
+
+1. Measure three-year materiality support over the full declared listed-company
+   denominator with the same direct and derived PBT proof semantics as runtime.
+2. Reject conflicting duplicates, nonnumeric amounts, non-latest or unproven
+   receipts, incompatible units/periods, and cross-series year borrowing.
+3. Degrade public runtime when coverage is below threshold and block
+   `auditor_full` with `materiality_benchmark_coverage`.
+4. Preserve metric policy, denominators, and exclusion counts through the
+   release report, artifact, CLI, and retained-clone evidence.
+
+## Task 8: Explainable, Customizable Peer Note Presentation Comparison
+
+Model lane: Terra-high.
+
+Requirements:
+
+1. Extend the existing peer-accounting-policy comparison without increasing
+   the frozen MCP tool count. Preserve deterministic backward-compatible
+   defaults while accepting an optional note topic, auditor/investor/balanced
+   selection profile, bounded criterion weights, and explicit peer
+   include/exclude overrides.
+2. Separate the initial industry/business/market candidate universe from the
+   final peer set. For every candidate expose inclusion status, selection
+   basis, component scores actually supported by cached data, data year and
+   FS, missing-data limitations, and whether the result came from defaults or
+   user customization. Never fabricate an unavailable financial criterion.
+3. Compare the subject and final peers on the same note/policy topic with
+   heading, note placement, bounded body excerpt, and exact latest annual
+   filing receipt proof. A missing cache row means
+   `cache_missing_not_filing_absence`; it must never be described as a missing
+   disclosure.
+4. Return chatbot-ready peer-selection, note-presentation, and topic-coverage
+   tables. Only exactly proven receipts may create top-level DART source
+   links. Textual similarity is a screening signal and must not be described
+   as an accounting-treatment conclusion.
+5. Cover defaults, custom profiles/weights, include/exclude validation,
+   missing financial dimensions, contaminated/foreign/older receipts,
+   missing note rows, bounded excerpts, stable order, the MCP
+   dispatch-envelope-answer-pack path, and the frozen tool count with strict
+   RED-to-GREEN tests.
+
 ## Final Review and QA
 
 The controller performs an independent diff review after each task and a
 whole-branch review at the end. Final verification includes the affected
-release/rehearsal, materiality, policy, MCP envelope, and answer-pack suites,
-Ruff for every changed Python file, `git diff --check`, and clean worktree
-status. Live DB checks, if any, are immutable/read-only and must preserve its
-SHA-256.
+release/rehearsal, materiality, policy, QoE, peer-selection, note-comparison,
+MCP envelope, and answer-pack suites, Ruff for every changed Python file,
+`git diff --check`, and clean worktree status. Live DB checks, if any, are
+immutable/read-only and must preserve its SHA-256.
