@@ -60,6 +60,7 @@ DOMAIN_VERDICT_ALLOWLISTS = {
         "calculation_unavailable",
     },
     "prepare_standard_audit_hours_inputs": {"not_assessed"},
+    "prepare_audit_materiality_inputs": {"not_assessed"},
 }
 
 DOMAIN_VERDICT_LABELS = {
@@ -79,6 +80,9 @@ DOMAIN_VERDICT_LABELS = {
     },
     "prepare_standard_audit_hours_inputs": {
         "not_assessed": "평가 미실시",
+    },
+    "prepare_audit_materiality_inputs": {
+        "not_assessed": "감사인 선택·승인 대기",
     },
 }
 
@@ -498,6 +502,14 @@ def _has_subsidiary_result(result: dict[str, Any]) -> bool:
     )
 
 
+def _has_materiality_result(result: dict[str, Any]) -> bool:
+    return (
+        isinstance(result.get("benchmark_series"), dict)
+        and isinstance(result.get("benchmark_stability"), dict)
+        and isinstance(result.get("materiality_candidates"), list)
+    )
+
+
 # Each predicate is bound to a real handler result shape and explicitly rejects
 # its no-data shape.  Configuration, subject metadata, selection policy, and
 # cohort descriptors never establish answer usability.
@@ -528,6 +540,7 @@ _TOOL_PURPOSE_PREDICATES: dict[str, ToolPurposePredicate] = {
     "compare_to_industry_multi": _has_industry_multi_result,
     "compare_peer_audit_fees": _has_audit_fee_result,
     "prepare_standard_audit_hours_inputs": _has_audit_effort_input_result,
+    "prepare_audit_materiality_inputs": _has_materiality_result,
     "compare_peer_risk_profile": _has_risk_profile_result,
     "compare_peer_accounting_policies": _has_peer_policy_result,
     "compare_peer_kam_topics": _has_kam_topic_result,

@@ -33,6 +33,7 @@ EXPECTED_KAM_GATED_TOOLS = {
 }
 EXPECTED_PROFESSIONAL_REHEARSAL_TOOLS = (
     ("prepare_standard_audit_hours_inputs", {"company": "005930", "year": 2025}),
+    ("prepare_audit_materiality_inputs", {"company": "005930", "end_year": 2025, "years_back": 5}),
     ("compare_peer_audit_fees", {"company": "005930", "year": 2025}),
     ("build_audit_acceptance_pack", {"company": "005930", "year": 2025}),
     ("compare_peer_risk_profile", {"company": "005930", "year": 2025}),
@@ -1245,7 +1246,7 @@ def test_mcp_validation_rejects_envelope_only_schema_leak(
     assert caught.value.code == "mcp_schema_not_closed"
 
 
-def test_mcp_validation_rejects_section_status_drift_across_all_17_boundaries(
+def test_mcp_validation_rejects_section_status_drift_across_all_18_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catch an envelope that reports a different section status than legacy/stdio."""
@@ -1330,4 +1331,4 @@ def test_mcp_validation_uses_exact_ordered_samsung_catalog_and_kam_gates(
     assert legacy_calls == list(EXPECTED_PROFESSIONAL_REHEARSAL_TOOLS)
     assert envelope_calls == list(EXPECTED_PROFESSIONAL_REHEARSAL_TOOLS)
     assert stdio_calls == list(EXPECTED_PROFESSIONAL_REHEARSAL_TOOLS)
-    assert result["tool_count"] == 17
+    assert result["tool_count"] == 18

@@ -1306,6 +1306,20 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         legacy_result.pop(field, None)
     detail: str | None = None
     if envelope.data_quality.status in {"missing", "error"}:
+        if tool_name == "prepare_audit_materiality_inputs":
+            detail = PROFESSIONAL_DETAIL_RENDERERS[tool_name](legacy_result)
+            return "\n".join([
+                detail,
+                "",
+                "데이터 상태:",
+                f"- {envelope.verdict}",
+                "",
+                "데이터 한계:",
+                *[f"- {item}" for item in envelope.data_quality.limitations],
+                "",
+                "다음 확인:",
+                *[f"- {item}" for item in envelope.next_checks],
+            ])
         rendered = _render_professional_envelope(presentation_envelope)
         if dcf_opening:
             rendered = rendered + "\n\n" + dcf_opening
@@ -1346,6 +1360,17 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         detail = _render_peer_benchmark(legacy_result)
     elif tool_name == "build_audit_acceptance_pack":
         detail = _render_acceptance_pack(legacy_result)
+    if tool_name == "prepare_audit_materiality_inputs" and detail:
+        # This preparation workflow is intentionally outcome-first: an
+        # internal deployment gate must never displace the auditor-facing
+        # explanation of what was prepared and what remains unassessed.
+        limitations = envelope.data_quality.limitations
+        lines = [detail, "", "데이터 상태:", f"- {envelope.verdict}"]
+        if limitations:
+            lines.extend(["", "데이터 한계:", *[f"- {item}" for item in limitations]])
+        if envelope.next_checks:
+            lines.extend(["", "다음 확인:", *[f"- {item}" for item in envelope.next_checks]])
+        return "\n".join(lines)
     rendered = _render_professional_envelope(
         presentation_envelope,
         detail=_sanitize_legacy_detail(detail) if detail else None,

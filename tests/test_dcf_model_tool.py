@@ -74,7 +74,7 @@ def test_build_dcf_model_pack_is_the_only_additive_33rd_tool():
     from kreports.mcp.handlers import HANDLERS
     from kreports.mcp.tools import ALL_TOOLS
 
-    assert len(TOOL_CATALOG) == 33
+    assert len(TOOL_CATALOG) == 34
     assert list(TOOL_CATALOG)[-1] == "build_dcf_model_pack"
     assert [tool.name for tool in ALL_TOOLS][-1] == "build_dcf_model_pack"
     assert "build_dcf_model_pack" in HANDLERS

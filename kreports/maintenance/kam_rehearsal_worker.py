@@ -32,6 +32,7 @@ KAM_GATED_TOOLS = {
 }
 PROFESSIONAL_REHEARSAL_TOOLS: tuple[tuple[str, dict[str, object]], ...] = (
     ("prepare_standard_audit_hours_inputs", {"company": "005930", "year": 2025}),
+    ("prepare_audit_materiality_inputs", {"company": "005930", "end_year": 2025, "years_back": 5}),
     ("compare_peer_audit_fees", {"company": "005930", "year": 2025}),
     ("build_audit_acceptance_pack", {"company": "005930", "year": 2025}),
     ("compare_peer_risk_profile", {"company": "005930", "year": 2025}),

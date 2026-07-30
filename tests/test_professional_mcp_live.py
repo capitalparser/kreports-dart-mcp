@@ -12,6 +12,7 @@ import pytest
 
 LIVE_TOOLS = (
     ("prepare_standard_audit_hours_inputs", {"company": "005930", "year": 2025}),
+    ("prepare_audit_materiality_inputs", {"company": "005930", "end_year": 2025, "years_back": 5}),
     ("compare_peer_audit_fees", {"company": "005930", "year": 2025}),
     ("build_audit_acceptance_pack", {"company": "005930", "year": 2025}),
     ("compare_peer_risk_profile", {"company": "005930", "year": 2025}),
@@ -169,7 +170,14 @@ def test_samsung_fy2025_professional_public_result_matrix(immutable_live_databas
         row["canonical_status"] in {"usable", "limited", "missing", "error"}
         for row in matrix
     )
-    assert all(str(row["first_answer_paragraph"]).startswith("판정:") for row in matrix)
+    assert all(
+        str(row["first_answer_paragraph"]).startswith(
+            "중요성 기준 후보 준비"
+            if row["tool"] == "prepare_audit_materiality_inputs"
+            else "판정:"
+        )
+        for row in matrix
+    )
     assert all(
         not row["pack_status"] or row["pack_status"] == row["canonical_status"]
         for row in matrix
@@ -183,6 +191,15 @@ def test_samsung_fy2025_professional_public_result_matrix(immutable_live_databas
     assert year_2023.get("audit_fee_m") is None
     assert year_2023.get("audit_hours") is None
     assert outputs["prepare_standard_audit_hours_inputs"].get("domain_verdict") == "not_assessed"
+    materiality = outputs["prepare_audit_materiality_inputs"]
+    assert materiality.get("assessment_status") == "not_assessed"
+    assert len(materiality.get("benchmark_series") or {}) == 4
+    assert len(materiality.get("benchmark_stability") or {}) == 4
+    assert any(
+        table["id"] == "materiality_benchmark_stability"
+        for table in materiality["answer_pack"]["tables"]
+    )
+    assert materiality["answer_pack"].get("sources") or materiality["data_quality"].get("limitations")
     history = outputs["get_audit_history"].get("history") or []
     assert any(
         row.get("auditor_nm") and row.get("audit_opinion") and row.get("rcept_no")

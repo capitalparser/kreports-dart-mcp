@@ -828,6 +828,7 @@ def test_professional_surface_registries_combine_implemented_routes():
 
     expected_audit_effort_routes = {
         "prepare_standard_audit_hours_inputs",
+        "prepare_audit_materiality_inputs",
         "compare_peer_audit_fees",
         "estimate_audit_hours_proxy",
     }
@@ -857,6 +858,7 @@ def test_professional_surface_registries_combine_implemented_routes():
     )
     assert set(DETAIL_RENDERERS) == {
         "prepare_standard_audit_hours_inputs",
+        "prepare_audit_materiality_inputs",
         "get_audit_history",
         "compare_peer_risk_profile",
         "build_audit_acceptance_pack",

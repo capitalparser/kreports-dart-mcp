@@ -95,6 +95,12 @@ _METRICS = {
             ("ifrs-full_ProfitLossAttributableToOwnersOfParent",),
         ), "last", "missing",
     ),
+    "profit_before_tax": _metric(
+        "profit_before_tax", "법인세차감전순이익", "KRW", "duration", "CFS",
+        _FINANCIAL_FACT_SOURCES,
+        (("ifrs-full_ProfitLossBeforeTax",), ("dart_ProfitBeforeTax",)),
+        "last", "missing",
+    ),
     "operating_cash_flow": _metric(
         "operating_cash_flow", "영업활동현금흐름", "KRW", "duration", "CFS",
         _FINANCIAL_FACT_SOURCES,

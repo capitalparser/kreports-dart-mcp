@@ -26,6 +26,7 @@ EXPECTED_TOOL_NAMES = [
     "compare_to_industry_multi",
     "compare_peer_audit_fees",
     "prepare_standard_audit_hours_inputs",
+    "prepare_audit_materiality_inputs",
     "compare_peer_risk_profile",
     "compare_peer_accounting_policies",
     "compare_peer_kam_topics",
@@ -46,7 +47,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "98df19f2f41c3c787fa8509583092b0cba2ba819e96cd5cd20ce048be60ed6e4"
+EXPECTED_INTERFACE_SHA256 = "c485e77c6aac77ffbe25be5a1309290cbcec869700bf50468642a0f7b9182a93"
 
 
 MINIMAL_ARGUMENTS = {
@@ -67,6 +68,7 @@ MINIMAL_ARGUMENTS = {
     "compare_to_industry_multi": {"company": "__task7_no_such_company__"},
     "compare_peer_audit_fees": {"company": "__task7_no_such_company__"},
     "prepare_standard_audit_hours_inputs": {"company": "__task7_no_such_company__"},
+    "prepare_audit_materiality_inputs": {"company": "__task7_no_such_company__"},
     "compare_peer_risk_profile": {"company": "__task7_no_such_company__"},
     "compare_peer_accounting_policies": {"company": "__task7_no_such_company__"},
     "compare_peer_kam_topics": {"company": "__task7_no_such_company__"},
@@ -98,7 +100,7 @@ def test_catalog_is_complete_ordered_and_immutable():
 
     assert list(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
     assert [tool.name for tool in list_mcp_tools()] == EXPECTED_TOOL_NAMES
-    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 33
+    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 34
     assert all(
         spec.input_model.model_config.get("extra") == "forbid"
         for spec in TOOL_CATALOG.values()

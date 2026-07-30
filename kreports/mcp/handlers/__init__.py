@@ -20,6 +20,7 @@ from kreports.mcp.handlers.auditor import (
     handle_search_audit_report_matters,
 )
 from kreports.mcp.handlers.audit_effort import (
+    handle_prepare_audit_materiality_inputs,
     handle_prepare_standard_audit_hours_inputs,
 )
 from kreports.mcp.handlers.company import (
@@ -61,6 +62,7 @@ HANDLERS = {
     "compare_to_industry_multi": handle_compare_to_industry_multi,
     "compare_peer_audit_fees": handle_compare_peer_audit_fees,
     "prepare_standard_audit_hours_inputs": handle_prepare_standard_audit_hours_inputs,
+    "prepare_audit_materiality_inputs": handle_prepare_audit_materiality_inputs,
     "compare_peer_risk_profile": handle_compare_peer_risk_profile,
     "compare_peer_accounting_policies": handle_compare_peer_accounting_policies,
     "compare_peer_kam_topics": handle_compare_peer_kam_topics,

@@ -192,6 +192,15 @@ class PrepareStandardAuditHoursInputsInput(ToolInput):
     )
 
 
+class PrepareAuditMaterialityInputsInput(ToolInput):
+    company: str = Field(description="corp_code / 종목코드 / 회사명")
+    end_year: Year = 2025
+    years_back: Literal[3, 5] = Field(5, description="3년 또는 5년 비교 범위")
+    fs_strategy: FsStrategy = Field(
+        "auto", description="auto면 CFS 우선, 없으면 OFS 한 기준으로 비교합니다.",
+    )
+
+
 class ComparePeerRiskProfileInput(ToolInput):
     company: str
     year: Year = 2025

@@ -22,6 +22,7 @@ EXPECTED_TOOL_NAMES = (
     "compare_to_industry_multi",
     "compare_peer_audit_fees",
     "prepare_standard_audit_hours_inputs",
+    "prepare_audit_materiality_inputs",
     "compare_peer_risk_profile",
     "compare_peer_accounting_policies",
     "compare_peer_kam_topics",
@@ -81,7 +82,7 @@ def _fixture_arguments(tool_name, model) -> dict:
     return values
 
 
-def test_all_tool_contract_is_derived_from_catalog_and_covers_all_33_tools(
+def test_all_tool_contract_is_derived_from_catalog_and_covers_all_34_tools(
     temp_engine,
 ):
     from kreports.release_artifact import (
@@ -91,13 +92,13 @@ def test_all_tool_contract_is_derived_from_catalog_and_covers_all_33_tools(
 
     result = run_all_tool_contract()
 
-    assert result == {"passed": True, "checks": 33}
+    assert result == {"passed": True, "checks": 34}
     assert FROZEN_TOOL_WIRE_SHA256 == (
-        "98df19f2f41c3c787fa8509583092b0cba2ba819e96cd5cd20ce048be60ed6e4"
+        "c485e77c6aac77ffbe25be5a1309290cbcec869700bf50468642a0f7b9182a93"
     )
 
 
-def test_all_33_catalog_tools_have_strict_inputs_and_answer_envelopes(
+def test_all_34_catalog_tools_have_strict_inputs_and_answer_envelopes(
     temp_engine,
 ):
     from sqlalchemy.orm import Session

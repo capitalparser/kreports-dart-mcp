@@ -7,6 +7,7 @@ REQUIRED_METRIC_KEYS = {
     "revenue",
     "operating_profit",
     "profit_loss",
+    "profit_before_tax",
     "operating_cash_flow",
     "assets",
     "liabilities",
