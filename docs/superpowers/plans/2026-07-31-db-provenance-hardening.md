@@ -112,6 +112,7 @@ Mutable paths:
 - `tests/test_policy_changes.py`
 - `tests/test_mcp_contracts.py`
 - `tests/test_mcp_answer_pack.py`
+- `tests/test_mcp_live_output_evidence.py`
 
 Requirements:
 
