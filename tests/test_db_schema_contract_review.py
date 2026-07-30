@@ -224,3 +224,51 @@ def test_policy_change_readiness_rejects_nonlatest_annual_receipt(temp_engine):
     assert snapshot["feature_status"]["accounting_policy_changes"] != "usable"
     assert snapshot["counts"]["policy_change_excluded_unproven"] == 1
     assert snapshot["counts"]["policy_change_comparable_companies"] == 0
+
+
+def test_policy_change_readiness_rejects_historical_pair_without_requested_year(
+    temp_engine,
+):
+    """A proven 2022/2023 pair cannot satisfy requested-year 2025 readiness."""
+    import kreports.analysis.readiness as readiness
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure
+
+    Session = sessionmaker(bind=temp_engine)
+    with Session() as session:
+        session.add(Company(
+            corp_code="00126380", corp_name="A", stock_code="005930",
+            market="KOSPI",
+        ))
+        session.add_all([
+            Disclosure(
+                rcept_no="20230301000001", corp_code="00126380", corp_name="A",
+                disc_date=date(2023, 3, 1), disc_type="A",
+                report_nm="사업보고서 (2022.12)",
+            ),
+            Disclosure(
+                rcept_no="20240301000001", corp_code="00126380", corp_name="A",
+                disc_date=date(2024, 3, 1), disc_type="A",
+                report_nm="사업보고서 (2023.12)",
+            ),
+            AccountingNoteChapter(
+                corp_code="00126380", bsns_year=2022, fs_div="CFS",
+                rcept_no="20230301000001", source_type="business_report",
+                note_no="2", section_type="policy", body="2022 policy",
+            ),
+            AccountingNoteChapter(
+                corp_code="00126380", bsns_year=2023, fs_div="CFS",
+                rcept_no="20240301000001", source_type="business_report",
+                note_no="2", section_type="policy", body="2023 policy",
+            ),
+        ])
+        session.commit()
+
+    snapshot = readiness.auditor_feature_readiness_snapshot(
+        year=2025,
+        market="KOSPI",
+    )
+
+    assert snapshot["feature_status"]["accounting_policy_changes"] != "usable"
+    assert snapshot["counts"]["accounting_policy_change_chapters"] == 0
+    assert snapshot["counts"]["policy_change_comparable_companies"] == 0
+    assert snapshot["counts"]["policy_change_excluded_missing_requested_year"] == 1

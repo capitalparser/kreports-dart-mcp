@@ -84,6 +84,7 @@ def _policy_change_readiness_coverage(
         "policy_change_comparable_companies": 0,
         "policy_change_excluded_unproven": 0,
         "policy_change_excluded_not_comparable": 0,
+        "policy_change_excluded_missing_requested_year": 0,
     }
     if not has_note_chapters:
         return empty
@@ -156,8 +157,14 @@ def _policy_change_readiness_coverage(
         )
         proven_years_by_key.setdefault(key, set()).add(bsns_year)
         proven_rows.append((*key, bsns_year))
-    comparable_keys = {
+    historically_comparable_keys = {
         key for key, years in proven_years_by_key.items() if len(years) >= 2
+    }
+    requested_year = int(params["year"])
+    comparable_keys = {
+        key
+        for key in historically_comparable_keys
+        if requested_year in proven_years_by_key[key]
     }
     comparable_companies = {key[0] for key in comparable_keys}
     not_comparable = sum(
@@ -170,6 +177,9 @@ def _policy_change_readiness_coverage(
         "policy_change_comparable_companies": len(comparable_companies),
         "policy_change_excluded_unproven": unproven,
         "policy_change_excluded_not_comparable": not_comparable,
+        "policy_change_excluded_missing_requested_year": len(
+            historically_comparable_keys - comparable_keys
+        ),
     }
 
 
@@ -1291,6 +1301,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "policy_change_comparable_companies": policy_change_coverage["policy_change_comparable_companies"],
             "policy_change_excluded_unproven": policy_change_coverage["policy_change_excluded_unproven"],
             "policy_change_excluded_not_comparable": policy_change_coverage["policy_change_excluded_not_comparable"],
+            "policy_change_excluded_missing_requested_year": policy_change_coverage["policy_change_excluded_missing_requested_year"],
             "accounting_policy_items": policy_items,
             "accounting_policy_item_companies": policy_item_companies,
             "audit_procedure_items": procedure_items,
