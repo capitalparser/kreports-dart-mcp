@@ -200,26 +200,35 @@ def _enrich_policy_change_evidence(result: dict) -> dict:
         if not isinstance(item, dict):
             continue
         receipt = str(item.get("rcept_no") or "").strip()
+        provenance_status = item.get("provenance_status")
+        if provenance_status != "proven_annual_filing":
+            continue
         if not _DART_RECEIPT_NO.fullmatch(receipt):
             continue
         year = item.get("year")
         fs_div = str(item.get("fs_div") or "재무제표")
         note_no = str(item.get("note_no") or "").strip()
         note_title = str(item.get("note_title") or "회계정책 주석").strip()
+        filing_source = item.get("filing_source")
+        if not isinstance(filing_source, dict):
+            continue
+        source_receipt = str(filing_source.get("rcept_no") or "").strip()
+        if source_receipt != receipt:
+            continue
+        fact_source = {
+            **filing_source,
+            "source_label": "DART 사업보고서",
+            "source_url": (
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                f"rcpNo={receipt}"
+            ),
+        }
         facts.append({
             "statement": (
                 f"{year}년 {fs_div} 주석 {note_no or '-'} "
                 f"'{note_title}'에서 텍스트 변경 후보가 확인되었습니다."
             ),
-            "source": {
-                "source_label": "DART 사업보고서",
-                "source_url": (
-                    "https://dart.fss.or.kr/dsaf001/main.do?"
-                    f"rcpNo={receipt}"
-                ),
-                "rcept_no": receipt,
-                "section_title": f"주석 {note_no} {note_title}".strip(),
-            },
+            "source": fact_source,
             "excerpt": str(item.get("body_excerpt") or "")[:600] or None,
         })
 
@@ -239,7 +248,7 @@ def _enrich_policy_change_evidence(result: dict) -> dict:
             if str(item).strip()
         ]
         limitations.append(
-            "회계정책 변경 후보의 DART 접수번호를 확인하지 못해 원문 근거를 "
+            "회계정책 변경 후보의 DART 접수번호를 검증하지 못해 원문 근거를 "
             "직접 연결할 수 없습니다."
         )
         enriched["data_quality"] = {

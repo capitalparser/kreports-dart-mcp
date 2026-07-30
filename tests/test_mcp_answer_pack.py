@@ -30,6 +30,63 @@ def test_peer_answer_pack_omits_cohort_metadata_without_metric_results():
     assert [table["id"] for table in pack["tables"]] == ["availability"]
 
 
+def test_policy_change_pack_keeps_proven_receipt_in_table_and_sources_only():
+    """A limited mixed result keeps the row audit trail without citing bad receipts."""
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("get_accounting_policy_changes", {
+        "subject": {"corp_name": "A"},
+        "changed_items": [
+            {
+                "year": 2024, "fs_div": "CFS", "note_no": "2",
+                "note_title": "중요한 회계정책", "section_type": "policy",
+                "change_type": "changed", "similarity_to_previous": 0.5,
+                "rcept_no": "20250301000001",
+                "provenance_status": "proven_annual_filing",
+            },
+            {
+                "year": 2023, "fs_div": "CFS", "note_no": "2",
+                "note_title": "중요한 회계정책", "section_type": "policy",
+                "change_type": "changed", "similarity_to_previous": 0.4,
+                "rcept_no": "bad-receipt",
+                "provenance_status": "invalid_receipt",
+            },
+        ],
+        "confirmed_facts": [{
+            "statement": "2024년 주석 2 텍스트 변경 후보가 확인되었습니다.",
+            "source": {
+                "corp_name": "A", "rcept_no": "20250301000001",
+                "report_nm": "사업보고서 (2024.12)", "section_title": "주석 2",
+            },
+        }],
+        "data_quality": {"status": "limited"},
+    })
+
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "accounting_policy_changes"
+    )
+    assert table["rows"] == [
+        {
+            "year": 2024, "fs_div": "CFS", "note_no": "2",
+            "note_title": "중요한 회계정책", "section_type": "policy",
+            "change_type": "changed", "similarity_to_previous": 0.5,
+            "rcept_no": "20250301000001",
+            "provenance_status": "proven_annual_filing",
+        },
+        {
+            "year": 2023, "fs_div": "CFS", "note_no": "2",
+            "note_title": "중요한 회계정책", "section_type": "policy",
+            "change_type": "changed", "similarity_to_previous": 0.4,
+            "rcept_no": "bad-receipt",
+            "provenance_status": "invalid_receipt",
+        },
+    ]
+    assert [source["rcept_no"] for source in pack["sources"]] == [
+        "20250301000001",
+    ]
+
+
 def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():
     result = {
         "subject": {"corp_name": "A"},

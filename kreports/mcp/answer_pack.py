@@ -1693,8 +1693,11 @@ def _build_search_dataset_pack(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_policy_changes_pack(result: dict[str, Any]) -> dict[str, Any]:
-    rows = [
-        {
+    rows = []
+    for item in result.get("changed_items") or []:
+        if not isinstance(item, dict):
+            continue
+        row = {
             "year": item.get("year"),
             "fs_div": item.get("fs_div"),
             "note_no": item.get("note_no"),
@@ -1704,9 +1707,11 @@ def _build_policy_changes_pack(result: dict[str, Any]) -> dict[str, Any]:
             "similarity_to_previous": item.get("similarity_to_previous"),
             "rcept_no": item.get("rcept_no"),
         }
-        for item in result.get("changed_items") or []
-        if isinstance(item, dict)
-    ][:50]
+        if item.get("provenance_status") is not None:
+            row["provenance_status"] = item.get("provenance_status")
+        rows.append(row)
+        if len(rows) == 50:
+            break
     pack = _base_pack(
         f"{_subject_label(result)} 회계정책 변경 후보",
         result,
@@ -1723,6 +1728,7 @@ def _build_policy_changes_pack(result: dict[str, Any]) -> dict[str, Any]:
             ("change_type", "변경 후보 유형"),
             ("similarity_to_previous", "전기 유사도"),
             ("rcept_no", "접수번호"),
+            ("provenance_status", "접수번호 검증"),
         ],
         rows,
         note=(

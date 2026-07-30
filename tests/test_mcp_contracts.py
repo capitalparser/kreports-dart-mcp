@@ -218,6 +218,116 @@ def test_usable_quality_is_limited_when_any_confirmed_fact_lacks_evidence():
     assert any("1개" in warning and "근거 링크" in warning for warning in envelope.warnings)
 
 
+def test_policy_change_provenance_survives_envelope_without_unproven_receipt_evidence():
+    """Only a proven annual filing becomes public MCP evidence."""
+    from kreports.mcp.contracts import build_answer_envelope
+
+    result = {
+        "changed_items": [
+            {
+                "year": 2024,
+                "fs_div": "CFS",
+                "note_no": "2",
+                "change_type": "changed",
+                "rcept_no": "20250301000001",
+                "provenance_status": "proven_annual_filing",
+                "filing_source": {
+                    "corp_code": "001",
+                    "corp_name": "A",
+                    "bsns_year": 2024,
+                    "rcept_no": "20250301000001",
+                    "report_nm": "사업보고서 (2024.12)",
+                    "section_title": "주석 2",
+                },
+            },
+            {
+                "year": 2023,
+                "fs_div": "CFS",
+                "note_no": "2",
+                "change_type": "changed",
+                "rcept_no": "bad-receipt",
+                "provenance_status": "invalid_receipt",
+            },
+        ],
+        "confirmed_facts": [{
+            "statement": "2024년 주석 2 텍스트 변경 후보가 확인되었습니다.",
+            "source": {
+                "corp_code": "001",
+                "corp_name": "A",
+                "bsns_year": 2024,
+                "rcept_no": "20250301000001",
+                "report_nm": "사업보고서 (2024.12)",
+                "section_title": "주석 2",
+            },
+        }],
+        "data_quality": {"status": "limited"},
+    }
+
+    envelope = build_answer_envelope("get_accounting_policy_changes", result)
+
+    assert envelope.verdict == "limited"
+    assert [item.rcept_no for item in envelope.evidence] == ["20250301000001"]
+
+
+def test_policy_change_handler_exposes_only_proven_chapter_receipt_as_confirmed_fact():
+    """A syntactically valid but foreign receipt must not become MCP evidence."""
+    from kreports.mcp.handlers.auditor import _enrich_policy_change_evidence
+
+    result = _enrich_policy_change_evidence({
+        "changed_items": [
+            {
+                "year": 2024,
+                "fs_div": "CFS",
+                "note_no": "2",
+                "note_title": "중요한 회계정책",
+                "rcept_no": "20250301000001",
+                "provenance_status": "proven_annual_filing",
+                "filing_source": {
+                    "corp_code": "001", "corp_name": "A", "bsns_year": 2024,
+                    "fs_div": "CFS", "rcept_no": "20250301000001",
+                    "report_nm": "사업보고서 (2024.12)",
+                    "section_title": "주석 2 중요한 회계정책",
+                },
+            },
+            {
+                "year": 2024,
+                "fs_div": "CFS",
+                "note_no": "3",
+                "note_title": "중요한 추정",
+                "rcept_no": "20250302000002",
+                "provenance_status": "unproven_annual_filing",
+            },
+        ],
+        "data_quality": {"status": "limited"},
+    })
+
+    assert result["data_quality"]["status"] == "limited"
+    assert [fact["source"]["rcept_no"] for fact in result["confirmed_facts"]] == [
+        "20250301000001",
+    ]
+    assert result["confirmed_facts"][0]["source"]["source_label"] == "DART 사업보고서"
+
+
+def test_policy_change_handler_does_not_promote_legacy_syntax_only_receipt():
+    """A 14-digit value without explicit filing proof is not public evidence."""
+    from kreports.mcp.handlers.auditor import _enrich_policy_change_evidence
+
+    result = _enrich_policy_change_evidence({
+        "changed_items": [{
+            "year": 2024,
+            "fs_div": "CFS",
+            "note_no": "2",
+            "note_title": "중요한 회계정책",
+            "rcept_no": "20250301000001",
+        }],
+        "data_quality": {"status": "usable"},
+    })
+
+    assert result.get("confirmed_facts") is None
+    assert result["data_quality"]["status"] == "limited"
+    assert any("검증" in limitation for limitation in result["data_quality"]["limitations"])
+
+
 def test_falsey_error_key_is_still_an_error_with_safe_limitation():
     from kreports.mcp.contracts import build_answer_envelope
 
