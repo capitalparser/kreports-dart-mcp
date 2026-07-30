@@ -75,7 +75,12 @@ def dcf_input_candidates(
 ) -> dict:
     """Return evidence-backed DCF assumption candidates without valuing the company."""
     series = _financial_series(
-        company, start_year, end_year, fs_div=fs_div, metric_keys=DCF_SUPPORT_METRICS,
+        company,
+        start_year,
+        end_year,
+        fs_div=fs_div,
+        metric_keys=DCF_SUPPORT_METRICS,
+        include_persisted_sources=True,
     )
     if not series:
         source_blockers = [
@@ -170,6 +175,11 @@ def dcf_input_candidates(
             "cash_conversion": cash_conversion,
             "tax_rate": tax_rate,
             "capex_to_revenue": capex_to_revenue,
+            **(
+                {"source": dict(row["source"])}
+                if isinstance(row.get("source"), dict)
+                else {}
+            ),
         })
         revenue_growths.append(revenue_growth)
         operating_margins.append(operating_margin)

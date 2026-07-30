@@ -22,18 +22,45 @@ def _financial_series(
     end_year: int,
     fs_div: str = "CFS",
     metric_keys: tuple[str, ...] = CORE_FINANCIAL_METRICS,
+    *,
+    include_persisted_sources: bool = False,
 ) -> list[dict]:
-    stmt = text("""
-        SELECT bsns_year, metric_key, amount
-        FROM financial_facts_compact
-        WHERE corp_code=:corp_code
-          AND fs_div=:fs_div
-          AND bsns_year BETWEEN :start_year AND :end_year
-          AND metric_key IN :metric_keys
-        ORDER BY bsns_year, metric_key
-    """).bindparams(bindparam("metric_keys", expanding=True))
     by_year: dict[int, dict] = {}
+    citations_by_year: dict[int, set[tuple[object, object, object]]] = {}
     with _engine_module.engine.connect() as conn:
+        compact_columns = (
+            {
+                row["name"]
+                for row in conn.execute(
+                    text("PRAGMA table_info(financial_facts_compact)")
+                ).mappings()
+            }
+            if include_persisted_sources
+            else set()
+        )
+        has_persisted_provenance = {
+            "citation_rcept_no",
+            "citation_report_nm",
+            "citation_basis",
+        }.issubset(compact_columns)
+        provenance_select = (
+            "citation_rcept_no, citation_report_nm, citation_basis"
+            if has_persisted_provenance
+            else (
+                "NULL AS citation_rcept_no, "
+                "NULL AS citation_report_nm, "
+                "NULL AS citation_basis"
+            )
+        )
+        stmt = text(f"""
+            SELECT bsns_year, metric_key, amount, {provenance_select}
+            FROM financial_facts_compact
+            WHERE corp_code=:corp_code
+              AND fs_div=:fs_div
+              AND bsns_year BETWEEN :start_year AND :end_year
+              AND metric_key IN :metric_keys
+            ORDER BY bsns_year, metric_key
+        """).bindparams(bindparam("metric_keys", expanding=True))
         for row in conn.execute(stmt, {
             "corp_code": company,
             "fs_div": fs_div,
@@ -41,8 +68,50 @@ def _financial_series(
             "end_year": int(end_year),
             "metric_keys": metric_keys,
         }).mappings():
-            item = by_year.setdefault(int(row["bsns_year"]), {"bsns_year": int(row["bsns_year"])})
+            year = int(row["bsns_year"])
+            item = by_year.setdefault(year, {"bsns_year": year})
             item[metric_output_key(row["metric_key"])] = row["amount"]
+            if has_persisted_provenance:
+                citations_by_year.setdefault(year, set()).add((
+                    row.get("citation_rcept_no"),
+                    row.get("citation_report_nm"),
+                    row.get("citation_basis"),
+                ))
+
+    if has_persisted_provenance:
+        for year, item in by_year.items():
+            citations = citations_by_year.get(year, set())
+            if len(citations) == 1:
+                receipt, report_nm, basis = next(iter(citations))
+            else:
+                receipt = report_nm = basis = None
+            if receipt and basis == "company_year_annual_filing_match":
+                item["source"] = {
+                    "corp_code": company,
+                    "report_nm": report_nm,
+                    "bsns_year": year,
+                    "rcept_no": receipt,
+                    "section_title": "재무제표",
+                    "source_table": "financial_facts_compact",
+                    "citation_basis": basis,
+                }
+            else:
+                item["source"] = {
+                    "corp_code": company,
+                    "report_nm": "DART 연간 재무 데이터",
+                    "bsns_year": year,
+                    "rcept_no": None,
+                    "section_title": "재무제표",
+                    "source_table": "financial_facts_compact",
+                    "citation_basis": basis or "uncitable",
+                    "provenance_status": (
+                        "compact_citation_unproven_or_conflicting"
+                    ),
+                    "provenance_gap": (
+                        f"{year}년 compact 재무값의 일관된 저장 접수번호를 "
+                        "확인하지 못했습니다."
+                    ),
+                }
     return [by_year[year] for year in sorted(by_year)]
 
 

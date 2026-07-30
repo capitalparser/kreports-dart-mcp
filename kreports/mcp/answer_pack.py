@@ -407,7 +407,23 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
 def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
     subject = _subject_label(result)
     pack = _base_pack(f"{subject} DCF 입력 후보", result)
-    actuals = list(result.get("historical_actuals") or [])
+    actuals: list[dict[str, Any]] = []
+    for raw_actual in result.get("historical_actuals") or []:
+        if not isinstance(raw_actual, dict):
+            continue
+        actual = dict(raw_actual)
+        source = actual.get("source")
+        reference = (
+            evidence_reference_fields(source)
+            if isinstance(source, dict)
+            else None
+        )
+        actual["source"] = (
+            reference.get("rcept_no")
+            if reference and reference.get("rcept_no")
+            else "사업보고서 접수번호 미확보"
+        )
+        actuals.append(actual)
     if actuals:
         pack["tables"].append(_table(
             "historical_actuals",
@@ -419,6 +435,7 @@ def _build_dcf_pack(result: dict[str, Any]) -> dict[str, Any]:
                 ("net_income", "순이익(원)", "KRW"),
                 ("operating_cf", "영업현금흐름(원)", "KRW"),
                 ("purchase_ppe", "유형자산 취득(원)", "KRW"),
+                ("source", "출처 접수번호"),
             ],
             actuals,
         ))

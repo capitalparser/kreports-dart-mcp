@@ -1,9 +1,48 @@
 from datetime import date
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 
 from kreports.db.models import Company, Disclosure
+
+
+def _seed_citable_compact_years(
+    years: list[int],
+    *,
+    metric_amounts: dict[str, int],
+) -> dict[int, str]:
+    from kreports.db.engine import get_session
+
+    receipts = {
+        year: f"{year + 1}0318000001"
+        for year in years
+    }
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        for year in years:
+            for metric_key, base_amount in metric_amounts.items():
+                session.execute(text("""
+                    INSERT INTO financial_facts_compact
+                    (corp_code, bsns_year, fs_div, metric_key, metric_name,
+                     amount, source_table, unit, period_type,
+                     citation_rcept_no, citation_report_nm, citation_basis,
+                     quality_status, fetched_at)
+                    VALUES
+                    (:corp_code, :bsns_year, 'CFS', :metric_key, :metric_key,
+                     :amount, 'financial_facts', 'KRW', 'duration',
+                     :citation_rcept_no, :citation_report_nm,
+                     'company_year_annual_filing_match', 'usable',
+                     CURRENT_TIMESTAMP)
+                """), {
+                    "corp_code": "00126380",
+                    "bsns_year": year,
+                    "metric_key": metric_key,
+                    "amount": base_amount + (year - years[0]) * 10,
+                    "citation_rcept_no": receipts[year],
+                    "citation_report_nm": f"사업보고서 ({year}.12)",
+                })
+        session.commit()
+    return receipts
 
 
 def test_compact_citation_anchors_are_bounded_and_keep_latest_valid_parent_receipt(
@@ -621,3 +660,84 @@ def test_dispatch_pack_does_not_default_unproven_amount_unit_to_억원(
     assert [
         source["rcept_no"] for source in result["answer_pack"]["sources"]
     ] == ["20250318000001"]
+
+
+def test_three_year_snapshot_keeps_each_persisted_receipt_in_envelope_and_pack(
+    temp_engine,
+):
+    """Reducing a three-year snapshot to the latest receipt is a public evidence bug."""
+    from kreports.mcp.dispatch import dispatch_tool
+
+    expected = _seed_citable_compact_years(
+        [2022, 2023, 2024],
+        metric_amounts={"revenue": 100_000_000},
+    )
+
+    result = dispatch_tool(
+        "get_financial_snapshot",
+        {"company": "00126380", "years": 3},
+    ).model_dump(mode="json")
+
+    assert {
+        evidence["rcept_no"] for evidence in result["evidence"]
+    } == set(expected.values())
+    pack = result["answer_pack"]
+    assert {
+        source["rcept_no"] for source in pack["sources"]
+    } == set(expected.values())
+    trend = next(
+        table for table in pack["tables"]
+        if table["id"] == "financial_trend"
+    )
+    assert {
+        row["year"]: row["source"] for row in trend["rows"]
+    } == expected
+
+
+def test_five_year_dcf_actuals_keep_persisted_receipt_per_year_in_public_outputs(
+    temp_engine,
+):
+    """DCF actuals must not collapse five annual sources to one latest filing."""
+    from kreports.mcp.dispatch import dispatch_tool
+
+    expected = _seed_citable_compact_years(
+        [2020, 2021, 2022, 2023, 2024],
+        metric_amounts={
+            "revenue": 1_000,
+            "operating_profit": 100,
+            "profit_loss": 80,
+            "operating_cash_flow": 120,
+            "tax_expense": 20,
+            "purchase_ppe": 30,
+            "purchase_intangible_assets": 5,
+        },
+    )
+
+    result = dispatch_tool(
+        "get_dcf_input_candidates",
+        {
+            "company": "00126380",
+            "start_year": 2020,
+            "end_year": 2024,
+            "fs_div": "CFS",
+        },
+    ).model_dump(mode="json")
+
+    assert {
+        evidence["rcept_no"] for evidence in result["evidence"]
+    } == set(expected.values())
+    pack = result["answer_pack"]
+    assert {
+        source["rcept_no"] for source in pack["sources"]
+    } == set(expected.values())
+    actuals = next(
+        table for table in pack["tables"]
+        if table["id"] == "historical_actuals"
+    )
+    assert {
+        row["year"]: row["source"] for row in actuals["rows"]
+    } == expected
+    assert any(
+        column["field"] == "source"
+        for column in actuals["columns"]
+    )

@@ -11,7 +11,10 @@ import kreports.db.engine as _engine_module
 from kreports.db.engine import get_session
 from kreports.db.models import Disclosure
 from kreports.analysis import queries as _queries
-from kreports.analysis.filing_provenance import annual_filing_source
+from kreports.analysis.filing_provenance import (
+    annual_filing_source,
+    annual_filing_sources,
+)
 from kreports.analysis.investor_peer_evidence import evaluate_investor_check
 
 from kreports.analysis._shared import _as_float, _avg, _clean_dict, _dedupe_confirmed_facts, _df_to_records, _has_db_table, _pct, _ratio
@@ -113,6 +116,35 @@ def _downgrade_unproven_financial_data_quality(result: dict, source: dict) -> di
     }
 
 
+def _downgrade_unproven_financial_sources(
+    result: dict,
+    sources: list[dict],
+) -> dict:
+    """Downgrade a multi-year result when any requested year is uncitable."""
+    data_quality = result.get("data_quality")
+    if not isinstance(data_quality, dict) or data_quality.get("status") != "usable":
+        return {}
+    gaps = [
+        source.get("provenance_gap") or (
+            f"{source.get('bsns_year')}년 구조화 재무 데이터의 "
+            "사업보고서 접수번호를 확인하지 못했습니다."
+        )
+        for source in sources
+        if not source.get("rcept_no")
+    ]
+    if not gaps:
+        return {}
+    limitations = list(data_quality.get("limitations") or [])
+    limitations.extend(gap for gap in gaps if gap not in limitations)
+    return {
+        "data_quality": {
+            **data_quality,
+            "status": "limited",
+            "limitations": limitations,
+        },
+    }
+
+
 def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: str) -> dict:
     """Build confirmed facts and next checks for investor financial tools."""
     corp_code = str(result.get("company") or (subject or {}).get("corp_code") or "")
@@ -125,6 +157,7 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
         source_table="financial_facts_compact",
         fs_div=result.get("fs_div"),
     )
+    evidence_sources = [source]
     facts: list[dict] = []
     analysis: list[dict] = []
     next_checks: list[str] = []
@@ -161,6 +194,46 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
     elif mode == "dcf":
         assumptions = result.get("candidate_assumptions") or {}
         actuals = result.get("historical_actuals") or []
+        missing_source_years = [
+            int(actual["year"])
+            for actual in actuals
+            if actual.get("year") is not None
+            and not isinstance(actual.get("source"), dict)
+        ]
+        legacy_sources = annual_filing_sources(
+            corp_code,
+            missing_source_years,
+            source_table="financial_facts_compact",
+            fs_div=result.get("fs_div"),
+        )
+        evidence_sources = []
+        for actual in actuals:
+            year = (
+                int(actual["year"])
+                if actual.get("year") is not None
+                else None
+            )
+            actual_source = (
+                dict(actual["source"])
+                if isinstance(actual.get("source"), dict)
+                else dict(legacy_sources[year])
+                if year in legacy_sources
+                else _uncitable_annual_source(
+                    corp_code,
+                    subject,
+                    year,
+                    "재무제표",
+                    "financial_facts_compact",
+                )
+            )
+            actual_source.setdefault(
+                "corp_name",
+                (subject or {}).get("corp_name") or corp_code,
+            )
+            actual["source"] = actual_source
+            evidence_sources.append(actual_source)
+        if evidence_sources:
+            source = evidence_sources[-1]
         facts.append({
             "statement": (
                 f"{start_year}~{end_year}년 과거 실적에서 DCF 입력 후보가 산출되었습니다. "
@@ -168,6 +241,7 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
                 f"영업이익률 후보는 {((assumptions.get('operating_margin') or {}).get('value'))}입니다."
             ),
             "source": source,
+            "sources": [dict(item) for item in evidence_sources],
             "excerpt": f"historical_actuals={len(actuals)}개년, basis=historical_median",
         })
         analysis.append({
@@ -183,7 +257,14 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
         "confirmed_facts": _dedupe_confirmed_facts(facts),
         "analysis": analysis,
         "next_checks": next_checks,
-        **_downgrade_unproven_financial_data_quality(result, source),
+        **(
+            _downgrade_unproven_financial_sources(
+                result,
+                evidence_sources,
+            )
+            if mode == "dcf"
+            else _downgrade_unproven_financial_data_quality(result, source)
+        ),
     }
 
 
