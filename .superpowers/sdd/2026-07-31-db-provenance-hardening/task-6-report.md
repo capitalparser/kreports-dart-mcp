@@ -21,6 +21,8 @@ Review fix RED evidence:
 - whitespace-padded raw receipt: `1 failed`, incorrectly admitted as `usable`
 - two proven years plus one unproven year: `1 failed`, the limited answer pack
   omitted both valid annual filing links from top-level `sources`
+- a 100,014-character rejected SQLite receipt: `1 failed`, the complete raw
+  value leaked through `raw_citation_rcept_nos`
 
 ## GREEN
 
@@ -47,6 +49,10 @@ Review fix RED evidence:
 - A limited QoE result keeps up to 20 deduplicated source links only when a
   `financial_sources` receipt exactly matches a proven annual observation.
   Unproven years never enter top-level sources.
+- Rejected receipt diagnostics are capped at eight entries. Each value longer
+  than 80 characters is represented by a 32-character prefix, original length,
+  SHA-256, and explicit `truncated=true`; the raw value is absent from domain
+  and MCP payloads.
 - Added literal isolated-DB tests for wrong-company/year receipt rejection,
   fully proven three-year evidence, and conflicting compact duplicates.
 
@@ -54,7 +60,7 @@ Review fix RED evidence:
 
 `UV_CACHE_DIR=/tmp/kreports-qoe-provenance-uv-cache uv run --extra dev python -m pytest tests/test_qoe_multiyear_provenance.py tests/test_investor_quality.py tests/test_api_evidence_packs.py tests/test_mcp_contracts.py tests/test_mcp_answer_pack.py tests/test_dcf_readiness_surface.py tests/test_professional_mcp_contract.py -q`
 
-- `140 passed`
+- `141 passed`
 
 `uv run ruff check kreports/analysis/investor_quality.py kreports/analysis/financial_analysis.py kreports/mcp/answer_pack.py tests/test_qoe_multiyear_provenance.py tests/test_investor_quality.py tests/test_api_evidence_packs.py`
 
@@ -71,3 +77,5 @@ Review fix RED evidence:
 `ba15970b0d894968c993ce5ef54baaeab8ab4722` — `Fix QoE provenance admission gaps`
 
 `d967a21983fb2bb7281263903c3264fab312d23e` — `Close final QoE source boundaries`
+
+`2a76480cab8a20c8782add7f888ab95a775b7c19` — `Bound rejected QoE receipt diagnostics`
