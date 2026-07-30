@@ -632,12 +632,6 @@ def migration_state() -> dict[str, object]:
     required_columns = {
         table: set(columns) for table, columns in REQUIRED_COLUMN_SPECS.items()
     }
-    required_columns["audit_fees"] = {
-        "contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours",
-        "source_class", "source_rcept_no", "source_period",
-        "availability_status", "quality_status", "compatibility_basis",
-        "conflict_status", "source_observations_json",
-    }
     connection = _open_readonly_database()
     try:
         tables = {str(row["name"]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}

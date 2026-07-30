@@ -5,6 +5,7 @@ import re
 from sqlalchemy import text
 
 import kreports.db.engine as _engine_module
+from kreports.analysis.filing_provenance import valid_annual_filing_receipt
 
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
 DEFAULT_YEARS_BACK = 5
@@ -67,6 +68,109 @@ def _evidence_kam_body(normalized_text: str | None) -> str:
 
 def _contains_any(text_value: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in text_value for pattern in patterns)
+
+
+def _policy_change_readiness_coverage(
+    conn,
+    *,
+    params: dict[str, object],
+    market_filter: str,
+    has_note_chapters: bool,
+) -> dict[str, int]:
+    """Count only comparable chapter pairs proven to the latest annual filing."""
+    empty = {
+        "policy_change_chapters": 0,
+        "policy_change_companies": 0,
+        "policy_change_comparable_companies": 0,
+        "policy_change_excluded_unproven": 0,
+        "policy_change_excluded_not_comparable": 0,
+    }
+    if not has_note_chapters:
+        return empty
+    notes = conn.execute(
+        text(
+            "SELECT anc.corp_code, anc.bsns_year, anc.fs_div, anc.rcept_no, "
+            "anc.note_no, anc.section_type "
+            "FROM accounting_note_chapters anc "
+            "JOIN companies c ON c.corp_code=anc.corp_code "
+            "WHERE anc.bsns_year<=:year "
+            "AND anc.note_no IN ('2', '3', '4') "
+            "AND anc.section_type IN ('basis', 'policy', 'estimate_judgment')"
+            + market_filter
+        ),
+        params,
+    ).mappings().all()
+    if not notes:
+        return empty
+    disclosures = conn.execute(
+        text(
+            "SELECT d.corp_code, d.rcept_no, d.disc_date, d.report_nm "
+            "FROM disclosures d JOIN companies c ON c.corp_code=d.corp_code "
+            "WHERE d.report_nm LIKE '%사업보고서 (%'" + market_filter
+        ),
+        params,
+    ).mappings().all()
+    latest: dict[tuple[str, int], str] = {}
+    requested_scopes = {
+        (str(row["corp_code"]), int(row["bsns_year"])) for row in notes
+    }
+    annual_by_scope: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    for disclosure in disclosures:
+        corp_code = str(disclosure["corp_code"])
+        report_name = str(disclosure.get("report_nm") or "")
+        raw_receipt = str(disclosure.get("rcept_no") or "").strip()
+        disclosure_date = str(disclosure.get("disc_date") or "")[:10].replace("-", "")
+        for scope in requested_scopes:
+            if scope[0] != corp_code or f"사업보고서 ({scope[1]}." not in report_name:
+                continue
+            receipt = valid_annual_filing_receipt(raw_receipt, scope[1])
+            if receipt is None or receipt != raw_receipt or receipt[:8] != disclosure_date:
+                continue
+            annual_by_scope.setdefault(scope, []).append((disclosure_date, receipt))
+    for scope, sources in annual_by_scope.items():
+        latest[scope] = max(sources)[1]
+
+    proven_years_by_key: dict[tuple[str, str, str, str], set[int]] = {}
+    proven_rows: list[tuple[str, str, str, str, int]] = []
+    unproven = 0
+    current_year_chapters = 0
+    for row in notes:
+        corp_code = str(row["corp_code"])
+        bsns_year = int(row["bsns_year"])
+        raw_receipt = str(row.get("rcept_no") or "").strip()
+        receipt = valid_annual_filing_receipt(raw_receipt, bsns_year)
+        if (
+            receipt is None
+            or receipt != raw_receipt
+            or latest.get((corp_code, bsns_year)) != receipt
+        ):
+            unproven += 1
+            continue
+        if bsns_year == int(params["year"]):
+            current_year_chapters += 1
+        key = (
+            corp_code,
+            str(row["fs_div"]),
+            str(row["note_no"]),
+            str(row["section_type"]),
+        )
+        proven_years_by_key.setdefault(key, set()).add(bsns_year)
+        proven_rows.append((*key, bsns_year))
+    comparable_keys = {
+        key for key, years in proven_years_by_key.items() if len(years) >= 2
+    }
+    comparable_companies = {key[0] for key in comparable_keys}
+    not_comparable = sum(
+        (corp_code, fs_div, note_no, section_type) not in comparable_keys
+        for corp_code, fs_div, note_no, section_type, _year in proven_rows
+    )
+    return {
+        "policy_change_chapters": current_year_chapters,
+        "policy_change_companies": len(comparable_companies),
+        "policy_change_comparable_companies": len(comparable_companies),
+        "policy_change_excluded_unproven": unproven,
+        "policy_change_excluded_not_comparable": not_comparable,
+    }
 
 
 def required_years(year: int = 2025, years_back: int = DEFAULT_YEARS_BACK) -> list[int]:
@@ -1095,29 +1199,11 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             if "accounting_note_chapters" in table_names
             else 0
         )
-        policy_change_chapters = (
-            scalar(
-                "SELECT COUNT(*) FROM accounting_note_chapters anc "
-                "JOIN companies c ON c.corp_code=anc.corp_code "
-                "WHERE anc.bsns_year=:year "
-                "AND anc.note_no IN ('2', '3', '4') "
-                "AND anc.section_type IN ('basis', 'policy', 'estimate_judgment')"
-                + market_filter
-            )
-            if "accounting_note_chapters" in table_names
-            else 0
-        )
-        policy_change_companies = (
-            scalar(
-                "SELECT COUNT(DISTINCT anc.corp_code) FROM accounting_note_chapters anc "
-                "JOIN companies c ON c.corp_code=anc.corp_code "
-                "WHERE anc.bsns_year=:year "
-                "AND anc.note_no IN ('2', '3', '4') "
-                "AND anc.section_type IN ('basis', 'policy', 'estimate_judgment')"
-                + market_filter
-            )
-            if "accounting_note_chapters" in table_names
-            else 0
+        policy_change_coverage = _policy_change_readiness_coverage(
+            conn,
+            params=params,
+            market_filter=market_filter,
+            has_note_chapters="accounting_note_chapters" in table_names,
         )
         policy_items = (
             scalar(
@@ -1168,7 +1254,10 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         "kam_procedure_hints": "usable" if kam_procedure > 0 and pct(kam_procedure, kam_sections) >= FEATURE_COVERAGE_THRESHOLD else ("degraded" if kam_procedure > 0 else "missing"),
         "audit_report_matters": "usable" if matter_sections > 0 else "missing",
         "accounting_notes": coverage_status(note_chapter_companies, listed),
-        "accounting_policy_changes": coverage_status(policy_change_companies, listed),
+        "accounting_policy_changes": coverage_status(
+            policy_change_coverage["policy_change_comparable_companies"],
+            listed,
+        ),
         "accounting_policy_items": coverage_status(policy_item_companies, listed),
         "audit_procedure_items": coverage_status(procedure_item_companies, listed),
     }
@@ -1197,8 +1286,11 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "audit_report_matters": matter_sections,
             "accounting_note_chapters": note_chapters,
             "accounting_note_chapter_companies": note_chapter_companies,
-            "accounting_policy_change_chapters": policy_change_chapters,
-            "accounting_policy_change_companies": policy_change_companies,
+            "accounting_policy_change_chapters": policy_change_coverage["policy_change_chapters"],
+            "accounting_policy_change_companies": policy_change_coverage["policy_change_companies"],
+            "policy_change_comparable_companies": policy_change_coverage["policy_change_comparable_companies"],
+            "policy_change_excluded_unproven": policy_change_coverage["policy_change_excluded_unproven"],
+            "policy_change_excluded_not_comparable": policy_change_coverage["policy_change_excluded_not_comparable"],
             "accounting_policy_items": policy_items,
             "accounting_policy_item_companies": policy_item_companies,
             "audit_procedure_items": procedure_items,
@@ -1210,7 +1302,10 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "raw_audit_company_coverage": pct(raw_audit_companies, listed),
             "kam_company_coverage": pct(kam_companies, listed),
             "accounting_note_company_coverage": pct(note_chapter_companies, listed),
-            "accounting_policy_change_company_coverage": pct(policy_change_companies, listed),
+            "accounting_policy_change_company_coverage": pct(
+                policy_change_coverage["policy_change_comparable_companies"],
+                listed,
+            ),
             "accounting_policy_company_coverage": pct(policy_item_companies, listed),
             "audit_procedure_company_coverage": pct(procedure_item_companies, listed),
             "kam_reason_to_kam": pct(kam_reason, kam_sections),

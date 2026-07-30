@@ -1,3 +1,5 @@
+from datetime import date
+
 from kreports.analysis.readiness import (
     audit_kam_quality_snapshot,
     auditor_readiness_snapshot,
@@ -12,6 +14,7 @@ from kreports.db.models import (
     AccountingPolicyItem,
     AuditProcedureItem,
     Company,
+    Disclosure,
     EvidenceDocument,
     ReportSection,
     SourceDocument,
@@ -372,6 +375,17 @@ def test_auditor_feature_readiness_snapshot_counts_feature_layers(temp_engine):
                 ),
                 AccountingNoteChapter(
                     corp_code="00126380",
+                    bsns_year=2024,
+                    fs_div="CFS",
+                    rcept_no="20250301000001",
+                    source_type="business_report",
+                    note_no="2",
+                    note_title="재무제표 작성기준",
+                    section_type="basis",
+                    body="한국채택국제회계기준에 따라 작성되었습니다.",
+                ),
+                AccountingNoteChapter(
+                    corp_code="00126380",
                     bsns_year=2025,
                     fs_div="CFS",
                     rcept_no="20260301000001",
@@ -380,6 +394,22 @@ def test_auditor_feature_readiness_snapshot_counts_feature_layers(temp_engine):
                     note_title="재무제표 작성기준",
                     section_type="basis",
                     body="한국채택국제회계기준에 따라 작성되었습니다.",
+                ),
+                Disclosure(
+                    rcept_no="20250301000001",
+                    corp_code="00126380",
+                    corp_name="감사준비회사",
+                    disc_date=date(2025, 3, 1),
+                    disc_type="A",
+                    report_nm="사업보고서 (2024.12)",
+                ),
+                Disclosure(
+                    rcept_no="20260301000001",
+                    corp_code="00126380",
+                    corp_name="감사준비회사",
+                    disc_date=date(2026, 3, 1),
+                    disc_type="A",
+                    report_nm="사업보고서 (2025.12)",
                 ),
                 AccountingPolicyItem(
                     corp_code="00126380",

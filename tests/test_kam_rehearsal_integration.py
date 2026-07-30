@@ -378,9 +378,7 @@ def test_file_backed_db_evidence_rehearsal_reaches_revision_11(
                 "SELECT revision FROM schema_migrations ORDER BY rowid"
             )
         ]
-    assert clone_revisions[-1] == (
-        "20260711_11_company_year_quality_freshness"
-    )
+    assert clone_revisions[-1] == MIGRATIONS[-1].revision
     assert clone_revisions == [migration.revision for migration in MIGRATIONS]
 
 

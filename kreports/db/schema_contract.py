@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 
 
 REQUIRED_TABLES = (
@@ -27,6 +28,12 @@ REQUIRED_TABLES = (
 )
 
 REQUIRED_COLUMN_SPECS = {
+    "audit_fees": (
+        "contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours",
+        "source_class", "source_rcept_no", "source_period",
+        "availability_status", "quality_status", "compatibility_basis",
+        "conflict_status", "source_observations_json",
+    ),
     "financial_facts_compact": (
         "corp_code", "bsns_year", "fs_div", "metric_key", "amount",
         "source_account_id", "source_table", "unit", "period_type",
@@ -51,7 +58,9 @@ REQUIRED_COLUMN_SPECS = {
     "accounting_note_chapters": (
         "id", "corp_code", "bsns_year", "fs_div", "rcept_no", "dcm_no",
         "source_type", "note_no", "note_title", "section_type", "body",
-        "body_hash", "body_length", "fetched_at",
+        "body_hash", "body_length", "full_text_uri", "full_text_hash",
+        "full_text_length", "full_text_compressed_length",
+        "full_text_storage_status", "fetched_at",
     ),
 }
 
@@ -92,6 +101,9 @@ REQUIRED_INDEX_SPECS = {
     "idx_note_chapter_section_type": (
         "accounting_note_chapters", ("section_type",), False, None
     ),
+    "idx_note_chapter_full_text_uri": (
+        "accounting_note_chapters", ("full_text_uri",), False, None
+    ),
 }
 REQUIRED_INDEXES = tuple(REQUIRED_INDEX_SPECS)
 
@@ -101,6 +113,13 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
         str(row["name"])
         for row in connection.execute(f'PRAGMA table_info("{table}")')
     }
+
+
+def _normalized_partial_predicate(sql: str) -> str | None:
+    match = re.search(r"\bwhere\b\s*(.+)$", sql, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return "where " + " ".join(match.group(1).lower().split())
 
 
 def index_contract_blockers(
@@ -128,12 +147,11 @@ def index_contract_blockers(
         sql_row = connection.execute(
             "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (name,)
         ).fetchone()
-        sql = " ".join(str(sql_row[0] or "").lower().split()) if sql_row else ""
+        predicate = _normalized_partial_predicate(str(sql_row[0] or "")) if sql_row else None
         if (
             actual_columns != columns
             or bool(row["unique"]) is not unique
-            or (where is not None and where not in sql)
-            or (where is None and " where " in f" {sql} ")
+            or predicate != where
         ):
             blockers.append(f"invalid_required_index:{name}")
     return blockers

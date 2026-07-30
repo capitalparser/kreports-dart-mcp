@@ -4,12 +4,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import logging
+import time
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 
 
 _logger = logging.getLogger(__name__)
+_SQLITE_BUSY_TIMEOUT_MS = 5_000
+_SQLITE_WAL_RETRY_ATTEMPTS = 5
+_SQLITE_WAL_RETRY_SECONDS = 0.05
+_SQLITE_MIGRATION_LOCK_TOKEN = "kreports_sqlite_migration_lock_token"
 
 
 class SchemaDriftError(RuntimeError):
@@ -511,6 +517,36 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260731_13_accounting_note_chapter_storage_contract",
+        description="Complete accounting note chapter storage schema",
+        statements=(
+            """
+            ALTER TABLE accounting_note_chapters
+            ADD COLUMN full_text_uri VARCHAR(500)
+            """,
+            """
+            ALTER TABLE accounting_note_chapters
+            ADD COLUMN full_text_hash VARCHAR(40)
+            """,
+            """
+            ALTER TABLE accounting_note_chapters
+            ADD COLUMN full_text_length INTEGER
+            """,
+            """
+            ALTER TABLE accounting_note_chapters
+            ADD COLUMN full_text_compressed_length INTEGER
+            """,
+            """
+            ALTER TABLE accounting_note_chapters
+            ADD COLUMN full_text_storage_status VARCHAR(30)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_note_chapter_full_text_uri
+            ON accounting_note_chapters (full_text_uri)
+            """,
+        ),
+    ),
 )
 
 
@@ -533,8 +569,54 @@ def _recorded_checksum(connection: Connection, revision: str) -> str | None:
     ).scalar_one_or_none()
 
 
+def _sqlite_main_database_is_file_backed(connection: Connection) -> bool:
+    return any(
+        str(row[1]) == "main" and bool(str(row[2] or ""))
+        for row in connection.exec_driver_sql("PRAGMA database_list")
+    )
+
+
+def _is_locked_error(error: OperationalError) -> bool:
+    return "locked" in str(error).lower() or "busy" in str(error).lower()
+
+
+def _configure_sqlite_migration_connection(connection: Connection) -> None:
+    """Set bounded lock policy and preserve WAL before schema serialization."""
+    connection.exec_driver_sql(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+    if not _sqlite_main_database_is_file_backed(connection):
+        return
+    # The retained-clone rehearsal binds one authenticated connection to a
+    # per-connection MEMORY journal and independently verifies that invariant.
+    # Never override it with a persistent WAL sidecar during a clone rehearsal.
+    if str(connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()).lower() == "memory":
+        return
+    for attempt in range(_SQLITE_WAL_RETRY_ATTEMPTS):
+        try:
+            mode = str(connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()).lower()
+            verified = str(connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()).lower()
+            if mode != "wal" or verified != "wal":
+                raise SchemaDriftError("SQLite migration requires WAL journal mode")
+            return
+        except OperationalError as error:
+            if not _is_locked_error(error) or attempt + 1 == _SQLITE_WAL_RETRY_ATTEMPTS:
+                raise
+            time.sleep(_SQLITE_WAL_RETRY_SECONDS)
+
+
+def _begin_sqlite_migration_immediate(connection: Connection) -> None:
+    """Acquire the single SQLite DDL writer before inspecting migration state."""
+    transaction_token = connection.get_transaction()
+    if connection.info.get(_SQLITE_MIGRATION_LOCK_TOKEN) is transaction_token:
+        return
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    connection.info[_SQLITE_MIGRATION_LOCK_TOKEN] = transaction_token
+
+
 def apply_schema_migrations(connection: Connection) -> list[str]:
     """Apply pending revisions in order and return newly applied revisions."""
+    if connection.dialect.name == "sqlite":
+        _configure_sqlite_migration_connection(connection)
+        _begin_sqlite_migration_immediate(connection)
     applied: list[str] = []
     for migration in MIGRATIONS:
         transaction = (
