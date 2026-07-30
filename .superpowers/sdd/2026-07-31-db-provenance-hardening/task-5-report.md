@@ -32,6 +32,12 @@
     `accounting_policy_changes`, with unproven/non-comparable exclusions;
   - added literal two-connection repeated migration, exact-predicate,
     release/rehearsal parity, ORM-schema, and latest-receipt adversarial tests.
+- `4065db4 Require requested year for policy readiness`
+  - a historically comparable key now qualifies only when its proven years
+    include the requested readiness year;
+  - exposes `policy_change_excluded_missing_requested_year` so a proven old
+    pair with no current-year chapter is inspectable rather than silently
+    reported usable.
 
 ## Strict TDD
 
@@ -44,6 +50,8 @@ RED:
   drift, a `WHERE ... AND 0` partial index, incomplete migration-created note
   schema, concurrent SQLite `database is locked`, and one unproven current
   policy row being reported usable.
+- Final semantic RED: proven latest annual chapters for 2022 and 2023, with no
+  2025 chapter, produced `accounting_policy_changes=usable` for `year=2025`.
 
 GREEN:
 
@@ -54,6 +62,9 @@ GREEN:
 - Final focused suite spanning schema contract/review, migration, release,
   rehearsal, readiness, policy, accounting-note, and MCP contract/answer-pack
   tests passed; Ruff and `git diff --check` passed again.
+- Requested-year correction: readiness/policy adversarial suite `46 passed`;
+  related MCP contract/answer-pack surfaces `73 passed`; Ruff and diff check
+  passed.
 
 ## Migration/data risk
 
