@@ -256,3 +256,83 @@ def test_audit_hours_proxy_carries_child_receipts_into_public_pack(monkeypatch):
         table["rows"][0]["financial_source_rcept_no"]
         == "20250311001085"
     )
+
+
+def test_multi_year_financial_envelope_keeps_hidden_growth_input_receipt(
+    monkeypatch,
+):
+    """Catches an older growth input appearing only in the answer-pack table."""
+    from kreports.mcp.dispatch import dispatch_tool
+    from kreports.mcp.handlers import company as company_handler
+
+    monkeypatch.setattr(
+        company_handler,
+        "resolve_company",
+        lambda _company: "00126380",
+    )
+    receipts = {
+        2022: "20230307000542",
+        2023: "20240312000736",
+        2024: "20250311001085",
+        2025: "20260310002820",
+    }
+
+    def source(year):
+        return {
+            "rcept_no": receipts[year],
+            "bsns_year": year,
+            "section_title": "재무제표",
+        }
+
+    monkeypatch.setattr(
+        company_handler,
+        "get_financial_snapshot",
+        lambda *_args, **_kwargs: {
+            "corp_code": "00126380",
+            "fs_div": "CFS",
+            "unit": "억원",
+            "rows": [
+                {
+                    "연도": 2023,
+                    "매출액": 100,
+                    "매출성장률": 10,
+                    "source": source(2023),
+                    "derived_sources": {
+                        "매출성장률": [source(2022), source(2023)],
+                    },
+                },
+                {
+                    "연도": 2024,
+                    "매출액": 120,
+                    "매출성장률": 20,
+                    "source": source(2024),
+                    "derived_sources": {
+                        "매출성장률": [source(2023), source(2024)],
+                    },
+                },
+                {
+                    "연도": 2025,
+                    "매출액": 150,
+                    "매출성장률": 25,
+                    "source": source(2025),
+                    "derived_sources": {
+                        "매출성장률": [source(2024), source(2025)],
+                    },
+                },
+            ],
+            "row_count": 3,
+            "data_quality": {
+                "status": "usable",
+                "source": "financials",
+            },
+        },
+    )
+
+    result = dispatch_tool(
+        "get_financial_snapshot",
+        {"company": "005930", "years": 3},
+    ).model_dump(mode="json")
+
+    assert {
+        item["rcept_no"] for item in result["evidence"]
+    } == set(receipts.values())

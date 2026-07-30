@@ -174,6 +174,48 @@ def test_annual_filing_source_skips_invalid_newer_receipts_for_latest_valid_rece
     assert source["rcept_no"] == "20260301002820"
 
 
+def test_annual_filing_source_rejects_receipt_date_mismatched_to_disclosure(
+    temp_engine,
+):
+    """Catches a 14-digit synthetic receipt outranking the real annual filing."""
+    from kreports.analysis.filing_provenance import annual_filing_source
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.add_all([
+            Disclosure(
+                rcept_no="20250311001085",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2025, 3, 11),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12)",
+                flr_nm="삼성전자",
+            ),
+            Disclosure(
+                rcept_no="20998220384504",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2025, 3, 12),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12) [정정]",
+                flr_nm="삼성전자",
+            ),
+        ])
+        _add_compact_fact(session, "00126380", 2024)
+
+    source = annual_filing_source(
+        "00126380",
+        2024,
+        source_table="financial_facts_compact",
+        fs_div="CFS",
+    )
+
+    assert source is not None
+    assert source["rcept_no"] == "20250311001085"
+
+
 def test_annual_filing_sources_require_matching_fact_identity_and_basis(temp_engine):
     """Batch provenance cannot cite a filing without the requested fact basis."""
     from kreports.analysis.filing_provenance import annual_filing_sources
@@ -239,7 +281,7 @@ def test_annual_filing_sources_rank_each_year_without_duplicate_fact_starvation(
             ))
         for index in range(1, 65):
             session.add(Disclosure(
-                rcept_no=f"2026{index:010d}",
+                rcept_no=f"20260320{index:06d}",
                 corp_code="00126380",
                 corp_name="삼성전자",
                 disc_date=date(2026, 3, 20),
@@ -256,6 +298,6 @@ def test_annual_filing_sources_rank_each_year_without_duplicate_fact_starvation(
     )
 
     assert list(sources) == [2025, 2024, 2023]
-    assert sources[2025]["rcept_no"] == "20260000000064"
+    assert sources[2025]["rcept_no"] == "20260320000064"
     assert sources[2024]["rcept_no"] == "20250301000001"
     assert sources[2023]["rcept_no"] == "20240301000001"

@@ -14,6 +14,7 @@ from kreports.analysis import queries as _queries
 from kreports.analysis.filing_provenance import (
     annual_filing_source,
     annual_filing_sources,
+    valid_annual_filing_receipt,
 )
 from kreports.analysis.investor_peer_evidence import evaluate_investor_check
 
@@ -481,11 +482,19 @@ def _financial_snapshot_from_compact(
 
     def proven_metric_source(year: int, metric: str) -> dict | None:
         provenance = metric_provenance.get(year, {}).get(metric)
+        receipt = (
+            valid_annual_filing_receipt(
+                provenance.get("citation_rcept_no"),
+                year,
+            )
+            if provenance
+            else None
+        )
         if (
             not provenance
             or provenance.get("unit") != "KRW"
             or provenance.get("quality_status") != "usable"
-            or not provenance.get("citation_rcept_no")
+            or not receipt
             or provenance.get("citation_basis")
             != "company_year_annual_filing_match"
         ):
@@ -495,7 +504,7 @@ def _financial_snapshot_from_compact(
             "corp_name": corp_name,
             "report_nm": provenance.get("citation_report_nm"),
             "bsns_year": year,
-            "rcept_no": provenance["citation_rcept_no"],
+            "rcept_no": receipt,
             "section_title": "재무제표",
             "source_table": "financial_facts_compact",
             "citation_basis": provenance["citation_basis"],
@@ -559,13 +568,20 @@ def _financial_snapshot_from_compact(
                 receipt, report_nm, basis = next(iter(sources))
             else:
                 receipt = report_nm = basis = None
-            if receipt and basis == "company_year_annual_filing_match":
+            canonical_receipt = valid_annual_filing_receipt(
+                receipt,
+                year,
+            )
+            if (
+                canonical_receipt
+                and basis == "company_year_annual_filing_match"
+            ):
                 item["source"] = {
                     "corp_code": corp_code,
                     "corp_name": corp_name,
                     "report_nm": report_nm,
                     "bsns_year": year,
-                    "rcept_no": receipt,
+                    "rcept_no": canonical_receipt,
                     "section_title": "재무제표",
                     "source_table": "financial_facts_compact",
                     "citation_basis": basis,
@@ -649,40 +665,61 @@ def _attach_annual_sources(result: dict, *, source_table: str) -> dict:
     if not rows or not corp_code:
         return result
     years = sorted({int(row["연도"]) for row in rows if row.get("연도") is not None})
-    sources: dict[int, dict] = {}
-    if years:
-        with _engine_module.engine.connect() as conn:
-            disclosures = conn.execute(text("""
-                SELECT rcept_no, corp_name, report_nm
-                FROM disclosures
-                WHERE corp_code=:corp_code
-                  AND (""" + " OR ".join(
-                    f"report_nm LIKE :year_{index}" for index, _ in enumerate(years)
-                ) + ") ORDER BY disc_date DESC, rcept_no DESC"), {
-                    "corp_code": corp_code,
-                    **{f"year_{index}": f"%사업보고서 ({year}.%" for index, year in enumerate(years)},
-                }).mappings().all()
-        for year in years:
-            row = next((item for item in disclosures if f"사업보고서 ({year}." in str(item.get("report_nm") or "")), None)
-            if row:
-                sources[year] = {
-                    "corp_code": corp_code, "corp_name": row.get("corp_name") or corp_code,
-                    "report_nm": row.get("report_nm"), "bsns_year": year,
-                    "rcept_no": row.get("rcept_no"), "section_title": "재무제표",
-                    "source_table": source_table,
-                }
+    growth_input_years = {
+        int(row["연도"]) - 1
+        for row in rows
+        if row.get("연도") is not None
+        and row.get("매출성장률") is not None
+    }
+    sources = annual_filing_sources(
+        str(corp_code),
+        sorted(set(years) | growth_input_years),
+        source_table=source_table,
+        fs_div=str(result.get("fs_div") or "") or None,
+    )
+    growth_source_gap = False
     for row in rows:
         year = int(row["연도"]) if row.get("연도") is not None else None
         row["source"] = sources.get(year) or _uncitable_annual_source(
             str(corp_code), None, year, "재무제표", source_table,
         )
-    if any(not row["source"].get("rcept_no") for row in rows):
+        if year is None or row.get("매출성장률") is None:
+            continue
+        growth_sources = [sources.get(year - 1), sources.get(year)]
+        if all(isinstance(source, dict) for source in growth_sources):
+            row["derived_sources"] = {
+                "매출성장률": [
+                    dict(source)
+                    for source in growth_sources
+                    if isinstance(source, dict)
+                ],
+            }
+        else:
+            row["매출성장률"] = None
+            row.pop("derived_sources", None)
+            growth_source_gap = True
+    if (
+        any(not row["source"].get("rcept_no") for row in rows)
+        or growth_source_gap
+    ):
         quality = dict(result.get("data_quality") or {})
         if quality.get("status") == "usable":
             quality["status"] = "limited"
-            quality["limitations"] = list(quality.get("limitations") or []) + [
-                "일부 연도는 동일 사업연도 사업보고서 접수번호를 로컬 캐시에서 확인하지 못했습니다."
-            ]
+            limitations = list(quality.get("limitations") or [])
+            if any(
+                not row["source"].get("rcept_no")
+                for row in rows
+            ):
+                limitations.append(
+                    "일부 연도는 동일 사업연도 사업보고서 접수번호를 "
+                    "로컬 캐시에서 확인하지 못했습니다."
+                )
+            if growth_source_gap:
+                limitations.append(
+                    "전기와 당기의 사업보고서 접수번호를 모두 확인하지 못한 "
+                    "매출성장률은 표시하지 않았습니다."
+                )
+            quality["limitations"] = list(dict.fromkeys(limitations))
             result["data_quality"] = quality
     return result
 

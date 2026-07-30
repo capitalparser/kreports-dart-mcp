@@ -38,11 +38,20 @@ def handle_get_financial_snapshot(args: GetFinancialSnapshotInput) -> dict:
     latest = max(rows, key=lambda row: int(row.get("연도") or 0), default={})
     latest_year = int(latest["연도"]) if latest.get("연도") is not None else None
     if rows:
-        annual_sources = [
-            dict(row["source"])
-            for row in rows
-            if isinstance(row.get("source"), dict)
-        ]
+        annual_sources: list[dict] = []
+        for row in rows:
+            if isinstance(row.get("source"), dict):
+                annual_sources.append(dict(row["source"]))
+            derived = row.get("derived_sources")
+            if not isinstance(derived, dict):
+                continue
+            for source in derived.get("매출성장률") or []:
+                if isinstance(source, dict):
+                    annual_sources.append(dict(source))
+        annual_sources = list({
+            str(source.get("rcept_no") or source): source
+            for source in annual_sources
+        }.values())
         confirmed_facts = [{
             "statement": (
                 f"{latest_year}년까지 {result.get('fs_div')} 기준 "

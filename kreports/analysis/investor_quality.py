@@ -6,6 +6,7 @@ from statistics import pstdev
 from sqlalchemy import bindparam, text
 
 from kreports.analysis.evidence import dart_filing_url, parent_rcept_no
+from kreports.analysis.filing_provenance import valid_annual_filing_receipt
 import kreports.db.engine as _engine_module
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS, metric_output_key
 
@@ -85,12 +86,19 @@ def _financial_series(
                 receipt, report_nm, basis = next(iter(citations))
             else:
                 receipt = report_nm = basis = None
-            if receipt and basis == "company_year_annual_filing_match":
+            canonical_receipt = valid_annual_filing_receipt(
+                receipt,
+                year,
+            )
+            if (
+                canonical_receipt
+                and basis == "company_year_annual_filing_match"
+            ):
                 item["source"] = {
                     "corp_code": company,
                     "report_nm": report_nm,
                     "bsns_year": year,
-                    "rcept_no": receipt,
+                    "rcept_no": canonical_receipt,
                     "section_title": "재무제표",
                     "source_table": "financial_facts_compact",
                     "citation_basis": basis,

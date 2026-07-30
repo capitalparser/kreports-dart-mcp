@@ -741,3 +741,78 @@ def test_five_year_dcf_actuals_keep_persisted_receipt_per_year_in_public_outputs
         column["field"] == "source"
         for column in actuals["columns"]
     )
+
+
+def test_legacy_financial_rows_use_valid_annual_sources_for_growth(temp_engine):
+    """Catches a malformed newer disclosure receipt contaminating legacy growth."""
+    from kreports.analysis.financial_analysis import _attach_annual_sources
+    from kreports.db.engine import get_session
+    from kreports.db.models import Financial
+
+    with get_session() as session:
+        session.add(Company(corp_code="00126380", corp_name="삼성전자"))
+        session.add_all([
+            Financial(
+                corp_code="00126380",
+                year=2023,
+                quarter=4,
+                fs_div="CFS",
+                revenue=100,
+            ),
+            Financial(
+                corp_code="00126380",
+                year=2024,
+                quarter=4,
+                fs_div="CFS",
+                revenue=150,
+            ),
+            Disclosure(
+                rcept_no="20240312000736",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2024, 3, 12),
+                disc_type="A",
+                report_nm="사업보고서 (2023.12)",
+                flr_nm="삼성전자",
+            ),
+            Disclosure(
+                rcept_no="20250311001085",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2025, 3, 11),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12)",
+                flr_nm="삼성전자",
+            ),
+            Disclosure(
+                rcept_no="20998220384504",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2025, 3, 12),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12) [정정]",
+                flr_nm="삼성전자",
+            ),
+        ])
+
+    result = _attach_annual_sources(
+        {
+            "corp_code": "00126380",
+            "fs_div": "CFS",
+            "rows": [
+                {"연도": 2023, "매출성장률": 10.0},
+                {"연도": 2024, "매출성장률": 50.0},
+            ],
+            "data_quality": {"status": "usable"},
+        },
+        source_table="financials",
+    )
+
+    assert [
+        row["source"]["rcept_no"] for row in result["rows"]
+    ] == ["20240312000736", "20250311001085"]
+    assert [
+        source["rcept_no"]
+        for source in result["rows"][1]["derived_sources"]["매출성장률"]
+    ] == ["20240312000736", "20250311001085"]
+    assert "20998220384504" not in str(result)

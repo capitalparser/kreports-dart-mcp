@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any, TypeAlias
 
 from sqlalchemy import text
@@ -23,6 +24,24 @@ CompactCitationScope: TypeAlias = tuple[str, int, str]
 
 _VALID_RECEIPT_GLOB = "*[0-9][0-9][0-9][0-9][0-9][0-9][0-9]" \
     "[0-9][0-9][0-9][0-9][0-9][0-9][0-9]*"
+
+
+def valid_annual_filing_receipt(
+    receipt: object,
+    bsns_year: object,
+) -> str | None:
+    """Return a canonical receipt only when its filing date is plausible."""
+    canonical = parent_rcept_no(str(receipt or ""))
+    if canonical is None or len(canonical) != 14 or not canonical.isdigit():
+        return None
+    try:
+        receipt_date = datetime.strptime(canonical[:8], "%Y%m%d").date()
+        normalized_year = int(bsns_year)
+    except (TypeError, ValueError):
+        return None
+    if not normalized_year <= receipt_date.year <= normalized_year + 10:
+        return None
+    return canonical
 
 
 def compact_citation_anchors(
@@ -89,6 +108,13 @@ def compact_citation_anchors(
                 WHERE d.report_nm LIKE
                       ('%사업보고서 (' || requested.bsns_year || '.%')
                   AND d.rcept_no GLOB '{_VALID_RECEIPT_GLOB}'
+                  AND LENGTH(d.rcept_no) >= 14
+                  AND SUBSTR(d.rcept_no, 1, 14) NOT GLOB '*[^0-9]*'
+                  AND SUBSTR(d.rcept_no, 1, 8) = REPLACE(
+                      SUBSTR(CAST(d.disc_date AS TEXT), 1, 10),
+                      '-',
+                      ''
+                  )
             )
             SELECT corp_code, bsns_year, fs_div, rcept_no, report_nm
             FROM ranked
@@ -98,7 +124,10 @@ def compact_citation_anchors(
             rows = conn.execute(query, params).mappings().all()
         for row in rows:
             scope = (str(row["corp_code"]), int(row["bsns_year"]), str(row["fs_div"]))
-            receipt = parent_rcept_no(row["rcept_no"])
+            receipt = valid_annual_filing_receipt(
+                row["rcept_no"],
+                scope[1],
+            )
             if receipt is None:
                 continue
             anchors[scope] = {
@@ -183,6 +212,13 @@ def annual_filing_sources(
             JOIN disclosures AS d ON d.corp_code=:corp_code
             WHERE ({" OR ".join(disclosure_year_clauses)})
               AND d.rcept_no GLOB '{valid_receipt_pattern}'
+              AND LENGTH(d.rcept_no) >= 14
+              AND SUBSTR(d.rcept_no, 1, 14) NOT GLOB '*[^0-9]*'
+              AND SUBSTR(d.rcept_no, 1, 8) = REPLACE(
+                  SUBSTR(CAST(d.disc_date AS TEXT), 1, 10),
+                  '-',
+                  ''
+              )
         )
         SELECT bsns_year, fs_div, rcept_no, corp_code, corp_name, report_nm
         FROM ranked_disclosures
@@ -194,8 +230,11 @@ def annual_filing_sources(
 
     sources: dict[int, dict[str, Any]] = {}
     for disclosure_row in disclosure_rows:
-        resolved_rcept_no = parent_rcept_no(disclosure_row.get("rcept_no"))
         normalized_year = int(disclosure_row["bsns_year"])
+        resolved_rcept_no = valid_annual_filing_receipt(
+            disclosure_row.get("rcept_no"),
+            normalized_year,
+        )
         if not resolved_rcept_no or normalized_year in sources:
             continue
         sources[normalized_year] = {
