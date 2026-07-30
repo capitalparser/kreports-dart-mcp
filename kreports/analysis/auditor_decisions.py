@@ -11,6 +11,7 @@ from kreports.analysis.audit_reporting import (
     attach_kam_item_semantics,
     classify_audit_matter,
     get_audit_history,
+    kam_section_confirmed_facts,
     kam_semantic_coverage,
 )
 from kreports.analysis.audit_reporting import (
@@ -436,6 +437,12 @@ def compare_peer_kam_topics(
     result["subject_sections"] = subject_sections
     result["data_quality"] = quality
     result["audit_report_sections"] = sections
+    result["confirmed_facts"] = kam_section_confirmed_facts(
+        subject,
+        subject_kam_sections,
+        statement_subject="대상 회사 감사보고서",
+        default_year=year,
+    )
     return result
 
 

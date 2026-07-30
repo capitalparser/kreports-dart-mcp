@@ -213,6 +213,13 @@ def test_kam_lifecycle_rows_without_semantic_coverage_stay_limited(monkeypatch):
             "has_procedure_hint": False,
             "rcept_no": "20260311000006",
             "body_excerpt": "감사인과 지배기구에 커뮤니케이션한 사항입니다.",
+        }, {
+            "year": 2025,
+            "topic": "unknown",
+            "has_reason_hint": False,
+            "has_procedure_hint": False,
+            "rcept_no": "20260311000007",
+            "body_excerpt": "동일 연도 별도 KAM 본문입니다.",
         }],
         "data_quality": {"status": "usable", "source": "report_sections.audit_report"},
     })
@@ -223,6 +230,75 @@ def test_kam_lifecycle_rows_without_semantic_coverage_stay_limited(monkeypatch):
     assert out["data_quality"]["timeline_status"] == "usable"
     assert out["data_quality"]["semantic_complete"] is False
     assert out["data_quality"]["topic_coverage"]["available"] == 0
+    assert out["confirmed_facts"] == [{
+        "statement": (
+            "2025년 감사보고서 KAM 본문에서 주제 미분류 "
+            "근거가 확인됩니다."
+        ),
+        "source": {
+            "corp_code": "001",
+            "corp_name": "A",
+            "report_nm": "감사보고서",
+            "bsns_year": 2025,
+            "rcept_no": "20260311000006",
+            "section_title": "핵심감사사항",
+            "section_key": "kam",
+            "source_table": "report_sections.audit_report",
+        },
+        "excerpt": "감사인과 지배기구에 커뮤니케이션한 사항입니다.",
+    }]
+
+
+def test_peer_kam_wrapper_promotes_subject_receipt_evidence(monkeypatch):
+    from kreports.analysis import auditor_decisions
+
+    monkeypatch.setattr(
+        auditor_decisions,
+        "_legacy_compare_peer_kam_topics",
+        lambda **_kwargs: {
+            "subject": {"corp_code": "001", "corp_name": "A"},
+            "subject_sections": [{
+                "corp_code": "001",
+                "corp_name": "A",
+                "rcept_no": "20260311000006",
+                "source_type": "audit_report",
+                "section_key": "kam",
+                "section_title": "핵심감사사항",
+                "body_excerpt": "수익인식 관련 KAM 본문입니다.",
+                "kam_analysis": {"topics": ["revenue"]},
+            }],
+            "audit_report_sections": {},
+            "data_quality": {
+                "status": "limited",
+                "subject_kam_body_count": 1,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        auditor_decisions,
+        "attach_kam_item_semantics",
+        lambda *_args, **_kwargs: None,
+    )
+
+    out = auditor_decisions.compare_peer_kam_topics("001", year=2025)
+
+    assert out["confirmed_facts"] == [{
+        "statement": (
+            "2025년 대상 회사 감사보고서 KAM 본문에서 revenue 주제 "
+            "분류 근거가 확인됩니다."
+        ),
+        "source": {
+            "corp_code": "001",
+            "corp_name": "A",
+            "report_nm": "감사보고서",
+            "bsns_year": 2025,
+            "rcept_no": "20260311000006",
+            "section_title": "핵심감사사항",
+            "section_key": "kam",
+            "source_table": "report_sections.audit_report",
+        },
+        "excerpt": "수익인식 관련 KAM 본문입니다.",
+    }]
 
 
 def test_two_item_kam_body_uses_each_material_item_as_coverage_denominator(

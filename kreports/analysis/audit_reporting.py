@@ -651,6 +651,72 @@ def _audit_report_sections_evidence(result: dict) -> dict:
     return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
 
 
+def kam_section_confirmed_facts(
+    subject: dict | None,
+    sections: list[dict],
+    *,
+    statement_subject: str = "감사보고서",
+    source_table: str = "report_sections.audit_report",
+    default_year: int | None = None,
+    limit: int = 4,
+) -> list[dict]:
+    """Promote bounded, receipt-backed KAM rows without claiming completeness."""
+    facts: list[dict] = []
+    seen_year_topics: set[tuple[int | None, str]] = set()
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        receipt = parent_rcept_no(str(section.get("rcept_no") or ""))
+        excerpt = str(section.get("body_excerpt") or "").strip()[:260]
+        analysis = (
+            section.get("kam_analysis")
+            if isinstance(section.get("kam_analysis"), dict)
+            else {}
+        )
+        topics = [
+            str(topic)
+            for topic in analysis.get("topics") or []
+            if topic
+        ]
+        topic = str(section.get("topic") or (topics[0] if topics else "unknown"))
+        year_value = section.get("bsns_year") or section.get("year")
+        year = year_value if isinstance(year_value, int) else default_year
+        year_topic = (year, topic)
+        if year_topic in seen_year_topics:
+            continue
+        if not receipt or not excerpt:
+            continue
+        seen_year_topics.add(year_topic)
+        row = {
+            **section,
+            "bsns_year": year,
+            "rcept_no": receipt,
+            "source_type": "audit_report",
+            "section_key": "kam",
+        }
+        topic_label = (
+            "주제 미분류"
+            if topic == "unknown"
+            else f"{topic} 주제 분류"
+        )
+        facts.append({
+            "statement": (
+                f"{year}년 {statement_subject} KAM 본문에서 {topic_label} "
+                "근거가 확인됩니다."
+            ),
+            "source": _audit_section_source(
+                subject,
+                row,
+                default_section_title="핵심감사사항",
+                source_table=source_table,
+            ),
+            "excerpt": excerpt,
+        })
+        if len(facts) >= limit:
+            break
+    return _dedupe_confirmed_facts(facts)
+
+
 def _audit_matters_evidence(result: dict) -> dict:
     facts: list[dict] = []
     for company in (result.get("companies") or [])[:4]:
@@ -1027,6 +1093,28 @@ def _attach_related_audit_procedures(rows: list[dict], *, corp_code: str, year: 
     }
     if not kam_receipts:
         return
+    required_columns = {
+        "rcept_no",
+        "dcm_no",
+        "kam_item_id",
+        "kam_topic",
+        "procedure_type",
+        "procedure_text",
+        "procedure_length",
+        "section_ordinal",
+        "procedure_ordinal",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+    }
+    if (
+        not _has_db_table("audit_procedure_items")
+        or not all(
+            _has_db_column("audit_procedure_items", column)
+            for column in required_columns
+        )
+    ):
+        return
     with _engine_module.engine.connect() as conn:
         procedure_rows = [dict(r) for r in conn.execute(
             text(
@@ -1090,6 +1178,27 @@ def _attach_kam_item_semantics(
         if receipt
     }
     if not kam_receipts:
+        return
+    required_columns = {
+        "id",
+        "rcept_no",
+        "ordinal",
+        "title",
+        "normalized_topic",
+        "reason_text",
+        "audit_response_text",
+        "quality_status",
+        "corp_code",
+        "bsns_year",
+        "source_type",
+    }
+    if (
+        not _has_db_table("kam_items")
+        or not all(
+            _has_db_column("kam_items", column)
+            for column in required_columns
+        )
+    ):
         return
     with _engine_module.engine.connect() as conn:
         stored_rows = [dict(record) for record in conn.execute(
@@ -1809,6 +1918,10 @@ def get_kam_lifecycle(company: str, start_year: int = 2021, end_year: int = 2025
         "procedure_coverage": current_quality.get("procedure_coverage"),
         "source_coverage": current_quality.get("source_coverage"),
     }
+    result["confirmed_facts"] = kam_section_confirmed_facts(
+        subject,
+        result.get("events") or [],
+    )
     return _clean_dict(result)
 
 

@@ -943,6 +943,71 @@ def test_get_audit_report_sections_adds_kam_analysis(temp_engine):
     assert out["data_quality"]["kam_procedure_coverage"]["with_procedure_hint"] == 1
 
 
+def test_get_audit_report_sections_keeps_raw_kam_on_legacy_enrichment_schema(
+    temp_engine,
+):
+    """A rev04 cache must retain KAM evidence when rev05/06 links are absent."""
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001",
+            stock_code="000001",
+            corp_name="샘플",
+            market="KOSPI",
+        ))
+        session.add(ReportSection(
+            rcept_no="20250331000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="audit_report",
+            section_key="kam",
+            section_title="핵심감사사항",
+            body_text=(
+                "수익인식은 중요한 왜곡표시위험으로 핵심감사사항으로 "
+                "결정되었습니다. 관련 계약과 거래 증빙을 검토하였습니다."
+            ),
+            body_hash="x",
+            body_length=62,
+            ordinal=0,
+            fetched_at=datetime.utcnow(),
+        ))
+
+    with temp_engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE kam_items")
+        connection.exec_driver_sql("DROP TABLE audit_procedure_items")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE audit_procedure_items (
+                id INTEGER PRIMARY KEY,
+                rcept_no TEXT,
+                corp_code TEXT,
+                bsns_year INTEGER,
+                source_type TEXT,
+                kam_topic TEXT,
+                procedure_type TEXT,
+                procedure_text TEXT,
+                procedure_length INTEGER,
+                section_ordinal INTEGER,
+                procedure_ordinal INTEGER
+            )
+            """
+        )
+
+    out = get_audit_report_sections(
+        "000001",
+        year=2024,
+        section_key="kam",
+    )
+
+    assert out["section_count"] == 1
+    assert out["sections"][0]["rcept_no"] == "20250331000001"
+    assert "수익인식" in out["sections"][0]["body_excerpt"]
+    assert out["data_quality"]["status"] == "limited"
+    assert out["data_quality"]["timeline_status"] == "usable"
+    assert out["data_quality"]["semantic_complete"] is False
+
+
 def test_get_audit_report_sections_enriches_short_kam_with_indexed_procedures(temp_engine):
     from kreports.db.engine import get_session
 
