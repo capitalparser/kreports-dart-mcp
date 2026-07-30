@@ -71,6 +71,327 @@ def test_parse_outcome_reports_no_kam_and_incomplete_structure():
     assert "incomplete_kam_structure" in incomplete.limitations
 
 
+def test_parse_collapsed_audit_report_recovers_explicit_kam_boundaries():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "감사의견근거 우리는 대한민국의 회계감사기준에 따라 감사를 "
+        "수행하였습니다. 핵 심감사사항 핵심감사사항은 우리의 전문가적 "
+        "판단에 따라 당기 재무제표감사에서 가장 유의적인 사항들입니다. "
+        "해당 사항들은 재무제표 전체에 대한 감사의 관점에서 다루어졌으며, "
+        "우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. "
+        "(1) 생명과학 현금창출단위에 대한 영업권 손상평가 "
+        "핵심감사사항으로 결정된 이유 영업권 금액과 회수가능액 추정에 "
+        "유의적인 경영진의 판단이 포함됩니다. "
+        "핵심감사사항이 감사에서 다루어진 방법 우리는 가치평가 모델과 "
+        "할인율을 검토했습니다. 연결재무제표감사에 대한 감사인의 책임 "
+        "우리의 목적은 합리적인 확신을 얻는 것입니다."
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "생명과학 현금창출단위에 대한 영업권 손상평가"
+    ]
+    assert outcome.items[0].reason_text == (
+        "영업권 금액과 회수가능액 추정에 유의적인 경영진의 판단이 포함됩니다."
+    )
+    assert outcome.items[0].audit_response_text == (
+        "우리는 가치평가 모델과 할인율을 검토했습니다."
+    )
+
+
+def test_parse_collapsed_audit_report_ignores_numbered_field_labels():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 1. 현금창출단위 손상검사 (1) "
+        "핵심감사사항으로 결정된 이유 회수가능액 추정에는 유의적인 "
+        "판단이 포함됩니다. (2) 핵심감사사항이 감사에서 다루어진 방법 "
+        "가치평가 모델과 할인율을 검토했습니다. "
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "현금창출단위 손상검사"
+    ]
+
+
+def test_parse_collapsed_audit_report_ignores_separate_numbered_field_label():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다.\n"
+        "재고자산의 실재성 및 평가\n"
+        "(1) 핵심감사사항으로 결정한 이유\n"
+        "재고자산의 실재성과 평가에는 유의적인 판단이 포함됩니다.\n"
+        "(2) 핵심감사사항이 감사에서 다루어진 방법\n"
+        "재고실사와 순실현가능가치를 검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "재고자산의 실재성 및 평가"
+    ]
+
+
+def test_parse_collapsed_audit_report_accepts_spaced_korean_matter_marker():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 "
+        "제공하지는 않습니다. 가 . 현금창출단위 손상평가\n"
+        "(1) 핵심감사사항으로 결정된 이유\n"
+        "미래현금흐름과 할인율에는 경영진의 유의적인 판단이 포함됩니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "가치평가모델과 주요 가정을 검토했습니다.\n"
+        "연결재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "현금창출단위 손상평가"
+    ]
+
+
+def test_parse_collapsed_audit_report_ignores_separate_korean_field_label():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다.\n"
+        "현금창출단위 손상검사\n"
+        "가. 핵심감사사항으로 결정한 이유\n"
+        "회수가능액에는 경영진의 유의적인 판단이 포함됩니다.\n"
+        "나. 핵심감사사항이 감사에서 다루어진 방법\n"
+        "미래현금흐름과 할인율을 검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "현금창출단위 손상검사"
+    ]
+
+
+def test_parse_collapsed_audit_report_accepts_exact_source_reason_heading_typo():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 "
+        "제공하지는 않습니다. 종속기업투자자산의 손상검사 "
+        "핵심감사항으로 결정한 이유 회수가능액에는 경영진의 유의적인 "
+        "판단이 포함됩니다. 핵심감사사항이 감사에서 다루어진 방법 "
+        "주요 가정과 할인율을 검토했습니다. "
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "종속기업투자자산의 손상검사"
+    ]
+
+
+def test_parse_collapsed_audit_report_recognizes_business_combination_title():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다.\n"
+        "매출인식 및 대손설정\n"
+        "핵심감사사항으로 결정된 이유 매출채권 평가에 유의적인 판단이 "
+        "포함됩니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법 수익인식과 대손설정을 "
+        "검토했습니다.\n"
+        "사업결합\n"
+        "핵심감사사항으로 결정된 이유 취득자산과 인수부채의 공정가치 "
+        "평가에 유의적인 판단이 포함됩니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법 계약과 공정가치 평가를 "
+        "검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "매출인식 및 대손설정",
+        "사업결합",
+    ]
+
+
+def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_only_with_explicit_title():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 "
+        "제공하지는 않습니다.\n"
+        "영업권 손상검사\n"
+        "영업권 금액은 재무제표에서 유의적입니다.\n"
+        "회수가능액 추정에는 미래 현금흐름과 할인율에 대한 경영진의 "
+        "유의적인 판단이 포함되므로 핵심감사사항에 포함하였습니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "핵심감사사항에 대응하기 위하여 가치평가 모델과 할인율을 "
+        "검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["영업권 손상검사"]
+    assert outcome.items[0].reason_text == (
+        "영업권 금액은 재무제표에서 유의적입니다.\n"
+        "회수가능액 추정에는 미래 현금흐름과 할인율에 대한 경영진의 "
+        "유의적인 판단이 포함되므로 핵심감사사항에 포함하였습니다."
+    )
+
+
+def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_after_intro_tail_title():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 "
+        "제공하지는 않습니다. 종속기업투자주식 및 대여금 손상검토\n"
+        "종속기업투자주식의 금액은 재무제표에서 유의적입니다.\n"
+        "회수가능액 평가에는 경영진의 유의적인 판단이 포함되므로 "
+        "핵심감사사항에 포함하였습니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "손상징후와 회수가능액을 검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "종속기업투자주식 및 대여금 손상검토"
+    ]
+
+
+def test_parse_collapsed_audit_report_recovers_inline_reason_after_explicit_title():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 "
+        "제공하지는 않습니다.\n"
+        "매각예정자산 인식 및 측정 연결회사는 호텔 영업손실이 증가하여 "
+        "해당 자산의 매각을 결정하였습니다.\n"
+        "회수가능가액과 부채의 귀속시기 결정에 경영진의 판단이 포함되므로 "
+        "핵심감사사항에 포함하였습니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "자산 분류시기와 회수가능가액을 검토했습니다.\n"
+        "연결재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "매각예정자산 인식 및 측정"
+    ]
+    assert (outcome.items[0].reason_text or "").startswith(
+        "연결회사는 호텔 영업손실이 증가하여"
+    )
+
+
+def test_parse_collapsed_audit_report_does_not_infer_title_from_reason_narrative():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다.\n"
+        "관계기업투자주식은 금액이 유의적이고 손상평가에 경영진의 "
+        "판단이 포함되므로 이를 핵심감사사항으로 판단하였습니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "회수가능액과 손상징후를 검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
+def test_parse_collapsed_audit_report_excludes_embedded_emphasis_before_response():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 "
+        "제공하지는 않습니다. (1) 투입법에 따른 수익인식\n"
+        "핵심감사사항으로 결정된 이유\n"
+        "진행률 측정에는 경영진의 유의적인 판단이 포함됩니다.\n"
+        "강조사항 감사의견에는 영향을 미치지 않는 사항으로서 COVID-19로 "
+        "인한 불확실성에 주의를 기울여야 합니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "계약원가와 진행률을 검토했습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "투입법에 따른 수익인식"
+    ]
+    assert "COVID-19" not in (outcome.items[0].reason_text or "")
+    assert outcome.items[0].audit_response_text == (
+        "계약원가와 진행률을 검토했습니다."
+    )
+
+
+@pytest.mark.parametrize(
+    "title_fragment",
+    [
+        "(1)",
+        (
+            "핵심감사사항은 우리의 전문가적 판단에 따라 당기 재무제표감사에서 "
+            "가장 유의적인 사항들입니다. 우리는 이런 사항에 대하여 별도의 "
+            "의견을 제공하지는 않습니다."
+        ),
+    ],
+)
+def test_parse_collapsed_audit_report_rejects_non_title_artifacts(
+    title_fragment,
+):
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 "
+        f"사항들입니다. {title_fragment} "
+        "핵심감사사항으로 결정된 이유 유의적인 판단이 포함됩니다. "
+        "핵심감사사항이 감사에서 다루어진 방법 관련 증거를 검토했습니다. "
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
 @pytest.mark.parametrize(
     "title",
     [
@@ -2949,6 +3270,119 @@ def test_rebuild_reports_structured_kam_parse_failure_as_error(temp_engine):
         limitation == "report_sections.structured_body:parse_error"
         for limitation in result["receipts"][0]["limitations"]
     )
+
+
+def test_rebuild_recovers_from_exact_receipt_full_text_after_kam_parse_error(
+    temp_engine,
+):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    malformed_summary = (
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "우리는 가치평가 모델을 검토했습니다."
+    )
+    collapsed_full_text = (
+        "감사의견근거 충분하고 적합한 감사증거를 입수하였습니다. "
+        "핵심감사사항 핵심감사사항은 당기 재무제표감사에서 가장 유의적인 "
+        "사항들입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 "
+        "않습니다. (1) 영업권 손상평가 핵심감사사항으로 결정된 이유 "
+        "회수가능액 추정에는 유의적인 판단이 포함됩니다. "
+        "핵심감사사항이 감사에서 다루어진 방법 가치평가 모델과 할인율을 "
+        "검토했습니다. 재무제표감사에 대한 감사인의 책임 우리의 목적은 "
+        "합리적인 확신을 얻는 것입니다."
+    )
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00000074",
+                stock_code="000074",
+                corp_name="전체본문복구회사",
+                market="KOSPI",
+            )
+        )
+        session.add_all(
+            [
+                ReportSection(
+                    rcept_no="20250318000074",
+                    corp_code="00000074",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    section_key="kam",
+                    section_title="불완전 KAM",
+                    body_text=malformed_summary,
+                    body_hash="a" * 40,
+                    body_length=len(malformed_summary),
+                    ordinal=0,
+                ),
+                ReportSection(
+                    rcept_no="20250318000074",
+                    corp_code="00000074",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    section_key="full_text",
+                    section_title="감사보고서 본문",
+                    body_text=collapsed_full_text,
+                    body_hash="b" * 40,
+                    body_length=len(collapsed_full_text),
+                    ordinal=1,
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "report_sections.full_text"
+    assert receipt["titles"] == ["영업권 손상평가"]
+    assert (
+        "report_sections.structured_body:parse_error"
+        in receipt["limitations"]
+    )
+
+
+def test_rebuild_does_not_promote_full_text_without_kam_to_summary(
+    temp_engine,
+):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    full_text = (
+        "감사의견 우리는 재무제표를 감사하였습니다. "
+        "재무제표감사에 대한 감사인의 책임 우리의 목적은 합리적인 확신을 "
+        "얻는 것입니다."
+    )
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000075",
+                    stock_code="000075",
+                    corp_name="KAM부재회사",
+                    market="KOSPI",
+                ),
+                ReportSection(
+                    rcept_no="20250318000075",
+                    corp_code="00000075",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    section_key="full_text",
+                    section_title="감사보고서 본문",
+                    body_text=full_text,
+                    body_hash="c" * 40,
+                    body_length=len(full_text),
+                    ordinal=0,
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "missing"
+    assert receipt["item_count"] == 0
+    assert receipt["source_basis"] == "none"
 
 
 def test_rebuild_reports_unreadable_receipt_as_error_and_absent_body_as_missing(

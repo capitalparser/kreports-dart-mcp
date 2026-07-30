@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from hashlib import sha1
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 import re
 
@@ -13,7 +13,7 @@ MAX_INPUT_CHARS = 2_000_000
 
 _TITLE_MARKER_RE = re.compile(
     r"^\s*(?:(?P<arabic>\(?\d{1,2}\)?)[.)]|"
-    r"(?P<korean>[가-하])[.)]|"
+    r"(?P<korean>[가-하])\s*[.)]|"
     r"(?P<roman>[IVX]{1,5})[.)])\s*(?P<title>.+?)\s*$",
     flags=re.IGNORECASE,
 )
@@ -26,6 +26,9 @@ _KAM_HEADINGS = ("핵심감사사항", "keyauditmatters")
 _REASON_HEADINGS = (
     "핵심감사사항으로선정한이유",
     "핵심감사사항으로결정한이유",
+    "핵심감사사항으로선정된이유",
+    "핵심감사사항으로결정된이유",
+    "핵심감사항으로결정한이유",
     "whythematterwasdeterminedtobeakeyauditmatter",
     "whythematterwasconsideredtobeoneofthemostsignificantmattersintheaudit",
     "whythematterwasconsideredtobeoneofmostsignificanceintheaudit",
@@ -41,13 +44,93 @@ _RESPONSE_HEADINGS = (
 )
 _TRAILING_HEADINGS = (
     "재무제표감사에대한감사인의책임",
+    "연결재무제표감사에대한감사인의책임",
     "감사인의책임",
     "재무제표에대한경영진",
+    "연결재무제표에대한경영진",
     "경영진과지배기구의책임",
+    "기타사항",
+    "강조사항",
     "첨부재무제표",
     "별첨재무제표",
     "auditor'sresponsibilitiesfortheauditof thefinancialstatements".replace(" ", ""),
     "auditorresponsibilitiesfortheauditof thefinancialstatements".replace(" ", ""),
+)
+_COLLAPSED_HEADING_LABELS = (
+    ("핵심감사사항으로선정한이유", "핵심감사사항으로 선정한 이유"),
+    ("핵심감사사항으로결정한이유", "핵심감사사항으로 결정한 이유"),
+    ("핵심감사사항으로선정된이유", "핵심감사사항으로 선정된 이유"),
+    ("핵심감사사항으로결정된이유", "핵심감사사항으로 결정된 이유"),
+    ("핵심감사항으로결정한이유", "핵심감사사항으로 결정한 이유"),
+    (
+        "핵심감사사항이감사에서다루어진방법",
+        "핵심감사사항이 감사에서 다루어진 방법",
+    ),
+    ("감사에서다루어진방법", "감사에서 다루어진 방법"),
+    (
+        "연결재무제표감사에대한감사인의책임",
+        "연결재무제표감사에 대한 감사인의 책임",
+    ),
+    (
+        "재무제표감사에대한감사인의책임",
+        "재무제표감사에 대한 감사인의 책임",
+    ),
+    (
+        "연결재무제표에대한경영진과지배기구의책임",
+        "연결재무제표에 대한 경영진과 지배기구의 책임",
+    ),
+    (
+        "재무제표에대한경영진과지배기구의책임",
+        "재무제표에 대한 경영진과 지배기구의 책임",
+    ),
+    ("기타사항", "기타사항"),
+    ("강조사항", "강조사항"),
+    ("핵심감사사항", "핵심감사사항"),
+)
+_COLLAPSED_HEADING_PATTERN = re.compile(
+    "|".join(
+        (
+            f"(?P<heading_{index}>"
+            + r"\s*".join(re.escape(character) for character in compact)
+            + ")"
+        )
+        for index, (compact, _label) in enumerate(
+            sorted(
+                _COLLAPSED_HEADING_LABELS,
+                key=lambda value: len(value[0]),
+                reverse=True,
+            )
+        )
+    ),
+    flags=re.IGNORECASE,
+)
+_COLLAPSED_HEADING_ORDER = tuple(
+    sorted(
+        _COLLAPSED_HEADING_LABELS,
+        key=lambda value: len(value[0]),
+        reverse=True,
+    )
+)
+_COLLAPSED_INTRO_ENDINGS = (
+    "별도의의견을제공하지는않습니다.",
+    "별도의의견을제공하지않습니다.",
+    "핵심감사사항으로결정하였습니다.",
+    "핵심감사사항으로식별하였습니다.",
+)
+_COLLAPSED_TITLE_ENDING_RE = re.compile(
+    r"(?:적정성|회수가능성|발생사실|실재성|손상평가|손상검사|"
+    r"공정가치측정|매수가격배분|평가|검사|인식|측정|배분|표시)"
+)
+_COLLAPSED_TITLE_MARKER_START_RE = re.compile(
+    r"(?:^|\s)(?:\(?\d{1,2}\)?[.)]|[가-하]\s*[.)]|[IVX]{1,5}[.)])\s*",
+    flags=re.IGNORECASE,
+)
+_COLLAPSED_FIELD_MARKER_RE = re.compile(
+    r"^\s*(?:\(?\d{1,2}\)?|[가-하]\s*[.)]|[IVX]{1,5}[.)])\s*$",
+    flags=re.IGNORECASE,
+)
+_COLLAPSED_REASON_SUBJECT_RE = re.compile(
+    r"\s+(?=(?:연결)?회사는\s|당사는\s|그룹은\s)"
 )
 MAX_TITLE_BLOCK_LINES = 8
 MAX_TITLE_BLOCK_CHARS = 800
@@ -97,6 +180,7 @@ _TITLE_TOPIC_TERMS = (
     "매출채권",
     "회수가능",
     "리스",
+    "사업결합",
     "revenue",
     "inventory",
     "goodwill",
@@ -1301,6 +1385,458 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
             status="error",
             limitations=[f"parser_error:{type(exc).__name__}"],
         )
+
+
+def _compact_span_end(value: str, compact_needle: str) -> int | None:
+    compact_chars: list[str] = []
+    source_indexes: list[int] = []
+    for index, character in enumerate(value):
+        if character.isspace():
+            continue
+        compact_chars.append(character.lower())
+        source_indexes.append(index)
+    position = "".join(compact_chars).rfind(compact_needle.lower())
+    if position < 0:
+        return None
+    final = position + len(compact_needle) - 1
+    if final >= len(source_indexes):
+        return None
+    return source_indexes[final] + 1
+
+
+def _split_collapsed_headings(value: str) -> list[str]:
+    parts: list[str] = []
+    cursor = 0
+    for match in _COLLAPSED_HEADING_PATTERN.finditer(value):
+        heading_index = int((match.lastgroup or "").removeprefix("heading_"))
+        compact, label = _COLLAPSED_HEADING_ORDER[heading_index]
+        if compact == "핵심감사사항":
+            suffix = value[match.end():].lstrip()
+            if suffix.startswith(
+                ("은", "는", "이", "가", "을", "를", "으로", "에")
+            ):
+                continue
+        prefix = value[cursor:match.start()].strip()
+        if prefix:
+            parts.append(prefix)
+        parts.append(label)
+        cursor = match.end()
+    suffix = value[cursor:].strip()
+    if suffix:
+        parts.append(suffix)
+    return parts
+
+
+def _refine_collapsed_marked_title(value: str) -> str:
+    if len(value) <= 120:
+        return value
+    cue = len(value)
+    for phrase in (
+        "관련된 회계정책",
+        "관련 내용은",
+        "재무제표에 대한 주석",
+        "연결재무제표에 대한 주석",
+    ):
+        position = value.find(phrase, 5)
+        if position >= 0:
+            cue = min(cue, position)
+    if cue == len(value):
+        return value
+    prefix = value[:cue]
+    endings = list(_COLLAPSED_TITLE_ENDING_RE.finditer(prefix))
+    if not endings:
+        return value
+    return prefix[:endings[-1].end()].strip()
+
+
+def _collapsed_title_candidate(value: str) -> tuple[str, str] | None:
+    markers = list(_COLLAPSED_TITLE_MARKER_START_RE.finditer(value))
+    for marker in reversed(markers):
+        prefix = value[:marker.start()].strip()
+        title = _refine_collapsed_marked_title(
+            value[marker.start():].strip()
+        )
+        parsed_marker = _title_marker(title)
+        if parsed_marker is not None and len(title) <= MAX_TITLE_BLOCK_CHARS:
+            return prefix, title
+
+    cut = -1
+    for ending in _COLLAPSED_INTRO_ENDINGS:
+        position = _compact_span_end(value, ending)
+        if position is not None:
+            cut = max(cut, position)
+    if cut >= 0:
+        prefix = value[:cut].strip()
+        title = value[cut:].strip()
+        if (
+            title
+            and len(title) <= 200
+            and _has_clear_title_evidence(title)
+        ):
+            return prefix, title
+        return None
+    if len(value) <= 200 and _has_clear_title_evidence(value):
+        return "", value
+    return None
+
+
+def _drop_embedded_collapsed_sections(
+    lines: list[str],
+    *,
+    kam_start: int,
+) -> None:
+    """Remove an unrelated exact-heading span inside a complete KAM frame."""
+    response_indexes = [
+        index
+        for index in range(kam_start + 1, len(lines))
+        if _matches_heading(lines[index], _RESPONSE_HEADINGS)
+    ]
+    for response_index in reversed(response_indexes):
+        reason_index = next(
+            (
+                index
+                for index in range(response_index - 1, kam_start, -1)
+                if _matches_heading(lines[index], _REASON_HEADINGS)
+            ),
+            None,
+        )
+        if reason_index is None:
+            continue
+        unrelated_index = next(
+            (
+                index
+                for index in range(reason_index + 1, response_index)
+                if _matches_heading(
+                    lines[index],
+                    ("강조사항", "기타사항"),
+                )
+            ),
+            None,
+        )
+        if unrelated_index is not None:
+            del lines[unrelated_index:response_index]
+
+
+def _has_embedded_collapsed_section(full_text: str) -> bool:
+    lines = [
+        part
+        for line in _structured_lines(full_text).lines
+        for part in _split_collapsed_headings(line.text)
+    ]
+    for response_index, line in enumerate(lines):
+        if not _matches_heading(line, _RESPONSE_HEADINGS):
+            continue
+        reason_index = next(
+            (
+                index
+                for index in range(response_index - 1, -1, -1)
+                if _matches_heading(lines[index], _REASON_HEADINGS)
+            ),
+            None,
+        )
+        if reason_index is not None and any(
+            _matches_heading(
+                lines[index],
+                ("강조사항", "기타사항"),
+            )
+            for index in range(reason_index + 1, response_index)
+        ):
+            return True
+    return False
+
+
+def _inject_omitted_collapsed_reason_heading(
+    lines: list[str],
+    *,
+    kam_start: int,
+    kam_end: int,
+) -> None:
+    """Recover a single matter only when an explicit short title survives."""
+    if any(
+        _matches_heading(lines[index], _REASON_HEADINGS)
+        for index in range(kam_start + 1, kam_end)
+    ):
+        return
+    response_indexes = [
+        index
+        for index in range(kam_start + 1, kam_end)
+        if _matches_heading(lines[index], _RESPONSE_HEADINGS)
+    ]
+    if len(response_indexes) != 1:
+        return
+    response_index = response_indexes[0]
+    candidate_index = None
+    candidate_value = None
+    candidate_inline_reason = None
+    for index in range(kam_start + 1, response_index):
+        inline_reason = None
+        subject = _COLLAPSED_REASON_SUBJECT_RE.search(lines[index])
+        if subject is not None:
+            inline_title = lines[index][:subject.start()].strip()
+            candidate = (
+                ("", inline_title)
+                if (
+                    len(inline_title) <= 80
+                    and not inline_title.endswith((".", "。"))
+                    and _title_evidence_score(inline_title) >= 3
+                )
+                else None
+            )
+            if candidate is not None:
+                inline_reason = lines[index][subject.end():].strip()
+        else:
+            candidate = None
+        if candidate is None:
+            candidate = _collapsed_title_candidate(lines[index])
+        if candidate is None:
+            cut = -1
+            for ending in _COLLAPSED_INTRO_ENDINGS:
+                position = _compact_span_end(lines[index], ending)
+                if position is not None:
+                    cut = max(cut, position)
+            if cut >= 0:
+                candidate = (
+                    lines[index][:cut].strip(),
+                    lines[index][cut:].strip(),
+                )
+        if (
+            candidate is None
+            and len(lines[index]) <= 80
+            and not lines[index].endswith((".", "。"))
+            and _title_evidence_score(lines[index]) >= 3
+        ):
+            candidate = ("", lines[index])
+        if candidate is None:
+            continue
+        prefix, title = candidate
+        normalized_title = _normalize_title(title)
+        if (
+            len(normalized_title) > 80
+            or normalized_title.endswith((".", "。"))
+            or _title_evidence_score(normalized_title) < 3
+        ):
+            continue
+        if (
+            not prefix
+            and inline_reason is None
+            and _compact(lines[index]) != _compact(title)
+        ):
+            continue
+        candidate_index = index
+        candidate_value = (prefix, title)
+        candidate_inline_reason = inline_reason
+        break
+    if candidate_index is None or candidate_value is None:
+        return
+    reason_parts = [
+        *([candidate_inline_reason] if candidate_inline_reason else []),
+        *lines[candidate_index + 1:response_index],
+    ]
+    if (
+        not reason_parts
+        or len(_compact(" ".join(reason_parts))) < 50
+        or any(
+            _matches_heading(
+                line,
+                _KAM_HEADINGS
+                + _REASON_HEADINGS
+                + _RESPONSE_HEADINGS
+                + _TRAILING_HEADINGS,
+            )
+            for line in reason_parts
+        )
+    ):
+        return
+    prefix, title = candidate_value
+    replacement = []
+    if prefix:
+        replacement.append(prefix)
+    replacement.extend(
+        (
+            f"<TITLE>{escape(title)}</TITLE>",
+            "핵심감사사항으로 결정된 이유",
+        )
+    )
+    if candidate_inline_reason:
+        replacement.append(candidate_inline_reason)
+    lines[candidate_index:candidate_index + 1] = replacement
+
+
+def _collapsed_kam_markup(full_text: str) -> str | None:
+    structure = _structured_lines(full_text)
+    if structure.limitations:
+        return None
+    lines = [
+        part
+        for line in structure.lines
+        for part in _split_collapsed_headings(line.text)
+    ]
+    try:
+        kam_start = next(
+            index
+            for index, line in enumerate(lines)
+            if _matches_heading(line, _KAM_HEADINGS)
+        )
+    except StopIteration:
+        return None
+
+    _drop_embedded_collapsed_sections(lines, kam_start=kam_start)
+    kam_end = len(lines)
+    for index in range(kam_start + 1, len(lines)):
+        if _matches_heading(lines[index], _TRAILING_HEADINGS):
+            kam_end = index
+            break
+    _inject_omitted_collapsed_reason_heading(
+        lines,
+        kam_start=kam_start,
+        kam_end=kam_end,
+    )
+    kam_end = len(lines)
+    for index in range(kam_start + 1, len(lines)):
+        if _matches_heading(lines[index], _TRAILING_HEADINGS):
+            kam_end = index
+            break
+    reason_indexes = [
+        index
+        for index in range(kam_start + 1, kam_end)
+        if _matches_heading(lines[index], _REASON_HEADINGS)
+    ]
+    for reason_index in reversed(reason_indexes):
+        if reason_index <= kam_start + 1:
+            continue
+        title_index = reason_index - 1
+        if (
+            _COLLAPSED_FIELD_MARKER_RE.fullmatch(lines[title_index])
+            and title_index > kam_start + 1
+        ):
+            title_index -= 1
+        if lines[title_index].startswith("<TITLE>"):
+            continue
+        candidate = _collapsed_title_candidate(lines[title_index])
+        if (
+            candidate is None
+            and len(lines[title_index]) <= 80
+            and not lines[title_index].endswith((".", "。"))
+            and (
+                _title_evidence_score(lines[title_index]) >= 3
+                or _COLLAPSED_TITLE_ENDING_RE.search(
+                    lines[title_index],
+                )
+                is not None
+            )
+        ):
+            candidate = ("", lines[title_index])
+        if candidate is None:
+            continue
+        prefix, title = candidate
+        replacement = []
+        if prefix:
+            replacement.append(prefix)
+        replacement.append(f"<TITLE>{escape(title)}</TITLE>")
+        lines[title_index:reason_index] = replacement
+    return "\n".join(lines)
+
+
+def _normalize_collapsed_result_title(value: str) -> str:
+    title = _normalize_title(value)
+    cut = -1
+    for ending in _COLLAPSED_INTRO_ENDINGS:
+        position = _compact_span_end(title, ending)
+        if position is not None:
+            cut = max(cut, position)
+    if cut >= 0:
+        title = title[cut:].strip()
+    title = re.sub(
+        r"^\s*(?:\(?\d{1,2}\)?[.)]|[가-하]\s*[.)]|[IVX]{1,5}[.)])\s*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(
+        r"\s*(?:\(?\d{1,2}\)?|[가-하]\s*[.)])\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    return _normalize_title(title)
+
+
+def _validated_collapsed_items(
+    items: list[ParsedKamItem],
+) -> list[ParsedKamItem] | None:
+    validated: list[ParsedKamItem] = []
+    for item in items:
+        title = _normalize_collapsed_result_title(item.title)
+        compact = _compact(title)
+        if (
+            not title
+            or len(title) > 160
+            or "핵심감사사항은" in compact
+            or "별도의의견을제공하지" in compact
+            or _matches_heading(title, _KAM_HEADINGS)
+            or _matches_heading(title, _REASON_HEADINGS)
+            or _matches_heading(title, _RESPONSE_HEADINGS)
+            or _matches_heading(title, _TRAILING_HEADINGS)
+        ):
+            return None
+        validated.append(
+            replace(
+                item,
+                title=title,
+                parser_version=f"{PARSER_VERSION}-collapsed",
+            )
+        )
+    return validated
+
+
+def parse_collapsed_kam_items(full_text: str) -> KamParseOutcome:
+    """Parse audit-report text whose source block boundaries were flattened.
+
+    This recovery path only promotes a result when the collapsed text still
+    contains an explicit KAM heading, a reason/response pair, and a supported
+    title boundary. All other cases retain an error or ambiguity outcome.
+    """
+    ordinary = parse_kam_items(full_text)
+    if (
+        ordinary.status == "complete"
+        and not _has_embedded_collapsed_section(full_text)
+    ):
+        validated = _validated_collapsed_items(ordinary.items)
+        if validated is not None:
+            return KamParseOutcome(
+                items=validated,
+                status="complete",
+                limitations=[],
+            )
+        ordinary = KamParseOutcome(
+            items=[],
+            status="error",
+            limitations=["invalid_collapsed_kam_title"],
+        )
+    recovered_text = _collapsed_kam_markup(full_text)
+    if recovered_text is None:
+        return ordinary
+    recovered = parse_kam_items(recovered_text)
+    if recovered.status != "complete":
+        if recovered.status == "no_kam":
+            return KamParseOutcome(
+                items=[],
+                status="error",
+                limitations=["incomplete_collapsed_kam_structure"],
+            )
+        return recovered
+    validated = _validated_collapsed_items(recovered.items)
+    if validated is None:
+        return KamParseOutcome(
+            items=[],
+            status="error",
+            limitations=["invalid_collapsed_kam_title"],
+        )
+    return KamParseOutcome(
+        items=validated,
+        status="complete",
+        limitations=[],
+    )
 
 
 def extract_kam_items(full_text: str) -> list[ParsedKamItem]:

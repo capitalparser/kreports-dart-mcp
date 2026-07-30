@@ -56,6 +56,7 @@ from kreports.processor.audit_procedure_parser import (
 from kreports.processor.kam_parser import (
     PARSER_VERSION,
     ParsedKamItem,
+    parse_collapsed_kam_items,
     parse_kam_items,
 )
 from kreports.processor.policy_parser import POLICY_KEYWORDS
@@ -1960,7 +1961,7 @@ def _kam_rebuild_targets(
         .filter(
             ReportSection.bsns_year == year,
             ReportSection.source_type == "audit_report",
-            ReportSection.section_key == "kam",
+            ReportSection.section_key.in_(("kam", "full_text")),
         )
     )
     report_query = (
@@ -2098,20 +2099,31 @@ def _recover_kam_items(
                 )
     derived_summaries: list[tuple[object, str]] = []
     structured_failure_at: datetime | None = None
-    for section in target["report_sections"]:
+    kam_sections = [
+        section
+        for section in target["report_sections"]
+        if section.section_key == "kam"
+    ]
+    full_text_sections = [
+        section
+        for section in target["report_sections"]
+        if section.section_key == "full_text"
+    ]
+    for section in kam_sections:
         body = (section.body_text or "").strip()
         if not body:
             continue
+        source_basis = "report_sections.structured_body"
         before_limitations = len(limitations)
         items = _parse_kam_candidate(
             body,
-            "report_sections.structured_body",
+            source_basis,
             limitations,
         )
         if items:
             return (
                 items,
-                "report_sections.structured_body",
+                source_basis,
                 limitations,
                 section.fetched_at,
             )
@@ -2127,6 +2139,40 @@ def _recover_kam_items(
         if new_limitations:
             limitations.pop()
         derived_summaries.append((section, body))
+
+    upstream_parse_failure = (
+        structured_failure_at is not None
+        or (
+            not derived_summaries
+            and any(
+                limitation.endswith(
+                    (":parse_error", ":ambiguous_boundary")
+                )
+                for limitation in limitations
+            )
+        )
+    )
+    if upstream_parse_failure:
+        for section in full_text_sections:
+            body = (section.body_text or "").strip()
+            if not body:
+                continue
+            outcome = parse_collapsed_kam_items(body)
+            if outcome.status == "complete":
+                return (
+                    outcome.items,
+                    "report_sections.full_text",
+                    limitations,
+                    section.fetched_at,
+                )
+            if outcome.status == "ambiguous":
+                limitations.append(
+                    "report_sections.full_text:ambiguous_boundary"
+                )
+            elif outcome.status == "error":
+                limitations.append(
+                    "report_sections.full_text:parse_error"
+                )
     if structured_failure_at is not None:
         return [], "none", limitations, structured_failure_at
     if derived_summaries:
