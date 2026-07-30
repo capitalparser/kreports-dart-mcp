@@ -888,6 +888,7 @@ def _index_contract_blockers(
     blockers: list[str] = []
     for name, (table, columns, unique, where) in REQUIRED_INDEX_SPECS.items():
         if table not in table_names:
+            blockers.append(f"missing_required_index:{name}")
             continue
         rows = {
             str(row["name"]): row

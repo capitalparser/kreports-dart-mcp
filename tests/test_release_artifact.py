@@ -730,6 +730,10 @@ def test_missing_index_target_tables_block_release(tmp_path, monkeypatch):
         "missing_required_table:group_entities",
         "missing_required_table:group_relationships",
         "missing_required_table:group_component_metrics",
+        "missing_required_index:idx_audit_fee_availability_year",
+        "missing_required_index:idx_group_entity_parent_year",
+        "missing_required_index:idx_group_relationship_parent_year",
+        "missing_required_index:idx_group_metric_parent_year",
     } <= blockers
 
 
