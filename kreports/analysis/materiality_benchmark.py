@@ -56,40 +56,40 @@ def methodology_references() -> list[dict[str, Any]]:
         {
             "reference_id": "isa_320_a4_a6_volatility",
             "authority_level": "authoritative_standard",
-            "issuer": "IAASB",
-            "jurisdiction": "International",
-            "standard_code": "ISA 320",
-            "document_title": "Materiality in Planning and Performing an Audit",
+            "issuer": "AUASB",
+            "jurisdiction": "Australia",
+            "standard_code": "ASA 320 (conforms with ISA 320)",
+            "document_title": "ASA 320 Materiality in Planning and Performing an Audit",
             "paragraphs": "A4-A6",
             "effective_from": "2009-12-15",
-            "official_url": "https://www.iaasb.org/publications/isa-320-materiality-planning-and-performing-audit",
-            "application_note_ko": "상대적 변동성, 예외적 변동 및 정규화 이익 검토의 근거이며 KReports 변동성 구간을 정하지 않습니다.",
+            "official_url": "https://standards.auasb.gov.au/asa-320-dec-2015",
+            "application_note_ko": "AUASB ASA 320(ISA 320 준거)의 상대적 변동성, 예외적 변동 및 정규화 이익 검토 근거이며 KReports 변동성 구간을 정하지 않습니다.",
             "registry_version_date": "2026-07-31",
         },
         {
             "reference_id": "isa_320_a8_pbt_illustration",
             "authority_level": "standard_illustration",
-            "issuer": "IAASB",
-            "jurisdiction": "International",
-            "standard_code": "ISA 320",
-            "document_title": "Materiality in Planning and Performing an Audit",
+            "issuer": "AUASB",
+            "jurisdiction": "Australia",
+            "standard_code": "ASA 320 (conforms with ISA 320)",
+            "document_title": "ASA 320 Materiality in Planning and Performing an Audit",
             "paragraphs": "A8",
             "effective_from": "2009-12-15",
-            "official_url": "https://www.iaasb.org/publications/isa-320-materiality-planning-and-performing-audit",
-            "application_note_ko": "계속영업 법인세차감전이익 5% 예시는 설명용이며 고정 의무 비율이 아닙니다.",
+            "official_url": "https://standards.auasb.gov.au/asa-320-dec-2015",
+            "application_note_ko": "AUASB ASA 320(ISA 320 준거)의 계속영업 법인세차감전이익 5% 예시는 설명용이며 고정 의무 비율이 아닙니다.",
             "registry_version_date": "2026-07-31",
         },
         {
             "reference_id": "isa_320_a8_revenue_illustration",
             "authority_level": "standard_illustration",
-            "issuer": "IAASB",
-            "jurisdiction": "International",
-            "standard_code": "ISA 320",
-            "document_title": "Materiality in Planning and Performing an Audit",
+            "issuer": "AUASB",
+            "jurisdiction": "Australia",
+            "standard_code": "ASA 320 (conforms with ISA 320)",
+            "document_title": "ASA 320 Materiality in Planning and Performing an Audit",
             "paragraphs": "A8",
             "effective_from": "2009-12-15",
-            "official_url": "https://www.iaasb.org/publications/isa-320-materiality-planning-and-performing-audit",
-            "application_note_ko": "비영리 조직의 수익 또는 비용 1% 예시는 설명용이며 일반화된 고정 비율이 아닙니다.",
+            "official_url": "https://standards.auasb.gov.au/asa-320-dec-2015",
+            "application_note_ko": "AUASB ASA 320(ISA 320 준거)의 비영리 조직 수익 또는 비용 1% 예시는 설명용이며 일반화된 고정 비율이 아닙니다.",
             "registry_version_date": "2026-07-31",
         },
         {
@@ -101,7 +101,8 @@ def methodology_references() -> list[dict[str, Any]]:
             "document_title": "Materiality candidate range registry",
             "paragraphs": "candidate ranges",
             "effective_from": "2026-07-31",
-            "official_url": "https://github.com/capitalparser/kreports-dart-mcp/blob/main/docs/data-contract.md#audit-materiality-preparation",
+            "source_locator": "docs/data-contract.md#audit-materiality-preparation",
+            "methodology_version": METHODOLOGY_VERSION,
             "application_note_ko": "후보 범위는 KReports 내부 방법론의 투명한 계산 입력이며 감사기준서상 의무 비율이 아닙니다.",
             "registry_version_date": "2026-07-31",
         },
@@ -114,7 +115,8 @@ def methodology_references() -> list[dict[str, Any]]:
             "document_title": "Materiality benchmark stability registry",
             "paragraphs": "transparent observations",
             "effective_from": "2026-07-31",
-            "official_url": "https://github.com/capitalparser/kreports-dart-mcp/blob/main/docs/data-contract.md#audit-materiality-preparation",
+            "source_locator": "docs/data-contract.md#audit-materiality-preparation",
+            "methodology_version": METHODOLOGY_VERSION,
             "application_note_ko": "3개년 미만은 안정성 결론을 내리지 않으며, CV 및 상대 전년대비 변동이 큰 계열은 단독 기준 후보에서 제외합니다.",
             "registry_version_date": "2026-07-31",
         },
@@ -200,15 +202,20 @@ def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], 
         tax = indexed.get(("tax_expense", year))
         direct_profit = _observation("profit_loss", year, profit, basis="direct_annual_fact")
         direct_tax = _observation("tax_expense", year, tax, basis="direct_annual_fact")
-        compatible = (
+        operands_usable = (
             direct_profit["amount"] is not None
             and direct_tax["amount"] is not None
             and profit is not None and tax is not None
+        )
+        profit_receipt = parent_rcept_no(profit.get("citation_rcept_no")) if profit else None
+        tax_receipt = parent_rcept_no(tax.get("citation_rcept_no")) if tax else None
+        compatible = (
+            operands_usable
             and profit.get("fs_div") == tax.get("fs_div") == fs_div
             and profit.get("period_type") == tax.get("period_type") == "duration"
             and profit.get("unit") == tax.get("unit") == "KRW"
-            and parent_rcept_no(profit.get("citation_rcept_no"))
-            and parent_rcept_no(profit.get("citation_rcept_no")) == parent_rcept_no(tax.get("citation_rcept_no"))
+            and profit_receipt
+            and profit_receipt == tax_receipt
         )
         if compatible:
             sources = [
@@ -228,7 +235,9 @@ def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], 
                 "limitations": ["direct_pbt_unusable_used_compatible_derivation"] if direct is not None else [],
             })
         else:
-            limitations = ["incompatible_operands", "incompatible_filing_provenance"]
+            limitations = ["incompatible_operands"]
+            if operands_usable and profit_receipt and tax_receipt and profit_receipt != tax_receipt:
+                limitations.append("incompatible_filing_provenance")
             if direct is not None:
                 limitations.append("direct_pbt_unusable")
             result["profit_before_tax"].append({
@@ -381,7 +390,6 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
         stability[metric] = item
     candidates = materiality_candidates(stability)
     source_count = sum(len(row.get("sources") or []) for values in series.values() for row in values)
-    has_any = any(row.get("amount") is not None for values in series.values() for row in values)
     # The methodology and requested-year observation table remain inspectable
     # even when the local compact cache has no usable facts, so expose this as
     # a bounded limited preparation rather than an opaque missing/error pack.

@@ -288,12 +288,23 @@ def _build_materiality_pack(result: dict[str, Any]) -> dict[str, Any]:
             if not candidate_rows else None
         ),
     })
-    references = result.get("methodology_references") or []
+    references = [
+        {
+            **reference,
+            "source_location": (
+                reference.get("official_url")
+                or reference.get("source_locator")
+                or "-"
+            ),
+        }
+        for reference in result.get("methodology_references") or []
+        if isinstance(reference, dict)
+    ]
     pack["tables"].append({
         "id": "materiality_methodology_references", "title": "방법론 및 기준 근거",
         "columns": [{"field": key, "label": label} for key, label in (
             ("reference_id", "근거 ID"), ("authority_level", "근거 구분"),
-            ("issuer", "발행자"), ("official_url", "공식 URL"),
+            ("issuer", "발행자"), ("source_location", "출처 위치"),
             ("standard_code", "기준 코드"), ("paragraphs", "문단"),
             ("document_title", "문서"), ("application_note_ko", "적용 설명"),
         )], "rows": references, "status": "usable",

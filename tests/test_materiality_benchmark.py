@@ -210,6 +210,23 @@ def test_pbt_derivation_requires_same_filing_and_falls_back_when_direct_is_inval
     assert "incompatible_filing_provenance" in mismatch["limitations"]
 
 
+def test_missing_pbt_operand_does_not_claim_a_filing_provenance_mismatch():
+    """Receipt mismatch is meaningful only after both otherwise-usable operands exist."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    series = build_benchmark_series([
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_before_tax", "amount": 999,
+         "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001"},
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001"},
+    ], years=[2025], fs_div="CFS")
+
+    limitations = series["profit_before_tax"][0]["limitations"]
+    assert "incompatible_operands" in limitations
+    assert "direct_pbt_unusable" in limitations
+    assert "incompatible_filing_provenance" not in limitations
+
+
 def test_stability_role_changes_with_observed_variation_not_metric_name():
     """The same metric must not have a fixed role independent of its series."""
     from kreports.analysis.materiality_benchmark import observe_stability
@@ -294,7 +311,12 @@ def test_materiality_pack_keeps_derived_operand_evidence_and_limited_tables(temp
     tables = {table["id"]: table for table in out["answer_pack"]["tables"]}
     assert {"materiality_benchmark_series", "materiality_benchmark_stability", "materiality_candidates", "materiality_methodology_references"} <= set(tables)
     assert tables["materiality_candidates"]["rows"][0]["benchmark_label_ko"] == "법인세차감전순이익"
-    assert {"issuer", "official_url", "authority_level"} <= {column["field"] for column in tables["materiality_methodology_references"]["columns"]}
+    assert {"issuer", "source_location", "authority_level"} <= {column["field"] for column in tables["materiality_methodology_references"]["columns"]}
+    internal_reference = next(
+        row for row in tables["materiality_methodology_references"]["rows"]
+        if row["reference_id"] == "materiality_candidate_ranges_v1"
+    )
+    assert internal_reference["source_location"] == "docs/data-contract.md#audit-materiality-preparation"
 
 
 def test_limited_provenance_keeps_empty_candidate_table_and_withheld_wording(temp_engine):
@@ -351,7 +373,7 @@ def test_live_shaped_legacy_compact_rows_render_limited_series_and_methodology_s
     assert out["data_quality"]["status"] == "limited"
     assert len(tables["materiality_benchmark_series"]["rows"]) == 12
     assert tables["materiality_candidates"]["rows"] == []
-    assert any(source["url"].startswith("https://www.iaasb.org/") for source in out["answer_pack"]["sources"])
+    assert any(source["url"] == "https://standards.auasb.gov.au/asa-320-dec-2015" for source in out["answer_pack"]["sources"])
     assert "후보 금액을 표시하지 않았습니다" in out["answer"]
 
 
@@ -382,3 +404,19 @@ def test_rate_references_do_not_overstate_isa_a8_ranges():
     assert by_key["profit_before_tax"]["rate_reference_ids"]["central"] == ["isa_320_a8_pbt_illustration"]
     assert all("isa_320_a8" not in ref for refs in by_key["revenue"]["rate_reference_ids"].values() for ref in refs)
     assert next(item for item in methodology_references() if item["reference_id"] == "materiality_candidate_ranges_v1")["authority_level"] == "internal_methodology"
+
+
+def test_methodology_uses_verified_asa_link_and_non_url_internal_locator():
+    """Public methodology links must be verified URLs; internal rules use stable locators."""
+    from kreports.analysis.materiality_benchmark import METHODOLOGY_VERSION, methodology_references
+
+    references = {item["reference_id"]: item for item in methodology_references()}
+    isa = references["isa_320_a8_pbt_illustration"]
+    internal = references["materiality_candidate_ranges_v1"]
+
+    assert isa["issuer"] == "AUASB"
+    assert isa["standard_code"] == "ASA 320 (conforms with ISA 320)"
+    assert isa["official_url"] == "https://standards.auasb.gov.au/asa-320-dec-2015"
+    assert "official_url" not in internal
+    assert internal["source_locator"] == "docs/data-contract.md#audit-materiality-preparation"
+    assert internal["methodology_version"] == METHODOLOGY_VERSION

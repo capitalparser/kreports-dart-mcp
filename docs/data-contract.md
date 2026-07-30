@@ -44,6 +44,10 @@ labelled as internal methodology.  The rate registry is versioned here; only
 the 5% PBT illustration carries the ISA 320 A8 reference.  KReports does not
 attribute its other candidate rates to ISA 320.
 
+KReports internal methodology references use the stable locator
+`docs/data-contract.md#audit-materiality-preparation` and their returned
+`methodology_version`; they are not published as external URLs.
+
 Amounts are candidate calculations only and use Decimal arithmetic. A missing
 unit, incompatible scope, absent receipt provenance, or unavailable compact
 cache prevents a source-backed amount from becoming a candidate. Cache absence
