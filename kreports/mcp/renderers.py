@@ -1207,6 +1207,27 @@ def _note_search_presentation_envelope(envelope: AnswerEnvelopeV1) -> AnswerEnve
     return envelope.model_copy(update={"confirmed_facts": summaries})
 
 
+def _on_demand_presentation_envelope(
+    envelope: AnswerEnvelopeV1,
+) -> AnswerEnvelopeV1:
+    """Localize the user-key remediation while preserving its machine contract."""
+    raw_message = "user_dart_api_key is required"
+    public_message = "온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다."
+    data_quality = envelope.data_quality.model_copy(update={
+        "limitations": [
+            public_message if limitation == raw_message else limitation
+            for limitation in envelope.data_quality.limitations
+        ],
+    })
+    return envelope.model_copy(update={
+        "data_quality": data_quality,
+        "warnings": [
+            public_message if warning == raw_message else warning
+            for warning in envelope.warnings
+        ],
+    })
+
+
 def _is_accounting_note_search(tool_name: str, result: dict[str, Any]) -> bool:
     query = result.get("query")
     return (
@@ -1270,11 +1291,14 @@ def render_answer(tool_name: str, result: Any) -> str | None:
         else None
     )
     envelope = build_answer_envelope(tool_name, result)
-    presentation_envelope = (
-        _note_search_presentation_envelope(envelope)
-        if _is_accounting_note_search(tool_name, result)
-        else envelope
-    )
+    presentation_envelope = envelope
+    if _is_accounting_note_search(tool_name, result):
+        presentation_envelope = _note_search_presentation_envelope(envelope)
+    elif (
+        tool_name == "fetch_disclosure_on_demand"
+        and result.get("error") == "user_dart_api_key is required"
+    ):
+        presentation_envelope = _on_demand_presentation_envelope(envelope)
     legacy_result = dict(result)
     legacy_result["data_quality"] = envelope.data_quality.model_dump()
     legacy_result["verdict"] = envelope.verdict

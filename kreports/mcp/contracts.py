@@ -918,11 +918,6 @@ def _data_quality(tool_name: str, result: dict[str, Any]) -> DataQualityV1:
         )
     if is_error:
         error_message = str(result["error"]).strip()
-        if (
-            tool_name == "fetch_disclosure_on_demand"
-            and error_message == "user_dart_api_key is required"
-        ):
-            error_message = "온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다."
         limitations.insert(0, error_message or "도구 처리 중 오류가 발생했습니다. 원인 확인이 필요합니다.")
 
     raw_section_statuses = quality.get("section_statuses")
