@@ -115,21 +115,23 @@ def _policy_change_readiness_coverage(
     requested_scopes = {
         (str(row["corp_code"]), int(row["bsns_year"])) for row in notes
     }
-    annual_by_scope: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    latest_annual_candidate: dict[tuple[str, int], tuple[str, str]] = {}
     for disclosure in disclosures:
         corp_code = str(disclosure["corp_code"])
         report_name = str(disclosure.get("report_nm") or "")
-        raw_receipt = str(disclosure.get("rcept_no") or "").strip()
+        raw_receipt = str(disclosure.get("rcept_no") or "")
         disclosure_date = str(disclosure.get("disc_date") or "")[:10].replace("-", "")
         for scope in requested_scopes:
             if scope[0] != corp_code or f"사업보고서 ({scope[1]}." not in report_name:
                 continue
-            receipt = valid_annual_filing_receipt(raw_receipt, scope[1])
-            if receipt is None or receipt != raw_receipt or receipt[:8] != disclosure_date:
-                continue
-            annual_by_scope.setdefault(scope, []).append((disclosure_date, receipt))
-    for scope, sources in annual_by_scope.items():
-        latest[scope] = max(sources)[1]
+            candidate = (disclosure_date, raw_receipt)
+            if candidate > latest_annual_candidate.get(scope, ("", "")):
+                latest_annual_candidate[scope] = candidate
+    for scope, (disclosure_date, raw_receipt) in latest_annual_candidate.items():
+        receipt = valid_annual_filing_receipt(raw_receipt, scope[1])
+        if receipt is None or receipt != raw_receipt or receipt[:8] != disclosure_date:
+            continue
+        latest[scope] = receipt
 
     proven_years_by_key: dict[tuple[str, str, str, str], set[int]] = {}
     proven_rows: list[tuple[str, str, str, str, int]] = []
@@ -138,7 +140,7 @@ def _policy_change_readiness_coverage(
     for row in notes:
         corp_code = str(row["corp_code"])
         bsns_year = int(row["bsns_year"])
-        raw_receipt = str(row.get("rcept_no") or "").strip()
+        raw_receipt = str(row.get("rcept_no") or "")
         receipt = valid_annual_filing_receipt(raw_receipt, bsns_year)
         if (
             receipt is None

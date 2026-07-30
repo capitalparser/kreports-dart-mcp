@@ -8,8 +8,6 @@ from typing import Any, TypeAlias
 from sqlalchemy import text
 
 import kreports.db.engine as _engine_module
-from kreports.analysis.evidence import parent_rcept_no
-
 _SOURCE_FACT_TABLES = {
     "financial_facts_compact": ("financial_facts_compact", "bsns_year", ""),
     "financial_facts": (
@@ -22,26 +20,46 @@ _SOURCE_FACT_TABLES = {
 
 CompactCitationScope: TypeAlias = tuple[str, int, str]
 
-_VALID_RECEIPT_GLOB = "*[0-9][0-9][0-9][0-9][0-9][0-9][0-9]" \
-    "[0-9][0-9][0-9][0-9][0-9][0-9][0-9]*"
-
-
 def valid_annual_filing_receipt(
     receipt: object,
     bsns_year: object,
 ) -> str | None:
-    """Return a canonical receipt only when its filing date is plausible."""
-    canonical = parent_rcept_no(str(receipt or ""))
-    if canonical is None or len(canonical) != 14 or not canonical.isdigit():
+    """Return a receipt only when the original stored value is exact and plausible.
+
+    This provenance boundary intentionally does not use ``parent_rcept_no``:
+    attachment/document ids and whitespace-wrapped values are not filing
+    receipts.  Callers that need a parent identifier for document navigation
+    must keep that weaker normalization separate from annual-filing proof.
+    """
+    raw_receipt = str(receipt or "")
+    if len(raw_receipt) != 14 or not raw_receipt.isdigit():
         return None
     try:
-        receipt_date = datetime.strptime(canonical[:8], "%Y%m%d").date()
+        receipt_date = datetime.strptime(raw_receipt[:8], "%Y%m%d").date()
         normalized_year = int(bsns_year)
     except (TypeError, ValueError):
         return None
     if not normalized_year <= receipt_date.year <= normalized_year + 10:
         return None
-    return canonical
+    return raw_receipt
+
+
+def _exact_receipt_matches_disclosure_date(
+    receipt: object,
+    bsns_year: object,
+    disclosure_date: object,
+) -> str | None:
+    """Prove an unmodified annual receipt against its recorded disclosure day."""
+    raw_receipt = str(receipt or "")
+    resolved_receipt = valid_annual_filing_receipt(raw_receipt, bsns_year)
+    normalized_disclosure_date = str(disclosure_date or "")[:10].replace("-", "")
+    if (
+        resolved_receipt is None
+        or resolved_receipt != raw_receipt
+        or resolved_receipt[:8] != normalized_disclosure_date
+    ):
+        return None
+    return resolved_receipt
 
 
 def compact_citation_anchors(
@@ -95,6 +113,7 @@ def compact_citation_anchors(
                     requested.bsns_year,
                     requested.fs_div,
                     d.rcept_no,
+                    d.disc_date,
                     d.report_nm,
                     ROW_NUMBER() OVER (
                         PARTITION BY
@@ -107,16 +126,8 @@ def compact_citation_anchors(
                 JOIN disclosures AS d ON d.corp_code = requested.corp_code
                 WHERE d.report_nm LIKE
                       ('%사업보고서 (' || requested.bsns_year || '.%')
-                  AND d.rcept_no GLOB '{_VALID_RECEIPT_GLOB}'
-                  AND LENGTH(d.rcept_no) >= 14
-                  AND SUBSTR(d.rcept_no, 1, 14) NOT GLOB '*[^0-9]*'
-                  AND SUBSTR(d.rcept_no, 1, 8) = REPLACE(
-                      SUBSTR(CAST(d.disc_date AS TEXT), 1, 10),
-                      '-',
-                      ''
-                  )
             )
-            SELECT corp_code, bsns_year, fs_div, rcept_no, report_nm
+            SELECT corp_code, bsns_year, fs_div, rcept_no, disc_date, report_nm
             FROM ranked
             WHERE source_rank = 1
         """)
@@ -124,9 +135,10 @@ def compact_citation_anchors(
             rows = conn.execute(query, params).mappings().all()
         for row in rows:
             scope = (str(row["corp_code"]), int(row["bsns_year"]), str(row["fs_div"]))
-            receipt = valid_annual_filing_receipt(
+            receipt = _exact_receipt_matches_disclosure_date(
                 row["rcept_no"],
                 scope[1],
+                row["disc_date"],
             )
             if receipt is None:
                 continue
@@ -190,8 +202,6 @@ def annual_filing_sources(
         params["fs_div"] = str(fs_div)
         fs_div_clause = "AND f.fs_div=:fs_div"
 
-    valid_receipt_pattern = "*[0-9][0-9][0-9][0-9][0-9][0-9][0-9]" \
-        "[0-9][0-9][0-9][0-9][0-9][0-9][0-9]*"
     query = text(f"""
         WITH fact_identities AS (
             SELECT DISTINCT f.{fact_table[1]} AS bsns_year, f.fs_div
@@ -203,7 +213,7 @@ def annual_filing_sources(
         ),
         ranked_disclosures AS (
             SELECT fact.bsns_year, fact.fs_div,
-                   d.rcept_no, d.corp_code, d.corp_name, d.report_nm,
+                   d.rcept_no, d.disc_date, d.corp_code, d.corp_name, d.report_nm,
                    ROW_NUMBER() OVER (
                        PARTITION BY fact.bsns_year, fact.fs_div
                        ORDER BY d.disc_date DESC, d.rcept_no DESC
@@ -211,16 +221,8 @@ def annual_filing_sources(
             FROM fact_identities AS fact
             JOIN disclosures AS d ON d.corp_code=:corp_code
             WHERE ({" OR ".join(disclosure_year_clauses)})
-              AND d.rcept_no GLOB '{valid_receipt_pattern}'
-              AND LENGTH(d.rcept_no) >= 14
-              AND SUBSTR(d.rcept_no, 1, 14) NOT GLOB '*[^0-9]*'
-              AND SUBSTR(d.rcept_no, 1, 8) = REPLACE(
-                  SUBSTR(CAST(d.disc_date AS TEXT), 1, 10),
-                  '-',
-                  ''
-              )
         )
-        SELECT bsns_year, fs_div, rcept_no, corp_code, corp_name, report_nm
+        SELECT bsns_year, fs_div, rcept_no, disc_date, corp_code, corp_name, report_nm
         FROM ranked_disclosures
         WHERE source_rank=1
         ORDER BY bsns_year DESC, fs_div ASC
@@ -231,9 +233,10 @@ def annual_filing_sources(
     sources: dict[int, dict[str, Any]] = {}
     for disclosure_row in disclosure_rows:
         normalized_year = int(disclosure_row["bsns_year"])
-        resolved_rcept_no = valid_annual_filing_receipt(
+        resolved_rcept_no = _exact_receipt_matches_disclosure_date(
             disclosure_row.get("rcept_no"),
             normalized_year,
+            disclosure_row.get("disc_date"),
         )
         if not resolved_rcept_no or normalized_year in sources:
             continue

@@ -226,6 +226,43 @@ def test_policy_change_readiness_rejects_nonlatest_annual_receipt(temp_engine):
     assert snapshot["counts"]["policy_change_comparable_companies"] == 0
 
 
+def test_policy_change_readiness_rejects_whitespace_wrapped_current_annual_receipt(
+    temp_engine,
+):
+    """A two-year chapter pair needs exact raw receipts in both years."""
+    import kreports.analysis.readiness as readiness
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure
+
+    Session = sessionmaker(bind=temp_engine)
+    with Session() as session:
+        session.add(Company(corp_code="00126380", corp_name="A", stock_code="005930", market="KOSPI"))
+        session.add_all([
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00126380", corp_name="A",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            Disclosure(
+                rcept_no=" 20260301000001 ", corp_code="00126380", corp_name="A",
+                disc_date=date(2026, 3, 1), disc_type="A", report_nm="사업보고서 (2025.12)",
+            ),
+            AccountingNoteChapter(
+                corp_code="00126380", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="2", section_type="policy", body="before",
+            ),
+            AccountingNoteChapter(
+                corp_code="00126380", bsns_year=2025, fs_div="CFS", rcept_no=" 20260301000001 ",
+                source_type="business_report", note_no="2", section_type="policy", body="after",
+            ),
+        ])
+        session.commit()
+
+    snapshot = readiness.auditor_feature_readiness_snapshot(year=2025, market="KOSPI")
+
+    assert snapshot["feature_status"]["accounting_policy_changes"] != "usable"
+    assert snapshot["counts"]["policy_change_excluded_unproven"] == 1
+    assert snapshot["counts"]["policy_change_comparable_companies"] == 0
+
+
 def test_policy_change_readiness_rejects_historical_pair_without_requested_year(
     temp_engine,
 ):

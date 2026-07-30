@@ -453,7 +453,8 @@ def _materiality_benchmark_coverage(
             ),
             annual_ranked AS (
                 SELECT s.corp_code, s.bsns_year, s.fs_div,
-                       SUBSTR(d.rcept_no, 1, 14) AS canonical_rcept_no,
+                       d.rcept_no,
+                       d.disc_date,
                        d.report_nm,
                        ROW_NUMBER() OVER (
                            PARTITION BY
@@ -462,20 +463,20 @@ def _materiality_benchmark_coverage(
                        ) AS source_rank
                 FROM fact_scopes AS s
                 JOIN disclosures AS d ON d.corp_code=s.corp_code
-                WHERE LENGTH(d.rcept_no) >= 14
-                  AND SUBSTR(d.rcept_no, 1, 14) NOT GLOB '*[^0-9]*'
-                  AND CAST(SUBSTR(d.rcept_no, 1, 4) AS INTEGER)
-                      BETWEEN s.bsns_year AND s.bsns_year + 10
-                  AND SUBSTR(d.rcept_no, 1, 8)=
-                      STRFTIME('%Y%m%d', d.disc_date)
-                  AND d.report_nm LIKE
+                WHERE d.report_nm LIKE
                       ('%사업보고서 (' || s.bsns_year || '.%')
             ),
             latest_annual AS (
                 SELECT corp_code, bsns_year, fs_div,
-                       canonical_rcept_no, report_nm
+                       rcept_no, disc_date, report_nm
                 FROM annual_ranked
                 WHERE source_rank=1
+                  AND LENGTH(rcept_no)=14
+                  AND rcept_no NOT GLOB '*[^0-9]*'
+                  AND CAST(SUBSTR(rcept_no, 1, 4) AS INTEGER)
+                      BETWEEN bsns_year AND bsns_year + 10
+                  AND SUBSTR(rcept_no, 1, 8)=
+                      STRFTIME('%Y%m%d', disc_date)
             ),
             candidate_rows AS (
                 SELECT f.corp_code, f.bsns_year, f.fs_div, f.metric_key,
@@ -497,7 +498,7 @@ def _materiality_benchmark_coverage(
                            AND LENGTH(f.citation_rcept_no)=14
                            AND f.citation_rcept_no NOT GLOB '*[^0-9]*'
                            AND f.citation_rcept_no=
-                               a.canonical_rcept_no
+                               a.rcept_no
                            AND f.citation_report_nm=a.report_nm
                            AND (
                                (f.metric_key IN (

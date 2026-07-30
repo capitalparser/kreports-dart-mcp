@@ -45,30 +45,34 @@ def _annual_note_filing_sources(
     with _engine_module.engine.connect() as conn:
         rows = conn.execute(stmt, params).mappings().all()
 
-    sources: dict[tuple[int, str], dict[str, Any]] = {}
+    latest_rows_by_year: dict[int, dict[str, Any]] = {}
     for year in normalized_years:
         for row in rows:
             report_nm = str(row.get("report_nm") or "")
             if f"사업보고서 ({year}." not in report_nm:
                 continue
-            raw_receipt = str(row.get("rcept_no") or "").strip()
-            receipt = valid_annual_filing_receipt(raw_receipt, year)
-            disclosure_date = str(row.get("disc_date") or "")[:10].replace("-", "")
-            if (
-                receipt is None
-                or raw_receipt != receipt
-                or receipt[:8] != disclosure_date
-                or (year, receipt) in sources
-            ):
-                continue
-            sources[(year, receipt)] = {
+            latest_rows_by_year.setdefault(year, dict(row))
+            break
+
+    sources: dict[tuple[int, str], dict[str, Any]] = {}
+    for year, row in latest_rows_by_year.items():
+        raw_receipt = str(row.get("rcept_no") or "")
+        receipt = valid_annual_filing_receipt(raw_receipt, year)
+        disclosure_date = str(row.get("disc_date") or "")[:10].replace("-", "")
+        if (
+            receipt is None
+            or raw_receipt != receipt
+            or receipt[:8] != disclosure_date
+        ):
+            continue
+        sources[(year, receipt)] = {
                 "corp_code": str(row.get("corp_code") or corp_code),
                 "corp_name": row.get("corp_name") or corp_code,
                 "bsns_year": year,
                 "rcept_no": receipt,
-                "report_nm": report_nm,
+                "report_nm": str(row.get("report_nm") or ""),
                 "source_table": "accounting_note_chapters",
-            }
+        }
     return sources
 
 
@@ -78,7 +82,7 @@ def _chapter_provenance(
 ) -> tuple[str, str, dict[str, Any] | None]:
     """Classify a cached chapter without substituting a different filing."""
     year = int(row["bsns_year"])
-    raw_receipt = str(row.get("rcept_no") or "").strip()
+    raw_receipt = str(row.get("rcept_no") or "")
     receipt = valid_annual_filing_receipt(raw_receipt, year)
     if receipt is None or raw_receipt != receipt:
         return raw_receipt, "invalid_receipt", None

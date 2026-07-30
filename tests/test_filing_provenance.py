@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from kreports.analysis.evidence import evidence_reference_fields
 from kreports.db.models import Company, Disclosure, FinancialFactCompact
 
@@ -17,7 +19,7 @@ def _add_compact_fact(session, corp_code: str, year: int, fs_div: str = "CFS") -
     ))
 
 
-def test_annual_filing_source_uses_latest_same_company_same_year_parent_receipt(temp_engine):
+def test_annual_filing_source_uses_latest_same_company_same_year_exact_receipt(temp_engine):
     """A correction must win without borrowing another company's receipt."""
     from kreports.analysis.filing_provenance import annual_filing_source
 
@@ -37,7 +39,7 @@ def test_annual_filing_source_uses_latest_same_company_same_year_parent_receipt(
                 flr_nm="삼성전자",
             ),
             Disclosure(
-                rcept_no="20260310002820_001_xml",
+                rcept_no="20260310002820",
                 corp_code="00126380",
                 corp_name="삼성전자",
                 disc_date=date(2026, 3, 10),
@@ -133,8 +135,20 @@ def test_annual_filing_source_returns_none_when_filing_identity_or_period_is_not
     assert evidence_reference_fields(source or {}) is None
 
 
-def test_annual_filing_source_skips_invalid_newer_receipts_for_latest_valid_receipt(temp_engine):
-    """An invalid newer receipt cannot suppress an older valid annual filing."""
+@pytest.mark.parametrize(
+    "contaminated_receipt",
+    [
+        "20260310002820-attachment",
+        "attachment-20260310002820",
+        " 20260310002820 ",
+    ],
+    ids=("suffix", "prefix", "whitespace"),
+)
+def test_annual_filing_source_rejects_contaminated_latest_receipt_without_borrowing_older_filing(
+    temp_engine,
+    contaminated_receipt,
+):
+    """A malformed latest annual disclosure must not fall back to an older filing."""
     from kreports.analysis.filing_provenance import annual_filing_source
 
     from kreports.db.engine import get_session
@@ -152,7 +166,7 @@ def test_annual_filing_source_skips_invalid_newer_receipts_for_latest_valid_rece
                 flr_nm="삼성전자",
             ),
             Disclosure(
-                rcept_no="invalid-receipt",
+                rcept_no=contaminated_receipt,
                 corp_code="00126380",
                 corp_name="삼성전자",
                 disc_date=date(2026, 3, 10),
@@ -170,14 +184,13 @@ def test_annual_filing_source_skips_invalid_newer_receipts_for_latest_valid_rece
         fs_div="CFS",
     )
 
-    assert source is not None
-    assert source["rcept_no"] == "20260301002820"
+    assert source is None
 
 
 def test_annual_filing_source_rejects_receipt_date_mismatched_to_disclosure(
     temp_engine,
 ):
-    """Catches a 14-digit synthetic receipt outranking the real annual filing."""
+    """A latest date-mismatched receipt cannot fall back to an older filing."""
     from kreports.analysis.filing_provenance import annual_filing_source
     from kreports.db.engine import get_session
 
@@ -212,8 +225,7 @@ def test_annual_filing_source_rejects_receipt_date_mismatched_to_disclosure(
         fs_div="CFS",
     )
 
-    assert source is not None
-    assert source["rcept_no"] == "20250311001085"
+    assert source is None
 
 
 def test_annual_filing_sources_require_matching_fact_identity_and_basis(temp_engine):

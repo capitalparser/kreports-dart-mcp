@@ -348,3 +348,47 @@ def test_accounting_policy_changes_rejects_contaminated_disclosure_receipt(
     assert changed["filing_source"] is None
     assert public.get("confirmed_facts") is None
     assert public["data_quality"]["status"] == "limited"
+
+
+def test_accounting_policy_changes_rejects_whitespace_wrapped_latest_disclosure_and_chapter(
+    temp_engine,
+):
+    """Whitespace is part of each stored receipt identity and cannot produce sources."""
+    import kreports.analysis.policy_changes as policy_changes
+    from kreports.mcp.answer_pack import build_answer_pack
+    from kreports.mcp.handlers.auditor import _enrich_policy_change_evidence
+
+    Session = sessionmaker(bind=temp_engine)
+    with Session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add_all([
+            Disclosure(
+                rcept_no="20240301000001", corp_code="001", corp_name="A",
+                disc_date=date(2024, 3, 1), disc_type="A", report_nm="사업보고서 (2023.12)",
+            ),
+            Disclosure(
+                rcept_no=" 20250301000001 ", corp_code="001", corp_name="A",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            AccountingNoteChapter(
+                corp_code="001", bsns_year=2023, fs_div="CFS", rcept_no="20240301000001",
+                source_type="business_report", note_no="2", note_title="정책", section_type="policy",
+                body="기존 정책", body_hash="before", body_length=5,
+            ),
+            AccountingNoteChapter(
+                corp_code="001", bsns_year=2024, fs_div="CFS", rcept_no=" 20250301000001 ",
+                source_type="business_report", note_no="2", note_title="정책", section_type="policy",
+                body="변경 정책", body_hash="after", body_length=5,
+            ),
+        ])
+        session.commit()
+
+    domain = policy_changes.accounting_policy_changes("001", start_year=2023, end_year=2024)
+    public = _enrich_policy_change_evidence({**domain, "subject": {"corp_code": "001", "corp_name": "A"}})
+    pack = build_answer_pack("get_accounting_policy_changes", public)
+    changed = domain["changed_items"][0]
+
+    assert changed["provenance_status"] == "invalid_receipt"
+    assert changed["filing_source"] is None
+    assert public.get("confirmed_facts") is None
+    assert pack["sources"] == []

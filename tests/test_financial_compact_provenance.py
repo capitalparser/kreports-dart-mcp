@@ -45,10 +45,10 @@ def _seed_citable_compact_years(
     return receipts
 
 
-def test_compact_citation_anchors_are_bounded_and_keep_latest_valid_parent_receipt(
+def test_compact_citation_anchors_are_bounded_and_reject_contaminated_latest_receipt(
     temp_engine,
 ):
-    """A compact writer must not issue one citation query per scope or borrow filings."""
+    """A compact writer must not issue one query per scope or borrow older proof."""
     from kreports.analysis.filing_provenance import compact_citation_anchors
     from kreports.db.engine import get_session
 
@@ -119,15 +119,8 @@ def test_compact_citation_anchors_are_bounded_and_keep_latest_valid_parent_recei
     finally:
         event.remove(temp_engine, "after_cursor_execute", record_statement)
 
-    assert anchors[("00126380", 2025, "CFS")] == {
-        "corp_code": "00126380",
-        "bsns_year": 2025,
-        "fs_div": "CFS",
-        "rcept_no": "20260310002820",
-        "report_nm": "사업보고서 (2025.12) [정정]",
-        "citation_basis": "company_year_annual_filing_match",
-    }
-    assert anchors[("00126380", 2025, "OFS")]["rcept_no"] == "20260310002820"
+    assert ("00126380", 2025, "CFS") not in anchors
+    assert ("00126380", 2025, "OFS") not in anchors
     assert ("00999998", 2025, "CFS") not in anchors
     assert len(statements) == 2
 
@@ -810,9 +803,7 @@ def test_legacy_financial_rows_use_valid_annual_sources_for_growth(temp_engine):
 
     assert [
         row["source"]["rcept_no"] for row in result["rows"]
-    ] == ["20240312000736", "20250311001085"]
-    assert [
-        source["rcept_no"]
-        for source in result["rows"][1]["derived_sources"]["매출성장률"]
-    ] == ["20240312000736", "20250311001085"]
+    ] == ["20240312000736", None]
+    assert result["rows"][1]["매출성장률"] is None
+    assert "derived_sources" not in result["rows"][1]
     assert "20998220384504" not in str(result)

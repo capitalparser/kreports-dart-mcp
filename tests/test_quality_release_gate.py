@@ -643,6 +643,45 @@ def test_only_latest_company_year_annual_filing_can_prove_materiality(
     ] == 1
 
 
+@pytest.mark.parametrize(
+    "receipt_template",
+    (
+        "{receipt}-attachment",
+        "attachment-{receipt}",
+        " {receipt} ",
+    ),
+    ids=("suffix", "prefix", "whitespace"),
+)
+def test_contaminated_latest_annual_disclosure_cannot_borrow_older_materiality_source(
+    temp_engine,
+    monkeypatch,
+    receipt_template,
+):
+    """Latest malformed disclosure rows must close, not revive older proof."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    with get_session() as session:
+        for year in (2023, 2024, 2025):
+            receipt = f"{year + 1}0331{int('00126380'):06d}"
+            session.add(Disclosure(
+                rcept_no=receipt_template.format(receipt=receipt),
+                corp_code="00126380",
+                corp_name="회사-00126380",
+                disc_date=date(year + 1, 4, 30),
+                disc_type="A",
+                report_nm=f"사업보고서 ({year}.12) [정정]",
+            ))
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["coverage"]["materiality_benchmark"]["numerator"] == 0
+
+
 def test_implausibly_late_receipt_date_cannot_prove_materiality(
     temp_engine,
     monkeypatch,

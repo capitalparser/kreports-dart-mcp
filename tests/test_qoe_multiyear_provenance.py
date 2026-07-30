@@ -173,6 +173,38 @@ def test_qoe_rejects_whitespace_padded_raw_receipt_without_hiding_it(
     assert observation["source"]["rcept_no"] is None
 
 
+def test_qoe_does_not_borrow_an_older_filing_after_latest_disclosure_receipt_is_contaminated(
+    temp_engine,
+):
+    """A valid compact receipt cannot revive proof after its latest disclosure is malformed."""
+    from kreports.analysis.investor_quality import quality_of_earnings_pack
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        _seed_annual_sources(session)
+        for year in _ANNUAL_RECEIPTS:
+            _seed_qoe_facts(session, year)
+        session.add(Disclosure(
+            rcept_no=" 20240418001234 ",
+            corp_code="001",
+            corp_name="A",
+            disc_date=date(2024, 4, 18),
+            disc_type="A",
+            report_nm="사업보고서 (2023.12) [정정]",
+            flr_nm="A",
+        ))
+
+    result = quality_of_earnings_pack("001", start_year=2022, end_year=2024)
+
+    assert result["data_quality"]["status"] == "limited"
+    assert result["metrics"]["years"] == 2
+    observation = next(row for row in result["financial_observations"] if row["year"] == 2023)
+    assert observation["source"]["rcept_no"] is None
+    assert "20240318001234" not in {
+        source["rcept_no"] for source in result["financial_sources"]
+    }
+
+
 def test_qoe_bounds_extreme_rejected_receipt_diagnostic_across_public_payload(
     temp_engine,
 ):
