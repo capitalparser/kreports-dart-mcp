@@ -59,6 +59,7 @@ _DB_EVIDENCE_AGGREGATE_FIELDS = {
 _CANONICAL_MCP_STATUSES = {"usable", "limited", "missing", "error"}
 _EXPECTED_PROFESSIONAL_TOOLS = (
     "prepare_standard_audit_hours_inputs",
+    "prepare_audit_materiality_inputs",
     "compare_peer_audit_fees",
     "build_audit_acceptance_pack",
     "compare_peer_risk_profile",

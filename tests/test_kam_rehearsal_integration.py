@@ -362,7 +362,7 @@ def test_file_backed_db_evidence_rehearsal_reaches_revision_11(
     }
     assert report["live_sha256_unchanged"] is True
     assert report["idempotency"]["semantic_sha256_equal"] is True
-    assert report["mcp"]["tool_count"] == 17
+    assert report["mcp"]["tool_count"] == 18
     # A genuine revision-04 audit_fees table predates the revision-07
     # compatibility JSON column. Nonzero normalized-claim coverage belongs to
     # the revision-08 worker test; this run proves the empty phase is stable.
@@ -449,7 +449,7 @@ def test_real_rehearsal_migrates_rebuilds_and_preserves_source(
         "data_quality_limited",
         "complete",
     }
-    assert report["mcp"]["tool_count"] == 17
+    assert report["mcp"]["tool_count"] == 18
     assert report["mcp"]["schema_error_closed"] is True
     assert report["idempotency"]["semantic_sha256_equal"] is True
     assert set(report["idempotency"]) == {
