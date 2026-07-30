@@ -240,14 +240,13 @@ def _admission_limitations(
         limitations.append("invalid_citation_receipt")
     if row.get("citation_basis") != _ANNUAL_FILING_CITATION_BASIS:
         limitations.append("citation_basis_not_company_year_annual_filing_match")
-    if annual_sources is not None:
-        source = annual_sources.get(int(row["bsns_year"]))
-        if (
-            source is None
-            or source.get("fs_div") != row.get("fs_div")
-            or source.get("rcept_no") != receipt
-        ):
-            limitations.append("annual_filing_receipt_mismatch")
+    source = (annual_sources or {}).get(int(row["bsns_year"]))
+    if (
+        source is None
+        or source.get("fs_div") != row.get("fs_div")
+        or source.get("rcept_no") != receipt
+    ):
+        limitations.append("annual_filing_receipt_mismatch")
     return limitations
 
 

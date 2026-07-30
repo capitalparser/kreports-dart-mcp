@@ -39,11 +39,31 @@ def test_benchmark_series_rejects_malformed_receipts_and_wrong_citation_basis():
         {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
          "unit": "KRW", "period_type": "duration", "quality_status": "usable",
          "citation_rcept_no": "20250318000001", "citation_basis": "endpoint_lineage"},
-    ], years=[2025, 2024], fs_div="CFS")
+    ], years=[2025, 2024], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+        2024: {"rcept_no": "20250318000001", "fs_div": "CFS"},
+    })
 
     assert all(row["amount"] is None for row in series["revenue"])
     assert "invalid_citation_receipt" in series["revenue"][0]["limitations"]
     assert "citation_basis_not_company_year_annual_filing_match" in series["revenue"][1]["limitations"]
+
+
+def test_benchmark_series_requires_explicit_verified_annual_source_mapping():
+    """A self-declared annual citation cannot prove its own company/year identity."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    series = build_benchmark_series([
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+         "source_account_id": "ifrs-full_Revenue", "source_table": "financial_facts"},
+    ], years=[2025], fs_div="CFS")
+
+    observation = series["revenue"][0]
+    assert observation["amount"] is None
+    assert observation["basis"] == "limited"
+    assert "annual_filing_receipt_mismatch" in observation["limitations"]
 
 
 def test_prepare_rejects_foreign_or_wrong_year_annual_filing_receipts(temp_engine):
@@ -93,7 +113,10 @@ def test_benchmark_series_rejects_conflicting_duplicates_and_deduplicates_identi
         {**proven, "bsns_year": 2025, "amount": 101, "citation_rcept_no": "20260318000001"},
         proven,
         dict(proven),
-    ], years=[2025, 2024], fs_div="CFS")
+    ], years=[2025, 2024], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+        2024: {"rcept_no": "20250318000001", "fs_div": "CFS"},
+    })
 
     conflict, identical = series["revenue"]
     assert conflict["amount"] is None
@@ -113,22 +136,25 @@ def test_duplicate_identity_normalizes_amount_and_rejects_source_account_or_tabl
         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
         "source_account_id": "ifrs-full_Revenue", "source_table": "financial_facts",
     }
+    annual_sources = {
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+    }
     normalized = build_benchmark_series([
         {**proven, "amount": "100.0"},
         proven,
-    ], years=[2025], fs_div="CFS")
+    ], years=[2025], fs_div="CFS", annual_sources=annual_sources)
     permuted = build_benchmark_series([
         proven,
         {**proven, "amount": "100.0"},
-    ], years=[2025], fs_div="CFS")
+    ], years=[2025], fs_div="CFS", annual_sources=annual_sources)
     account_conflict = build_benchmark_series([
         proven,
         {**proven, "source_account_id": "dart_Revenue"},
-    ], years=[2025], fs_div="CFS")
+    ], years=[2025], fs_div="CFS", annual_sources=annual_sources)
     table_conflict = build_benchmark_series([
         proven,
         {**proven, "source_table": "financials"},
-    ], years=[2025], fs_div="CFS")
+    ], years=[2025], fs_div="CFS", annual_sources=annual_sources)
 
     assert normalized["revenue"] == permuted["revenue"]
     assert normalized["revenue"][0]["amount"] == Decimal("100")
@@ -152,7 +178,9 @@ def test_derived_pbt_retains_direct_observation_limitations_and_bounded_diagnost
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
          "unit": "KRW", "period_type": "duration", "quality_status": "usable",
          "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
-    ], years=[2025], fs_div="CFS")
+    ], years=[2025], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+    })
 
     derived = series["profit_before_tax"][0]
     assert derived["amount"] == Decimal("100")
@@ -245,7 +273,9 @@ def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():
         },
     ]
 
-    series = build_benchmark_series(rows, years=[2025], fs_div="CFS")
+    series = build_benchmark_series(rows, years=[2025], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+    })
 
     observation = series["profit_before_tax"][0]
     assert observation["amount"] == Decimal("150")
@@ -264,7 +294,15 @@ def test_derived_pbt_requires_compatible_operands_and_preserves_both_sources():
         {"bsns_year": 2023, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 10, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20240318000001", "citation_basis": _ANNUAL_BASIS},
     ]
 
-    series = build_benchmark_series(compatible, years=[2024, 2023], fs_div="CFS")
+    series = build_benchmark_series(
+        compatible,
+        years=[2024, 2023],
+        fs_div="CFS",
+        annual_sources={
+            2024: {"rcept_no": "20250318000001", "fs_div": "CFS"},
+            2023: {"rcept_no": "20240318000001", "fs_div": "CFS"},
+        },
+    )
 
     derived = series["profit_before_tax"][0]
     incompatible = series["profit_before_tax"][1]
@@ -422,7 +460,10 @@ def test_pbt_derivation_requires_same_filing_and_falls_back_when_direct_is_inval
          "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250319000001", "citation_basis": _ANNUAL_BASIS},
     ]
 
-    series = build_benchmark_series(rows, years=[2025, 2024], fs_div="CFS")
+    series = build_benchmark_series(rows, years=[2025, 2024], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+        2024: {"rcept_no": "20250318000001", "fs_div": "CFS"},
+    })
 
     derived = series["profit_before_tax"][0]
     mismatch = series["profit_before_tax"][1]
@@ -430,7 +471,7 @@ def test_pbt_derivation_requires_same_filing_and_falls_back_when_direct_is_inval
     assert derived["basis"] == "derived_profit_loss_plus_tax_expense"
     assert {source["operand_metric"] for source in derived["sources"]} == {"profit_loss", "tax_expense"}
     assert mismatch["amount"] is None
-    assert "incompatible_filing_provenance" in mismatch["limitations"]
+    assert "annual_filing_receipt_mismatch" in mismatch["limitations"]
 
 
 def test_missing_pbt_operand_does_not_claim_a_filing_provenance_mismatch():
@@ -442,7 +483,9 @@ def test_missing_pbt_operand_does_not_claim_a_filing_provenance_mismatch():
          "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
          "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
-    ], years=[2025], fs_div="CFS")
+    ], years=[2025], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+    })
 
     limitations = series["profit_before_tax"][0]["limitations"]
     assert "incompatible_operands" in limitations
