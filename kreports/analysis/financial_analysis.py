@@ -166,7 +166,42 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
     if mode == "quality_of_earnings":
         metrics = result.get("metrics") or {}
         evidence_rows = result.get("evidence") or []
+        observations = [
+            row for row in result.get("financial_observations") or []
+            if isinstance(row, dict)
+        ]
+        evidence_sources = [
+            dict(row["source"])
+            for row in observations
+            if isinstance(row.get("source"), dict)
+        ]
+        if not evidence_sources:
+            legacy_years = [
+                int(row["year"])
+                for row in evidence_rows
+                if row.get("year") is not None
+            ]
+            legacy_sources = annual_filing_sources(
+                corp_code,
+                legacy_years,
+                source_table="financial_facts_compact",
+                fs_div=result.get("fs_div"),
+            )
+            evidence_sources = [
+                dict(legacy_sources[year])
+                if year in legacy_sources
+                else _uncitable_annual_source(
+                    corp_code,
+                    subject,
+                    year,
+                    "재무제표",
+                    "financial_facts_compact",
+                )
+                for year in legacy_years
+            ]
         latest = evidence_rows[-1] if evidence_rows else {}
+        if evidence_sources:
+            source = evidence_sources[-1]
         if evidence_rows:
             facts.append({
                 "statement": (
@@ -174,6 +209,7 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
                     f"{metrics.get('years') or len(evidence_rows)}개년 이익의 질 지표가 계산되었습니다."
                 ),
                 "source": source,
+                "sources": evidence_sources,
                 "excerpt": (
                     f"최근연도 {latest.get('year') or end_year}: revenue={latest.get('revenue')}, "
                     f"operating_cf={latest.get('operating_cf')}, cash_conversion={latest.get('cash_conversion')}"
@@ -263,7 +299,7 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
                 result,
                 evidence_sources,
             )
-            if mode == "dcf"
+            if mode in {"dcf", "quality_of_earnings"}
             else _downgrade_unproven_financial_data_quality(result, source)
         ),
     }

@@ -869,6 +869,34 @@ def _build_quality_pack(result: dict[str, Any]) -> dict[str, Any]:
             [("metric", "지표"), ("value", "값")],
             [{"metric": key, "value": value} for key, value in metrics.items()],
         ))
+    observations = [
+        row for row in result.get("financial_observations") or []
+        if isinstance(row, dict)
+    ]
+    if observations:
+        provenance_rows = []
+        for row in observations:
+            source = row.get("source")
+            source = source if isinstance(source, dict) else {}
+            provenance_rows.append({
+                "year": row.get("year"),
+                "provenance_status": row.get("provenance_status"),
+                "rcept_no": source.get("rcept_no"),
+                "unit": row.get("units"),
+                "limitation": row.get("limitation") or source.get("provenance_gap"),
+            })
+        pack["tables"].append(_table(
+            "quality_financial_provenance",
+            "QoE 연도별 재무 근거",
+            [
+                ("year", "사업연도", None),
+                ("provenance_status", "근거 상태", None),
+                ("rcept_no", "사업보고서 접수번호", None),
+                ("unit", "원 단위", None),
+                ("limitation", "한계", None),
+            ],
+            provenance_rows,
+        ))
     return pack
 
 

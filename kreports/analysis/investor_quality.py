@@ -6,7 +6,10 @@ from statistics import pstdev
 from sqlalchemy import bindparam, text
 
 from kreports.analysis.evidence import dart_filing_url, parent_rcept_no
-from kreports.analysis.filing_provenance import valid_annual_filing_receipt
+from kreports.analysis.filing_provenance import (
+    annual_filing_sources,
+    valid_annual_filing_receipt,
+)
 import kreports.db.engine as _engine_module
 from kreports.semantic.metrics import CORE_FINANCIAL_METRICS, metric_output_key
 
@@ -123,6 +126,167 @@ def _financial_series(
     return [by_year[year] for year in sorted(by_year)]
 
 
+_QOE_PROVENANCE_FIELDS = (
+    "amount",
+    "unit",
+    "period_type",
+    "citation_rcept_no",
+    "citation_report_nm",
+    "citation_basis",
+    "quality_status",
+    "source_account_id",
+    "source_table",
+)
+
+
+def _qoe_unproven_source(
+    company: str,
+    year: int,
+    *,
+    status: str,
+    limitation: str,
+) -> dict:
+    """Describe a non-citable annual observation without borrowing a filing."""
+    return {
+        "corp_code": company,
+        "report_nm": "DART 연간 재무 데이터",
+        "bsns_year": year,
+        "rcept_no": None,
+        "section_title": "재무제표",
+        "source_table": "financial_facts_compact",
+        "provenance_status": status,
+        "provenance_gap": limitation,
+    }
+
+
+def _qoe_provenance_series(
+    company: str,
+    start_year: int,
+    end_year: int,
+    *,
+    fs_div: str,
+) -> tuple[list[dict], list[dict]]:
+    """Admit QoE rows only when every used annual metric has one exact filing.
+
+    This path is intentionally stricter than the historical-series helper used
+    by DCF.  A QoE multi-year conclusion must not turn a locally stored value
+    or a plausible-looking receipt into a company/year filing citation.
+    """
+    raw_rows: list[dict] = []
+    with _engine_module.engine.connect() as conn:
+        compact_columns = {
+            row["name"]
+            for row in conn.execute(
+                text("PRAGMA table_info(financial_facts_compact)")
+            ).mappings()
+        }
+        requested_columns = {"bsns_year", "metric_key", *_QOE_PROVENANCE_FIELDS}
+        if not requested_columns.issubset(compact_columns):
+            return [], []
+        stmt = text("""
+            SELECT bsns_year, metric_key, amount, unit, period_type,
+                   citation_rcept_no, citation_report_nm, citation_basis,
+                   quality_status, source_account_id, source_table
+            FROM financial_facts_compact
+            WHERE corp_code=:corp_code
+              AND fs_div=:fs_div
+              AND bsns_year BETWEEN :start_year AND :end_year
+              AND metric_key IN :metric_keys
+            ORDER BY bsns_year, metric_key, citation_rcept_no,
+                     source_account_id, source_table
+        """).bindparams(bindparam("metric_keys", expanding=True))
+        raw_rows = [dict(row) for row in conn.execute(stmt, {
+            "corp_code": company,
+            "fs_div": fs_div,
+            "start_year": int(start_year),
+            "end_year": int(end_year),
+            "metric_keys": CORE_FINANCIAL_METRICS,
+        }).mappings()]
+
+    rows_by_year: dict[int, dict[str, list[dict]]] = {}
+    for row in raw_rows:
+        try:
+            year = int(row["bsns_year"])
+        except (TypeError, ValueError):
+            continue
+        metric_key = str(row.get("metric_key") or "")
+        if metric_key:
+            rows_by_year.setdefault(year, {}).setdefault(metric_key, []).append(row)
+
+    annual_sources = annual_filing_sources(
+        company,
+        sorted(rows_by_year),
+        source_table="financial_facts_compact",
+        fs_div=fs_div,
+    )
+    admitted: list[dict] = []
+    observations: list[dict] = []
+    for year in sorted(rows_by_year):
+        metric_groups = rows_by_year[year]
+        source = annual_sources.get(year)
+        safe_values: dict[str, object] = {}
+        units: dict[str, object] = {}
+        statuses: list[str] = []
+        for metric_key in sorted(metric_groups):
+            candidates = metric_groups[metric_key]
+            identities = {
+                tuple(candidate.get(field) for field in _QOE_PROVENANCE_FIELDS)
+                for candidate in candidates
+            }
+            if len(identities) != 1:
+                statuses.append("conflicting_compact_series_rows")
+                safe_values[metric_output_key(metric_key)] = None
+                units[metric_output_key(metric_key)] = None
+                continue
+            row = candidates[0]
+            output_key = metric_output_key(metric_key)
+            safe_values[output_key] = row.get("amount")
+            units[output_key] = row.get("unit")
+            canonical_receipt = valid_annual_filing_receipt(
+                row.get("citation_rcept_no"), year,
+            )
+            if source is None:
+                statuses.append("requested_annual_report_not_cached")
+            elif not row.get("unit"):
+                statuses.append("compact_unit_missing")
+            elif row.get("citation_basis") != "company_year_annual_filing_match":
+                statuses.append("compact_citation_basis_unproven")
+            elif canonical_receipt != source.get("rcept_no"):
+                statuses.append("compact_citation_not_exact_annual_filing")
+
+        if statuses:
+            status = sorted(set(statuses))[0]
+            limitation = (
+                f"{year}년 QoE 재무값은 {status} 상태여서 동일 회사·사업연도 "
+                "사업보고서 근거의 다년 결론에 사용하지 않았습니다."
+            )
+            observation_source = _qoe_unproven_source(
+                company, year, status=status, limitation=limitation,
+            )
+        else:
+            status = "proven_company_year_annual_filing"
+            observation_source = {
+                **source,
+                "citation_basis": "company_year_annual_filing_match",
+            }
+            admitted.append({
+                "bsns_year": year,
+                **safe_values,
+                "source": dict(observation_source),
+                "units": dict(units),
+            })
+            limitation = None
+        observations.append({
+            "year": year,
+            **safe_values,
+            "units": units,
+            "source": observation_source,
+            "provenance_status": status,
+            **({"limitation": limitation} if limitation else {}),
+        })
+    return admitted, observations
+
+
 def _normalized_excerpt(value: str) -> str:
     return " ".join(str(value or "").split()).casefold()
 
@@ -215,7 +379,38 @@ def quality_of_earnings_pack(
     """Return investor-facing quality-of-earnings signals."""
     matter_summary = _audit_matter_summary(company, start_year, end_year)
     matter_flags = _audit_matter_flags(company, start_year, end_year)
-    series = _financial_series(company, start_year, end_year, fs_div=fs_div)
+    series, financial_observations = _qoe_provenance_series(
+        company, start_year, end_year, fs_div=fs_div,
+    )
+    # Keep legacy/non-proven compact observations inspectable, but never let
+    # that compatibility path establish a filing-backed multi-year conclusion.
+    if not series and not financial_observations:
+        legacy_series = _financial_series(
+            company, start_year, end_year, fs_div=fs_div,
+        )
+        for row in legacy_series:
+            year = int(row["bsns_year"])
+            limitation = (
+                f"{year}년 QoE 재무값은 저장된 사업보고서 접수번호를 확인하지 "
+                "못해 동일 회사·사업연도 근거의 다년 결론에 사용하지 않았습니다."
+            )
+            financial_observations.append({
+                "year": year,
+                **{
+                    key: value for key, value in row.items()
+                    if key != "bsns_year"
+                },
+                "units": {},
+                "source": _qoe_unproven_source(
+                    company,
+                    year,
+                    status="compact_citation_unproven_or_conflicting",
+                    limitation=limitation,
+                ),
+                "provenance_status": "compact_citation_unproven_or_conflicting",
+                "limitation": limitation,
+            })
+        series = legacy_series
 
     evidence: list[dict] = []
     signals: list[dict] = []
@@ -243,6 +438,16 @@ def quality_of_earnings_pack(
             "operating_cf": ocf,
             "operating_margin": margin,
             "cash_conversion": cash_conversion,
+            "source": dict(row.get("source") or _qoe_unproven_source(
+                company,
+                int(row["bsns_year"]),
+                status="compact_citation_unproven_or_conflicting",
+                limitation=(
+                    f"{int(row['bsns_year'])}년 QoE 재무값의 사업보고서 "
+                    "접수번호를 확인하지 못했습니다."
+                ),
+            )),
+            "units": dict(row.get("units") or {}),
         })
 
     if low_cash_conversion_years:
@@ -282,9 +487,14 @@ def quality_of_earnings_pack(
         if series
         else "insufficient_data"
     )
+    provenance_limitations = [
+        str(row["limitation"])
+        for row in financial_observations
+        if row.get("limitation")
+    ]
     quality_status = (
         "usable"
-        if len(series) >= 3
+        if len(series) >= 3 and not provenance_limitations
         else "limited"
         if series or matter_summary["section_count"]
         else "missing"
@@ -298,6 +508,10 @@ def quality_of_earnings_pack(
             0,
             "요청 기간의 compact 연간 재무 실제값은 없지만 감사보고서 matter는 독립적으로 표시합니다.",
         )
+    limitations.extend(
+        limitation for limitation in provenance_limitations
+        if limitation not in limitations
+    )
     return {
         "company": company,
         "start_year": int(start_year),
@@ -313,6 +527,12 @@ def quality_of_earnings_pack(
             "negative_ocf_years": negative_ocf_years,
         },
         "evidence": evidence,
+        "financial_observations": financial_observations,
+        "financial_sources": [
+            dict(row["source"])
+            for row in financial_observations
+            if row.get("provenance_status") == "proven_company_year_annual_filing"
+        ],
         "audit_matter_flags": matter_flags,
         "audit_matter_summary": matter_summary,
         "data_quality": {
@@ -323,6 +543,7 @@ def quality_of_earnings_pack(
                 else "financial_facts_compact"
             ),
             "year_count": len(series),
+            "limitations": provenance_limitations,
         },
         "limitations": limitations,
     }
