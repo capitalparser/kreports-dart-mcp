@@ -40,9 +40,19 @@ stability calculations, rate-range candidates, and methodology references;
 it always remains `not_assessed` until an auditor explicitly selects and
 approves a benchmark and rate. ISA 320 illustrations are labelled as
 illustrations, while KReports candidate ranges and stability handling are
-labelled as practice observation or internal methodology.
+labelled as internal methodology.  The rate registry is versioned here; only
+the 5% PBT illustration carries the ISA 320 A8 reference.  KReports does not
+attribute its other candidate rates to ISA 320.
 
 Amounts are candidate calculations only and use Decimal arithmetic. A missing
 unit, incompatible scope, absent receipt provenance, or unavailable compact
 cache prevents a source-backed amount from becoming a candidate. Cache absence
 is explicitly not a claim that the source filing lacks the fact.
+
+The stability registry classifies a three-year-or-longer series from its sample
+coefficient of variation and maximum relative year-over-year change: low is at
+most 15% for both measures, moderate is otherwise below the high trigger, and
+high is CV above 50%, relative year-over-year change above 50%, a sign change,
+or a fivefold discontinuity. These are KReports internal descriptive rules,
+not ISA thresholds. High or insufficient series remain visible but have no
+numeric candidate range.

@@ -112,7 +112,7 @@ def test_candidates_use_exact_decimal_amounts_and_methodology_references():
 
     row = candidates[0]
     assert row["central_candidate_amount"] == Decimal("5.0050")
-    assert row["authority_levels"] == ["standard_illustration", "practice_observation"]
+    assert row["authority_levels"] == ["standard_illustration", "internal_methodology"]
     assert row["conclusion_status"] == "not_assessed"
     assert row["reference_ids"]
 
@@ -162,3 +162,223 @@ def test_materiality_tool_dispatch_preserves_not_assessed_tables_and_receipts(te
     }
     assert out["answer"].startswith("중요성 기준 후보 준비")
     assert out["answer_pack"]["sources"][0]["rcept_no"] == "20260318000001"
+
+
+def test_candidates_withhold_numeric_amounts_for_anomalous_or_insufficient_benchmarks():
+    """An excluded benchmark must remain visible in stability, never as money."""
+    from kreports.analysis.materiality_benchmark import materiality_candidates
+
+    candidates = materiality_candidates({
+        "equity": {
+            "selected_amount": Decimal("1000"), "selected_year": 2025,
+            "stability": "observed", "role": "avoid_as_sole_basis",
+        },
+        "revenue": {
+            "selected_amount": Decimal("2000"), "selected_year": 2025,
+            "stability": "insufficient", "role": "not_assessed",
+        },
+    })
+
+    assert candidates == []
+
+
+def test_pbt_derivation_requires_same_filing_and_falls_back_when_direct_is_invalid():
+    """A bad direct PBT row may not suppress a valid, same-filing derivation."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    rows = [
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_before_tax", "amount": 999,
+         "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001"},
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001"},
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001"},
+        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001"},
+        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250319000001"},
+    ]
+
+    series = build_benchmark_series(rows, years=[2025, 2024], fs_div="CFS")
+
+    derived = series["profit_before_tax"][0]
+    mismatch = series["profit_before_tax"][1]
+    assert derived["amount"] == Decimal("100")
+    assert derived["basis"] == "derived_profit_loss_plus_tax_expense"
+    assert {source["operand_metric"] for source in derived["sources"]} == {"profit_loss", "tax_expense"}
+    assert mismatch["amount"] is None
+    assert "incompatible_filing_provenance" in mismatch["limitations"]
+
+
+def test_stability_role_changes_with_observed_variation_not_metric_name():
+    """The same metric must not have a fixed role independent of its series."""
+    from kreports.analysis.materiality_benchmark import observe_stability
+
+    stable = observe_stability([
+        {"year": 2025, "amount": Decimal("100")},
+        {"year": 2024, "amount": Decimal("102")},
+        {"year": 2023, "amount": Decimal("98")},
+    ], requested_years=[2025, 2024, 2023])
+    volatile = observe_stability([
+        {"year": 2025, "amount": Decimal("100")},
+        {"year": 2024, "amount": Decimal("500")},
+        {"year": 2023, "amount": Decimal("20")},
+    ], requested_years=[2025, 2024, 2023])
+
+    assert stable["volatility_classification"] == "low"
+    assert stable["role"] == "primary_candidate"
+    assert volatile["volatility_classification"] == "high"
+    assert volatile["role"] == "avoid_as_sole_basis"
+
+
+def test_prepare_assigns_roles_from_each_metric_variation_not_metric_identity(temp_engine):
+    """Volatile PBT and volatile revenue must each be excluded when their own series moves."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from kreports.analysis.materiality_benchmark import prepare_audit_materiality_inputs
+    from kreports.db.models import Company
+
+    with Session(temp_engine) as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+        for year, pbt, revenue in ((2025, 100, 100), (2024, 102, 500), (2023, 98, 20)):
+            for key, amount, period in (("profit_before_tax", pbt, "duration"), ("revenue", revenue, "duration")):
+                session.execute(text("""
+                    INSERT INTO financial_facts_compact
+                    (corp_code, bsns_year, fs_div, metric_key, metric_name, amount, unit, period_type,
+                     citation_rcept_no, quality_status, fetched_at)
+                    VALUES ('00126380', :year, 'CFS', :key, :key, :amount, 'KRW', :period,
+                            :receipt, 'usable', CURRENT_TIMESTAMP)
+                """), {"year": year, "key": key, "amount": amount, "period": period, "receipt": f"{year + 1}0318000001"})
+        session.commit()
+
+    first = prepare_audit_materiality_inputs("00126380", end_year=2025, years_back=3, fs_strategy="CFS")
+    assert first["benchmark_stability"]["profit_before_tax"]["role"] == "primary_candidate"
+    assert first["benchmark_stability"]["revenue"]["role"] == "avoid_as_sole_basis"
+
+    with temp_engine.begin() as conn:
+        conn.execute(text("UPDATE financial_facts_compact SET amount=CASE metric_key WHEN 'profit_before_tax' THEN CASE bsns_year WHEN 2025 THEN 100 WHEN 2024 THEN 500 ELSE 20 END WHEN 'revenue' THEN CASE bsns_year WHEN 2025 THEN 100 WHEN 2024 THEN 102 ELSE 98 END END WHERE metric_key IN ('profit_before_tax', 'revenue')"))
+    second = prepare_audit_materiality_inputs("00126380", end_year=2025, years_back=3, fs_strategy="CFS")
+    assert second["benchmark_stability"]["profit_before_tax"]["role"] == "avoid_as_sole_basis"
+    assert second["benchmark_stability"]["revenue"]["role"] == "primary_candidate"
+
+
+def test_materiality_pack_keeps_derived_operand_evidence_and_limited_tables(temp_engine):
+    """The envelope and answer-pack must not drop derivation evidence or empty tables."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Company
+    from kreports.mcp.tools import call_tool
+
+    with Session(temp_engine) as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+        for year in (2025, 2024, 2023):
+            receipt = f"{year + 1}0318000001"
+            for key, amount in (("profit_loss", 80), ("tax_expense", 20)):
+                session.execute(text("""
+                    INSERT INTO financial_facts_compact
+                    (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
+                     unit, period_type, citation_rcept_no, quality_status, fetched_at)
+                    VALUES ('00126380', :year, 'CFS', :key, :key, :amount,
+                            'KRW', 'duration', :receipt, 'usable', CURRENT_TIMESTAMP)
+                """), {"year": year, "key": key, "amount": amount, "receipt": receipt})
+        session.commit()
+
+    out = json.loads(call_tool("prepare_audit_materiality_inputs", {
+        "company": "005930", "end_year": 2025, "years_back": 3, "fs_strategy": "CFS",
+    }))
+
+    pbt_fact = next(fact for fact in out["confirmed_facts"] if "법인세차감전순이익 2025" in fact["statement"])
+    assert {source["operand_metric"] for source in pbt_fact["sources"]} == {"profit_loss", "tax_expense"}
+    assert out["answer_pack"]["sources"][0]["rcept_no"] == "20260318000001"
+    tables = {table["id"]: table for table in out["answer_pack"]["tables"]}
+    assert {"materiality_benchmark_series", "materiality_benchmark_stability", "materiality_candidates", "materiality_methodology_references"} <= set(tables)
+    assert tables["materiality_candidates"]["rows"][0]["benchmark_label_ko"] == "법인세차감전순이익"
+    assert {"issuer", "official_url", "authority_level"} <= {column["field"] for column in tables["materiality_methodology_references"]["columns"]}
+
+
+def test_limited_provenance_keeps_empty_candidate_table_and_withheld_wording(temp_engine):
+    """A limited cache must render the contract tables without invented amounts."""
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Company
+    from kreports.mcp.tools import call_tool
+    from kreports.analysis.materiality_benchmark import prepare_audit_materiality_inputs
+
+    with Session(temp_engine) as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+        session.commit()
+
+    raw = prepare_audit_materiality_inputs("00126380", end_year=2025, years_back=3, fs_strategy="CFS")
+    assert raw["data_quality"]["status"] == "limited"
+    from kreports.mcp.answer_pack import build_answer_pack
+    assert build_answer_pack("prepare_audit_materiality_inputs", raw)
+
+    out = json.loads(call_tool("prepare_audit_materiality_inputs", {
+        "company": "005930", "end_year": 2025, "years_back": 3, "fs_strategy": "CFS",
+    }))
+
+    tables = {table["id"]: table for table in out["answer_pack"]["tables"]}
+    assert "materiality_candidates" in tables, out
+    assert tables["materiality_candidates"]["rows"] == []
+    assert "후보 금액을 표시하지 않았습니다" in tables["materiality_candidates"]["note"]
+    assert "후보 금액을 표시하지 않았습니다" in out["answer"]
+
+
+def test_live_shaped_legacy_compact_rows_render_limited_series_and_methodology_sources(temp_engine):
+    """A legacy compact schema's null provenance must stay inspectable and withheld."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Company
+    from kreports.mcp.tools import call_tool
+
+    with Session(temp_engine) as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+        for year in (2025, 2024, 2023):
+            session.execute(text("""
+                INSERT INTO financial_facts_compact
+                (corp_code, bsns_year, fs_div, metric_key, metric_name, amount, fetched_at)
+                VALUES ('00126380', :year, 'CFS', 'revenue', 'revenue', :amount, CURRENT_TIMESTAMP)
+            """), {"year": year, "amount": 1000})
+        session.commit()
+
+    out = json.loads(call_tool("prepare_audit_materiality_inputs", {
+        "company": "005930", "end_year": 2025, "years_back": 3, "fs_strategy": "CFS",
+    }))
+
+    tables = {table["id"]: table for table in out["answer_pack"]["tables"]}
+    assert out["data_quality"]["status"] == "limited"
+    assert len(tables["materiality_benchmark_series"]["rows"]) == 12
+    assert tables["materiality_candidates"]["rows"] == []
+    assert any(source["url"].startswith("https://www.iaasb.org/") for source in out["answer_pack"]["sources"])
+    assert "후보 금액을 표시하지 않았습니다" in out["answer"]
+
+
+def test_materiality_prepare_handles_missing_schema_without_operational_error(temp_engine):
+    """A partial local cache is missing evidence, not an exposed SQL failure."""
+    from sqlalchemy import text
+    from kreports.analysis.materiality_benchmark import prepare_audit_materiality_inputs
+
+    with temp_engine.begin() as conn:
+        conn.execute(text("DROP TABLE companies"))
+        conn.execute(text("DROP TABLE financial_facts_compact"))
+
+    result = prepare_audit_materiality_inputs("00126380", end_year=2025, years_back=3)
+
+    assert result["data_quality"]["status"] == "limited"
+    assert result["subject"]["corp_code"] == "00126380"
+
+
+def test_rate_references_do_not_overstate_isa_a8_ranges():
+    """Only the PBT 5 percent illustration may carry the matching ISA A8 reference."""
+    from kreports.analysis.materiality_benchmark import materiality_candidates, methodology_references
+
+    candidates = materiality_candidates({
+        "profit_before_tax": {"selected_amount": Decimal("100"), "selected_year": 2025, "stability": "observed", "role": "primary_candidate"},
+        "revenue": {"selected_amount": Decimal("100"), "selected_year": 2025, "stability": "observed", "role": "primary_candidate"},
+    })
+    by_key = {row["benchmark_key"]: row for row in candidates}
+    assert by_key["profit_before_tax"]["rate_reference_ids"]["central"] == ["isa_320_a8_pbt_illustration"]
+    assert all("isa_320_a8" not in ref for refs in by_key["revenue"]["rate_reference_ids"].values() for ref in refs)
+    assert next(item for item in methodology_references() if item["reference_id"] == "materiality_candidate_ranges_v1")["authority_level"] == "internal_methodology"

@@ -237,7 +237,7 @@ def test_handler_failure_hides_unrelated_exception_for_empty_or_short_secret(
     assert "[REDACTED]" in serialized
 
 
-def test_compat_handlers_return_raw_domain_result_and_trim_required_strings():
+def test_compat_handlers_return_raw_domain_result_and_trim_required_strings(temp_engine):
     from kreports.mcp.tools import HANDLERS, call_tool
 
     raw = HANDLERS["search_company"]({"query": "  __task7_no_such_company__  "})

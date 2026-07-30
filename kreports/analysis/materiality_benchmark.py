@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from sqlalchemy import bindparam, inspect, text
 
 import kreports.db.engine as _engine_module
+from kreports.analysis.evidence import parent_rcept_no
 
 
 METHODOLOGY_VERSION = "kreports-materiality-methodology-2026.07"
@@ -29,10 +30,23 @@ _RATES = {
     "equity": (Decimal("0.010"), Decimal("0.015"), Decimal("0.020")),
 }
 _RATE_REFERENCES = {
-    "profit_before_tax": ("isa_320_a8_pbt_illustration", "materiality_candidate_ranges_v1"),
-    "revenue": ("isa_320_a8_revenue_illustration", "materiality_candidate_ranges_v1"),
-    "assets": ("materiality_candidate_ranges_v1",),
-    "equity": ("materiality_candidate_ranges_v1",),
+    # ISA 320 A8's 5% PBT example applies only to that one illustrated rate.
+    # Every other rate is a transparent KReports internal-methodology input.
+    "profit_before_tax": {
+        "lower": ("materiality_candidate_ranges_v1",),
+        "central": ("isa_320_a8_pbt_illustration",),
+        "upper": ("materiality_candidate_ranges_v1",),
+    },
+    "revenue": {rate: ("materiality_candidate_ranges_v1",) for rate in ("lower", "central", "upper")},
+    "assets": {rate: ("materiality_candidate_ranges_v1",) for rate in ("lower", "central", "upper")},
+    "equity": {rate: ("materiality_candidate_ranges_v1",) for rate in ("lower", "central", "upper")},
+}
+_VOLATILITY_RULE = {
+    "reference_id": "materiality_stability_registry_v1",
+    "low_cv_max": Decimal("0.15"),
+    "moderate_cv_max": Decimal("0.50"),
+    "high_relative_year_over_year_change": Decimal("0.50"),
+    "rule": "CV and maximum relative year-over-year change are descriptive internal thresholds, not ISA thresholds.",
 }
 
 
@@ -80,15 +94,15 @@ def methodology_references() -> list[dict[str, Any]]:
         },
         {
             "reference_id": "materiality_candidate_ranges_v1",
-            "authority_level": "practice_observation",
+            "authority_level": "internal_methodology",
             "issuer": "KReports",
             "jurisdiction": "Korea",
             "standard_code": "KREPORTS-MAT-RANGE-1",
             "document_title": "Materiality candidate range registry",
             "paragraphs": "candidate ranges",
             "effective_from": "2026-07-31",
-            "official_url": "https://github.com/capitalparser/kreports-dart-mcp",
-            "application_note_ko": "후보 범위는 실무 관찰값으로 감사기준서상 의무 비율이 아니며 감사인의 별도 검토가 필요합니다.",
+            "official_url": "https://github.com/capitalparser/kreports-dart-mcp/blob/main/docs/data-contract.md#audit-materiality-preparation",
+            "application_note_ko": "후보 범위는 KReports 내부 방법론의 투명한 계산 입력이며 감사기준서상 의무 비율이 아닙니다.",
             "registry_version_date": "2026-07-31",
         },
         {
@@ -100,8 +114,8 @@ def methodology_references() -> list[dict[str, Any]]:
             "document_title": "Materiality benchmark stability registry",
             "paragraphs": "transparent observations",
             "effective_from": "2026-07-31",
-            "official_url": "https://github.com/capitalparser/kreports-dart-mcp",
-            "application_note_ko": "3개년 미만은 안정성 결론을 내리지 않으며, 큰 단절은 단독 기준 자동 후보에서 제외합니다.",
+            "official_url": "https://github.com/capitalparser/kreports-dart-mcp/blob/main/docs/data-contract.md#audit-materiality-preparation",
+            "application_note_ko": "3개년 미만은 안정성 결론을 내리지 않으며, CV 및 상대 전년대비 변동이 큰 계열은 단독 기준 후보에서 제외합니다.",
             "registry_version_date": "2026-07-31",
         },
     ]
@@ -117,17 +131,20 @@ def _decimal(value: Any) -> Decimal | None:
     return value if value.is_finite() else None
 
 
-def _source(row: dict[str, Any]) -> dict[str, Any] | None:
+def _source(row: dict[str, Any], *, operand_metric: str | None = None) -> dict[str, Any] | None:
     receipt = row.get("citation_rcept_no")
     if not receipt:
         return None
-    return {
+    source = {
         "source_label": "DART 사업보고서 재무사실",
         "rcept_no": str(receipt),
         "source_url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}",
         "report_nm": row.get("citation_report_nm"),
         "provenance_status": "receipt_proven",
     }
+    if operand_metric:
+        source["operand_metric"] = operand_metric
+    return source
 
 
 def _observation(metric: str, year: int, row: dict[str, Any] | None, *, basis: str, sources: list[dict[str, Any]] | None = None, limitations: list[str] | None = None) -> dict[str, Any]:
@@ -175,8 +192,9 @@ def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], 
         for metric in ("revenue", "assets", "equity"):
             result[metric].append(_observation(metric, year, indexed.get((metric, year)), basis="direct_annual_fact"))
         direct = indexed.get(("profit_before_tax", year))
-        if direct is not None:
-            result["profit_before_tax"].append(_observation("profit_before_tax", year, direct, basis="direct_annual_fact"))
+        direct_observation = _observation("profit_before_tax", year, direct, basis="direct_annual_fact")
+        if direct_observation["amount"] is not None:
+            result["profit_before_tax"].append(direct_observation)
             continue
         profit = indexed.get(("profit_loss", year))
         tax = indexed.get(("tax_expense", year))
@@ -189,9 +207,15 @@ def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], 
             and profit.get("fs_div") == tax.get("fs_div") == fs_div
             and profit.get("period_type") == tax.get("period_type") == "duration"
             and profit.get("unit") == tax.get("unit") == "KRW"
+            and parent_rcept_no(profit.get("citation_rcept_no"))
+            and parent_rcept_no(profit.get("citation_rcept_no")) == parent_rcept_no(tax.get("citation_rcept_no"))
         )
         if compatible:
-            sources = [*direct_profit["sources"], *direct_tax["sources"]]
+            sources = [
+                _source(profit, operand_metric="profit_loss"),
+                _source(tax, operand_metric="tax_expense"),
+            ]
+            sources = [source for source in sources if source is not None]
             result["profit_before_tax"].append({
                 "year": year,
                 "amount": direct_profit["amount"] + direct_tax["amount"],
@@ -201,12 +225,15 @@ def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], 
                 "source": sources[0] if sources else None,
                 "unit": "KRW",
                 "period_type": "duration",
-                "limitations": [],
+                "limitations": ["direct_pbt_unusable_used_compatible_derivation"] if direct is not None else [],
             })
         else:
+            limitations = ["incompatible_operands", "incompatible_filing_provenance"]
+            if direct is not None:
+                limitations.append("direct_pbt_unusable")
             result["profit_before_tax"].append({
                 "year": year, "amount": None, "basis": "limited", "sources": [],
-                "limitations": ["incompatible_operands"], "formula": "profit_loss + tax_expense",
+                "limitations": limitations, "formula": "profit_loss + tax_expense",
             })
     return result
 
@@ -223,6 +250,7 @@ def observe_stability(observations: list[dict[str, Any]], *, requested_years: li
             "stability": "insufficient", "usable_year_count": len(values),
             "requested_year_count": len(requested_years), "raw_annual_values": usable,
             "missing_years": missing, "anomaly_flags": [], "role": "not_assessed",
+            "volatility_classification": "insufficient", "volatility_rule": _VOLATILITY_RULE,
         }
     with localcontext() as ctx:
         ctx.prec = 28
@@ -232,23 +260,38 @@ def observe_stability(observations: list[dict[str, Any]], *, requested_years: li
         med = Decimal(str(median(values)))
         mad = Decimal(str(median([abs(value - med) for value in values])))
         yoy = [abs(values[index] - values[index + 1]) for index in range(len(values) - 1)]
+        relative_yoy = [
+            abs(left - right) / abs(right) if right != 0 else None
+            for left, right in zip(values, values[1:])
+        ]
         changes = sum(1 for left, right in zip(values, values[1:]) if (left < 0) != (right < 0))
         discontinuity = any(
             min(abs(left), abs(right)) > 0 and max(abs(left), abs(right)) / min(abs(left), abs(right)) >= 5
             for left, right in zip(values, values[1:])
         )
+        cv = sample_stddev / abs(mean) if mean != 0 else None
+        max_relative_yoy = max((item for item in relative_yoy if item is not None), default=None)
+        if changes or discontinuity or cv is None or cv > _VOLATILITY_RULE["moderate_cv_max"] or (max_relative_yoy is not None and max_relative_yoy > _VOLATILITY_RULE["high_relative_year_over_year_change"]):
+            volatility = "high"
+        elif cv <= _VOLATILITY_RULE["low_cv_max"] and (max_relative_yoy is None or max_relative_yoy <= _VOLATILITY_RULE["low_cv_max"]):
+            volatility = "low"
+        else:
+            volatility = "moderate"
         flags = ["material_discontinuity"] if discontinuity else []
+        role = "avoid_as_sole_basis" if volatility == "high" or flags else "primary_candidate" if volatility == "low" else "cross_check"
         return {
             "stability": "observed", "usable_year_count": len(values),
             "requested_year_count": len(requested_years), "raw_annual_values": usable,
             "mean": mean, "median": med, "sample_standard_deviation": sample_stddev,
-            "coefficient_of_variation": sample_stddev / abs(mean) if mean != 0 else None,
+            "coefficient_of_variation": cv,
             "median_absolute_deviation_ratio": mad / abs(med) if med != 0 else None,
             "minimum": min(values), "maximum": max(values),
             "maximum_absolute_year_over_year_change": max(yoy) if yoy else None,
+            "maximum_relative_year_over_year_change": max_relative_yoy,
             "profit_loss_sign_changes": changes, "missing_years": missing,
             "anomaly_flags": flags,
-            "role": "avoid_as_sole_basis" if flags else "cross_check",
+            "volatility_classification": volatility, "volatility_rule": _VOLATILITY_RULE,
+            "role": role,
         }
 
 
@@ -258,10 +301,21 @@ def materiality_candidates(stability: dict[str, dict[str, Any]]) -> list[dict[st
     refs = {item["reference_id"]: item for item in methodology_references()}
     for metric, observation in stability.items():
         amount = _decimal(observation.get("selected_amount"))
-        if amount is None or metric not in _RATES:
+        if (
+            amount is None or metric not in _RATES
+            or observation.get("stability") != "observed"
+            or observation.get("role") not in {"primary_candidate", "cross_check"}
+        ):
             continue
         lower, central, upper = _RATES[metric]
-        reference_ids = list(_RATE_REFERENCES[metric])
+        rate_reference_ids = {
+            rate: list(reference_ids)
+            for rate, reference_ids in _RATE_REFERENCES[metric].items()
+        }
+        reference_ids = list(dict.fromkeys([
+            reference_id for reference_id in ("isa_320_a8_pbt_illustration", "materiality_candidate_ranges_v1")
+            if any(reference_id in values for values in rate_reference_ids.values())
+        ]))
         candidates.append({
             "benchmark_key": metric, "benchmark_label_ko": _METRIC_LABELS[metric],
             "selected_source_amount": amount, "selected_year_basis": observation.get("selected_year"),
@@ -271,6 +325,7 @@ def materiality_candidates(stability: dict[str, dict[str, Any]]) -> list[dict[st
             "upper_candidate_amount": amount * upper,
             "stability": observation.get("stability"), "suitability_role": observation.get("role"),
             "reference_ids": reference_ids,
+            "rate_reference_ids": rate_reference_ids,
             "authority_levels": [refs[key]["authority_level"] for key in reference_ids],
             "conclusion_status": "not_assessed",
         })
@@ -299,7 +354,10 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
             field if field in compact_columns else f"NULL AS {field}"
             for field in optional_fields
         )
-        company_row = conn.execute(text("SELECT corp_code, corp_name, stock_code, market, induty_code FROM companies WHERE corp_code=:corp_code"), {"corp_code": company}).mappings().first()
+        company_row = (
+            conn.execute(text("SELECT corp_code, corp_name, stock_code, market, induty_code FROM companies WHERE corp_code=:corp_code"), {"corp_code": company}).mappings().first()
+            if inspector.has_table("companies") else None
+        )
         rows = ([dict(row) for row in conn.execute(text("""
             SELECT corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
                    """ + optional_select + """
@@ -320,15 +378,16 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
         if usable:
             item["selected_amount"] = usable[0]["amount"]
             item["selected_year"] = usable[0]["year"]
-        if item["stability"] == "observed" and not item["anomaly_flags"]:
-            item["role"] = "cross_check" if metric == "profit_before_tax" else "primary_candidate" if metric == "revenue" else "cross_check"
         stability[metric] = item
     candidates = materiality_candidates(stability)
     source_count = sum(len(row.get("sources") or []) for values in series.values() for row in values)
     has_any = any(row.get("amount") is not None for values in series.values() for row in values)
-    status = "usable" if source_count and all(value["usable_year_count"] >= 3 for value in stability.values()) else "limited" if (has_any or rows) else "missing"
+    # The methodology and requested-year observation table remain inspectable
+    # even when the local compact cache has no usable facts, so expose this as
+    # a bounded limited preparation rather than an opaque missing/error pack.
+    status = "usable" if source_count and all(value["usable_year_count"] >= 3 for value in stability.values()) else "limited"
     limitations = []
-    if status == "missing":
+    if not rows:
         limitations.append("로컬 캐시에 필요한 재무사실이 없습니다. 원 공시에 값이 없다는 뜻은 아닙니다.")
     if any(value["stability"] == "insufficient" for value in stability.values()):
         limitations.append("일부 기준은 비교 가능한 3개년이 부족하여 안정성 결론을 내리지 않았습니다.")
@@ -342,7 +401,7 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
         "benchmark_series": series, "benchmark_stability": stability,
         "materiality_candidates": candidates, "methodology_references": methodology_references(),
         "confirmed_facts": [
-            {"statement": f"{_METRIC_LABELS[metric]} {row['year']}년 공시 수치를 확인했습니다.", "source": row.get("source")}
+            {"statement": f"{_METRIC_LABELS[metric]} {row['year']}년 공시 수치를 확인했습니다.", "source": row.get("source"), "sources": row.get("sources") or []}
             for metric, values in series.items() for row in values if row.get("amount") is not None and row.get("source")
         ],
         "analysis": [{"statement": "후보 범위는 감사 결론이 아니며, 감사인이 기준과 비율을 명시적으로 선택·승인하기 전까지 not_assessed입니다.", "perspective": "auditor", "basis": "materiality_stability_registry_v1"}],
