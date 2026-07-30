@@ -13,6 +13,10 @@ from sqlalchemy import bindparam, inspect, text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis.evidence import parent_rcept_no
+from kreports.analysis.filing_provenance import (
+    annual_filing_sources,
+    valid_annual_filing_receipt,
+)
 
 
 METHODOLOGY_VERSION = "kreports-materiality-methodology-2026.07"
@@ -48,6 +52,16 @@ _VOLATILITY_RULE = {
     "high_relative_year_over_year_change": Decimal("0.50"),
     "rule": "CV and maximum relative year-over-year change are descriptive internal thresholds, not ISA thresholds.",
 }
+_ANNUAL_FILING_CITATION_BASIS = "company_year_annual_filing_match"
+_SERIES_VALUE_AND_PROVENANCE_FIELDS = (
+    "amount",
+    "unit",
+    "period_type",
+    "quality_status",
+    "citation_rcept_no",
+    "citation_report_nm",
+    "citation_basis",
+)
 
 
 def methodology_references() -> list[dict[str, Any]]:
@@ -149,9 +163,16 @@ def _source(row: dict[str, Any], *, operand_metric: str | None = None) -> dict[s
     return source
 
 
-def _observation(metric: str, year: int, row: dict[str, Any] | None, *, basis: str, sources: list[dict[str, Any]] | None = None, limitations: list[str] | None = None) -> dict[str, Any]:
+def _observation(metric: str, year: int, row: dict[str, Any] | None, *, basis: str, sources: list[dict[str, Any]] | None = None, limitations: list[str] | None = None, rejected_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     if row is None:
-        return {"year": year, "amount": None, "basis": "missing", "sources": [], "limitations": ["cache_missing_not_filing_absence"]}
+        return {
+            "year": year,
+            "amount": None,
+            "basis": "limited" if limitations else "missing",
+            "sources": [],
+            "limitations": list(limitations or ["cache_missing_not_filing_absence"]),
+            "rejected_rows": list(rejected_rows or []),
+        }
     value = _decimal(row.get("amount"))
     source = _source(row)
     valid = (
@@ -181,20 +202,118 @@ def _observation(metric: str, year: int, row: dict[str, Any] | None, *, basis: s
     return result
 
 
-def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], fs_div: str) -> dict[str, list[dict[str, Any]]]:
-    """Build source-backed facts and the narrowly allowed PBT derivation."""
-    indexed: dict[tuple[str, int], dict[str, Any]] = {}
+def _series_value_and_provenance_identity(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Return the fields that must agree before one compact series is chosen."""
+    return tuple(row.get(field) for field in _SERIES_VALUE_AND_PROVENANCE_FIELDS)
+
+
+def _rejected_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep bounded provenance diagnostics without exposing rejected money."""
+    return {
+        "metric_key": row.get("metric_key"),
+        "bsns_year": row.get("bsns_year"),
+        "fs_div": row.get("fs_div"),
+        "citation_rcept_no": row.get("citation_rcept_no"),
+        "citation_basis": row.get("citation_basis"),
+    }
+
+
+def _admission_limitations(
+    row: dict[str, Any],
+    *,
+    annual_sources: dict[int, dict[str, Any]] | None,
+) -> list[str]:
+    """Require a compact citation to prove, then match, annual-filing identity."""
+    receipt_raw = row.get("citation_rcept_no")
+    receipt = valid_annual_filing_receipt(receipt_raw, row.get("bsns_year"))
+    limitations: list[str] = []
+    if receipt is None or str(receipt_raw) != receipt:
+        limitations.append("invalid_citation_receipt")
+    if row.get("citation_basis") != _ANNUAL_FILING_CITATION_BASIS:
+        limitations.append("citation_basis_not_company_year_annual_filing_match")
+    if annual_sources is not None:
+        source = annual_sources.get(int(row["bsns_year"]))
+        if (
+            source is None
+            or source.get("fs_div") != row.get("fs_div")
+            or source.get("rcept_no") != receipt
+        ):
+            limitations.append("annual_filing_receipt_mismatch")
+    return limitations
+
+
+def _indexed_rows(
+    rows: Iterable[dict[str, Any]],
+    *,
+    years: list[int],
+    fs_div: str,
+    annual_sources: dict[int, dict[str, Any]] | None,
+) -> tuple[dict[tuple[str, int], dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
+    """Resolve compact duplicates before any direct or derived observation selection."""
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for raw in rows:
         metric = raw.get("metric_key")
         year = raw.get("bsns_year")
         if metric and year in years and raw.get("fs_div") == fs_div:
-            indexed.setdefault((str(metric), int(year)), dict(raw))
+            grouped.setdefault((str(metric), int(year)), []).append(dict(raw))
+
+    indexed: dict[tuple[str, int], dict[str, Any]] = {}
+    rejected: dict[tuple[str, int], dict[str, Any]] = {}
+    for identity, candidates in grouped.items():
+        if len({_series_value_and_provenance_identity(row) for row in candidates}) > 1:
+            rejected[identity] = {
+                "limitations": ["conflicting_compact_series_rows"],
+                "rows": [_rejected_row(row) for row in candidates],
+            }
+            continue
+        row = candidates[0]
+        limitations = _admission_limitations(row, annual_sources=annual_sources)
+        if limitations:
+            rejected[identity] = {
+                "limitations": limitations,
+                "rows": [_rejected_row(row)],
+            }
+            continue
+        indexed[identity] = row
+    return indexed, rejected
+
+
+def build_benchmark_series(
+    rows: Iterable[dict[str, Any]],
+    *,
+    years: list[int],
+    fs_div: str,
+    annual_sources: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Build source-backed facts and the narrowly allowed PBT derivation."""
+    indexed, rejected = _indexed_rows(
+        rows,
+        years=years,
+        fs_div=fs_div,
+        annual_sources=annual_sources,
+    )
     result: dict[str, list[dict[str, Any]]] = {metric: [] for metric in _CANONICAL_METRICS}
     for year in years:
         for metric in ("revenue", "assets", "equity"):
-            result[metric].append(_observation(metric, year, indexed.get((metric, year)), basis="direct_annual_fact"))
+            rejection = rejected.get((metric, year))
+            result[metric].append(_observation(
+                metric,
+                year,
+                indexed.get((metric, year)),
+                basis="direct_annual_fact",
+                limitations=rejection.get("limitations") if rejection else None,
+                rejected_rows=rejection.get("rows") if rejection else None,
+            ))
         direct = indexed.get(("profit_before_tax", year))
-        direct_observation = _observation("profit_before_tax", year, direct, basis="direct_annual_fact")
+        direct_rejection = rejected.get(("profit_before_tax", year))
+        direct_observation = _observation(
+            "profit_before_tax",
+            year,
+            direct,
+            basis="direct_annual_fact",
+            limitations=direct_rejection.get("limitations") if direct_rejection else None,
+            rejected_rows=direct_rejection.get("rows") if direct_rejection else None,
+        )
         if direct_observation["amount"] is not None:
             result["profit_before_tax"].append(direct_observation)
             continue
@@ -232,17 +351,30 @@ def build_benchmark_series(rows: Iterable[dict[str, Any]], *, years: list[int], 
                 "source": sources[0] if sources else None,
                 "unit": "KRW",
                 "period_type": "duration",
-                "limitations": ["direct_pbt_unusable_used_compatible_derivation"] if direct is not None else [],
+                "limitations": (
+                    ["direct_pbt_unusable_used_compatible_derivation"]
+                    + (direct_rejection.get("limitations") if direct_rejection else [])
+                ) if direct is not None or direct_rejection else [],
+                "rejected_rows": direct_rejection.get("rows") if direct_rejection else [],
             })
         else:
             limitations = ["incompatible_operands"]
+            for operand in ("profit_loss", "tax_expense"):
+                operand_rejection = rejected.get((operand, year))
+                if operand_rejection:
+                    limitations.extend(operand_rejection["limitations"])
             if operands_usable and profit_receipt and tax_receipt and profit_receipt != tax_receipt:
                 limitations.append("incompatible_filing_provenance")
             if direct is not None:
                 limitations.append("direct_pbt_unusable")
             result["profit_before_tax"].append({
                 "year": year, "amount": None, "basis": "limited", "sources": [],
-                "limitations": limitations, "formula": "profit_loss + tax_expense",
+                "limitations": list(dict.fromkeys(limitations)), "formula": "profit_loss + tax_expense",
+                "rejected_rows": [
+                    rejected_row
+                    for operand in ("profit_loss", "tax_expense")
+                    for rejected_row in (rejected.get((operand, year), {}).get("rows") or [])
+                ],
             })
     return result
 
@@ -355,9 +487,10 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
             if inspector.has_table("financial_facts_compact")
             else set()
         )
+        has_disclosures = inspector.has_table("disclosures")
         optional_fields = (
             "unit", "period_type", "citation_rcept_no", "citation_report_nm",
-            "quality_status",
+            "citation_basis", "quality_status",
         )
         optional_select = ",\n                   ".join(
             field if field in compact_columns else f"NULL AS {field}"
@@ -379,7 +512,22 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
         fs_div = max(("CFS", "OFS"), key=lambda item: sum(1 for row in rows if row.get("fs_div") == item))
     else:
         fs_div = fs_strategy
-    series = build_benchmark_series(rows, years=years, fs_div=fs_div)
+    annual_sources = (
+        annual_filing_sources(
+            company,
+            years,
+            source_table="financial_facts_compact",
+            fs_div=fs_div,
+        )
+        if compact_columns and "citation_basis" in compact_columns and has_disclosures
+        else {}
+    )
+    series = build_benchmark_series(
+        rows,
+        years=years,
+        fs_div=fs_div,
+        annual_sources=annual_sources,
+    )
     stability: dict[str, dict[str, Any]] = {}
     for metric, observations in series.items():
         item = observe_stability(observations, requested_years=years)

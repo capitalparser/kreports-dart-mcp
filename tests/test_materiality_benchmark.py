@@ -5,8 +5,135 @@ calculation boundary with literal, source-backed fixtures.
 """
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 import json
+
+
+_ANNUAL_BASIS = "company_year_annual_filing_match"
+
+
+def _annual_disclosure(session, *, corp_code: str, year: int, receipt: str) -> None:
+    """Persist the exact annual filing that a compact fact is allowed to cite."""
+    from kreports.db.models import Disclosure
+
+    session.add(Disclosure(
+        rcept_no=receipt,
+        corp_code=corp_code,
+        corp_name="삼성전자" if corp_code == "00126380" else "다른회사",
+        disc_date=date(int(receipt[:4]), int(receipt[4:6]), int(receipt[6:8])),
+        disc_type="A",
+        report_nm=f"사업보고서 ({year}.12)",
+        flr_nm="삼성전자" if corp_code == "00126380" else "다른회사",
+    ))
+
+
+def test_benchmark_series_rejects_malformed_receipts_and_wrong_citation_basis():
+    """A compact amount is not a benchmark fact without canonical annual provenance."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    series = build_benchmark_series([
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "not-a-rcept", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "20250318000001", "citation_basis": "endpoint_lineage"},
+    ], years=[2025, 2024], fs_div="CFS")
+
+    assert all(row["amount"] is None for row in series["revenue"])
+    assert "invalid_citation_receipt" in series["revenue"][0]["limitations"]
+    assert "citation_basis_not_company_year_annual_filing_match" in series["revenue"][1]["limitations"]
+
+
+def test_prepare_rejects_foreign_or_wrong_year_annual_filing_receipts(temp_engine):
+    """A receipt must resolve to this company and this business year's annual filing."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from kreports.analysis.materiality_benchmark import prepare_audit_materiality_inputs
+    from kreports.db.models import Company
+
+    with Session(temp_engine) as session:
+        session.add_all([
+            Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"),
+            Company(corp_code="00999999", corp_name="다른회사"),
+        ])
+        _annual_disclosure(session, corp_code="00999999", year=2025, receipt="20260318000001")
+        _annual_disclosure(session, corp_code="00126380", year=2023, receipt="20250318000001")
+        for year, receipt in ((2025, "20260318000001"), (2024, "20250318000001")):
+            session.execute(text("""
+                INSERT INTO financial_facts_compact
+                (corp_code, bsns_year, fs_div, metric_key, metric_name, amount, unit, period_type,
+                 citation_rcept_no, citation_basis, quality_status, fetched_at)
+                VALUES ('00126380', :year, 'CFS', 'revenue', '매출액', 100, 'KRW', 'duration',
+                        :receipt, 'company_year_annual_filing_match', 'usable', CURRENT_TIMESTAMP)
+            """), {"year": year, "receipt": receipt})
+        session.commit()
+
+    result = prepare_audit_materiality_inputs("00126380", end_year=2025, years_back=3, fs_strategy="CFS")
+
+    assert result["data_quality"]["status"] == "limited"
+    assert all(row["amount"] is None for row in result["benchmark_series"]["revenue"])
+    assert all("annual_filing_receipt_mismatch" in row["limitations"] for row in result["benchmark_series"]["revenue"][:2])
+    assert result["materiality_candidates"] == []
+
+
+def test_benchmark_series_rejects_conflicting_duplicates_and_deduplicates_identical_rows():
+    """Database row order must neither decide a conflict nor duplicate a proven observation."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    proven = {
+        "bsns_year": 2024, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+        "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+        "citation_rcept_no": "20250318000001", "citation_basis": _ANNUAL_BASIS,
+    }
+    series = build_benchmark_series([
+        {**proven, "bsns_year": 2025, "amount": 100, "citation_rcept_no": "20260318000001"},
+        {**proven, "bsns_year": 2025, "amount": 101, "citation_rcept_no": "20260318000001"},
+        proven,
+        dict(proven),
+    ], years=[2025, 2024], fs_div="CFS")
+
+    conflict, identical = series["revenue"]
+    assert conflict["amount"] is None
+    assert conflict["basis"] == "limited"
+    assert "conflicting_compact_series_rows" in conflict["limitations"]
+    assert identical["amount"] == Decimal("100")
+    assert identical["sources"] == [identical["source"]]
+
+
+def test_materiality_public_surfaces_keep_rejected_rows_but_withhold_candidate_money(temp_engine):
+    """Public envelope and answer pack expose the limitation, never money from rejected facts."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Company
+    from kreports.mcp.tools import call_tool
+
+    with Session(temp_engine) as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+        for year in (2025, 2024, 2023):
+            _annual_disclosure(session, corp_code="00126380", year=year, receipt=f"{year + 1}0318000001")
+            session.execute(text("""
+                INSERT INTO financial_facts_compact
+                (corp_code, bsns_year, fs_div, metric_key, metric_name, amount, unit, period_type,
+                 citation_rcept_no, citation_basis, quality_status, fetched_at)
+                VALUES ('00126380', :year, 'CFS', 'revenue', '매출액', 100, 'KRW', 'duration',
+                        :receipt, 'wrong_basis', 'usable', CURRENT_TIMESTAMP)
+            """), {"year": year, "receipt": f"{year + 1}0318000001"})
+        session.commit()
+
+    out = json.loads(call_tool("prepare_audit_materiality_inputs", {
+        "company": "005930", "end_year": 2025, "years_back": 3, "fs_strategy": "CFS",
+    }))
+
+    series_rows = [row for row in out["benchmark_series"]["revenue"] if row["year"] in {2025, 2024, 2023}]
+    assert out["data_quality"]["status"] == out["answer_pack"]["data_quality"]["status"] == "limited"
+    assert all(row["amount"] is None and row["limitations"] for row in series_rows)
+    assert out["materiality_candidates"] == []
+    candidate_table = next(table for table in out["answer_pack"]["tables"] if table["id"] == "materiality_candidates")
+    assert candidate_table["rows"] == []
 
 
 def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():
@@ -24,6 +151,7 @@ def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():
             "quality_status": "usable",
             "citation_rcept_no": "20260318000001",
             "citation_report_nm": "사업보고서 (2025.12)",
+            "citation_basis": _ANNUAL_BASIS,
         },
         {
             "bsns_year": 2025,
@@ -34,6 +162,7 @@ def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():
             "period_type": "duration",
             "quality_status": "usable",
             "citation_rcept_no": "20260318000001",
+            "citation_basis": _ANNUAL_BASIS,
         },
         {
             "bsns_year": 2025,
@@ -44,6 +173,7 @@ def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():
             "period_type": "duration",
             "quality_status": "usable",
             "citation_rcept_no": "20260318000001",
+            "citation_basis": _ANNUAL_BASIS,
         },
     ]
 
@@ -60,10 +190,10 @@ def test_derived_pbt_requires_compatible_operands_and_preserves_both_sources():
     from kreports.analysis.materiality_benchmark import build_benchmark_series
 
     compatible = [
-        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001"},
-        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001"},
-        {"bsns_year": 2023, "fs_div": "OFS", "metric_key": "profit_loss", "amount": 70, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20240318000001"},
-        {"bsns_year": 2023, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 10, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20240318000001"},
+        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2023, "fs_div": "OFS", "metric_key": "profit_loss", "amount": 70, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20240318000001", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2023, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 10, "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20240318000001", "citation_basis": _ANNUAL_BASIS},
     ]
 
     series = build_benchmark_series(compatible, years=[2024, 2023], fs_div="CFS")
@@ -75,6 +205,30 @@ def test_derived_pbt_requires_compatible_operands_and_preserves_both_sources():
     assert {source["rcept_no"] for source in derived["sources"]} == {"20250318000001"}
     assert incompatible["amount"] is None
     assert "incompatible_operands" in incompatible["limitations"]
+
+
+def test_derived_pbt_withholds_money_when_either_operand_lacks_annual_admission():
+    """A derived result must not launder an unproven profit or tax compact row."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    series = build_benchmark_series([
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "20260318000001", "citation_basis": "endpoint_lineage"},
+    ], years=[2025], fs_div="CFS", annual_sources={
+        2025: {"rcept_no": "20260318000001", "fs_div": "CFS"},
+    })
+
+    pbt = series["profit_before_tax"][0]
+    assert pbt["amount"] is None
+    assert "citation_basis_not_company_year_annual_filing_match" in pbt["limitations"]
+    assert pbt["rejected_rows"] == [{
+        "metric_key": "tax_expense", "bsns_year": 2025, "fs_div": "CFS",
+        "citation_rcept_no": "20260318000001", "citation_basis": "endpoint_lineage",
+    }]
 
 
 def test_stability_requires_three_comparable_years_and_keeps_anomalies_visible():
@@ -132,6 +286,7 @@ def test_materiality_tool_dispatch_preserves_not_assessed_tables_and_receipts(te
             (2024, 100, 950, 1900, 1400),
             (2023, 90, 900, 1800, 1300),
         ):
+            _annual_disclosure(session, corp_code="00126380", year=year, receipt=f"{year + 1}0318000001")
             for key, amount, period in (
                 ("profit_before_tax", pbt, "duration"),
                 ("revenue", revenue, "duration"),
@@ -141,10 +296,10 @@ def test_materiality_tool_dispatch_preserves_not_assessed_tables_and_receipts(te
                 session.execute(text("""
                     INSERT INTO financial_facts_compact
                     (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
-                     unit, period_type, citation_rcept_no, citation_report_nm,
+                     unit, period_type, citation_rcept_no, citation_report_nm, citation_basis,
                      quality_status, fetched_at)
                     VALUES ('00126380', :year, 'CFS', :key, :key, :amount,
-                            'KRW', :period, :receipt, :report_nm,
+                            'KRW', :period, :receipt, :report_nm, 'company_year_annual_filing_match',
                             'usable', CURRENT_TIMESTAMP)
                 """), {
                     "year": year, "key": key, "amount": amount, "period": period,
@@ -188,15 +343,15 @@ def test_pbt_derivation_requires_same_filing_and_falls_back_when_direct_is_inval
 
     rows = [
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_before_tax", "amount": 999,
-         "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001"},
+         "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
-         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001"},
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
-         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001"},
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
         {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
-         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001"},
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250318000001", "citation_basis": _ANNUAL_BASIS},
         {"bsns_year": 2024, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
-         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250319000001"},
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20250319000001", "citation_basis": _ANNUAL_BASIS},
     ]
 
     series = build_benchmark_series(rows, years=[2025, 2024], fs_div="CFS")
@@ -216,9 +371,9 @@ def test_missing_pbt_operand_does_not_claim_a_filing_provenance_mismatch():
 
     series = build_benchmark_series([
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_before_tax", "amount": 999,
-         "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001"},
+         "unit": None, "period_type": "duration", "quality_status": "limited", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
         {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
-         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001"},
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable", "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
     ], years=[2025], fs_div="CFS")
 
     limitations = series["profit_before_tax"][0]["limitations"]
@@ -258,13 +413,14 @@ def test_prepare_assigns_roles_from_each_metric_variation_not_metric_identity(te
     with Session(temp_engine) as session:
         session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
         for year, pbt, revenue in ((2025, 100, 100), (2024, 102, 500), (2023, 98, 20)):
+            _annual_disclosure(session, corp_code="00126380", year=year, receipt=f"{year + 1}0318000001")
             for key, amount, period in (("profit_before_tax", pbt, "duration"), ("revenue", revenue, "duration")):
                 session.execute(text("""
                     INSERT INTO financial_facts_compact
                     (corp_code, bsns_year, fs_div, metric_key, metric_name, amount, unit, period_type,
-                     citation_rcept_no, quality_status, fetched_at)
+                     citation_rcept_no, citation_basis, quality_status, fetched_at)
                     VALUES ('00126380', :year, 'CFS', :key, :key, :amount, 'KRW', :period,
-                            :receipt, 'usable', CURRENT_TIMESTAMP)
+                            :receipt, 'company_year_annual_filing_match', 'usable', CURRENT_TIMESTAMP)
                 """), {"year": year, "key": key, "amount": amount, "period": period, "receipt": f"{year + 1}0318000001"})
         session.commit()
 
@@ -291,13 +447,14 @@ def test_materiality_pack_keeps_derived_operand_evidence_and_limited_tables(temp
         session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
         for year in (2025, 2024, 2023):
             receipt = f"{year + 1}0318000001"
+            _annual_disclosure(session, corp_code="00126380", year=year, receipt=receipt)
             for key, amount in (("profit_loss", 80), ("tax_expense", 20)):
                 session.execute(text("""
                     INSERT INTO financial_facts_compact
                     (corp_code, bsns_year, fs_div, metric_key, metric_name, amount,
-                     unit, period_type, citation_rcept_no, quality_status, fetched_at)
+                     unit, period_type, citation_rcept_no, citation_basis, quality_status, fetched_at)
                     VALUES ('00126380', :year, 'CFS', :key, :key, :amount,
-                            'KRW', 'duration', :receipt, 'usable', CURRENT_TIMESTAMP)
+                            'KRW', 'duration', :receipt, 'company_year_annual_filing_match', 'usable', CURRENT_TIMESTAMP)
                 """), {"year": year, "key": key, "amount": amount, "receipt": receipt})
         session.commit()
 
