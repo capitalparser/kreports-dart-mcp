@@ -490,17 +490,18 @@ def _open_pinned_database(
         # switch to the per-connection journal policy.
         fcntl.flock(file_descriptor, fcntl.LOCK_UN)
         flock_held = False
-        if collector and not allow_file_wal:
-            configured_journal_mode = str(
-                connection.execute("PRAGMA journal_mode=MEMORY").fetchone()[0]
-            ).lower()
-            if configured_journal_mode != "memory":
-                raise WorkerActionError(
-                    "rehearsal_binding_required",
-                    "could not enable in-memory SQLite journaling",
-                )
-            _require_memory_journal(connection)
+        if collector:
             connection.execute("PRAGMA foreign_keys=ON")
+            if not allow_file_wal:
+                configured_journal_mode = str(
+                    connection.execute("PRAGMA journal_mode=MEMORY").fetchone()[0]
+                ).lower()
+                if configured_journal_mode != "memory":
+                    raise WorkerActionError(
+                        "rehearsal_binding_required",
+                        "could not enable in-memory SQLite journaling",
+                    )
+                _require_memory_journal(connection)
         elif not collector:
             connection.execute("PRAGMA query_only=ON")
         _verify_binding_identity(binding, file_descriptor)

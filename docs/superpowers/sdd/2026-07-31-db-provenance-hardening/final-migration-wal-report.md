@@ -17,6 +17,9 @@
    repaired that state.
 3. The peer policy comparison reads `accounting_policy_items`, which was not
    included in the shared release/rehearsal schema contract.
+4. The first WAL allowance put `PRAGMA foreign_keys=ON` inside the
+   MEMORY-only collector branch, leaving the writable retained-clone migrate
+   connection at SQLite's default `foreign_keys=OFF`.
 
 ## Changes
 
@@ -24,7 +27,9 @@
   WAL transition only for lock/busy errors, verify WAL, and then acquire
   `BEGIN IMMEDIATE`. In-memory SQLite remains the only no-WAL exception.
 - Retained-clone `migrate` allows the verified file-backed WAL policy; all
-  other collector rehearsal actions retain the in-memory-journal policy.
+  other collector rehearsal actions retain the in-memory-journal policy. Every
+  collector connection enables foreign-key enforcement before either journal
+  policy is selected.
 - Added append-only revision `20260731_14_schema_contract_repair` for the
   policy item storage shape and named required indexes. The repair may skip an
   index only when its table is absent in a partial historical migration test;
@@ -47,4 +52,8 @@
   `tests/test_mcp_catalog.py` -> `199 passed`.
 - Focused file-backed `DELETE` and `MEMORY` two-connection migration probes
   both preserve WAL, serialize one applied ledger, and record every revision.
+- RED/GREEN regression: the migrate-bound connection now proves
+  `foreign_keys=1`, `query_only=0`, and `journal_mode=wal` after `init_db()`
+  has applied migrations; the non-migrate collector memory-journal contract
+  remains covered.
 - Ruff and `git diff --check` pass.

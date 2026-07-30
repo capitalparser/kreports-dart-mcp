@@ -778,6 +778,35 @@ def test_writable_open_authenticates_sqlite_fd_and_uses_memory_journal(
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "memory"
 
 
+def test_wal_enabled_migrate_binding_keeps_foreign_keys_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the WAL migrate path silently losing SQLite foreign-key enforcement."""
+    import kreports.maintenance.kam_rehearsal_worker as worker
+
+    database = tmp_path / "rehearsal" / "clone.db"
+    _create_probe_database(database, "original")
+    marker = write_marker(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_REHEARSAL_MARKER", str(marker))
+    monkeypatch.setenv("KREPORTS_REHEARSAL_CAPABILITY", TEST_CAPABILITY)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    binding = worker._require_rehearsal_binding(require_initial_digest=False)
+
+    with worker._bound_database_runtime(
+        binding,
+        collector=True,
+        allow_file_wal=True,
+    ) as connection:
+        from kreports.db.engine import init_db
+
+        init_db()
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 0
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
 def test_writable_transaction_swap_creates_no_sidecars_next_to_either_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
