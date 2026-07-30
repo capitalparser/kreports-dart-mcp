@@ -9,6 +9,18 @@
 - Made rehearsal use the same exact full index definitions as release (table, ordered columns, unique flag, and partial predicate) and expose `invalid_indexes` separately from `missing_indexes`.
 - Added an `accounting_policy_changes` readiness feature/count/rate distinct from `accounting_policy_items`.
 
+## Changed files and commits
+
+- `8cc90f3 Harden policy chapter schema contracts`
+  - `kreports/db/schema_contract.py`
+  - `kreports/db/models.py`, `kreports/db/migrations.py`
+  - `kreports/release_artifact.py`, `kreports/maintenance/kam_rehearsal_worker.py`
+  - `kreports/analysis/readiness.py`
+  - focused schema, migration, release, rehearsal, and readiness tests
+- `c512ccd test: cover policy chapter contract blockers`
+  - literal release and rehearsal assertions for a missing `body_hash` column,
+    a wrong named unique index, and a missing policy chapter table.
+
 ## Strict TDD
 
 RED:
