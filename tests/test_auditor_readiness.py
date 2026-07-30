@@ -413,8 +413,10 @@ def test_auditor_feature_readiness_snapshot_counts_feature_layers(temp_engine):
     assert snapshot["counts"]["kam_sections"] == 1
     assert snapshot["counts"]["audit_report_matters"] == 1
     assert snapshot["counts"]["accounting_note_chapters"] == 1
+    assert snapshot["counts"]["accounting_policy_change_chapters"] == 1
     assert snapshot["counts"]["accounting_policy_items"] == 1
     assert snapshot["counts"]["audit_procedure_items"] == 1
+    assert snapshot["feature_status"]["accounting_policy_changes"] == "usable"
     assert snapshot["missing_features"] == []
 
 

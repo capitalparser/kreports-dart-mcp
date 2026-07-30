@@ -474,6 +474,43 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260731_12_accounting_note_chapter_contract",
+        description="Name deterministic accounting note chapter identity indexes",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS accounting_note_chapters (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fs_div VARCHAR(3) NOT NULL,
+              rcept_no VARCHAR(14) NOT NULL,
+              dcm_no VARCHAR(20),
+              source_type VARCHAR(30) NOT NULL DEFAULT 'business_report',
+              note_no VARCHAR(20) NOT NULL,
+              note_title VARCHAR(500),
+              section_type VARCHAR(40) NOT NULL,
+              body TEXT NOT NULL,
+              body_hash VARCHAR(40),
+              body_length INTEGER,
+              fetched_at DATETIME NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_accounting_note_chapter_identity
+            ON accounting_note_chapters
+              (corp_code, bsns_year, fs_div, note_no, section_type)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_note_chapter_corp_year
+            ON accounting_note_chapters (corp_code, bsns_year, fs_div)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_note_chapter_section_type
+            ON accounting_note_chapters (section_type)
+            """,
+        ),
+    ),
 )
 
 

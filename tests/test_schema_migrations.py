@@ -56,6 +56,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260711_09_audit_fee_observations",
         "20260711_10_financial_compact_provenance",
         "20260711_11_company_year_quality_freshness",
+        "20260731_12_accounting_note_chapter_contract",
     ]
     assert second == []
 
@@ -221,6 +222,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         "20260711_09_audit_fee_observations",
         "20260711_10_financial_compact_provenance",
         "20260711_11_company_year_quality_freshness",
+        "20260731_12_accounting_note_chapter_contract",
     ]
     assert second_applied == []
     assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)
@@ -822,7 +824,10 @@ def test_company_year_quality_freshness_migration_upgrades_revision_10_row(
             )
 
     with legacy.begin() as conn:
-        assert apply_schema_migrations(conn) == [MIGRATIONS[10].revision]
+        assert apply_schema_migrations(conn) == [
+            MIGRATIONS[10].revision,
+            MIGRATIONS[11].revision,
+        ]
         assert apply_schema_migrations(conn) == []
         upgraded = conn.execute(
             text("""
@@ -845,6 +850,118 @@ def test_company_year_quality_freshness_migration_upgrades_revision_10_row(
         inspect(legacy)
         .get_pk_constraint("company_year_quality")["constrained_columns"]
     ) == ("corp_code", "bsns_year")
+
+
+def test_accounting_note_chapter_contract_migration_adds_named_identity_index(
+    tmp_path,
+):
+    """A legacy chapter table gains deterministic identity without row rewrite."""
+    from kreports.db.migrations import MIGRATIONS, _checksum, apply_schema_migrations
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'legacy-note-chapters.db'}")
+    with legacy.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE accounting_note_chapters (
+              id INTEGER PRIMARY KEY,
+              corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL,
+              fs_div TEXT NOT NULL, rcept_no TEXT NOT NULL, dcm_no TEXT,
+              source_type TEXT NOT NULL, note_no TEXT NOT NULL,
+              note_title TEXT, section_type TEXT NOT NULL, body TEXT NOT NULL,
+              body_hash TEXT, body_length INTEGER, fetched_at TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO accounting_note_chapters VALUES (
+              1, '00126380', 2025, 'CFS', '20260301000001', NULL,
+              'business_report', '2', '정책', 'policy', '본문', 'a', 2,
+              '2026-07-31T00:00:00Z'
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision TEXT PRIMARY KEY, checksum TEXT NOT NULL,
+              description TEXT NOT NULL, applied_at TEXT NOT NULL
+            )
+        """))
+        for migration in MIGRATIONS[:-1]:
+            conn.execute(text("""
+                INSERT INTO schema_migrations
+                (revision, checksum, description, applied_at)
+                VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)
+            """), {
+                "revision": migration.revision,
+                "checksum": _checksum(migration),
+                "description": migration.description,
+            })
+
+    with legacy.begin() as conn:
+        assert apply_schema_migrations(conn) == [MIGRATIONS[-1].revision]
+        assert conn.execute(text("SELECT body FROM accounting_note_chapters")).scalar_one() == "본문"
+
+    indexes = {
+        item["name"]: item
+        for item in inspect(legacy).get_indexes("accounting_note_chapters")
+    }
+    assert indexes["uq_accounting_note_chapter_identity"]["unique"] == 1
+    assert indexes["uq_accounting_note_chapter_identity"]["column_names"] == [
+        "corp_code", "bsns_year", "fs_div", "note_no", "section_type",
+    ]
+
+
+def test_accounting_note_chapter_contract_migration_fails_closed_on_duplicates(
+    tmp_path,
+):
+    """Never silently select an arbitrary duplicate chapter identity."""
+    from kreports.db.migrations import MIGRATIONS, _checksum, apply_schema_migrations
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'duplicate-note-chapters.db'}")
+    with legacy.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE accounting_note_chapters (
+              id INTEGER PRIMARY KEY, corp_code TEXT NOT NULL,
+              bsns_year INTEGER NOT NULL, fs_div TEXT NOT NULL,
+              rcept_no TEXT NOT NULL, dcm_no TEXT, source_type TEXT NOT NULL,
+              note_no TEXT NOT NULL, note_title TEXT, section_type TEXT NOT NULL,
+              body TEXT NOT NULL, body_hash TEXT, body_length INTEGER,
+              fetched_at TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO accounting_note_chapters
+            (id, corp_code, bsns_year, fs_div, rcept_no, source_type, note_no,
+             section_type, body, fetched_at)
+            VALUES
+            (1, '00126380', 2025, 'CFS', '20260301000001', 'business_report',
+             '2', 'policy', '원본', '2026-07-31T00:00:00Z'),
+            (2, '00126380', 2025, 'CFS', '20260302000001', 'business_report',
+             '2', 'policy', '정정', '2026-07-31T00:00:01Z')
+        """))
+        conn.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision TEXT PRIMARY KEY, checksum TEXT NOT NULL,
+              description TEXT NOT NULL, applied_at TEXT NOT NULL
+            )
+        """))
+        for migration in MIGRATIONS[:-1]:
+            conn.execute(text("""
+                INSERT INTO schema_migrations
+                (revision, checksum, description, applied_at)
+                VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)
+            """), {
+                "revision": migration.revision,
+                "checksum": _checksum(migration),
+                "description": migration.description,
+            })
+
+    with pytest.raises(DatabaseError):
+        with legacy.begin() as conn:
+            apply_schema_migrations(conn)
+
+    with legacy.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM accounting_note_chapters")).scalar_one() == 2
+        assert conn.execute(text("SELECT COUNT(*) FROM schema_migrations WHERE revision=:revision"), {
+            "revision": MIGRATIONS[-1].revision,
+        }).scalar_one() == 0
 
 
 def test_audit_fee_observation_current_slot_allows_one_current_claim(

@@ -29,6 +29,12 @@ from pydantic import (
 )
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from kreports.db.schema_contract import (
+    REQUIRED_INDEXES,
+    REQUIRED_TABLES,
+    column_contract_blockers as _schema_column_contract_blockers,
+    index_contract_blockers as _schema_index_contract_blockers,
+)
 
 
 ARTIFACT_VERSION = "1.0"
@@ -48,174 +54,6 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MAX_COUNT = 10**12
 _MAX_TEXT_LENGTH = 10_000
 MAX_MANIFEST_BYTES = 2_000_000
-REQUIRED_TABLES = (
-    "companies",
-    "disclosures",
-    "financials",
-    "financial_facts_compact",
-    "audit_fees",
-    "audit_fee_observations",
-    "group_entities",
-    "group_relationships",
-    "group_component_metrics",
-    "report_sections",
-    "evidence_documents",
-    "kam_items",
-    "audit_procedure_items",
-    "backfill_runs",
-    "company_year_quality",
-    "schema_migrations",
-    "dataset_manifest",
-    "source_documents",
-)
-REQUIRED_COLUMN_SPECS = {
-    "financial_facts_compact": (
-        "corp_code",
-        "bsns_year",
-        "fs_div",
-        "metric_key",
-        "amount",
-        "source_account_id",
-        "source_table",
-        "unit",
-        "period_type",
-        "citation_rcept_no",
-        "citation_report_nm",
-        "citation_basis",
-        "quality_status",
-    ),
-    "kam_items": (
-        "id",
-        "rcept_no",
-        "dcm_no",
-        "corp_code",
-        "bsns_year",
-        "source_type",
-        "ordinal",
-        "title",
-        "normalized_topic",
-        "reason_text",
-        "audit_response_text",
-        "related_note_references_json",
-        "full_body_hash",
-        "full_body_length",
-        "source_basis",
-        "parser_version",
-        "quality_status",
-    ),
-    "audit_procedure_items": (
-        "id",
-        "rcept_no",
-        "dcm_no",
-        "corp_code",
-        "bsns_year",
-        "source_type",
-        "kam_item_id",
-        "kam_topic",
-        "method",
-        "procedure_type",
-        "procedure_text",
-        "procedure_hash",
-        "procedure_length",
-        "assertion_hints_json",
-        "linked_metric_keys_json",
-        "linked_note_keys_json",
-        "linked_event_keys_json",
-        "parser_version",
-        "quality_status",
-        "section_ordinal",
-        "procedure_ordinal",
-    ),
-}
-REQUIRED_INDEXES = (
-    "idx_company_year_quality_year_market",
-    "uq_backfill_runs_active_lease",
-    "idx_kam_item_corp_year",
-    "idx_kam_item_quality_year",
-    "idx_kam_item_receipt",
-    "idx_audit_procedure_kam_item",
-    "idx_audit_procedure_method_year",
-    "idx_audit_fee_availability_year",
-    "idx_audit_fee_observation_corp_year",
-    "idx_audit_fee_observation_receipt",
-    "idx_audit_fee_observation_year_quality",
-    "uq_audit_fee_observation_current_slot",
-    "idx_group_entity_parent_year",
-    "idx_group_entity_resolved_year",
-    "idx_group_relationship_parent_year",
-    "idx_group_relationship_nodes",
-    "idx_group_metric_parent_year",
-    "idx_group_metric_entity_kind",
-    "idx_group_metric_qsc_year",
-)
-REQUIRED_INDEX_SPECS = {
-    "idx_company_year_quality_year_market": (
-        "company_year_quality", ("bsns_year", "market"), False, None
-    ),
-    "uq_backfill_runs_active_lease": (
-        "backfill_runs", ("lease_key",), True, "where status = 'running'"
-    ),
-    "idx_kam_item_corp_year": (
-        "kam_items", ("corp_code", "bsns_year"), False, None
-    ),
-    "idx_kam_item_quality_year": (
-        "kam_items", ("bsns_year", "quality_status"), False, None
-    ),
-    "idx_kam_item_receipt": (
-        "kam_items", ("rcept_no", "source_type"), False, None
-    ),
-    "idx_audit_procedure_kam_item": (
-        "audit_procedure_items", ("kam_item_id",), False, None
-    ),
-    "idx_audit_procedure_method_year": (
-        "audit_procedure_items", ("method", "bsns_year"), False, None
-    ),
-    "idx_audit_fee_availability_year": (
-        "audit_fees", ("bsns_year", "availability_status"), False, None
-    ),
-    "idx_audit_fee_observation_corp_year": (
-        "audit_fee_observations", ("corp_code", "bsns_year"), False, None
-    ),
-    "idx_audit_fee_observation_receipt": (
-        "audit_fee_observations", ("source_rcept_no",), False, None
-    ),
-    "idx_audit_fee_observation_year_quality": (
-        "audit_fee_observations", ("bsns_year", "quality_status"), False, None
-    ),
-    "uq_audit_fee_observation_current_slot": (
-        "audit_fee_observations", ("source_slot_hash",), True, "where is_current = 1"
-    ),
-    "idx_group_entity_parent_year": (
-        "group_entities", ("parent_corp_code", "effective_year"), False, None
-    ),
-    "idx_group_entity_resolved_year": (
-        "group_entities", ("resolved_corp_code", "effective_year"), False, None
-    ),
-    "idx_group_relationship_parent_year": (
-        "group_relationships",
-        ("parent_corp_code", "effective_year"),
-        False,
-        None,
-    ),
-    "idx_group_relationship_nodes": (
-        "group_relationships",
-        ("parent_entity_key", "child_entity_key"),
-        False,
-        None,
-    ),
-    "idx_group_metric_parent_year": (
-        "group_component_metrics",
-        ("parent_corp_code", "effective_year"),
-        False,
-        None,
-    ),
-    "idx_group_metric_entity_kind": (
-        "group_component_metrics", ("entity_key", "metric_key"), False, None
-    ),
-    "idx_group_metric_qsc_year": (
-        "group_component_metrics", ("effective_year", "qsc_status"), False, None
-    ),
-}
 
 
 class ReleaseArtifactError(RuntimeError):
@@ -890,36 +728,7 @@ def _index_contract_blockers(
     connection: sqlite3.Connection,
     table_names: set[str],
 ) -> list[str]:
-    blockers: list[str] = []
-    for name, (table, columns, unique, where) in REQUIRED_INDEX_SPECS.items():
-        if table not in table_names:
-            blockers.append(f"missing_required_index:{name}")
-            continue
-        rows = {
-            str(row["name"]): row
-            for row in connection.execute(f'PRAGMA index_list("{table}")')
-        }
-        row = rows.get(name)
-        if row is None:
-            blockers.append(f"missing_required_index:{name}")
-            continue
-        actual_columns = tuple(
-            str(item["name"])
-            for item in connection.execute(f'PRAGMA index_info("{name}")')
-        )
-        sql_row = connection.execute(
-            "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?",
-            (name,),
-        ).fetchone()
-        sql = " ".join(str(sql_row[0] or "").lower().split()) if sql_row else ""
-        if (
-            actual_columns != columns
-            or bool(row["unique"]) is not unique
-            or (where is not None and where not in sql)
-            or (where is None and " where " in f" {sql} ")
-        ):
-            blockers.append(f"invalid_required_index:{name}")
-    return blockers
+    return _schema_index_contract_blockers(connection, table_names)
 
 
 def _column_contract_blockers(
@@ -927,17 +736,7 @@ def _column_contract_blockers(
     table_names: set[str],
 ) -> list[str]:
     """Name every current-runtime column absent from an otherwise present table."""
-    blockers: list[str] = []
-    for table_name, required_columns in REQUIRED_COLUMN_SPECS.items():
-        if table_name not in table_names:
-            continue
-        actual_columns = _table_columns(connection, table_name)
-        blockers.extend(
-            f"missing_required_column:{table_name}.{column}"
-            for column in required_columns
-            if column not in actual_columns
-        )
-    return blockers
+    return _schema_column_contract_blockers(connection, table_names)
 
 
 def _duplicate_key_blockers(

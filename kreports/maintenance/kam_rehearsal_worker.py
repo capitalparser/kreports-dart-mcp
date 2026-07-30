@@ -622,18 +622,21 @@ def _table_indexes(connection: sqlite3.Connection, table: str) -> set[str]:
 def migration_state() -> dict[str, object]:
     """Inspect the configured SQLite database without changing it."""
     from kreports.db.migrations import MIGRATIONS, _checksum
+    from kreports.db.schema_contract import (
+        REQUIRED_COLUMN_SPECS,
+        REQUIRED_TABLES,
+        column_contract_blockers,
+        index_contract_blockers,
+    )
 
     required_columns = {
-        "kam_items": {"id", "rcept_no", "dcm_no", "corp_code", "bsns_year", "source_type", "ordinal", "related_note_references_json", "full_body_hash", "source_basis", "quality_status"},
-        "audit_procedure_items": {"id", "rcept_no", "dcm_no", "corp_code", "bsns_year", "source_type", "kam_item_id", "method", "assertion_hints_json", "linked_metric_keys_json", "linked_note_keys_json", "linked_event_keys_json", "parser_version", "quality_status"},
-        "audit_fees": {"contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours", "source_class", "source_rcept_no", "source_period", "availability_status", "quality_status", "compatibility_basis", "conflict_status", "source_observations_json"},
+        table: set(columns) for table, columns in REQUIRED_COLUMN_SPECS.items()
     }
-    required_tables = set(required_columns) | {"schema_migrations", "group_entities", "group_relationships", "group_component_metrics"}
-    required_indexes = {
-        "idx_kam_item_corp_year", "idx_kam_item_quality_year", "idx_kam_item_receipt",
-        "idx_audit_procedure_kam_item", "idx_audit_procedure_method_year",
-        "idx_audit_fee_availability_year", "idx_group_entity_parent_year",
-        "idx_group_relationship_parent_year", "idx_group_metric_parent_year",
+    required_columns["audit_fees"] = {
+        "contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours",
+        "source_class", "source_rcept_no", "source_period",
+        "availability_status", "quality_status", "compatibility_basis",
+        "conflict_status", "source_observations_json",
     }
     connection = _open_readonly_database()
     try:
@@ -646,12 +649,23 @@ def migration_state() -> dict[str, object]:
             }
         expected = {migration.revision: _checksum(migration) for migration in MIGRATIONS}
         checksum_mismatches = [revision for revision, checksum in recorded.items() if expected.get(revision) != checksum]
-        missing_tables = sorted(required_tables - tables)
+        missing_tables = sorted(set(REQUIRED_TABLES) - tables)
         missing_columns = {
             table: sorted(columns - _table_columns(connection, table))
             for table, columns in required_columns.items() if table in tables and columns - _table_columns(connection, table)
         }
-        existing_indexes = set().union(*(_table_indexes(connection, table) for table in tables)) if tables else set()
+        release_column_blockers = column_contract_blockers(connection, tables)
+        index_blockers = index_contract_blockers(connection, tables)
+        missing_indexes = sorted(
+            blocker.removeprefix("missing_required_index:")
+            for blocker in index_blockers
+            if blocker.startswith("missing_required_index:")
+        )
+        invalid_indexes = sorted(
+            blocker.removeprefix("invalid_required_index:")
+            for blocker in index_blockers
+            if blocker.startswith("invalid_required_index:")
+        )
         foreign_keys = [dict(row) for row in connection.execute("PRAGMA foreign_key_check")]
         quick_check = [str(row[0]) for row in connection.execute("PRAGMA quick_check")]
         pending = [migration.revision for migration in MIGRATIONS if migration.revision not in recorded]
@@ -659,10 +673,14 @@ def migration_state() -> dict[str, object]:
             "recorded_revisions": [migration.revision for migration in MIGRATIONS if migration.revision in recorded],
             "pending_revisions": pending,
             "checksum_mismatches": checksum_mismatches,
-            "schema_complete": not (missing_tables or missing_columns or required_indexes - existing_indexes),
+            "schema_complete": not (
+                missing_tables or missing_columns or release_column_blockers
+                or index_blockers
+            ),
             "missing_tables": missing_tables,
             "missing_columns": missing_columns,
-            "missing_indexes": sorted(required_indexes - existing_indexes),
+            "missing_indexes": missing_indexes,
+            "invalid_indexes": invalid_indexes,
             "quick_check": quick_check,
             "foreign_key_violations": foreign_keys,
         }

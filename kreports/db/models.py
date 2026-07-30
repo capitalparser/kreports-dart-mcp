@@ -434,9 +434,14 @@ class AccountingNoteChapter(Base):
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint(
+        # The named SQLite index is also the release/rehearsal identity
+        # contract.  Receipt/body deliberately remain mutable evidence fields:
+        # an amended annual filing updates the same logical note slot rather
+        # than making policy comparison choose between duplicate rows.
+        Index(
+            "uq_accounting_note_chapter_identity",
             "corp_code", "bsns_year", "fs_div", "note_no", "section_type",
-            name="uq_accounting_note_chapter",
+            unique=True,
         ),
         Index("idx_note_chapter_corp_year", "corp_code", "bsns_year", "fs_div"),
         Index("idx_note_chapter_section_type", "section_type"),

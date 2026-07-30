@@ -26,11 +26,14 @@ def test_accounting_note_chapter_schema(temp_engine):
         "fetched_at",
     }.issubset(columns)
 
-    constraints = {
-        constraint["name"]
-        for constraint in inspector.get_unique_constraints("accounting_note_chapters")
+    indexes = {
+        item["name"]: item
+        for item in inspector.get_indexes("accounting_note_chapters")
     }
-    assert "uq_accounting_note_chapter" in constraints
+    assert indexes["uq_accounting_note_chapter_identity"]["unique"] == 1
+    assert indexes["uq_accounting_note_chapter_identity"]["column_names"] == [
+        "corp_code", "bsns_year", "fs_div", "note_no", "section_type",
+    ]
 
 
 def test_accounting_note_chapter_indexes():

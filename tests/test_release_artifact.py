@@ -1506,6 +1506,54 @@ def test_wrong_index_definition_with_expected_name_is_blocked(tmp_path):
     )
 
 
+def test_policy_chapter_table_and_identity_index_are_release_contract_blockers(
+    tmp_path,
+    monkeypatch,
+):
+    """A policy comparison dependency cannot be omitted or reordered at release."""
+    from sqlalchemy import create_engine
+
+    from kreports import release_artifact
+    from kreports.db.migrations import apply_schema_migrations
+    from kreports.db.models import Base
+
+    database = tmp_path / "policy-contract.db"
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            apply_schema_migrations(connection)
+    finally:
+        engine.dispose()
+    monkeypatch.setattr(
+        release_artifact,
+        "run_all_tool_contract",
+        lambda _db: {"passed": True, "checks": 0},
+    )
+    monkeypatch.setattr(
+        release_artifact,
+        "golden_contract_result",
+        lambda: {"passed": True, "sha256": "a" * 64, "cases": 1},
+    )
+    monkeypatch.setattr(release_artifact, "_tool_wire_sha256", lambda: "b" * 64)
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DROP INDEX uq_accounting_note_chapter_identity")
+        connection.execute(
+            "CREATE UNIQUE INDEX uq_accounting_note_chapter_identity "
+            "ON accounting_note_chapters (corp_code, bsns_year, fs_div, note_no)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    evidence = release_artifact._collect_current_evidence(database, "public_runtime")
+    assert "invalid_required_index:uq_accounting_note_chapter_identity" in evidence[
+        "release_gate"
+    ]["blockers"]
+
+
 def test_verify_rejects_database_filename_mismatch(tmp_path, monkeypatch):
     from kreports import release_artifact
 

@@ -1038,6 +1038,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         source_basis = {
             "kam_sections": "report_sections",
             "audit_report_matters": "report_sections",
+            "accounting_policy_changes": "accounting_note_chapters",
         }
         if kam_sections == 0 and "evidence_documents" in table_names:
             evidence_rows = conn.execute(
@@ -1094,6 +1095,30 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             if "accounting_note_chapters" in table_names
             else 0
         )
+        policy_change_chapters = (
+            scalar(
+                "SELECT COUNT(*) FROM accounting_note_chapters anc "
+                "JOIN companies c ON c.corp_code=anc.corp_code "
+                "WHERE anc.bsns_year=:year "
+                "AND anc.note_no IN ('2', '3', '4') "
+                "AND anc.section_type IN ('basis', 'policy', 'estimate_judgment')"
+                + market_filter
+            )
+            if "accounting_note_chapters" in table_names
+            else 0
+        )
+        policy_change_companies = (
+            scalar(
+                "SELECT COUNT(DISTINCT anc.corp_code) FROM accounting_note_chapters anc "
+                "JOIN companies c ON c.corp_code=anc.corp_code "
+                "WHERE anc.bsns_year=:year "
+                "AND anc.note_no IN ('2', '3', '4') "
+                "AND anc.section_type IN ('basis', 'policy', 'estimate_judgment')"
+                + market_filter
+            )
+            if "accounting_note_chapters" in table_names
+            else 0
+        )
         policy_items = (
             scalar(
                 "SELECT COUNT(*) FROM accounting_policy_items api JOIN companies c ON c.corp_code=api.corp_code "
@@ -1143,6 +1168,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
         "kam_procedure_hints": "usable" if kam_procedure > 0 and pct(kam_procedure, kam_sections) >= FEATURE_COVERAGE_THRESHOLD else ("degraded" if kam_procedure > 0 else "missing"),
         "audit_report_matters": "usable" if matter_sections > 0 else "missing",
         "accounting_notes": coverage_status(note_chapter_companies, listed),
+        "accounting_policy_changes": coverage_status(policy_change_companies, listed),
         "accounting_policy_items": coverage_status(policy_item_companies, listed),
         "audit_procedure_items": coverage_status(procedure_item_companies, listed),
     }
@@ -1171,6 +1197,8 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "audit_report_matters": matter_sections,
             "accounting_note_chapters": note_chapters,
             "accounting_note_chapter_companies": note_chapter_companies,
+            "accounting_policy_change_chapters": policy_change_chapters,
+            "accounting_policy_change_companies": policy_change_companies,
             "accounting_policy_items": policy_items,
             "accounting_policy_item_companies": policy_item_companies,
             "audit_procedure_items": procedure_items,
@@ -1182,6 +1210,7 @@ def auditor_feature_readiness_snapshot(year: int = 2025, market: str | None = No
             "raw_audit_company_coverage": pct(raw_audit_companies, listed),
             "kam_company_coverage": pct(kam_companies, listed),
             "accounting_note_company_coverage": pct(note_chapter_companies, listed),
+            "accounting_policy_change_company_coverage": pct(policy_change_companies, listed),
             "accounting_policy_company_coverage": pct(policy_item_companies, listed),
             "audit_procedure_company_coverage": pct(procedure_item_companies, listed),
             "kam_reason_to_kam": pct(kam_reason, kam_sections),
