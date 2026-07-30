@@ -1375,6 +1375,21 @@ def _append_visual_table(
         if built is None:
             return narrative
         pack = VisualizationPackV1.model_validate(built)
+    if tool_name == "build_audit_acceptance_pack":
+        scale_tables = [
+            table
+            for table in pack.tables
+            if table.id == "subject_scale_history"
+        ]
+        if not scale_tables:
+            return narrative
+        pack = pack.model_copy(update={
+            "tables": scale_tables,
+            "charts": [],
+            "diagrams": [],
+            "timelines": [],
+            "resource_uri": None,
+        })
     if tool_name == "search_dataset" and not any(
         table.id == "accounting_note_evidence" for table in pack.tables
     ):
