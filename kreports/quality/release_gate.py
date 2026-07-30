@@ -43,6 +43,10 @@ _MATERIALITY_COVERAGE_METADATA = {
     "unit": "KRW",
     "citation_basis": _MATERIALITY_CITATION_BASIS,
     "receipt_policy": "exact_canonical_company_year_annual_filing",
+    "annual_source_policy": "latest_company_year_fs_annual_filing",
+    "duplicate_policy": "value_and_provenance_identical_only",
+    "amount_policy": "finite_sqlite_integer_or_real",
+    "pbt_policy": "direct_or_profit_loss_plus_tax_expense",
 }
 STALE_BACKFILL_AGE = timedelta(hours=1)
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
@@ -426,7 +430,7 @@ def _materiality_benchmark_coverage(
     start_year = coverage_year - MATERIALITY_BENCHMARK_WINDOW_YEARS + 1
     metrics = ", ".join(
         f":materiality_metric_{index}"
-        for index in range(len(MATERIALITY_BENCHMARK_METRICS))
+        for index in range(len(MATERIALITY_BENCHMARK_METRICS) + 2)
     )
     result = session.execute(
         text(
@@ -437,37 +441,128 @@ def _materiality_benchmark_coverage(
                 WHERE stock_code IS NOT NULL
                   AND market IN ('KOSPI', 'KOSDAQ')
             ),
-            qualified AS (
-                SELECT f.corp_code, f.bsns_year, f.fs_div, f.metric_key
+            fact_scopes AS (
+                SELECT DISTINCT
+                       f.corp_code, f.bsns_year, f.fs_div
                 FROM financial_facts_compact AS f
                 JOIN listed AS l ON l.corp_code=f.corp_code
-                JOIN disclosures AS d
-                  ON d.corp_code=f.corp_code
-                 AND d.rcept_no=f.citation_rcept_no
                 WHERE f.bsns_year BETWEEN :materiality_start_year
                     AND :materiality_coverage_year
                   AND f.fs_div IN ('CFS', 'OFS')
                   AND f.metric_key IN ({metrics})
-                  AND f.amount IS NOT NULL
-                  AND TRIM(COALESCE(f.source_account_id, '')) != ''
-                  AND f.source_table IN ('financial_facts', 'financials')
-                  AND f.unit='KRW'
-                  AND f.quality_status='usable'
-                  AND f.citation_basis=:materiality_citation_basis
-                  AND LENGTH(f.citation_rcept_no)=14
-                  AND f.citation_rcept_no NOT GLOB '*[^0-9]*'
-                  AND SUBSTR(f.citation_rcept_no, 1, 8)=
+            ),
+            annual_ranked AS (
+                SELECT s.corp_code, s.bsns_year, s.fs_div,
+                       SUBSTR(d.rcept_no, 1, 14) AS canonical_rcept_no,
+                       d.report_nm,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY
+                               s.corp_code, s.bsns_year, s.fs_div
+                           ORDER BY d.disc_date DESC, d.rcept_no DESC
+                       ) AS source_rank
+                FROM fact_scopes AS s
+                JOIN disclosures AS d ON d.corp_code=s.corp_code
+                WHERE LENGTH(d.rcept_no) >= 14
+                  AND SUBSTR(d.rcept_no, 1, 14) NOT GLOB '*[^0-9]*'
+                  AND CAST(SUBSTR(d.rcept_no, 1, 4) AS INTEGER)
+                      BETWEEN s.bsns_year AND s.bsns_year + 10
+                  AND SUBSTR(d.rcept_no, 1, 8)=
                       STRFTIME('%Y%m%d', d.disc_date)
-                  AND f.citation_report_nm=d.report_nm
                   AND d.report_nm LIKE
-                      ('%사업보고서 (' || f.bsns_year || '.%')
-                  AND (
-                      (f.metric_key IN ('profit_before_tax', 'revenue')
-                       AND f.period_type='duration')
-                      OR
-                      (f.metric_key IN ('assets', 'equity')
-                       AND f.period_type='instant')
-                  )
+                      ('%사업보고서 (' || s.bsns_year || '.%')
+            ),
+            latest_annual AS (
+                SELECT corp_code, bsns_year, fs_div,
+                       canonical_rcept_no, report_nm
+                FROM annual_ranked
+                WHERE source_rank=1
+            ),
+            candidate_rows AS (
+                SELECT f.corp_code, f.bsns_year, f.fs_div, f.metric_key,
+                       f.amount, f.source_account_id, f.source_table,
+                       f.unit, f.period_type, f.quality_status,
+                       f.citation_rcept_no, f.citation_report_nm,
+                       f.citation_basis,
+                       CASE WHEN
+                           TYPEOF(f.amount) IN ('integer', 'real')
+                           AND CAST(f.amount AS TEXT) NOT IN ('Inf', '-Inf')
+                           AND TRIM(COALESCE(f.source_account_id, '')) != ''
+                           AND f.source_table IN (
+                               'financial_facts', 'financials'
+                           )
+                           AND f.unit='KRW'
+                           AND f.quality_status='usable'
+                           AND f.citation_basis=
+                               :materiality_citation_basis
+                           AND LENGTH(f.citation_rcept_no)=14
+                           AND f.citation_rcept_no NOT GLOB '*[^0-9]*'
+                           AND f.citation_rcept_no=
+                               a.canonical_rcept_no
+                           AND f.citation_report_nm=a.report_nm
+                           AND (
+                               (f.metric_key IN (
+                                   'profit_before_tax', 'revenue',
+                                   'profit_loss', 'tax_expense'
+                                ) AND f.period_type='duration')
+                               OR
+                               (f.metric_key IN ('assets', 'equity')
+                                AND f.period_type='instant')
+                           )
+                           THEN 1 ELSE 0
+                       END AS row_admissible
+                FROM financial_facts_compact AS f
+                JOIN listed AS l ON l.corp_code=f.corp_code
+                LEFT JOIN latest_annual AS a
+                  ON a.corp_code=f.corp_code
+                 AND a.bsns_year=f.bsns_year
+                 AND a.fs_div=f.fs_div
+                WHERE f.bsns_year BETWEEN :materiality_start_year
+                    AND :materiality_coverage_year
+                  AND f.fs_div IN ('CFS', 'OFS')
+                  AND f.metric_key IN ({metrics})
+            ),
+            identity_checked AS (
+                SELECT corp_code, bsns_year, fs_div, metric_key,
+                       MIN(amount) AS amount,
+                       MIN(citation_rcept_no) AS citation_rcept_no
+                FROM candidate_rows
+                GROUP BY corp_code, bsns_year, fs_div, metric_key
+                HAVING SUM(row_admissible)=COUNT(*)
+                   AND MIN(amount)=MAX(amount)
+                   AND COUNT(DISTINCT source_account_id)=1
+                   AND COUNT(DISTINCT source_table)=1
+                   AND COUNT(DISTINCT unit)=1
+                   AND COUNT(DISTINCT period_type)=1
+                   AND COUNT(DISTINCT quality_status)=1
+                   AND COUNT(DISTINCT citation_rcept_no)=1
+                   AND COUNT(DISTINCT citation_report_nm)=1
+                   AND COUNT(DISTINCT citation_basis)=1
+            ),
+            direct_benchmarks AS (
+                SELECT corp_code, bsns_year, fs_div, metric_key
+                FROM identity_checked
+                WHERE metric_key IN (
+                    'profit_before_tax', 'revenue', 'assets', 'equity'
+                )
+            ),
+            derived_pbt AS (
+                SELECT p.corp_code, p.bsns_year, p.fs_div,
+                       'profit_before_tax' AS metric_key
+                FROM identity_checked AS p
+                JOIN identity_checked AS t
+                  ON t.corp_code=p.corp_code
+                 AND t.bsns_year=p.bsns_year
+                 AND t.fs_div=p.fs_div
+                 AND t.metric_key='tax_expense'
+                WHERE p.metric_key='profit_loss'
+                  AND p.citation_rcept_no=t.citation_rcept_no
+            ),
+            qualified AS (
+                SELECT corp_code, bsns_year, fs_div, metric_key
+                FROM direct_benchmarks
+                UNION
+                SELECT corp_code, bsns_year, fs_div, metric_key
+                FROM derived_pbt
             ),
             metric_support AS (
                 SELECT corp_code, fs_div, metric_key,
@@ -506,7 +601,9 @@ def _materiality_benchmark_coverage(
             "materiality_window_years": MATERIALITY_BENCHMARK_WINDOW_YEARS,
             **{
                 f"materiality_metric_{index}": metric
-                for index, metric in enumerate(MATERIALITY_BENCHMARK_METRICS)
+                for index, metric in enumerate(
+                    (*MATERIALITY_BENCHMARK_METRICS, "profit_loss", "tax_expense")
+                )
             },
         },
     ).mappings().one()

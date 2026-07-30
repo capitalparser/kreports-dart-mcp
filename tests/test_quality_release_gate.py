@@ -198,6 +198,118 @@ def _seed_materiality_fact_years(
                     quality_status="usable",
                 )
             )
+
+
+def _replace_compact_table_without_unique(temp_engine) -> None:
+    """Allow literal duplicate fixtures while retaining the final columns."""
+    with temp_engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE financial_facts_compact")
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE financial_facts_compact (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                corp_code VARCHAR(8) NOT NULL,
+                bsns_year SMALLINT NOT NULL,
+                fs_div VARCHAR(3) NOT NULL,
+                metric_key VARCHAR(50) NOT NULL,
+                metric_name VARCHAR(200) NOT NULL,
+                amount,
+                source_account_id VARCHAR(200),
+                source_account_nm VARCHAR(300),
+                source_table VARCHAR(40),
+                unit VARCHAR(30),
+                period_type VARCHAR(20),
+                citation_rcept_no VARCHAR(80),
+                citation_report_nm VARCHAR(300),
+                citation_basis VARCHAR(50) NOT NULL DEFAULT 'uncitable',
+                quality_status VARCHAR(24) NOT NULL DEFAULT 'limited',
+                fetched_at DATETIME NOT NULL
+            )
+            """
+        )
+
+
+def _seed_duplicate_compact_fact(
+    corp_code: str,
+    year: int,
+    *,
+    metric_key: str = "revenue",
+    amount=100_000_000,
+    source_account_id: str = "ifrs-full_Revenue",
+    unit: str = "KRW",
+) -> None:
+    receipt = f"{year + 1}0331{int(corp_code):06d}"
+    with get_session() as session:
+        session.add(
+            FinancialFactCompact(
+                corp_code=corp_code,
+                bsns_year=year,
+                fs_div="CFS",
+                metric_key=metric_key,
+                metric_name=metric_key,
+                amount=amount,
+                source_account_id=source_account_id,
+                source_table="financial_facts",
+                unit=unit,
+                period_type="duration",
+                citation_rcept_no=receipt,
+                citation_report_nm=f"사업보고서 ({year}.12)",
+                citation_basis="company_year_annual_filing_match",
+                quality_status="usable",
+            )
+        )
+
+
+def _seed_derived_pbt_years(
+    corp_code: str,
+    years: tuple[int, ...],
+    *,
+    tax_unit: str = "KRW",
+) -> None:
+    with get_session() as session:
+        for year in years:
+            receipt = f"{year + 1}0331{int(corp_code):06d}"
+            report_name = f"사업보고서 ({year}.12)"
+            session.add(
+                Disclosure(
+                    rcept_no=receipt,
+                    corp_code=corp_code,
+                    corp_name=f"회사-{corp_code}",
+                    disc_date=date(year + 1, 3, 31),
+                    disc_type="A",
+                    report_nm=report_name,
+                )
+            )
+            for metric_key, amount, account_id, unit in (
+                ("profit_loss", 80_000_000, "ifrs-full_ProfitLoss", "KRW"),
+                (
+                    "tax_expense",
+                    20_000_000,
+                    "ifrs-full_IncomeTaxExpenseContinuingOperations",
+                    tax_unit,
+                ),
+            ):
+                session.add(
+                    FinancialFactCompact(
+                        corp_code=corp_code,
+                        bsns_year=year,
+                        fs_div="CFS",
+                        metric_key=metric_key,
+                        metric_name=metric_key,
+                        amount=amount,
+                        source_account_id=account_id,
+                        source_table="financial_facts",
+                        unit=unit,
+                        period_type="duration",
+                        citation_rcept_no=receipt,
+                        citation_report_nm=report_name,
+                        citation_basis="company_year_annual_filing_match",
+                        quality_status="usable",
+                    )
+                )
+
+
+
 def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     temp_engine,
     monkeypatch,
@@ -367,6 +479,10 @@ def test_three_exact_proven_years_pass_materiality_benchmark_coverage(
         "unit": "KRW",
         "citation_basis": "company_year_annual_filing_match",
         "receipt_policy": "exact_canonical_company_year_annual_filing",
+        "annual_source_policy": "latest_company_year_fs_annual_filing",
+        "duplicate_policy": "value_and_provenance_identical_only",
+        "amount_policy": "finite_sqlite_integer_or_real",
+        "pbt_policy": "direct_or_profit_loss_plus_tax_expense",
     }
 
 
@@ -404,6 +520,245 @@ def test_unproven_materiality_facts_do_not_count_toward_auditor_coverage(
 
     assert "materiality_benchmark_coverage" in report["required_failures"]
     assert report["coverage"]["materiality_benchmark"]["numerator"] == 0
+
+
+@pytest.mark.parametrize(
+    ("amount", "source_account_id"),
+    [
+        (100_000_001, "ifrs-full_Revenue"),
+        (100_000_000, "dart_Revenue"),
+    ],
+    ids=("conflicting_value", "conflicting_provenance"),
+)
+def test_conflicting_compact_duplicates_invalidate_exact_materiality_year(
+    temp_engine,
+    monkeypatch,
+    amount,
+    source_account_id,
+):
+    """Catch coverage that hides a conflicting compact value or provenance."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _replace_compact_table_without_unique(temp_engine)
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    _seed_duplicate_compact_fact(
+        "00126380",
+        2025,
+        amount=amount,
+        source_account_id=source_account_id,
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["excluded_populations"]["materiality_benchmark"][
+        "two_proven_years"
+    ] == 1
+
+
+def test_value_and_provenance_identical_compact_duplicates_dedupe(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a gate that rejects byte-equivalent duplicate compact evidence."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _replace_compact_table_without_unique(temp_engine)
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    _seed_duplicate_compact_fact("00126380", 2025)
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert report["ok"] is True
+    assert report["coverage"]["materiality_benchmark"]["numerator"] == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_amount",
+    ["not-a-number", float("inf")],
+    ids=("sqlite_text", "sqlite_infinity"),
+)
+def test_nonnumeric_or_nonfinite_compact_amount_is_not_materiality_coverage(
+    temp_engine,
+    monkeypatch,
+    invalid_amount,
+):
+    """Catch SQLite affinity coercion of text or infinity into a benchmark."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    with temp_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE financial_facts_compact SET amount=? "
+            "WHERE corp_code=? AND bsns_year=2025 AND metric_key='revenue'",
+            (invalid_amount, "00126380"),
+        )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["excluded_populations"]["materiality_benchmark"][
+        "two_proven_years"
+    ] == 1
+
+
+def test_only_latest_company_year_annual_filing_can_prove_materiality(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch coverage that accepts an older annual filing after a newer one."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    with get_session() as session:
+        for year in (2023, 2024, 2025):
+            session.add(
+                Disclosure(
+                    rcept_no=f"{year + 1}0430{int('00126380'):06d}",
+                    corp_code="00126380",
+                    corp_name="회사-00126380",
+                    disc_date=date(year + 1, 4, 30),
+                    disc_type="A",
+                    report_nm=f"사업보고서 ({year}.12)",
+                )
+            )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["excluded_populations"]["materiality_benchmark"][
+        "zero_proven_years"
+    ] == 1
+
+
+def test_implausibly_late_receipt_date_cannot_prove_materiality(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a receipt outside production's company-year plausibility range."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    with temp_engine.begin() as connection:
+        for year in (2023, 2024, 2025):
+            old_receipt = f"{year + 1}0331{int('00126380'):06d}"
+            late_receipt = f"{year + 11}0331{int('00126380'):06d}"
+            connection.exec_driver_sql(
+                "UPDATE disclosures SET rcept_no=?, disc_date=? "
+                "WHERE rcept_no=?",
+                (late_receipt, f"{year + 11}-03-31", old_receipt),
+            )
+            connection.exec_driver_sql(
+                "UPDATE financial_facts_compact "
+                "SET citation_rcept_no=? WHERE citation_rcept_no=?",
+                (late_receipt, old_receipt),
+            )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+
+
+def test_proven_compatible_derived_pbt_three_years_count_as_coverage(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch readiness that omits production's compatible PBT derivation."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_derived_pbt_years("00126380", (2023, 2024, 2025))
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert report["ok"] is True
+    assert report["coverage"]["materiality_benchmark"]["numerator"] == 1
+
+
+def test_bad_derived_pbt_operand_does_not_count_as_materiality_coverage(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a derived PBT series that accepts a non-KRW tax operand."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_derived_pbt_years(
+        "00126380",
+        (2023, 2024, 2025),
+        tax_unit="million_KRW",
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+
+
+def test_conflicting_derived_pbt_operand_invalidates_only_that_year(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch derivation that chooses one of two conflicting tax operands."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _replace_compact_table_without_unique(temp_engine)
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_derived_pbt_years("00126380", (2023, 2024, 2025))
+    _seed_duplicate_compact_fact(
+        "00126380",
+        2025,
+        metric_key="tax_expense",
+        amount=21_000_000,
+        source_account_id="ifrs-full_IncomeTaxExpenseContinuingOperations",
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["excluded_populations"]["materiality_benchmark"][
+        "two_proven_years"
+    ] == 1
+
+
+def test_missing_compact_schema_fails_materiality_coverage_closed(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a missing compact table that disappears from auditor readiness."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_valid_manifest(temp_engine)
+    with temp_engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE financial_facts_compact")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "missing_table:financial_facts_compact" in report["required_failures"]
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["coverage"]["materiality_benchmark"]["denominator"] == 1
 
 
 def test_explicit_no_kam_is_excluded_from_procedure_denominator(
