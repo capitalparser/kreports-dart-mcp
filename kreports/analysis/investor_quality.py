@@ -1,6 +1,8 @@
 """Investor quality-of-earnings diagnostics from DART-derived facts."""
 from __future__ import annotations
 
+from decimal import Decimal
+import math
 from statistics import pstdev
 
 from sqlalchemy import bindparam, text
@@ -137,6 +139,26 @@ _QOE_PROVENANCE_FIELDS = (
     "source_account_id",
     "source_table",
 )
+_QOE_REQUIRED_METRICS = {
+    "revenue",
+    "operating_profit",
+    "profit_loss",
+    "operating_cash_flow",
+}
+_QOE_DURATION_METRICS = _QOE_REQUIRED_METRICS
+
+
+def _finite_numeric(value: object) -> bool:
+    if not isinstance(value, (int, float, Decimal)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _has_recorded_unit(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _qoe_unproven_source(
@@ -182,7 +204,49 @@ def _qoe_provenance_series(
         }
         requested_columns = {"bsns_year", "metric_key", *_QOE_PROVENANCE_FIELDS}
         if not requested_columns.issubset(compact_columns):
-            return [], []
+            identity_columns = {"corp_code", "bsns_year", "fs_div", "metric_key"}
+            if not identity_columns.issubset(compact_columns):
+                return [], []
+            legacy_rows = conn.execute(text("""
+                SELECT DISTINCT bsns_year, metric_key
+                FROM financial_facts_compact
+                WHERE corp_code=:corp_code
+                  AND fs_div=:fs_div
+                  AND bsns_year BETWEEN :start_year AND :end_year
+                  AND metric_key IN :metric_keys
+                ORDER BY bsns_year, metric_key
+            """).bindparams(bindparam("metric_keys", expanding=True)), {
+                "corp_code": company,
+                "fs_div": fs_div,
+                "start_year": int(start_year),
+                "end_year": int(end_year),
+                "metric_keys": tuple(sorted(_QOE_REQUIRED_METRICS)),
+            }).mappings()
+            legacy_metrics_by_year: dict[int, list[str]] = {}
+            for row in legacy_rows:
+                legacy_metrics_by_year.setdefault(
+                    int(row["bsns_year"]), []
+                ).append(str(row["metric_key"]))
+            observations: list[dict] = []
+            for year, metric_keys in legacy_metrics_by_year.items():
+                limitation = (
+                    f"{year}년 compact 재무행은 증빙 열이 없어 금액과 QoE "
+                    "결론을 공개하지 않았습니다."
+                )
+                observations.append({
+                    "year": year,
+                    "available_metric_keys": metric_keys,
+                    "units": {},
+                    "source": _qoe_unproven_source(
+                        company,
+                        year,
+                        status="compact_provenance_columns_missing",
+                        limitation=limitation,
+                    ),
+                    "provenance_status": "compact_provenance_columns_missing",
+                    "limitation": limitation,
+                })
+            return [], observations
         stmt = text("""
             SELECT bsns_year, metric_key, amount, unit, period_type,
                    citation_rcept_no, citation_report_nm, citation_basis,
@@ -200,7 +264,7 @@ def _qoe_provenance_series(
             "fs_div": fs_div,
             "start_year": int(start_year),
             "end_year": int(end_year),
-            "metric_keys": CORE_FINANCIAL_METRICS,
+            "metric_keys": tuple(sorted(_QOE_REQUIRED_METRICS)),
         }).mappings()]
 
     rows_by_year: dict[int, dict[str, list[dict]]] = {}
@@ -227,6 +291,11 @@ def _qoe_provenance_series(
         safe_values: dict[str, object] = {}
         units: dict[str, object] = {}
         statuses: list[str] = []
+        missing_metrics = sorted(
+            _QOE_REQUIRED_METRICS.difference(metric_groups)
+        )
+        if missing_metrics:
+            statuses.append("compact_required_metrics_missing")
         for metric_key in sorted(metric_groups):
             candidates = metric_groups[metric_key]
             identities = {
@@ -240,19 +309,44 @@ def _qoe_provenance_series(
                 continue
             row = candidates[0]
             output_key = metric_output_key(metric_key)
-            safe_values[output_key] = row.get("amount")
+            amount = row.get("amount")
+            safe_values[output_key] = amount if _finite_numeric(amount) else None
             units[output_key] = row.get("unit")
-            canonical_receipt = valid_annual_filing_receipt(
-                row.get("citation_rcept_no"), year,
-            )
+            raw_receipt = str(row.get("citation_rcept_no") or "").strip()
+            canonical_receipt = valid_annual_filing_receipt(raw_receipt, year)
             if source is None:
                 statuses.append("requested_annual_report_not_cached")
-            elif not row.get("unit"):
+            elif row.get("quality_status") != "usable":
+                statuses.append("compact_quality_not_usable")
+            elif not _finite_numeric(amount):
+                statuses.append("compact_amount_not_finite_numeric")
+            elif not _has_recorded_unit(row.get("unit")):
                 statuses.append("compact_unit_missing")
+            elif (
+                metric_key in _QOE_DURATION_METRICS
+                and row.get("period_type") != "duration"
+            ):
+                statuses.append("compact_period_not_duration")
             elif row.get("citation_basis") != "company_year_annual_filing_match":
                 statuses.append("compact_citation_basis_unproven")
-            elif canonical_receipt != source.get("rcept_no"):
+            elif (
+                raw_receipt != canonical_receipt
+                or canonical_receipt != source.get("rcept_no")
+            ):
                 statuses.append("compact_citation_not_exact_annual_filing")
+
+        for numerator_key, denominator_key in (
+            ("operating_profit", "revenue"),
+            ("operating_cash_flow", "profit_loss"),
+        ):
+            numerator_unit = units.get(metric_output_key(numerator_key))
+            denominator_unit = units.get(metric_output_key(denominator_key))
+            if (
+                _has_recorded_unit(numerator_unit)
+                and _has_recorded_unit(denominator_unit)
+                and numerator_unit != denominator_unit
+            ):
+                statuses.append("compact_ratio_unit_mismatch")
 
         if statuses:
             status = sorted(set(statuses))[0]
@@ -282,6 +376,7 @@ def _qoe_provenance_series(
             "units": units,
             "source": observation_source,
             "provenance_status": status,
+            **({"missing_metrics": missing_metrics} if missing_metrics else {}),
             **({"limitation": limitation} if limitation else {}),
         })
     return admitted, observations
@@ -382,36 +477,6 @@ def quality_of_earnings_pack(
     series, financial_observations = _qoe_provenance_series(
         company, start_year, end_year, fs_div=fs_div,
     )
-    # Keep legacy/non-proven compact observations inspectable, but never let
-    # that compatibility path establish a filing-backed multi-year conclusion.
-    if not series and not financial_observations:
-        legacy_series = _financial_series(
-            company, start_year, end_year, fs_div=fs_div,
-        )
-        for row in legacy_series:
-            year = int(row["bsns_year"])
-            limitation = (
-                f"{year}년 QoE 재무값은 저장된 사업보고서 접수번호를 확인하지 "
-                "못해 동일 회사·사업연도 근거의 다년 결론에 사용하지 않았습니다."
-            )
-            financial_observations.append({
-                "year": year,
-                **{
-                    key: value for key, value in row.items()
-                    if key != "bsns_year"
-                },
-                "units": {},
-                "source": _qoe_unproven_source(
-                    company,
-                    year,
-                    status="compact_citation_unproven_or_conflicting",
-                    limitation=limitation,
-                ),
-                "provenance_status": "compact_citation_unproven_or_conflicting",
-                "limitation": limitation,
-            })
-        series = legacy_series
-
     evidence: list[dict] = []
     signals: list[dict] = []
     margins: list[float] = []
@@ -496,7 +561,7 @@ def quality_of_earnings_pack(
         "usable"
         if len(series) >= 3 and not provenance_limitations
         else "limited"
-        if series or matter_summary["section_count"]
+        if financial_observations or matter_summary["section_count"]
         else "missing"
     )
     limitations = [
@@ -506,7 +571,7 @@ def quality_of_earnings_pack(
     if not series:
         limitations.insert(
             0,
-            "요청 기간의 compact 연간 재무 실제값은 없지만 감사보고서 matter는 독립적으로 표시합니다.",
+            "요청 기간에 QoE 결론에 사용할 증빙 완료 재무연도는 없지만 연도별 관찰과 감사보고서 matter는 독립적으로 표시합니다.",
         )
     limitations.extend(
         limitation for limitation in provenance_limitations

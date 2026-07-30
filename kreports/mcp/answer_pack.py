@@ -852,7 +852,7 @@ def _build_dcf_model_pack(result: dict[str, Any]) -> dict[str, Any]:
 
 def _build_quality_pack(result: dict[str, Any]) -> dict[str, Any]:
     subject = _subject_label(result)
-    pack = _base_pack(f"{subject} 이익의 질 점검", result, status=str(result.get("verdict") or _status(result)))
+    pack = _base_pack(f"{subject} 이익의 질 점검", result, status=_status(result))
     rows = [row for row in result.get("signals") or [] if isinstance(row, dict)]
     if rows:
         pack["tables"].append(_table(

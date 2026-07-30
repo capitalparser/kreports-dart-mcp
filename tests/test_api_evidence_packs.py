@@ -68,7 +68,25 @@ def test_quality_of_earnings_api_adds_confirmed_facts(temp_engine, monkeypatch):
             "metrics": {"years": 3, "low_cash_conversion_years": 0, "negative_ocf_years": 0},
             "evidence": [
                 {"year": 2022, "revenue": 100, "operating_cf": 20, "cash_conversion": 1.0},
+                {"year": 2023, "revenue": 125, "operating_cf": 30, "cash_conversion": 1.1},
                 {"year": 2024, "revenue": 150, "operating_cf": 40, "cash_conversion": 1.2},
+            ],
+            "financial_observations": [
+                {
+                    "year": year,
+                    "provenance_status": "proven_company_year_annual_filing",
+                    "source": {
+                        "corp_code": "001",
+                        "bsns_year": year,
+                        "rcept_no": receipt,
+                        "source_table": "financial_facts_compact",
+                    },
+                }
+                for year, receipt in (
+                    (2022, "20230318001234"),
+                    (2023, "20240318001234"),
+                    (2024, "20250318001234"),
+                )
             ],
             "limitations": ["한계"],
             "data_quality": {"status": "usable", "source": "financial_facts_compact", "year_count": 3},
@@ -82,6 +100,7 @@ def test_quality_of_earnings_api_adds_confirmed_facts(temp_engine, monkeypatch):
 
     assert out["confirmed_facts"]
     assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20250318001234"
+    assert len(out["confirmed_facts"][0]["sources"]) == 3
     assert out["analysis"][0]["perspective"] == "investor"
     assert out["next_checks"]
 
@@ -130,7 +149,10 @@ def test_annual_financial_evidence_does_not_cite_a_different_fiscal_year(temp_en
     monkeypatch.setattr(investor_quality, "quality_of_earnings_pack", lambda *args, **kwargs: {
         "company": "001", "start_year": 2022, "end_year": 2022, "fs_div": "CFS",
         "metrics": {"years": 1}, "evidence": [{"year": 2022}], "signals": [],
-        "data_quality": {"status": "usable"},
+        "data_quality": {
+            "status": "limited",
+            "limitations": ["2022년 사업보고서 접수번호를 확인하지 못했습니다."],
+        },
     })
     with get_session() as session:
         session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
@@ -141,14 +163,12 @@ def test_annual_financial_evidence_does_not_cite_a_different_fiscal_year(temp_en
         ))
 
     out = get_quality_of_earnings_pack("001", start_year=2022, end_year=2022)
-    source = out["confirmed_facts"][0]["source"]
 
-    assert source["rcept_no"] is None
-    assert source["provenance_status"] == "requested_annual_report_not_cached"
-    assert "2022" in source["provenance_gap"]
+    assert out["confirmed_facts"] == []
+    assert out["financial_sources"] == []
     assert "20260318001234" not in str(out["confirmed_facts"])
     assert out["data_quality"]["status"] == "limited"
-    assert source["provenance_gap"] in out["data_quality"]["limitations"]
+    assert any("2022" in item for item in out["data_quality"]["limitations"])
 
 
 def test_annual_financial_evidence_cites_matching_non_december_fiscal_year(temp_engine, monkeypatch):
@@ -159,7 +179,7 @@ def test_annual_financial_evidence_cites_matching_non_december_fiscal_year(temp_
     monkeypatch.setattr(investor_quality, "quality_of_earnings_pack", lambda *args, **kwargs: {
         "company": "001", "start_year": 2022, "end_year": 2022, "fs_div": "CFS",
         "metrics": {"years": 1}, "evidence": [{"year": 2022}], "signals": [],
-        "data_quality": {"status": "usable"},
+        "data_quality": {"status": "limited"},
     })
     with get_session() as session:
         session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
@@ -171,7 +191,8 @@ def test_annual_financial_evidence_cites_matching_non_december_fiscal_year(temp_
 
     out = get_quality_of_earnings_pack("001", start_year=2022, end_year=2022)
 
-    assert out["confirmed_facts"][0]["source"]["rcept_no"] == "20230318001234"
+    assert out["confirmed_facts"] == []
+    assert out["financial_sources"][0]["rcept_no"] == "20230318001234"
 
 
 def test_disclosure_event_api_adds_confirmed_facts(temp_engine):

@@ -202,7 +202,29 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
         latest = evidence_rows[-1] if evidence_rows else {}
         if evidence_sources:
             source = evidence_sources[-1]
-        if evidence_rows:
+        quality = result.get("data_quality")
+        evidence_years = {
+            int(row["year"])
+            for row in evidence_rows
+            if row.get("year") is not None
+        }
+        proven_observation_years = {
+            int(row["year"])
+            for row in observations
+            if row.get("year") is not None
+            and row.get("provenance_status")
+            == "proven_company_year_annual_filing"
+            and isinstance(row.get("source"), dict)
+            and row["source"].get("rcept_no")
+        }
+        has_supported_multiyear_conclusion = (
+            isinstance(quality, dict)
+            and quality.get("status") == "usable"
+            and int(metrics.get("years") or 0) >= 3
+            and len(evidence_years) >= 3
+            and evidence_years.issubset(proven_observation_years)
+        )
+        if evidence_rows and has_supported_multiyear_conclusion:
             facts.append({
                 "statement": (
                     f"{start_year}~{end_year}년 {result.get('fs_div') or 'CFS'} 기준 "
@@ -294,6 +316,16 @@ def _investor_financial_evidence(result: dict, subject: dict | None, *, mode: st
         "confirmed_facts": _dedupe_confirmed_facts(facts),
         "analysis": analysis,
         "next_checks": next_checks,
+        **(
+            {
+                "financial_sources": [
+                    dict(item) for item in evidence_sources
+                    if item.get("rcept_no")
+                ],
+            }
+            if mode == "quality_of_earnings"
+            else {}
+        ),
         **(
             _downgrade_unproven_financial_sources(
                 result,
