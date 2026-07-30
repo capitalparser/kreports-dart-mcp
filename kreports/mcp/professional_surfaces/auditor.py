@@ -215,9 +215,15 @@ def _risk_pack(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _acceptance_pack(result: dict[str, Any]) -> dict[str, Any]:
-    from kreports.mcp.answer_pack import _base_pack, _subject_label, _table
+    from kreports.mcp.answer_pack import (
+        _append_subject_scale_history,
+        _base_pack,
+        _subject_label,
+        _table,
+    )
 
     pack = _base_pack(f"{_subject_label(result)} 감사 검토 근거", result)
+    _append_subject_scale_history(pack, result)
     rows = _acceptance_rows(result)
     pack["tables"].append(_table(
         "acceptance_requirements",

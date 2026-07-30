@@ -97,7 +97,10 @@ def _build_prepare_inputs_pack(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_fee_comparison_pack(result: dict[str, Any]) -> dict[str, Any]:
+    from kreports.mcp.answer_pack import _append_subject_scale_history
+
     pack = _base_pack("감사보수·감사시간 비교", result)
+    _append_subject_scale_history(pack, result)
     rows = []
     subject = result.get("subject_metrics")
     if isinstance(subject, dict):

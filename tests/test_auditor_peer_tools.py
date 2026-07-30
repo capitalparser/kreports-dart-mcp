@@ -57,6 +57,149 @@ def test_compare_peer_audit_fees_mcp_dispatch():
     assert out["peer_count"] > 0
 
 
+def test_compare_peer_audit_fees_returns_three_year_subject_scale_history(
+    temp_engine,
+):
+    """Catch regressions that hide company scale behind one-year fee/hour values."""
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="subject", corp_name="대상회사", market="KOSPI"),
+            Company(corp_code="peer", corp_name="비교회사", market="KOSPI"),
+        ])
+        session.add_all([
+            Financial(
+                corp_code="subject",
+                year=2024,
+                quarter=4,
+                fs_div="CFS",
+                total_assets=4_000_000_000_000,
+                revenue=2_000_000_000_000,
+                source="acntall",
+            ),
+            Financial(
+                corp_code="subject",
+                year=2023,
+                quarter=4,
+                fs_div="CFS",
+                total_assets=3_000_000_000_000,
+                revenue=1_500_000_000_000,
+                source="acntall",
+            ),
+            Financial(
+                corp_code="peer",
+                year=2024,
+                quarter=4,
+                fs_div="CFS",
+                total_assets=1_000_000_000_000,
+                revenue=500_000_000_000,
+                source="acntall",
+            ),
+        ])
+        session.add_all([
+            AuditFee(
+                corp_code="subject",
+                bsns_year=2024,
+                auditor_nm="감사법인A",
+                audit_fee_m=800,
+                audit_hours=8_000,
+                source_rcept_no="20250318000123",
+                source_class="business_report",
+                source_period="2024",
+                compatibility_basis="actual",
+                availability_status="available",
+            ),
+            AuditFee(
+                corp_code="subject",
+                bsns_year=2023,
+                auditor_nm="감사법인A",
+                audit_fee_m=600,
+                audit_hours=6_000,
+                source_rcept_no="20240318000456",
+                source_class="business_report",
+                source_period="2023",
+                compatibility_basis="actual",
+                availability_status="available",
+            ),
+            AuditFee(
+                corp_code="peer",
+                bsns_year=2024,
+                audit_fee_m=200,
+                audit_hours=2_000,
+                compatibility_basis="actual",
+                availability_status="available",
+            ),
+        ])
+
+    out = compare_peer_audit_fees(
+        "subject",
+        year=2024,
+        _peer_group={
+            "subject": {"corp_code": "subject", "corp_name": "대상회사"},
+            "selection_policy": {"fs_div_used": "CFS"},
+            "peers": [{"corp_code": "peer"}],
+        },
+    )
+
+    assert [row["year"] for row in out["subject_scale_history"]] == [
+        2024,
+        2023,
+        2022,
+    ]
+    current, prior, missing = out["subject_scale_history"]
+    assert current == {
+        "year": 2024,
+        "fs_div": "CFS",
+        "total_assets": 4_000_000_000_000,
+        "total_assets_100m": 40_000.0,
+        "revenue": 2_000_000_000_000,
+        "revenue_100m": 20_000.0,
+        "financial_source": "acntall",
+        "auditor_nm": "감사법인A",
+        "audit_fee_m": 800,
+        "audit_hours": 8_000,
+        "metric_basis": "actual",
+        "audit_source_rcept_no": "20250318000123",
+        "audit_source_class": "business_report",
+        "audit_source_period": "2024",
+        "audit_hours_per_trillion_assets": 2_000.0,
+        "audit_hours_per_trillion_revenue": 4_000.0,
+        "audit_fee_m_per_trillion_assets": 200.0,
+        "audit_fee_m_per_trillion_revenue": 400.0,
+        "audit_fee_per_hour_m": 0.1,
+        "missing_fields": [],
+    }
+    assert prior["year"] == 2023
+    assert prior["total_assets_100m"] == 30_000.0
+    assert prior["revenue_100m"] == 15_000.0
+    assert missing == {
+        "year": 2022,
+        "fs_div": "CFS",
+        "missing_fields": [
+            "total_assets",
+            "revenue",
+            "audit_fee_m",
+            "audit_hours",
+        ],
+        "missing_fields_label": "총자산, 매출액, 감사보수, 감사시간",
+    }
+    assert out["data_quality"]["subject_scale_history"] == {
+        "status": "limited",
+        "requested_years": [2024, 2023, 2022],
+        "covered_years": [2024, 2023],
+        "complete_years": [2024, 2023],
+        "missing_by_year": {
+            "2022": [
+                "total_assets",
+                "revenue",
+                "audit_fee_m",
+                "audit_hours",
+            ],
+        },
+    }
+
+
 def test_compare_peer_audit_fees_never_mixes_typed_actual_and_contract(
     temp_engine,
 ):
@@ -761,7 +904,29 @@ def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeyp
             return result
         return child
 
-    monkeypatch.setattr(peer_benchmarks, "compare_peer_audit_fees", child_result("fee", {"subject_metrics": {}, "benchmarks": {}}))
+    scale_history = [{
+        "year": 2022,
+        "fs_div": "CFS",
+        "total_assets_100m": 1234.0,
+        "revenue_100m": 567.0,
+        "audit_fee_m": 100,
+        "audit_hours": 1_000,
+        "missing_fields": [],
+    }]
+    monkeypatch.setattr(peer_benchmarks, "compare_peer_audit_fees", child_result("fee", {
+        "subject_metrics": {},
+        "subject_scale_history": scale_history,
+        "benchmarks": {},
+        "data_quality": {
+            "subject_scale_history": {
+                "status": "limited",
+                "requested_years": [2022, 2021, 2020],
+                "covered_years": [2022],
+                "complete_years": [2022],
+                "missing_by_year": {},
+            },
+        },
+    }))
     monkeypatch.setattr(peer_benchmarks, "compare_peer_risk_profile", child_result("risk", {"subject_metrics": {}, "benchmarks": {}}))
     monkeypatch.setattr(peer_benchmarks, "estimate_audit_hours_proxy", child_result("hours", {"complexity_band": "low", "drivers": []}))
     monkeypatch.setattr(peer_benchmarks, "compare_peer_accounting_policies", child_result("policy", {"peer_count": 1, "peers_with_policy": 1, "data_quality": {"status": "usable"}}))
@@ -775,6 +940,8 @@ def test_acceptance_pack_selects_one_requested_year_cohort_and_reuses_it(monkeyp
     assert all(group is cohort for _, group in reused)
     assert out["peer_group"]["selection_policy"]["requested_year"] == 2022
     assert out["peer_group"]["selection_policy"]["resolved_year"] == 2022
+    assert out["subject_scale_history"] == scale_history
+    assert out["data_quality"]["subject_scale_history"]["status"] == "limited"
 
 
 def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):

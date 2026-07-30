@@ -484,6 +484,122 @@ def test_audit_peer_nas_ratio_is_explicitly_a_ratio_in_all_views():
         assert "0.2" in rendered and "0.1" in rendered
 
 
+def test_audit_fee_answer_pack_exposes_three_year_scale_before_peer_distribution():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_peer_audit_fees", {
+        "subject": {"corp_name": "대상회사"},
+        "subject_scale_history": [
+            {
+                "year": 2024,
+                "fs_div": "CFS",
+                "total_assets_100m": 40_000.0,
+                "revenue_100m": 20_000.0,
+                "audit_fee_m": 800,
+                "audit_hours": 8_000,
+                "audit_hours_per_trillion_assets": 2_000.0,
+                "audit_hours_per_trillion_revenue": 4_000.0,
+                "audit_source_rcept_no": "20250318000123",
+            },
+            {
+                "year": 2023,
+                "fs_div": "CFS",
+                "total_assets_100m": 30_000.0,
+                "revenue_100m": 15_000.0,
+                "audit_fee_m": 600,
+                "audit_hours": 6_000,
+                "audit_hours_per_trillion_assets": 2_000.0,
+                "audit_hours_per_trillion_revenue": 4_000.0,
+                "audit_source_rcept_no": "20240318000456",
+            },
+            {
+                "year": 2022,
+                "fs_div": "CFS",
+                "missing_fields": [
+                    "total_assets",
+                    "revenue",
+                    "audit_fee_m",
+                    "audit_hours",
+                ],
+                "missing_fields_label": "총자산, 매출액, 감사보수, 감사시간",
+            },
+        ],
+        "subject_metrics": {
+            "corp_name": "대상회사",
+            "audit_fee_m": 800,
+            "audit_hours": 8_000,
+        },
+        "peers": [{
+            "corp_name": "비교회사",
+            "audit_fee_m": 200,
+            "audit_hours": 2_000,
+        }],
+        "data_quality": {"status": "limited"},
+    })
+
+    assert [table["id"] for table in pack["tables"]][:2] == [
+        "subject_scale_history",
+        "peer_audit_fee_benchmark",
+    ]
+    scale = pack["tables"][0]
+    assert [column["field"] for column in scale["columns"]] == [
+        "year",
+        "fs_div",
+        "total_assets_100m",
+        "revenue_100m",
+        "audit_fee_m",
+        "audit_hours",
+        "auditor_nm",
+        "missing_fields_label",
+    ]
+    assert scale["rows"][0]["total_assets_100m"] == 40_000.0
+    assert scale["rows"][2]["missing_fields_label"] == (
+        "총자산, 매출액, 감사보수, 감사시간"
+    )
+    assert [source["rcept_no"] for source in pack["sources"]] == [
+        "20250318000123",
+        "20240318000456",
+    ]
+
+
+def test_acceptance_answer_pack_exposes_subject_scale_history():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("build_audit_acceptance_pack", {
+        "subject": {"corp_name": "대상회사"},
+        "year": 2024,
+        "subject_scale_history": [{
+            "year": 2024,
+            "fs_div": "CFS",
+            "total_assets_100m": 40_000.0,
+            "revenue_100m": 20_000.0,
+            "audit_fee_m": 800,
+            "audit_hours": 8_000,
+            "audit_hours_per_trillion_assets": 2_000.0,
+            "audit_hours_per_trillion_revenue": 4_000.0,
+            "audit_source_rcept_no": "20250318000123",
+            "missing_fields": [],
+        }],
+        "acceptance_signals": [{
+            "area": "audit_report_matters",
+            "severity": "info",
+            "signal": "audit_report_other_matter_paragraph_present",
+        }],
+        "data_quality": {"status": "limited"},
+        "limitations": [
+            "This pack supports acceptance/continuance screening only.",
+        ],
+    })
+
+    assert pack["summary"]["title"] == "대상회사 감사 검토 근거"
+    assert [table["id"] for table in pack["tables"]][:2] == [
+        "subject_scale_history",
+        "acceptance_requirements",
+    ]
+    assert pack["tables"][0]["rows"][0]["audit_hours"] == 8_000
+    assert pack["sources"][0]["rcept_no"] == "20250318000123"
+
+
 def test_answer_pack_ratio_and_percent_column_inventory_is_explicit():
     from kreports.mcp.answer_pack import build_answer_pack
 

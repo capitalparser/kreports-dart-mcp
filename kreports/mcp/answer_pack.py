@@ -393,6 +393,12 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
     for event in result.get("events") or []:
         if isinstance(event, dict):
             add(_source_from_rcept_no(event.get("rcept_no"), label=event.get("event_title") or event.get("report_nm")))
+    for row in result.get("subject_scale_history") or []:
+        if isinstance(row, dict):
+            add(_source_from_rcept_no(
+                row.get("audit_source_rcept_no"),
+                label=f"{row.get('year') or ''}년 감사보수·시간 공시".strip(),
+            ))
     return sources
 
 
@@ -926,6 +932,7 @@ def _build_audit_fee_trend_pack(result: dict[str, Any]) -> dict[str, Any]:
 
 def _build_audit_fee_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
     pack = _base_pack(f"{_subject_label(result)} 감사보수 Peer 비교", result)
+    _append_subject_scale_history(pack, result)
     subject = result.get("subject_metrics")
     peers = result.get("peers")
     rows = []
@@ -968,6 +975,65 @@ def _build_audit_fee_benchmark_pack(result: dict[str, Any]) -> dict[str, Any]:
                 *pack.get("limitations", []),
                 "audit_fee_peer_chart_suppressed:no_numeric_facts",
             ]
+    return pack
+
+
+def _append_subject_scale_history(
+    pack: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    history = [
+        row
+        for row in (result.get("subject_scale_history") or [])
+        if isinstance(row, dict)
+    ]
+    if not history:
+        return
+    caveat = (
+        "동일한 연결·별도 기준의 요청연도 포함 3개년입니다. "
+        "공개자료 기반 산정 입력·비교 자료이며 표준감사시간 결론이 아닙니다."
+    )
+    pack["tables"].append(_table(
+        "subject_scale_history",
+        "대상회사 3개년 규모·감사투입 추이",
+        [
+            ("year", "연도"),
+            ("fs_div", "재무제표 기준"),
+            ("total_assets_100m", "총자산", "억원"),
+            ("revenue_100m", "매출액", "억원"),
+            ("audit_fee_m", "감사보수", "백만원"),
+            ("audit_hours", "감사시간", "시간"),
+            ("auditor_nm", "감사인"),
+            ("missing_fields_label", "미확보 항목"),
+        ],
+        history,
+        note=caveat,
+    ))
+    pack["limitations"] = list(dict.fromkeys([
+        *pack.get("limitations", []),
+        caveat,
+    ]))
+
+
+def _build_acceptance_pack(result: dict[str, Any]) -> dict[str, Any]:
+    pack = _base_pack(f"{_subject_label(result)} 수임·유지 검토", result)
+    _append_subject_scale_history(pack, result)
+    signals = [
+        signal
+        for signal in (result.get("acceptance_signals") or [])
+        if isinstance(signal, dict)
+    ]
+    if signals:
+        pack["tables"].append(_table(
+            "acceptance_signals",
+            "수임·유지 검토 신호",
+            [
+                ("area", "검토영역"),
+                ("severity", "중요도"),
+                ("signal", "확인 신호"),
+            ],
+            signals,
+        ))
     return pack
 
 

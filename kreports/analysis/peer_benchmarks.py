@@ -974,6 +974,193 @@ def _metric_quantiles(values: list[float]) -> dict:
     }
 
 
+_SUBJECT_SCALE_FIELDS = (
+    "total_assets",
+    "revenue",
+    "audit_fee_m",
+    "audit_hours",
+)
+_SUBJECT_SCALE_FIELD_LABELS = {
+    "total_assets": "총자산",
+    "revenue": "매출액",
+    "audit_fee_m": "감사보수",
+    "audit_hours": "감사시간",
+}
+
+
+def _per_trillion(value: float | int | None, denominator: float | int | None) -> float | None:
+    if value is None or denominator is None or denominator <= 0:
+        return None
+    return round(float(value) * 1_000_000_000_000.0 / float(denominator), 2)
+
+
+def _subject_scale_history(
+    corp_code: str,
+    *,
+    year: int,
+    fs_div: str,
+) -> tuple[list[dict], dict]:
+    """Return three comparable annual scale/effort rows without mixing FS bases."""
+    requested_years = [year, year - 1, year - 2]
+    financial_stmt = text(
+        """
+        SELECT year, fs_div, total_assets, revenue, source
+        FROM financials
+        WHERE corp_code=:corp_code
+          AND year IN :years
+          AND quarter=4
+          AND fs_div=:fs_div
+        """
+    ).bindparams(bindparam("years", expanding=True))
+    source_rcept_expr = (
+        "source_rcept_no"
+        if _has_db_column("audit_fees", "source_rcept_no")
+        else "NULL AS source_rcept_no"
+    )
+    source_class_expr = (
+        "source_class"
+        if _has_db_column("audit_fees", "source_class")
+        else "NULL AS source_class"
+    )
+    source_period_expr = (
+        "source_period"
+        if _has_db_column("audit_fees", "source_period")
+        else "NULL AS source_period"
+    )
+    metric_basis_expr = (
+        "COALESCE(compatibility_basis, 'legacy_inferred') AS metric_basis"
+        if _has_db_column("audit_fees", "compatibility_basis")
+        else "'legacy_inferred' AS metric_basis"
+    )
+    audit_stmt = text(
+        f"""
+        SELECT bsns_year, auditor_nm, audit_fee_m, audit_hours,
+               non_audit_fee_m, nas_ratio, {metric_basis_expr},
+               {source_rcept_expr}, {source_class_expr}, {source_period_expr}
+        FROM audit_fees
+        WHERE corp_code=:corp_code
+          AND bsns_year IN :years
+        """
+    ).bindparams(bindparam("years", expanding=True))
+
+    with _engine_module.engine.connect() as conn:
+        params = {
+            "corp_code": corp_code,
+            "years": requested_years,
+            "fs_div": fs_div,
+        }
+        financial_rows = conn.execute(financial_stmt, params).mappings().all()
+        audit_rows = conn.execute(audit_stmt, params).mappings().all()
+
+    financial_by_year = {int(row["year"]): dict(row) for row in financial_rows}
+    audit_by_year = {int(row["bsns_year"]): dict(row) for row in audit_rows}
+    history: list[dict] = []
+    covered_years: list[int] = []
+    complete_years: list[int] = []
+    missing_by_year: dict[str, list[str]] = {}
+
+    for current_year in requested_years:
+        financial = financial_by_year.get(current_year, {})
+        audit = audit_by_year.get(current_year, {})
+        total_assets = financial.get("total_assets")
+        revenue = financial.get("revenue")
+        audit_fee_m = audit.get("audit_fee_m")
+        audit_hours = audit.get("audit_hours")
+        missing_fields = [
+            field
+            for field, value in (
+                ("total_assets", total_assets),
+                ("revenue", revenue),
+                ("audit_fee_m", audit_fee_m),
+                ("audit_hours", audit_hours),
+            )
+            if value is None
+        ]
+        if len(missing_fields) < len(_SUBJECT_SCALE_FIELDS):
+            covered_years.append(current_year)
+        if not missing_fields:
+            complete_years.append(current_year)
+        else:
+            missing_by_year[str(current_year)] = missing_fields
+
+        history_row = {
+            "year": current_year,
+            "fs_div": fs_div,
+            "total_assets": total_assets,
+            "total_assets_100m": (
+                round(float(total_assets) / 100_000_000.0, 1)
+                if total_assets is not None
+                else None
+            ),
+            "revenue": revenue,
+            "revenue_100m": (
+                round(float(revenue) / 100_000_000.0, 1)
+                if revenue is not None
+                else None
+            ),
+            "financial_source": financial.get("source"),
+            "auditor_nm": audit.get("auditor_nm"),
+            "audit_fee_m": audit_fee_m,
+            "audit_hours": audit_hours,
+            "non_audit_fee_m": audit.get("non_audit_fee_m"),
+            "nas_ratio": audit.get("nas_ratio"),
+            "metric_basis": audit.get("metric_basis"),
+            "audit_source_rcept_no": audit.get("source_rcept_no"),
+            "audit_source_class": audit.get("source_class"),
+            "audit_source_period": audit.get("source_period"),
+            "audit_hours_per_trillion_assets": _per_trillion(
+                audit_hours,
+                total_assets,
+            ),
+            "audit_hours_per_trillion_revenue": _per_trillion(
+                audit_hours,
+                revenue,
+            ),
+            "audit_fee_m_per_trillion_assets": _per_trillion(
+                audit_fee_m,
+                total_assets,
+            ),
+            "audit_fee_m_per_trillion_revenue": _per_trillion(
+                audit_fee_m,
+                revenue,
+            ),
+            "audit_fee_per_hour_m": (
+                round(float(audit_fee_m) / float(audit_hours), 6)
+                if audit_fee_m is not None and audit_hours
+                else None
+            ),
+            "missing_fields": missing_fields,
+            "missing_fields_label": (
+                ", ".join(
+                    _SUBJECT_SCALE_FIELD_LABELS[field]
+                    for field in missing_fields
+                )
+                if missing_fields
+                else None
+            ),
+        }
+        history.append(_clean_dict({
+            key: value
+            for key, value in history_row.items()
+            if value is not None
+        }))
+
+    status = (
+        "usable"
+        if len(complete_years) == len(requested_years)
+        else "limited"
+        if covered_years
+        else "missing"
+    )
+    return history, {
+        "status": status,
+        "requested_years": requested_years,
+        "covered_years": covered_years,
+        "complete_years": complete_years,
+        "missing_by_year": missing_by_year,
+    }
+
+
 def compare_peer_audit_fees(
     company: str,
     year: int = 2025,
@@ -1182,12 +1369,19 @@ def compare_peer_audit_fees(
     }
     if typed_evidence:
         data_quality["basis_populations"] = basis_populations
+    subject_scale_history, subject_scale_quality = _subject_scale_history(
+        corp_code,
+        year=year,
+        fs_div=fs_div,
+    )
+    data_quality["subject_scale_history"] = subject_scale_quality
     return _clean_dict({
         "subject": base["subject"],
         "year": year,
         "fs_div_used": fs_div,
         "peer_count": len(peer_rows),
         "subject_metrics": subject_row,
+        "subject_scale_history": subject_scale_history,
         "benchmarks": benchmarks,
         "data_quality": data_quality,
         "peers": peer_rows[:peer_limit],
@@ -2264,6 +2458,15 @@ def build_audit_acceptance_pack(
     kam_reason_coverage = kam_section_quality.get("kam_reason_coverage") or {}
     kam_procedure_coverage = kam_section_quality.get("kam_procedure_coverage") or {}
     data_quality = {
+        "subject_scale_history": (
+            fee_pack.get("data_quality") or {}
+        ).get("subject_scale_history") or {
+            "status": "missing",
+            "requested_years": [year, year - 1, year - 2],
+            "covered_years": [],
+            "complete_years": [],
+            "missing_by_year": {},
+        },
         "policy_cache": {
             "subject_policy_count": policy_pack.get("subject_policy_count"),
             "peers_with_policy": peers_with_policy,
@@ -2357,6 +2560,7 @@ def build_audit_acceptance_pack(
             "subject_metrics": subject_fee,
             "benchmarks": fee_pack.get("benchmarks"),
         },
+        "subject_scale_history": fee_pack.get("subject_scale_history") or [],
         "risk_summary": {
             "subject_metrics": risk_subject,
             "benchmarks": risk_pack.get("benchmarks"),
