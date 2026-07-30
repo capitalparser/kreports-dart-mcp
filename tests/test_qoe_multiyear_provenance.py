@@ -173,6 +173,44 @@ def test_qoe_rejects_whitespace_padded_raw_receipt_without_hiding_it(
     assert observation["source"]["rcept_no"] is None
 
 
+def test_qoe_bounds_extreme_rejected_receipt_diagnostic_across_public_payload(
+    temp_engine,
+):
+    """An oversized SQLite string must not escape through diagnostics or MCP."""
+    from kreports.analysis.api import get_quality_of_earnings_pack
+    from kreports.db.engine import get_session
+    from kreports.mcp.contracts import enrich_answer_response
+
+    oversized_receipt = "X" * 100_000 + "20240318001234"
+    with get_session() as session:
+        _seed_annual_sources(session)
+        _seed_qoe_facts(session, 2022)
+        _seed_qoe_facts(session, 2023, receipt=oversized_receipt)
+        _seed_qoe_facts(session, 2024)
+
+    result = get_quality_of_earnings_pack("001", start_year=2022, end_year=2024)
+    public = enrich_answer_response("get_quality_of_earnings_pack", result)
+    observation = next(
+        row for row in result["financial_observations"]
+        if row["year"] == 2023
+    )
+
+    assert result["data_quality"]["status"] == "limited"
+    assert result["metrics"]["years"] == 2
+    assert observation["raw_citation_rcept_nos"] == [{
+        "prefix": "X" * 32,
+        "original_length": 100_014,
+        "sha256": "cba238b9512e55207a97127a3b5832fe3f904a2dfde2d63bb8f2630362537583",
+        "truncated": True,
+    }]
+    assert oversized_receipt not in str(result)
+    assert oversized_receipt not in str(public)
+    assert {source["rcept_no"] for source in public["answer_pack"]["sources"]} == {
+        "20230318001234",
+        "20250318001234",
+    }
+
+
 @pytest.mark.parametrize(
     ("field", "invalid_value", "expected_status"),
     [

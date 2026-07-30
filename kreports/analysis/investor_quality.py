@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import hashlib
 import math
 from statistics import pstdev
 
@@ -161,6 +162,18 @@ def _has_recorded_unit(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _bounded_receipt_diagnostic(raw_receipt: str) -> str | dict[str, object]:
+    """Keep rejected source identity inspectable without reflecting huge DB text."""
+    if len(raw_receipt) <= 80:
+        return raw_receipt
+    return {
+        "prefix": raw_receipt[:32],
+        "original_length": len(raw_receipt),
+        "sha256": hashlib.sha256(raw_receipt.encode("utf-8")).hexdigest(),
+        "truncated": True,
+    }
+
+
 def _qoe_unproven_source(
     company: str,
     year: int,
@@ -291,12 +304,16 @@ def _qoe_provenance_series(
         safe_values: dict[str, object] = {}
         units: dict[str, object] = {}
         statuses: list[str] = []
-        raw_receipts = sorted({
+        raw_receipt_values = sorted({
             str(candidate.get("citation_rcept_no") or "")
             for candidates in metric_groups.values()
             for candidate in candidates
             if str(candidate.get("citation_rcept_no") or "") != ""
         })[:8]
+        raw_receipts = [
+            _bounded_receipt_diagnostic(value)
+            for value in raw_receipt_values
+        ]
         missing_metrics = sorted(
             _QOE_REQUIRED_METRICS.difference(metric_groups)
         )
