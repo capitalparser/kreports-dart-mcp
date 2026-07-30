@@ -103,6 +103,7 @@ def test_rehearsal_migration_state_rejects_a_release_contract_index_mismatch(
     connection.row_factory = sqlite3.Row
     try:
         connection.executescript("""
+            ALTER TABLE accounting_note_chapters DROP COLUMN body_hash;
             DROP INDEX uq_accounting_note_chapter_identity;
             CREATE UNIQUE INDEX uq_accounting_note_chapter_identity
               ON accounting_note_chapters
@@ -115,6 +116,7 @@ def test_rehearsal_migration_state_rejects_a_release_contract_index_mismatch(
         connection.close()
 
     assert state["schema_complete"] is False
+    assert "body_hash" in state["missing_columns"]["accounting_note_chapters"]
     assert "uq_accounting_note_chapter_identity" in state["invalid_indexes"]
 
 

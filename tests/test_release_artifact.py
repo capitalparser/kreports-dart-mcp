@@ -1539,6 +1539,7 @@ def test_policy_chapter_table_and_identity_index_are_release_contract_blockers(
 
     connection = sqlite3.connect(database)
     try:
+        connection.execute("ALTER TABLE accounting_note_chapters DROP COLUMN body_hash")
         connection.execute("DROP INDEX uq_accounting_note_chapter_identity")
         connection.execute(
             "CREATE UNIQUE INDEX uq_accounting_note_chapter_identity "
@@ -1549,6 +1550,9 @@ def test_policy_chapter_table_and_identity_index_are_release_contract_blockers(
         connection.close()
 
     evidence = release_artifact._collect_current_evidence(database, "public_runtime")
+    assert "missing_required_column:accounting_note_chapters.body_hash" in evidence[
+        "release_gate"
+    ]["blockers"]
     assert "invalid_required_index:uq_accounting_note_chapter_identity" in evidence[
         "release_gate"
     ]["blockers"]
