@@ -188,6 +188,7 @@ def test_derived_pbt_retains_direct_observation_limitations_and_bounded_diagnost
     assert derived["rejected_rows"] == [{
         "metric_key": "profit_before_tax", "bsns_year": 2025, "fs_div": "CFS",
         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+        "source_account_id": None, "source_table": None,
     }]
 
 
@@ -228,8 +229,67 @@ def test_materiality_public_surfaces_keep_rejected_rows_but_withhold_candidate_m
     assert public_rejection == [{
         "metric_key": "revenue", "bsns_year": 2025, "fs_div": "CFS",
         "citation_rcept_no": "20260318000001", "citation_basis": "wrong_basis",
+        "source_account_id": None, "source_table": None,
     }]
     assert "100" not in str(public_rejection)
+
+
+def test_materiality_rejected_conflicts_expose_provenance_without_amount():
+    """Public conflict diagnostics retain compact-row provenance, never money."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    rows = [
+        {
+            "bsns_year": 2025, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+            "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+            "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+            "source_account_id": "ifrs-full_Revenue", "source_table": "financial_facts",
+        },
+        {
+            "bsns_year": 2025, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+            "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+            "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+            "source_account_id": "dart_Revenue", "source_table": "financial_facts",
+        },
+    ]
+    result = build_benchmark_series(
+        rows,
+        years=[2025],
+        fs_div="CFS",
+        annual_sources={2025: {"rcept_no": "20260318000001", "fs_div": "CFS"}},
+    )
+    rejected = result["revenue"][0]["rejected_rows"]
+    public_pack = build_answer_pack("prepare_audit_materiality_inputs", {
+        "benchmark_series": result,
+        "benchmark_stability": {},
+        "materiality_candidates": [],
+        "methodology_references": [],
+        "data_quality": {"status": "limited"},
+    })
+    series_table = next(
+        table for table in public_pack["tables"] if table["id"] == "materiality_benchmark_series"
+    )
+    public_rejected = next(
+        row["rejected_rows"] for row in series_table["rows"] if row["benchmark"] == "revenue"
+    )
+
+    expected = [
+        {
+            "metric_key": "revenue", "bsns_year": 2025, "fs_div": "CFS",
+            "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+            "source_account_id": "ifrs-full_Revenue", "source_table": "financial_facts",
+        },
+        {
+            "metric_key": "revenue", "bsns_year": 2025, "fs_div": "CFS",
+            "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+            "source_account_id": "dart_Revenue", "source_table": "financial_facts",
+        },
+    ]
+    assert rejected == expected
+    assert public_rejected == expected
+    assert all("amount" not in row for row in public_rejected)
+    assert "100" not in json.dumps(public_rejected)
 
 
 def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():
@@ -334,6 +394,7 @@ def test_derived_pbt_withholds_money_when_either_operand_lacks_annual_admission(
     assert pbt["rejected_rows"] == [{
         "metric_key": "tax_expense", "bsns_year": 2025, "fs_div": "CFS",
         "citation_rcept_no": "20260318000001", "citation_basis": "endpoint_lineage",
+        "source_account_id": None, "source_table": None,
     }]
 
 

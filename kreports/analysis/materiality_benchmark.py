@@ -224,6 +224,8 @@ def _rejected_row(row: dict[str, Any]) -> dict[str, Any]:
         "fs_div": row.get("fs_div"),
         "citation_rcept_no": row.get("citation_rcept_no"),
         "citation_basis": row.get("citation_basis"),
+        "source_account_id": row.get("source_account_id"),
+        "source_table": row.get("source_table"),
     }
 
 

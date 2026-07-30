@@ -232,6 +232,7 @@ def _build_materiality_pack(result: dict[str, Any]) -> dict[str, Any]:
                     for field in (
                         "metric_key", "bsns_year", "fs_div",
                         "citation_rcept_no", "citation_basis",
+                        "source_account_id", "source_table",
                     )
                 }
                 for rejected in observation.get("rejected_rows") or []
