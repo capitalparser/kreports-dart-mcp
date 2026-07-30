@@ -291,6 +291,12 @@ def _qoe_provenance_series(
         safe_values: dict[str, object] = {}
         units: dict[str, object] = {}
         statuses: list[str] = []
+        raw_receipts = sorted({
+            str(candidate.get("citation_rcept_no") or "")
+            for candidates in metric_groups.values()
+            for candidate in candidates
+            if str(candidate.get("citation_rcept_no") or "") != ""
+        })[:8]
         missing_metrics = sorted(
             _QOE_REQUIRED_METRICS.difference(metric_groups)
         )
@@ -312,7 +318,7 @@ def _qoe_provenance_series(
             amount = row.get("amount")
             safe_values[output_key] = amount if _finite_numeric(amount) else None
             units[output_key] = row.get("unit")
-            raw_receipt = str(row.get("citation_rcept_no") or "").strip()
+            raw_receipt = str(row.get("citation_rcept_no") or "")
             canonical_receipt = valid_annual_filing_receipt(raw_receipt, year)
             if source is None:
                 statuses.append("requested_annual_report_not_cached")
@@ -376,6 +382,7 @@ def _qoe_provenance_series(
             "units": units,
             "source": observation_source,
             "provenance_status": status,
+            **({"raw_citation_rcept_nos": raw_receipts} if statuses else {}),
             **({"missing_metrics": missing_metrics} if missing_metrics else {}),
             **({"limitation": limitation} if limitation else {}),
         })

@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
+from kreports.analysis.filing_provenance import valid_annual_filing_receipt
 from kreports.mcp.auditor_public import public_kam_lifecycle_events
 from kreports.mcp.contracts import (
     build_answer_envelope,
@@ -873,6 +874,50 @@ def _build_quality_pack(result: dict[str, Any]) -> dict[str, Any]:
         row for row in result.get("financial_observations") or []
         if isinstance(row, dict)
     ]
+    proven_observation_receipts: set[tuple[int, str]] = set()
+    for row in observations:
+        source = row.get("source")
+        if (
+            row.get("provenance_status")
+            != "proven_company_year_annual_filing"
+            or not isinstance(source, dict)
+            or not source.get("rcept_no")
+        ):
+            continue
+        try:
+            year = int(row["year"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        proven_observation_receipts.add((year, str(source["rcept_no"])))
+    known_receipts = {
+        str(source.get("rcept_no") or "")
+        for source in pack["sources"]
+    }
+    for source in (result.get("financial_sources") or [])[:20]:
+        if not isinstance(source, dict) or source.get("bsns_year") is None:
+            continue
+        try:
+            year = int(source["bsns_year"])
+        except (TypeError, ValueError):
+            continue
+        raw_receipt = source.get("rcept_no")
+        if not isinstance(raw_receipt, str):
+            continue
+        if (
+            valid_annual_filing_receipt(raw_receipt, year) != raw_receipt
+            or (year, raw_receipt) not in proven_observation_receipts
+            or raw_receipt in known_receipts
+        ):
+            continue
+        known_receipts.add(raw_receipt)
+        pack["sources"].append({
+            "label": f"{year}년 사업보고서 재무제표",
+            "rcept_no": raw_receipt,
+            "url": (
+                "https://dart.fss.or.kr/dsaf001/main.do?"
+                f"rcpNo={raw_receipt}"
+            ),
+        })
     if observations:
         provenance_rows = []
         for row in observations:

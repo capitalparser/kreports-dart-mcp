@@ -147,6 +147,32 @@ def test_qoe_rejects_contaminated_compact_receipt_even_when_parent_is_canonical(
     assert observation["source"]["rcept_no"] is None
 
 
+def test_qoe_rejects_whitespace_padded_raw_receipt_without_hiding_it(
+    temp_engine,
+):
+    """Whitespace is part of the stored citation identity, not normalization."""
+    from kreports.analysis.investor_quality import quality_of_earnings_pack
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        _seed_annual_sources(session)
+        _seed_qoe_facts(session, 2022)
+        _seed_qoe_facts(session, 2023, receipt=" 20240318001234 ")
+        _seed_qoe_facts(session, 2024)
+
+    result = quality_of_earnings_pack("001", start_year=2022, end_year=2024)
+
+    assert result["data_quality"]["status"] == "limited"
+    assert result["metrics"]["years"] == 2
+    observation = next(
+        row for row in result["financial_observations"]
+        if row["year"] == 2023
+    )
+    assert observation["provenance_status"] == "compact_citation_not_exact_annual_filing"
+    assert observation["raw_citation_rcept_nos"] == [" 20240318001234 "]
+    assert observation["source"]["rcept_no"] is None
+
+
 @pytest.mark.parametrize(
     ("field", "invalid_value", "expected_status"),
     [
@@ -284,6 +310,47 @@ def test_qoe_two_proven_complete_years_do_not_create_public_confirmed_fact(
     assert result["confirmed_facts"] == []
     assert envelope.confirmed_facts == []
     assert envelope.evidence == []
+
+
+def test_qoe_limited_pack_keeps_only_proven_year_links_at_top_level(
+    temp_engine,
+):
+    """A missing third-year proof blocks the conclusion, not valid year links."""
+    from kreports.analysis.api import get_quality_of_earnings_pack
+    from kreports.db.engine import get_session
+    from kreports.mcp.contracts import enrich_answer_response
+
+    with get_session() as session:
+        _seed_annual_sources(session)
+        _seed_qoe_facts(session, 2022)
+        _seed_qoe_facts(session, 2023, receipt="20250318009999")
+        _seed_qoe_facts(session, 2024)
+
+    result = get_quality_of_earnings_pack("001", start_year=2022, end_year=2024)
+    pack = enrich_answer_response(
+        "get_quality_of_earnings_pack", result,
+    )["answer_pack"]
+
+    assert result["data_quality"]["status"] == "limited"
+    assert result["metrics"]["years"] == 2
+    assert result["confirmed_facts"] == []
+    assert {
+        source["rcept_no"] for source in result["financial_sources"]
+    } == {"20230318001234", "20250318001234"}
+    assert {source["rcept_no"] for source in pack["sources"]} == {
+        "20230318001234",
+        "20250318001234",
+    }
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "quality_financial_provenance"
+    )
+    assert [row["rcept_no"] for row in table["rows"]] == [
+        "20230318001234",
+        None,
+        "20250318001234",
+    ]
+    assert "20250318009999" not in str(pack)
 
 
 def test_qoe_legacy_table_is_inspectable_but_never_assessed(temp_engine):
