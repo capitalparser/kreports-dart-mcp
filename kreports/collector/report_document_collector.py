@@ -2132,6 +2132,15 @@ def _recover_kam_items(
             limitation.endswith((":parse_error", ":ambiguous_boundary"))
             for limitation in new_limitations
         ):
+            collapsed = parse_collapsed_kam_items(body)
+            if collapsed.status == "complete":
+                del limitations[before_limitations:]
+                return (
+                    collapsed.items,
+                    source_basis,
+                    limitations,
+                    section.fetched_at,
+                )
             structured_failure_at = (
                 structured_failure_at or section.fetched_at
             )

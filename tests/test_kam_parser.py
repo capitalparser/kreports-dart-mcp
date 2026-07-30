@@ -3272,6 +3272,62 @@ def test_rebuild_reports_structured_kam_parse_failure_as_error(temp_engine):
     )
 
 
+def test_rebuild_recovers_exact_structured_kam_with_collapsed_reason_boundary(
+    temp_engine,
+):
+    """A complete cached KAM must not stay blocked only because lines collapsed."""
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    collapsed = (
+        "핵심감사사항\n"
+        "광고대행 수익인식의 적정성\n"
+        "회사는 광고주 및 매체사와의 정산 구조가 복잡하고 수익 금액이 "
+        "유의적이므로 광고대행 수익인식을 핵심감사사항으로 "
+        "결정하였습니다.\n"
+        "회계처리과정에서 발생가능한 오류로 인해 광고대행수익에 대한 "
+        "유의적인 왜곡표시위험이 있는 것으로 판단하였습니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "우리가 수행한 주요 감사절차는 다음과 같습니다.\n"
+        "- 광고대행 수익인식의 기간귀속 검토\n"
+        "- 추출한 표본에 대한 근거문서 대사\n"
+        "## audit_procedure/revenue/cutoff\n"
+        "광고대행 수익인식의 기간귀속 검토"
+    )
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00000077",
+                    stock_code="000077",
+                    corp_name="구조화본문복구회사",
+                    market="KOSPI",
+                ),
+                ReportSection(
+                    rcept_no="20250318000077",
+                    corp_code="00000077",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    section_key="kam",
+                    section_title="핵심감사사항",
+                    body_text=collapsed,
+                    body_hash="e" * 40,
+                    body_length=len(collapsed),
+                    ordinal=0,
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "report_sections.structured_body"
+    assert receipt["titles"] == ["광고대행 수익인식의 적정성"]
+    assert receipt["has_reason"] == [True]
+    assert receipt["has_audit_response"] == [True]
+
+
 def test_rebuild_recovers_from_exact_receipt_full_text_after_kam_parse_error(
     temp_engine,
 ):
