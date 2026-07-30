@@ -1,0 +1,146 @@
+# DART sample corpus manifest.
+#
+# Keep this file metadata-first. Prefer reproducible DART identifiers and expected
+# extraction outputs over storing full raw filings in the repository.
+
+schema_version: 1
+principles:
+  - "Every case must preserve DART identifiers and extraction route."
+  - "Raw filing archives are optional; expected outputs are required before a case becomes a regression fixture."
+  - "Do not commit API keys, private client data, or non-public working papers."
+  - "When source redistribution is uncertain, store rcept_no plus extraction instructions instead of raw source."
+
+routes:
+  structured_financial_api: "fnlttSinglAcntAll.json"
+  xbrl_zip: "fnlttXbrlDs003.zip"
+  document_xml: "document.xml"
+  viewer_html: "DART web viewer fallback for diagnosis"
+
+statuses:
+  candidate: "Interesting case identified; expected output not ready."
+  expected_defined: "Expected output defined; ready for parser comparison."
+  fixture_ready: "Machine-readable fixture/test exists."
+  regression_locked: "Included in automated regression tests."
+
+cases:
+  - id: "KR-FS-001"
+    status: "candidate"
+    segment: "large_manufacturing_cfs"
+    corp_name: "삼성전자"
+    stock_code: "005930"
+    corp_code: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    rcept_no: ""
+    filing_name: "사업보고서"
+    routes: ["structured_financial_api", "xbrl_zip", "document_xml"]
+    targets:
+      - "core financial facts"
+      - "significant accounting policies"
+      - "revenue note"
+      - "lease note"
+    expected_outputs: []
+    known_risks:
+      - "Large note tables and multiple business segments."
+
+  - id: "KR-FS-002"
+    status: "candidate"
+    segment: "platform_service_revenue"
+    corp_name: "카카오"
+    stock_code: "035720"
+    corp_code: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    rcept_no: ""
+    filing_name: "사업보고서"
+    routes: ["structured_financial_api", "document_xml"]
+    targets:
+      - "revenue recognition policy"
+      - "intangible assets policy"
+      - "related-party note"
+    expected_outputs: []
+    known_risks:
+      - "Service revenue wording may not use simple product-sales terms."
+
+  - id: "KR-FS-003"
+    status: "candidate"
+    segment: "bio_development_cost"
+    corp_name: "셀트리온"
+    stock_code: "068270"
+    corp_code: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    rcept_no: ""
+    filing_name: "사업보고서"
+    routes: ["structured_financial_api", "xbrl_zip", "document_xml"]
+    targets:
+      - "development cost policy"
+      - "impairment policy"
+      - "R&D section"
+    expected_outputs: []
+    known_risks:
+      - "Development cost and impairment notes require domain-sensitive labeling."
+
+  - id: "KR-FS-004"
+    status: "candidate"
+    segment: "construction_progress_revenue"
+    corp_name: "현대건설"
+    stock_code: "000720"
+    corp_code: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    rcept_no: ""
+    filing_name: "사업보고서"
+    routes: ["structured_financial_api", "document_xml"]
+    targets:
+      - "construction contract revenue"
+      - "order backlog"
+      - "provisions and contingencies"
+    expected_outputs: []
+    known_risks:
+      - "Progress revenue tables can lose meaning when flattened."
+
+  - id: "KR-FS-005"
+    status: "candidate"
+    segment: "financial_institution_taxonomy"
+    corp_name: "KB금융"
+    stock_code: "105560"
+    corp_code: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    rcept_no: ""
+    filing_name: "사업보고서"
+    routes: ["structured_financial_api", "xbrl_zip", "document_xml"]
+    targets:
+      - "financial-institution statement taxonomy"
+      - "financial instruments note"
+      - "fair value hierarchy"
+    expected_outputs: []
+    known_risks:
+      - "Banking taxonomy may not match industrial company account maps."
+
+expected_output_templates:
+  financial_fact:
+    corp_code: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    fs_div: "CFS"
+    sj_div: "BS"
+    account_id: "ifrs-full_Assets"
+    account_nm: "자산총계"
+    thstrm_amount: 0
+    source_route: "xbrl_zip"
+    confidence: 1.0
+  note_excerpt:
+    corp_code: ""
+    rcept_no: ""
+    bsns_year: 2024
+    reprt_code: "11011"
+    fs_div: "CFS"
+    note_key: "revenue_recognition"
+    title: ""
+    source_route: "document_xml"
+    source_file: ""
+    text_excerpt: ""
+    confidence: 0.0
+    warnings: []

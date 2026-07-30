@@ -70,6 +70,7 @@ def parse_xbrl_zip(
     """
     results: list[dict] = []
     try:
+        label_map = extract_label_map(zip_bytes)
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             xbrl_files = [n for n in zf.namelist() if n.lower().endswith(".xbrl")]
             if not xbrl_files:
@@ -87,7 +88,7 @@ def parse_xbrl_zip(
                 with zf.open(fname) as f:
                     raw = f.read()
 
-                facts = _parse_xbrl_instance(raw, corp_code, bsns_year, reprt_code, fs_div)
+                facts = _parse_xbrl_instance(raw, corp_code, bsns_year, reprt_code, fs_div, label_map)
                 results.extend(facts)
                 logger.info("XBRL 파싱 완료 [%s]: %d facts", fname, len(facts))
 
@@ -105,6 +106,7 @@ def _parse_xbrl_instance(
     bsns_year: int,
     reprt_code: str,
     fs_div: str,
+    label_map: dict[str, str] | None = None,
 ) -> list[dict]:
     """XBRL 인스턴스 XML bytes → FinancialFact dict 리스트."""
     try:
@@ -113,8 +115,11 @@ def _parse_xbrl_instance(
         logger.error("XBRL XML 파싱 오류: %s", e)
         return []
 
+    label_map = label_map or {}
+
     # 1. context 파싱: context_id → {period_start, period_end, period_type, fs_div}
     contexts = _parse_contexts(root)
+    units = _parse_units(root)
 
     # 2. 대상 period 결정 (당기 = bsns_year)
     target_year = str(bsns_year)
@@ -145,6 +150,9 @@ def _parse_xbrl_instance(
 
         context_ref = elem.get("contextRef", "")
         ctx = contexts.get(context_ref, {})
+        unit_ref = elem.get("unitRef", "")
+        if unit_ref and not _is_krw_unit(unit_ref, units):
+            continue
 
         # 당기 기간만 처리
         period_end = ctx.get("period_end", "")
@@ -172,7 +180,7 @@ def _parse_xbrl_instance(
         except ValueError:
             pass
 
-        dedup = (sj_div, account_id, ctx.get("period_type", ""))
+        dedup = (sj_div, account_id, context_ref, unit_ref)
         if dedup in seen:
             continue
         seen.add(dedup)
@@ -184,9 +192,9 @@ def _parse_xbrl_instance(
             "fs_div": fs_div,
             "sj_div": sj_div,
             "account_id": account_id,
-            "account_nm": local,   # 레이블 파일 없으면 element 이름 사용
+            "account_nm": label_map.get(account_id, local),
             "ord": None,
-            "thstrm_amount": amount if ctx.get("period_type") == "duration" else None,
+            "thstrm_amount": amount,
             "frmtrm_amount": None,
             "bfefrmtrm_amount": None,
             "thstrm_add_amount": None,
@@ -221,19 +229,56 @@ def _parse_contexts(root: etree._Element) -> dict[str, dict]:
                 if end is not None and end.text:
                     meta["period_end"] = end.text.strip()
 
-        # scenario → CFS/OFS 구분
+        # segment/scenario → CFS/OFS 구분
+        entity = ctx_elem.find(f"{{{xbrli_ns}}}entity")
+        containers = []
+        if entity is not None:
+            segment = entity.find(f"{{{xbrli_ns}}}segment")
+            if segment is not None:
+                containers.append(segment)
         scenario = ctx_elem.find(f"{{{xbrli_ns}}}scenario")
         if scenario is not None:
-            for member_elem in scenario:
+            containers.append(scenario)
+
+        dimensions: list[str] = []
+        for container in containers:
+            for member_elem in container.iter():
                 member_text = (member_elem.text or "").strip()
+                if member_text:
+                    dimensions.append(member_text)
                 for pattern, div in _FS_DIV_PATTERNS.items():
                     if pattern in member_text:
                         meta["fs_div"] = div
                         break
+        meta["dimensions"] = dimensions
 
         contexts[ctx_id] = meta
 
     return contexts
+
+
+def _parse_units(root: etree._Element) -> dict[str, set[str]]:
+    """XBRL unit id별 measure 목록을 반환한다."""
+    units: dict[str, set[str]] = {}
+    for unit_elem in root.findall(f"{{{_NS_XBRLI}}}unit"):
+        unit_id = unit_elem.get("id", "")
+        if not unit_id:
+            continue
+        measures: set[str] = set()
+        for measure in unit_elem.findall(f".//{{{_NS_XBRLI}}}measure"):
+            text = (measure.text or "").strip()
+            if text:
+                measures.add(text)
+        units[unit_id] = measures
+    return units
+
+
+def _is_krw_unit(unit_ref: str, units: dict[str, set[str]]) -> bool:
+    """KRW monetary unit이면 True. unit 정의가 없으면 보수적으로 id만 확인한다."""
+    measures = units.get(unit_ref)
+    if not measures:
+        return unit_ref.upper() in {"KRW", "KRW_UNIT"}
+    return any(measure.upper().endswith(":KRW") or measure.upper() == "KRW" for measure in measures)
 
 
 def _ns_to_prefix(ns_uri: str) -> str:
