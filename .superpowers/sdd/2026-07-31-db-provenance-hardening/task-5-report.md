@@ -20,6 +20,18 @@
 - `c512ccd test: cover policy chapter contract blockers`
   - literal release and rehearsal assertions for a missing `body_hash` column,
     a wrong named unique index, and a missing policy chapter table.
+- `5804ef1 Address DB schema contract review`
+  - moved all 12 `audit_fees` readiness columns into the shared contract;
+  - made partial-index WHERE validation exact after whitespace normalization;
+  - added revision `20260731_13_accounting_note_chapter_storage_contract` so a
+    migration-created table reaches the full ORM storage schema and indexes;
+  - added bounded SQLite `busy_timeout` + WAL retry/verification +
+    `BEGIN IMMEDIATE` migration serialization (the pinned rehearsal MEMORY
+    journal remains explicitly preserved and separately verified);
+  - required two receipt-proven, latest-annual-filing comparable years for
+    `accounting_policy_changes`, with unproven/non-comparable exclusions;
+  - added literal two-connection repeated migration, exact-predicate,
+    release/rehearsal parity, ORM-schema, and latest-receipt adversarial tests.
 
 ## Strict TDD
 
@@ -27,6 +39,11 @@ RED:
 
 - `tests/test_db_schema_contract.py` initially failed with `ModuleNotFoundError: kreports.db.schema_contract`.
 - New migration regression tests then exposed stale expected revision lists and legacy migration paths without `accounting_note_chapters`; the migration was made additive by creating the table first.
+- Review remediation RED: `tests/test_db_schema_contract_review.py` failed all
+  five adversarial cases on the reviewed revision: release/rehearsal audit-fee
+  drift, a `WHERE ... AND 0` partial index, incomplete migration-created note
+  schema, concurrent SQLite `database is locked`, and one unproven current
+  policy row being reported usable.
 
 GREEN:
 
@@ -34,8 +51,14 @@ GREEN:
 - `tests/test_policy_changes.py tests/test_mcp_contracts.py tests/test_mcp_answer_pack.py tests/test_accounting_note_mcp_contract.py tests/test_accounting_note_answer_surface.py -q`: `80 passed`.
 - Final focused release/readiness/schema check: `88 passed`.
 - Ruff on every changed Python file and `git diff --check`: passed.
+- Final focused suite spanning schema contract/review, migration, release,
+  rehearsal, readiness, policy, accounting-note, and MCP contract/answer-pack
+  tests passed; Ruff and `git diff --check` passed again.
 
 ## Migration/data risk
 
 - A pre-existing duplicate `(corp_code, bsns_year, fs_div, note_no, section_type)` is intentionally a fail-closed migration blocker; the migration neither deletes nor chooses a row. Deduplicate with a separately reviewed evidence/backfill operation before applying the new revision.
+- Revision 13 is additive. If a pre-existing note table is missing a storage
+  column, it adds that nullable metadata column; if logical chapter identities
+  are duplicated, revision 12 remains the blocking precondition.
 - No live `kreports.db` was opened or modified.
