@@ -1519,6 +1519,9 @@ _POLICY_SELECTION_WEIGHTS = {
 }
 _POLICY_SELECTION_KEYS = frozenset({"size", "leverage", "profitability", "growth"})
 _POLICY_EXCERPT_LIMIT = 400
+_POLICY_KEYWORD_PER_COMPANY_LIMIT = 5
+_POLICY_KEYWORD_TOTAL_LIMIT = 25
+_POLICY_INVENTORY_ITEM_LIMIT = 20
 
 
 def _policy_peer_code_map(selectors: list[str]) -> dict[str, dict]:
@@ -1549,20 +1552,78 @@ def _policy_peer_code_map(selectors: list[str]) -> dict[str, dict]:
 def _policy_similarity(subject: float | None, candidate: float | None, *, logarithmic: bool = False) -> float | None:
     if subject is None or candidate is None:
         return None
+    try:
+        subject_value, candidate_value = float(subject), float(candidate)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(subject_value) or not math.isfinite(candidate_value):
+        return None
     if logarithmic:
-        if subject <= 0 or candidate <= 0:
+        if subject_value <= 0 or candidate_value <= 0:
             return None
-        distance = abs(math.log10(float(candidate) / float(subject)))
+        distance = abs(math.log10(candidate_value / subject_value))
     else:
-        distance = abs(float(candidate) - float(subject))
+        distance = abs(candidate_value - subject_value)
     return round(1.0 / (1.0 + distance), 4)
+
+
+_POLICY_FINANCIAL_FIELDS = (
+    "revenue", "total_assets", "total_debt", "total_equity",
+    "operating_profit", "revenue_yoy",
+)
+
+
+def _finite_policy_number(value: object) -> object | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return value if math.isfinite(float(value)) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_policy_financial_rows(
+    rows: list[dict],
+) -> tuple[dict[str, dict], set[str], set[str]]:
+    """Fail closed on conflicting legacy duplicate financial rows.
+
+    The current table has a uniqueness constraint, but retained legacy SQLite
+    artifacts may not. Exact duplicate values are harmlessly de-duplicated;
+    differing values receive no score rather than an arbitrary latest-row pick.
+    """
+    grouped: dict[str, list[dict]] = {}
+    nonfinite_codes: set[str] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        corp_code = str(row["corp_code"])
+        normalized = {}
+        for field in _POLICY_FINANCIAL_FIELDS:
+            value = _finite_policy_number(row.get(field))
+            if row.get(field) is not None and value is None:
+                nonfinite_codes.add(corp_code)
+            normalized[field] = value
+        row.update(normalized)
+        grouped.setdefault(corp_code, []).append(row)
+
+    resolved: dict[str, dict] = {}
+    conflicts: set[str] = set()
+    for corp_code, candidates in grouped.items():
+        signatures = {
+            tuple(candidate.get(field) for field in _POLICY_FINANCIAL_FIELDS)
+            for candidate in candidates
+        }
+        if len(signatures) != 1:
+            conflicts.add(corp_code)
+            continue
+        resolved[corp_code] = candidates[0]
+    return resolved, conflicts, nonfinite_codes
 
 
 def _policy_selection_financials(
     corp_codes: list[str], *, year: int, fs_div: str,
-) -> tuple[dict[str, dict], set[str]]:
+) -> tuple[dict[str, dict], set[str], set[str]]:
     if not corp_codes:
-        return {}, set()
+        return {}, set(), set()
     stmt = text("""
         SELECT id, corp_code, revenue, total_assets, total_debt, total_equity,
                operating_profit, revenue_yoy
@@ -1574,15 +1635,16 @@ def _policy_selection_financials(
         rows = conn.execute(
             stmt, {"ccs": corp_codes, "year": year, "fs_div": fs_div}
         ).mappings().all()
-    resolved: dict[str, dict] = {}
-    duplicate_codes: set[str] = set()
-    for row in rows:
-        corp_code = str(row["corp_code"])
-        if corp_code in resolved:
-            duplicate_codes.add(corp_code)
-            continue
-        resolved[corp_code] = dict(row)
-    return resolved, duplicate_codes
+    return _resolve_policy_financial_rows([dict(row) for row in rows])
+
+
+def _policy_ratio(numerator: object, denominator: object) -> float | None:
+    top = _finite_policy_number(numerator)
+    bottom = _finite_policy_number(denominator)
+    if top is None or bottom is None or float(bottom) == 0:
+        return None
+    value = float(top) / float(bottom)
+    return value if math.isfinite(value) else None
 
 
 def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float | None], dict[str, float | None]]:
@@ -1596,26 +1658,21 @@ def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float 
     values = {
         "size": round(sum(size_values) / len(size_values), 4) if size_values else None,
         "leverage": _policy_similarity(
-            float(subject["total_debt"]) / float(subject["total_equity"])
-            if subject.get("total_debt") is not None and subject.get("total_equity") not in {None, 0} else None,
-            float(candidate["total_debt"]) / float(candidate["total_equity"])
-            if candidate.get("total_debt") is not None and candidate.get("total_equity") not in {None, 0} else None,
+            _policy_ratio(subject.get("total_debt"), subject.get("total_equity")),
+            _policy_ratio(candidate.get("total_debt"), candidate.get("total_equity")),
         ),
         "profitability": _policy_similarity(
-            float(subject["operating_profit"]) / float(subject["revenue"])
-            if subject.get("operating_profit") is not None and subject.get("revenue") not in {None, 0} else None,
-            float(candidate["operating_profit"]) / float(candidate["revenue"])
-            if candidate.get("operating_profit") is not None and candidate.get("revenue") not in {None, 0} else None,
+            _policy_ratio(subject.get("operating_profit"), subject.get("revenue")),
+            _policy_ratio(candidate.get("operating_profit"), candidate.get("revenue")),
         ),
         "growth": _policy_similarity(subject.get("revenue_yoy"), candidate.get("revenue_yoy")),
     }
     metrics = {
-        "revenue": candidate.get("revenue"), "total_assets": candidate.get("total_assets"),
-        "leverage": (float(candidate["total_debt"]) / float(candidate["total_equity"])
-                     if candidate.get("total_debt") is not None and candidate.get("total_equity") not in {None, 0} else None),
-        "profitability": (float(candidate["operating_profit"]) / float(candidate["revenue"])
-                           if candidate.get("operating_profit") is not None and candidate.get("revenue") not in {None, 0} else None),
-        "growth": candidate.get("revenue_yoy"),
+        "revenue": _finite_policy_number(candidate.get("revenue")),
+        "total_assets": _finite_policy_number(candidate.get("total_assets")),
+        "leverage": _policy_ratio(candidate.get("total_debt"), candidate.get("total_equity")),
+        "profitability": _policy_ratio(candidate.get("operating_profit"), candidate.get("revenue")),
+        "growth": _finite_policy_number(candidate.get("revenue_yoy")),
     }
     return values, metrics
 
@@ -1645,6 +1702,22 @@ def _policy_annual_sources(corp_codes: list[str], *, year: int) -> dict[str, str
     return latest
 
 
+def _policy_row_provenance(
+    row: dict, annual_sources: dict[str, str], *, year: int,
+) -> tuple[str | None, str]:
+    raw_receipt = row.get("rcept_no")
+    receipt = valid_annual_filing_receipt(raw_receipt, year)
+    proven = (
+        isinstance(raw_receipt, str) and raw_receipt == receipt
+        and bool(receipt) and annual_sources.get(row["corp_code"]) == receipt
+    )
+    if proven:
+        return receipt, "proven_annual_filing"
+    if not isinstance(raw_receipt, str) or raw_receipt != receipt:
+        return None, "invalid_receipt"
+    return None, "unproven_annual_filing"
+
+
 def compare_peer_accounting_policies(
     company: str,
     year: int = 2025,
@@ -1670,6 +1743,9 @@ def compare_peer_accounting_policies(
     if selection_profile not in _POLICY_SELECTION_WEIGHTS:
         raise ValueError("selection_profile은 auditor/investor/balanced 중 하나여야 합니다.")
     include_peers, exclude_peers = include_peers or [], exclude_peers or []
+    for selector in [*include_peers, *exclude_peers]:
+        if not isinstance(selector, str) or not selector.strip() or len(selector.strip()) > 100:
+            raise ValueError("peer selector는 1~100자 비어 있지 않은 문자열이어야 합니다.")
     if set(include_peers) & set(exclude_peers):
         raise ValueError("include_peers와 exclude_peers는 중복될 수 없습니다.")
     if peer_weights is not None and (
@@ -1698,17 +1774,22 @@ def compare_peer_accounting_policies(
     excluded_codes = {row["corp_code"] for row in excluded_map.values()}
     if included_codes & excluded_codes:
         raise ValueError("해석된 include/exclude peer가 중복됩니다.")
+    if len(included_codes) > peer_limit:
+        raise ValueError("include_peers 수는 peer_limit을 초과할 수 없습니다.")
 
     candidate_by_code = {row["corp_code"]: dict(row) for row in base["peers"]}
     for row in included_map.values():
         candidate_by_code.setdefault(row["corp_code"], dict(row))
     candidate_codes = sorted(candidate_by_code)
     selection_year = int(base["selection_policy"].get("resolved_year") or year)
-    financial_rows, duplicate_financial_codes = _policy_selection_financials(
+    financial_rows, conflicting_financial_codes, nonfinite_financial_codes = _policy_selection_financials(
         [corp_code, *candidate_codes], year=selection_year, fs_div=base["selection_policy"]["fs_div_used"]
     )
-    weights = dict(_POLICY_SELECTION_WEIGHTS[selection_profile])
-    weights.update(peer_weights or {})
+    weights = (
+        {key: float((peer_weights or {}).get(key, 0.0)) for key in _POLICY_SELECTION_KEYS}
+        if peer_weights is not None
+        else dict(_POLICY_SELECTION_WEIGHTS[selection_profile])
+    )
     subject_financials = financial_rows.get(corp_code, {})
     peer_selection: list[dict] = []
     ranked_candidates: list[tuple[float, str]] = []
@@ -1727,8 +1808,10 @@ def compare_peer_accounting_policies(
             for key in _POLICY_SELECTION_KEYS
         }
         limitations = [f"missing_financial_dimensions:{key}" for key, value in components.items() if value is None]
-        if candidate_code in duplicate_financial_codes:
-            limitations.append("duplicate_financial_rows_resolved_by_latest_id")
+        if candidate_code in conflicting_financial_codes:
+            limitations.append("conflicting_financial_rows_no_score")
+        if candidate_code in nonfinite_financial_codes:
+            limitations.append("nonfinite_financial_values_unavailable")
         direct = candidate_code in included_codes
         excluded = candidate_code in excluded_codes
         if excluded:
@@ -1767,7 +1850,11 @@ def compare_peer_accounting_policies(
         if row["selection_status"] == "candidate":
             if row["corp_code"] in peer_codes:
                 row["selection_status"] = "included"
-                row["selection_reason"] = "algorithmic_financial_similarity"
+                row["selection_reason"] = (
+                    "algorithmic_financial_similarity"
+                    if row["algorithmic_score"] is not None
+                    else "industry_sector_fallback_no_financial_score"
+                )
             else:
                 row["selection_status"] = "excluded"
                 row["selection_reason"] = "outside_peer_limit"
@@ -1843,27 +1930,47 @@ def compare_peer_accounting_policies(
         })
 
     peer_coverage_pct = round(100.0 * len(peer_summaries) / len(peer_codes), 1) if peer_codes else 0.0
+    topic_requested = item_key is not None or keyword is not None
     selected_topic = {"item_key": item_key, "keyword": keyword}
-    selected_rows = [
+    matching_rows = [
         row for row in rows
-        if (item_key is None or row["item_key"] == item_key)
+        if topic_requested
+        and (item_key is None or row["item_key"] == item_key)
         and (keyword is None or keyword.lower() in str(row.get("heading") or "").lower()
              or keyword.lower() in str(row.get("body") or "").lower())
     ]
+    matched_count_by_company = {code: 0 for code in all_codes}
+    for row in matching_rows:
+        matched_count_by_company[row["corp_code"]] = matched_count_by_company.get(row["corp_code"], 0) + 1
+    selected_rows: list[dict] = []
+    returned_per_company = {code: 0 for code in all_codes}
+    for row in matching_rows:
+        if keyword is not None and (
+            len(selected_rows) >= _POLICY_KEYWORD_TOTAL_LIMIT
+            or returned_per_company[row["corp_code"]] >= _POLICY_KEYWORD_PER_COMPANY_LIMIT
+        ):
+            continue
+        selected_rows.append(row)
+        returned_per_company[row["corp_code"]] = returned_per_company.get(row["corp_code"], 0) + 1
+    presentation_truncation = {
+        "requested": topic_requested,
+        "total_matches": len(matching_rows),
+        "returned_matches": len(selected_rows),
+        "per_company_limit": _POLICY_KEYWORD_PER_COMPANY_LIMIT if keyword is not None else None,
+        "total_limit": _POLICY_KEYWORD_TOTAL_LIMIT if keyword is not None else None,
+        "truncated": len(selected_rows) < len(matching_rows),
+    }
     annual_sources = _policy_annual_sources(all_codes, year=year)
+    matched_provenance_by_company = {code: [] for code in all_codes}
+    for row in matching_rows:
+        _receipt, status = _policy_row_provenance(row, annual_sources, year=year)
+        matched_provenance_by_company.setdefault(row["corp_code"], []).append(status)
     note_presentations: list[dict] = []
     rows_by_company = {code: [] for code in all_codes}
     for row in selected_rows:
         rows_by_company.setdefault(row["corp_code"], []).append(row)
-        raw_receipt = row.get("rcept_no")
-        receipt = valid_annual_filing_receipt(raw_receipt, year)
-        proven = (
-            isinstance(raw_receipt, str) and raw_receipt == receipt
-            and bool(receipt) and annual_sources.get(row["corp_code"]) == receipt
-        )
-        provenance_status = (
-            "proven_annual_filing" if proven else "invalid_receipt"
-            if not isinstance(raw_receipt, str) or raw_receipt != receipt else "unproven_annual_filing"
+        receipt, provenance_status = _policy_row_provenance(
+            row, annual_sources, year=year,
         )
         body = str(row.get("body") or "")
         note_presentations.append(_clean_dict({
@@ -1872,10 +1979,10 @@ def compare_peer_accounting_policies(
             "body_length": row.get("body_length") if row.get("body_length") is not None else len(body),
             "body_hash": row.get("body_hash"), "data_year": year, "fs_div": fs_div,
             "provenance_status": provenance_status,
-            "rcept_no": receipt if proven else None,
-            "source_url": dart_filing_url(receipt) if proven else None,
+            "rcept_no": receipt if provenance_status == "proven_annual_filing" else None,
+            "source_url": dart_filing_url(receipt) if provenance_status == "proven_annual_filing" else None,
         }))
-    if item_key is not None or keyword is not None:
+    if item_key is not None:
         presentation_codes = {row["corp_code"] for row in note_presentations}
         names = {corp_code: base["subject"].get("corp_name")}
         names.update({row["corp_code"]: row.get("corp_name") for row in peer_selection})
@@ -1889,16 +1996,31 @@ def compare_peer_accounting_policies(
                 })
     note_presentations.sort(key=lambda row: (all_codes.index(row["corp_code"]), row["item_key"], str(row.get("heading") or "")))
     topic_coverage = []
-    if item_key is not None or keyword is not None:
+    if topic_requested:
         names = {corp_code: base["subject"].get("corp_name")}
         names.update({row["corp_code"]: row.get("corp_name") for row in peer_selection})
         for code in all_codes:
             topic_coverage.append({
                 "corp_code": code, "corp_name": names.get(code),
-                "status": "topic_cached" if rows_by_company.get(code) else "cache_missing_not_filing_absence",
-                "matched_item_count": len(rows_by_company.get(code, [])),
+                "status": "topic_cached" if matched_count_by_company.get(code) else "cache_missing_not_filing_absence",
+                "matched_item_count": matched_count_by_company.get(code, 0),
+                "returned_item_count": returned_per_company.get(code, 0),
             })
-    subject_topic_available = bool(rows_by_company.get(corp_code)) if (item_key is not None or keyword is not None) else bool(subject_items)
+    topic_inventory = []
+    if presentation_mode and not topic_requested:
+        for code in all_codes:
+            items = by_corp.get(code, [])
+            keys = sorted(row["item_key"] for row in items)
+            topic_inventory.append({
+                "corp_code": code,
+                "corp_name": base["subject"].get("corp_name") if code == corp_code else next(
+                    (row.get("corp_name") for row in peer_selection if row["corp_code"] == code), None,
+                ),
+                "cached_item_count": len(keys),
+                "item_keys": keys[:_POLICY_INVENTORY_ITEM_LIMIT],
+                "item_keys_truncated": len(keys) > _POLICY_INVENTORY_ITEM_LIMIT,
+            })
+    subject_topic_available = bool(matched_count_by_company.get(corp_code)) if topic_requested else bool(subject_items)
     data_quality = {
         "status": cache_quality_status(
             subject_count=len(subject_items),
@@ -1916,12 +2038,39 @@ def compare_peer_accounting_policies(
             "as absence of accounting policy disclosure."
         ),
     }
-    if not subject_topic_available:
+    limitations = list(data_quality.get("limitations") or [])
+    if presentation_mode and not topic_requested:
         data_quality["status"] = "limited"
-        data_quality["limitations"] = ["subject_topic_cache_missing_not_filing_absence"]
-    elif (item_key is not None or keyword is not None) and not any(row.get("provenance_status") == "proven_annual_filing" for row in note_presentations if row["corp_code"] == corp_code):
+        limitations.append("topic_selector_required")
+    elif not subject_topic_available:
         data_quality["status"] = "limited"
-        data_quality["limitations"] = ["subject_topic_receipt_not_proven_against_latest_annual_filing"]
+        limitations.append("subject_topic_cache_missing_not_filing_absence")
+    elif topic_requested and "proven_annual_filing" not in matched_provenance_by_company.get(corp_code, []):
+        data_quality["status"] = "limited"
+        limitations.append("subject_topic_receipt_not_proven_against_latest_annual_filing")
+    if topic_requested:
+        peer_topic_quality = {
+            "final_peer_count": len(peer_codes),
+            "cache_missing_count": 0,
+            "unproven_receipt_count": 0,
+            "proven_count": 0,
+        }
+        for peer_code in peer_codes:
+            if not matched_count_by_company.get(peer_code):
+                peer_topic_quality["cache_missing_count"] += 1
+            elif "proven_annual_filing" in matched_provenance_by_company.get(peer_code, []):
+                peer_topic_quality["proven_count"] += 1
+            else:
+                peer_topic_quality["unproven_receipt_count"] += 1
+        data_quality["peer_topic_quality"] = peer_topic_quality
+        if peer_topic_quality["cache_missing_count"]:
+            data_quality["status"] = "limited"
+            limitations.append("peer_topic_cache_missing_not_filing_absence")
+        if peer_topic_quality["unproven_receipt_count"]:
+            data_quality["status"] = "limited"
+            limitations.append("peer_topic_receipt_not_proven")
+    if limitations:
+        data_quality["limitations"] = sorted(set(limitations))
 
     result = {
         "subject": base["subject"],
@@ -1953,6 +2102,7 @@ def compare_peer_accounting_policies(
                     "components": ["size", "leverage", "profitability", "growth"],
                     "size_basis": "revenue and total_assets only when both cached values are positive",
                     "missing_value_policy": "missing components receive no score or contribution; no value is fabricated",
+                    "weighting_status": "internal screening heuristic; not an auditing, accounting, or external-standard methodology",
                 },
                 "supported_customization": {
                     "selection_profile": ["auditor", "investor", "balanced"],
@@ -1981,10 +2131,13 @@ def compare_peer_accounting_policies(
             "selected_topic": selected_topic,
             "note_presentations": note_presentations,
             "topic_coverage": topic_coverage,
+            "topic_inventory": topic_inventory,
+            "presentation_truncation": presentation_truncation,
             "methodology": {
             "selection_profile": selection_profile,
             "candidate_universe": "industry/sector candidate universe; direct includes are overrides, not algorithmic matches",
             "financial_similarity": "size uses revenue/total_assets where cached; leverage, profitability, and growth are scored only when both sides have reliable fields",
+            "weighting_status": "auditor/investor/balanced weights are internal screening heuristics, not auditing or accounting standards.",
             "comparison_limitations": "Heading, placement and text differences are screening signals only; they are not an accounting treatment conclusion.",
             "source_rule": "DART links appear only when the cached exact 14-digit receipt matches the latest same-company, same-year annual filing.",
             },

@@ -1822,21 +1822,19 @@ def _build_policy_changes_pack(result: dict[str, Any]) -> dict[str, Any]:
 def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, Any]:
     """Render the extended policy comparison without treating cache misses as absence."""
     pack = _base_pack(f"{_subject_label(result)} 회계정책 주석 비교", result)
-    criteria = (result.get("selection_policy") or {}).get("preselection_criteria")
-    if isinstance(criteria, dict):
-        pack["tables"].append(_table(
-            "peer_policy_methodology", "Peer 선정 기준과 범위",
-            [("candidate_universe", "초기 후보군"),
-             ("financial_similarity", "재무 유사도 기준"),
-             ("supported_customization", "지원 사용자 지정"),
-             ("unsupported_customization", "미지원/제한 기준")],
-            [{
-                "candidate_universe": criteria.get("candidate_universe"),
-                "financial_similarity": criteria.get("financial_similarity"),
-                "supported_customization": criteria.get("supported_customization"),
-                "unsupported_customization": criteria.get("unsupported_customization"),
-            }],
-        ))
+    selection_policy = result.get("selection_policy") or {}
+    criteria = selection_policy.get("preselection_criteria")
+    methodology_rows = _peer_policy_methodology_rows(selection_policy, criteria)
+    pack["tables"].append(_table(
+        "peer_policy_methodology", "Peer 선정 기준과 범위",
+        [("criterion", "기준"), ("setting", "적용값"), ("provenance", "근거/한계")],
+        methodology_rows,
+        note="가중치는 내부 스크리닝 휴리스틱이며 감사·회계 기준 또는 외부 표준이 아닙니다.",
+    ))
+    extended = bool(result.get("peer_selection") or result.get("selected_topic"))
+    if not extended:
+        _append_legacy_peer_policy_tables(pack, result, selection_policy)
+        return pack
     selection_rows = []
     for row in result.get("peer_selection") or []:
         if not isinstance(row, dict):
@@ -1847,14 +1845,20 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
             "status": row.get("selection_status"),
             "reason": row.get("selection_reason"),
             "score": row.get("algorithmic_score"),
-            "score_components": row.get("score_components"),
-            "component_contributions": row.get("component_contributions"),
+            "profile_or_weights": _flat_peer_policy_mapping(row.get("weights")),
+            "data_year": row.get("data_year"),
+            "fs_div": row.get("fs_div"),
+            "financial_values": _flat_peer_policy_mapping(row.get("financial_values")),
+            "score_components": _flat_peer_policy_mapping(row.get("score_components")),
+            "component_contributions": _flat_peer_policy_mapping(row.get("component_contributions")),
             "limitations": ", ".join(row.get("limitations") or []),
         })
     pack["tables"].append(_table(
         "peer_policy_selection", "Peer 선정 근거",
         [("company", "회사"), ("corp_code", "회사코드"), ("status", "선정 상태"),
          ("reason", "선정 사유"), ("score", "유사도 점수"),
+         ("profile_or_weights", "유효 가중치"), ("data_year", "데이터 연도"),
+         ("fs_div", "재무제표 기준"), ("financial_values", "재무값"),
          ("score_components", "지표별 점수"), ("component_contributions", "가중 기여도"),
          ("limitations", "데이터 한계")],
         selection_rows,
@@ -1870,26 +1874,120 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
             "excerpt": row.get("body_excerpt"), "body_length": row.get("body_length"),
             "receipt": row.get("rcept_no"), "provenance": row.get("provenance_status"),
         })
-    pack["tables"].append(_table(
-        "peer_note_presentations", "회계정책 주석 표시 비교",
-        [("company", "회사"), ("item_key", "주제"), ("heading", "주석 제목/위치"),
-         ("excerpt", "본문 발췌"), ("body_length", "본문 길이"),
-         ("receipt", "검증된 접수번호"), ("provenance", "출처 검증")],
-        presentation_rows,
-        note="텍스트/표시 차이는 스크리닝 신호일 뿐 회계처리 결론이 아닙니다.",
-    ))
+    if presentation_rows:
+        pack["tables"].append(_table(
+            "peer_note_presentations", "회계정책 주석 표시 비교",
+            [("company", "회사"), ("item_key", "주제"), ("heading", "주석 제목/위치"),
+             ("excerpt", "본문 발췌"), ("body_length", "본문 길이"),
+             ("receipt", "검증된 접수번호"), ("provenance", "출처 검증")],
+            presentation_rows,
+            note="텍스트/표시 차이는 스크리닝 신호일 뿐 회계처리 결론이 아닙니다.",
+        ))
     coverage_rows = [row for row in result.get("topic_coverage") or [] if isinstance(row, dict)]
-    pack["tables"].append(_table(
-        "peer_policy_topic_coverage", "주제 캐시 가용성",
-        [("corp_name", "회사"), ("corp_code", "회사코드"), ("status", "상태"),
-         ("matched_item_count", "일치 항목 수")],
-        coverage_rows,
-        note="cache_missing_not_filing_absence는 로컬 캐시 미확보이며 공시 부재를 뜻하지 않습니다.",
-    ))
+    if coverage_rows:
+        pack["tables"].append(_table(
+            "peer_policy_topic_coverage", "주제 캐시 가용성",
+            [("corp_name", "회사"), ("corp_code", "회사코드"), ("status", "상태"),
+             ("matched_item_count", "일치 항목 수"), ("returned_item_count", "표시 항목 수")],
+            coverage_rows,
+            note="cache_missing_not_filing_absence는 로컬 캐시 미확보이며 공시 부재를 뜻하지 않습니다.",
+        ))
+    inventory_rows = [row for row in result.get("topic_inventory") or [] if isinstance(row, dict)]
+    if inventory_rows:
+        for row in inventory_rows:
+            row["item_keys"] = ", ".join(row.get("item_keys") or [])
+        pack["tables"].append(_table(
+            "peer_policy_topic_inventory", "주제 선택 전 캐시 인벤토리",
+            [("corp_name", "회사"), ("corp_code", "회사코드"),
+             ("cached_item_count", "캐시 항목 수"), ("item_keys", "항목 키"),
+             ("item_keys_truncated", "항목 키 생략 여부")],
+            inventory_rows,
+            note="본문 비교에는 item_key 또는 keyword를 지정하세요. 이 인벤토리는 공시 부재를 뜻하지 않습니다.",
+        ))
     methodology = result.get("methodology")
     if isinstance(methodology, dict):
         pack["methodology"] = methodology
     return pack
+
+
+def _flat_peer_policy_mapping(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    return ", ".join(
+        f"{key}={value[key]}" for key in sorted(value)
+        if value[key] is not None
+    ) or "미확보"
+
+
+def _peer_policy_methodology_rows(
+    selection_policy: dict[str, Any], criteria: object,
+) -> list[dict[str, str]]:
+    if not isinstance(criteria, dict):
+        return [
+            {"criterion": "기본 peer 기준", "setting": ", ".join(selection_policy.get("criteria") or ["industry", "sector", "financial_data"]), "provenance": "기존 peer group 기본값"},
+            {"criterion": "재무제표/연도", "setting": f"{selection_policy.get('fs_div_used') or '-'} / {selection_policy.get('resolved_year') or selection_policy.get('requested_year') or '-'}", "provenance": "로컬 캐시"},
+        ]
+    financial = criteria.get("financial_similarity") or {}
+    supported = criteria.get("supported_customization") or {}
+    return [
+        {"criterion": "초기 후보군", "setting": str(criteria.get("candidate_universe") or "-"), "provenance": "업종/sector 로컬 캐시"},
+        {"criterion": "재무 유사도", "setting": ", ".join(financial.get("components") or []), "provenance": str(financial.get("missing_value_policy") or "-")},
+        {"criterion": "가중치", "setting": _flat_peer_policy_mapping(selection_policy.get("weights")) or "프로필 기본값", "provenance": str(financial.get("weighting_status") or "내부 스크리닝 휴리스틱")},
+        {"criterion": "지원 사용자 지정", "setting": ", ".join(sorted(supported)), "provenance": "입력 스키마 범위"},
+        {"criterion": "미지원/제한", "setting": ", ".join(criteria.get("unsupported_customization") or []), "provenance": "값을 추정하거나 점수화하지 않음"},
+    ]
+
+
+def _append_legacy_peer_policy_tables(
+    pack: dict[str, Any], result: dict[str, Any], selection_policy: dict[str, Any],
+) -> None:
+    selection_rows = [
+        {
+            "company": row.get("corp_name") or row.get("corp_code"),
+            "corp_code": row.get("corp_code"), "status": "selected_legacy_peer",
+            "reason": "existing_peer_group", "profile_or_weights": "legacy default; no additional score",
+            "data_year": selection_policy.get("resolved_year") or result.get("year"),
+            "fs_div": result.get("fs_div"), "financial_values": "legacy raw contract",
+            "limitations": "side-by-side topic selector not requested",
+        }
+        for row in result.get("peer_summaries") or []
+        if isinstance(row, dict)
+    ]
+    pack["tables"].append(_table(
+        "peer_policy_selection", "Peer 선정 근거",
+        [("company", "회사"), ("corp_code", "회사코드"), ("status", "선정 상태"),
+         ("reason", "선정 사유"), ("profile_or_weights", "유효 가중치/프로필"),
+         ("data_year", "데이터 연도"), ("fs_div", "재무제표 기준"),
+         ("financial_values", "재무값"), ("limitations", "데이터 한계")],
+        selection_rows,
+    ))
+    subject_rows = [
+        {"item_key": key, "heading": value.get("heading"), "body_length": value.get("body_length"), "body_hash": value.get("body_hash")}
+        for key, value in sorted((result.get("subject_items") or {}).items())
+        if isinstance(value, dict)
+    ]
+    if subject_rows:
+        pack["tables"].append(_table(
+            "peer_note_presentations", "대상회사 회계정책 캐시",
+            [("item_key", "항목 키"), ("heading", "주석 제목"),
+             ("body_length", "본문 길이"), ("body_hash", "본문 해시")],
+            subject_rows,
+            note="side-by-side 본문 발췌는 item_key 또는 keyword를 지정하면 활성화됩니다.",
+        ))
+    coverage_rows = [
+        {"item_key": key, **value}
+        for key, value in sorted((result.get("peer_item_coverage") or {}).items())
+        if isinstance(value, dict)
+    ]
+    if coverage_rows:
+        pack["tables"].append(_table(
+            "peer_policy_topic_coverage", "Peer 항목 캐시 커버리지",
+            [("item_key", "항목 키"), ("covered_peers", "캐시 보유 peer 수"),
+             ("peer_count", "peer 수"), ("coverage_pct", "커버리지"),
+             ("subject_has_item", "대상회사 항목 보유")],
+            coverage_rows,
+            note="캐시 미확보는 공시 부재가 아닙니다.",
+        ))
 
 
 def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, Any]:

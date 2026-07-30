@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import math
 from typing import Annotated, Literal
 
 from kreports.analysis.dcf_model import (
@@ -31,6 +32,7 @@ Metric = Literal[
     "Beneish_M",
 ]
 Year = Annotated[int, Field(ge=2000, le=2100)]
+PeerSelector = Annotated[str, Field(min_length=1, max_length=100)]
 
 
 class ToolInput(BaseModel):
@@ -218,11 +220,11 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
     keyword: str | None = Field(None, max_length=100, description="선택. 제목/본문 주제 검색어")
     selection_profile: Literal["auditor", "investor", "balanced"] = "balanced"
     peer_weights: dict[str, float] | None = Field(
-        None, description="선택. size/leverage/profitability/growth 가중치(0~1)"
+        None, description="선택. size/leverage/profitability/growth 전체 가중치(0~1); 생략 키는 0"
     )
     size_bucket_decade: float | None = Field(None, ge=0.1, le=3.0)
-    include_peers: list[str] = Field(default_factory=list, max_length=50)
-    exclude_peers: list[str] = Field(default_factory=list, max_length=50)
+    include_peers: list[PeerSelector] = Field(default_factory=list, max_length=50)
+    exclude_peers: list[PeerSelector] = Field(default_factory=list, max_length=50)
 
     @field_validator("peer_weights")
     @classmethod
@@ -233,11 +235,28 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
         unknown = sorted(set(value) - supported)
         if unknown:
             raise ValueError(f"지원하지 않는 peer weight: {', '.join(unknown)}")
-        if not value or any(not 0 <= weight <= 1 for weight in value.values()):
+        if not value or any(
+            not isinstance(weight, (int, float))
+            or isinstance(weight, bool)
+            or not math.isfinite(float(weight))
+            or not 0 <= weight <= 1
+            for weight in value.values()
+        ):
             raise ValueError("peer_weights는 0~1 범위의 하나 이상의 값이어야 합니다.")
         if sum(value.values()) <= 0:
             raise ValueError("peer_weights 합계는 0보다 커야 합니다.")
         return value
+
+    @field_validator("include_peers", "exclude_peers")
+    @classmethod
+    def normalize_peer_selectors(cls, value):
+        normalized = []
+        for selector in value:
+            clean = selector.strip()
+            if not clean:
+                raise ValueError("peer selector는 비어 있을 수 없습니다.")
+            normalized.append(clean)
+        return normalized
 
     @model_validator(mode="after")
     def validate_peer_overrides(self):
