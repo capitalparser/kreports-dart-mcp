@@ -18,6 +18,45 @@ from kreports.db.models import (
 )
 
 
+def test_backfill_preflight_rejects_low_free_disk_space():
+    import subprocess
+
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/backfill_preflight.sh; "
+                "KREPORTS_BACKFILL_FREE_KB_OVERRIDE=42 "
+                "KREPORTS_MIN_FREE_KB=100 "
+                "require_backfill_free_space 'test backfill'"
+            ),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 70
+    assert "test backfill requires at least 100 KB free" in proc.stderr
+    assert "found 42 KB" in proc.stderr
+
+
+def test_complete_and_limit_aware_backfills_run_disk_preflight_before_work():
+    complete_script = open("scripts/run_complete_dataset_backfill.sh", encoding="utf-8").read()
+    wrapper_script = open("scripts/dart_limit_aware_backfill.sh", encoding="utf-8").read()
+
+    assert "source scripts/backfill_preflight.sh" in complete_script
+    assert "require_backfill_free_space \"complete dataset backfill\"" in complete_script
+    assert complete_script.index("require_backfill_free_space") < complete_script.index(
+        'log "complete dataset backfill started"'
+    )
+
+    assert "source \"$PROJECT_DIR/scripts/backfill_preflight.sh\"" in wrapper_script
+    assert "require_backfill_free_space \"DART backfill wrapper\"" in wrapper_script
+    assert wrapper_script.index("require_backfill_free_space") < wrapper_script.index('log "probe started"')
+
+
 def test_full_backfill_runs_policies_before_financial_endpoint():
     script = open("scripts/run_full_dataset_backfill.sh", encoding="utf-8").read()
 
