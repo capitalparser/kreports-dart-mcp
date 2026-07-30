@@ -698,6 +698,114 @@ def test_missing_table_index_inline_raw_and_duplicate_keys_are_named_blockers(
     assert "duplicate_key:financial_facts_compact" in blockers
 
 
+def test_missing_index_target_tables_block_release(tmp_path, monkeypatch):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    monkeypatch.setattr(
+        release_artifact,
+        "run_all_tool_contract",
+        lambda _db: {"passed": True, "checks": 0},
+    )
+    monkeypatch.setattr(
+        release_artifact,
+        "golden_contract_result",
+        lambda: {"passed": True, "sha256": "a" * 64, "cases": 1},
+    )
+    monkeypatch.setattr(
+        release_artifact,
+        "_tool_wire_sha256",
+        lambda: "b" * 64,
+    )
+
+    evidence = release_artifact._collect_current_evidence(
+        db_path,
+        "public_runtime",
+    )
+
+    blockers = set(evidence["release_gate"]["blockers"])
+    assert {
+        "missing_required_table:audit_fees",
+        "missing_required_table:group_entities",
+        "missing_required_table:group_relationships",
+        "missing_required_table:group_component_metrics",
+    } <= blockers
+
+
+@pytest.mark.parametrize(
+    "missing_column",
+    [
+        "corp_code",
+        "bsns_year",
+        "fs_div",
+        "metric_key",
+        "amount",
+        "source_account_id",
+        "source_table",
+        "unit",
+        "period_type",
+        "citation_rcept_no",
+        "citation_report_nm",
+        "citation_basis",
+        "quality_status",
+    ],
+)
+def test_missing_compact_provenance_column_blocks_release(
+    tmp_path,
+    missing_column,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    all_columns = [
+        "corp_code",
+        "bsns_year",
+        "fs_div",
+        "metric_key",
+        "amount",
+        "source_account_id",
+        "source_table",
+        "unit",
+        "period_type",
+        "citation_rcept_no",
+        "citation_report_nm",
+        "citation_basis",
+        "quality_status",
+    ]
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("DROP TABLE financial_facts_compact")
+        columns = ", ".join(
+            f'"{column}" TEXT'
+            for column in all_columns
+            if column != missing_column
+        )
+        connection.execute(
+            "CREATE TABLE financial_facts_compact "
+            f"(id INTEGER PRIMARY KEY, {columns})"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        blockers = release_artifact._column_contract_blockers(
+            connection,
+            {"financial_facts_compact"},
+        )
+    finally:
+        connection.close()
+
+    assert (
+        f"missing_required_column:financial_facts_compact.{missing_column}"
+        in blockers
+    )
+
+
 def test_missing_kam_runtime_tables_and_linkage_columns_block_release(tmp_path):
     """Catches a revision-04 artifact passing despite revision-05/06 KAM needs."""
     from kreports import release_artifact

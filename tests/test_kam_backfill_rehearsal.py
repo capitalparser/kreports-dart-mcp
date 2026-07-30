@@ -13,6 +13,7 @@ import pytest
 _TEST_CAPABILITY = "ab" * 32
 _EXPECTED_PROFESSIONAL_TOOLS = (
     "prepare_standard_audit_hours_inputs",
+    "prepare_audit_materiality_inputs",
     "compare_peer_audit_fees",
     "build_audit_acceptance_pack",
     "compare_peer_risk_profile",
@@ -108,7 +109,7 @@ def _valid_mcp_payload(
     overrides = row_overrides or {}
     return {
         "ok": True,
-        "tool_count": 17,
+        "tool_count": 18,
         "schema_error_closed": True,
         "all_boundary_parity": True,
         "matrix": [
@@ -116,6 +117,14 @@ def _valid_mcp_payload(
             for tool in _EXPECTED_PROFESSIONAL_TOOLS
         ],
     }
+
+
+def test_rehearsal_fixture_is_closed_against_production_validator():
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        _validate_mcp_payload,
+    )
+
+    _validate_mcp_payload(_valid_mcp_payload())
 
 
 def _install_fake_worker(tmp_path: Path, body: str) -> None:
@@ -1609,7 +1618,7 @@ def test_rehearsal_rejects_unclosed_mcp_schema_gate(
         monkeypatch,
         mcp_payload={
             "ok": True,
-            "tool_count": 17,
+            "tool_count": 18,
             "schema_error_closed": False,
             "all_boundary_parity": True,
             "matrix": [],
@@ -1657,9 +1666,9 @@ def test_rehearsal_rejects_malformed_mcp_matrix_before_classification(
     matrix = payload["matrix"]
     assert isinstance(matrix, list)
     if malformation == "empty-rows":
-        payload["matrix"] = [{} for _ in range(17)]
+        payload["matrix"] = [{} for _ in range(18)]
     elif malformation == "duplicate-tools":
-        payload["matrix"] = [dict(matrix[0]) for _ in range(17)]
+        payload["matrix"] = [dict(matrix[0]) for _ in range(18)]
     elif malformation == "unexpected-tool":
         matrix[0]["tool"] = "not_a_professional_tool"
     elif malformation == "invalid-status":

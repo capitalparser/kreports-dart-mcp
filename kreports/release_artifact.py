@@ -53,7 +53,11 @@ REQUIRED_TABLES = (
     "disclosures",
     "financials",
     "financial_facts_compact",
+    "audit_fees",
     "audit_fee_observations",
+    "group_entities",
+    "group_relationships",
+    "group_component_metrics",
     "report_sections",
     "evidence_documents",
     "kam_items",
@@ -65,6 +69,21 @@ REQUIRED_TABLES = (
     "source_documents",
 )
 REQUIRED_COLUMN_SPECS = {
+    "financial_facts_compact": (
+        "corp_code",
+        "bsns_year",
+        "fs_div",
+        "metric_key",
+        "amount",
+        "source_account_id",
+        "source_table",
+        "unit",
+        "period_type",
+        "citation_rcept_no",
+        "citation_report_nm",
+        "citation_basis",
+        "quality_status",
+    ),
     "kam_items": (
         "id",
         "rcept_no",
