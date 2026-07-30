@@ -54,13 +54,14 @@ _VOLATILITY_RULE = {
 }
 _ANNUAL_FILING_CITATION_BASIS = "company_year_annual_filing_match"
 _SERIES_VALUE_AND_PROVENANCE_FIELDS = (
-    "amount",
     "unit",
     "period_type",
     "quality_status",
     "citation_rcept_no",
     "citation_report_nm",
     "citation_basis",
+    "source_account_id",
+    "source_table",
 )
 
 
@@ -204,7 +205,15 @@ def _observation(metric: str, year: int, row: dict[str, Any] | None, *, basis: s
 
 def _series_value_and_provenance_identity(row: dict[str, Any]) -> tuple[Any, ...]:
     """Return the fields that must agree before one compact series is chosen."""
-    return tuple(row.get(field) for field in _SERIES_VALUE_AND_PROVENANCE_FIELDS)
+    amount = _decimal(row.get("amount"))
+    normalized_amount = (
+        ("decimal", amount)
+        if amount is not None
+        else ("raw", row.get("amount"))
+    )
+    return (normalized_amount,) + tuple(
+        row.get(field) for field in _SERIES_VALUE_AND_PROVENANCE_FIELDS
+    )
 
 
 def _rejected_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -342,6 +351,16 @@ def build_benchmark_series(
                 _source(tax, operand_metric="tax_expense"),
             ]
             sources = [source for source in sources if source is not None]
+            direct_limitations = (
+                direct_observation["limitations"]
+                if direct is not None or direct_rejection
+                else []
+            )
+            direct_rejected_rows = (
+                direct_rejection.get("rows")
+                if direct_rejection
+                else [_rejected_row(direct)] if direct is not None else []
+            )
             result["profit_before_tax"].append({
                 "year": year,
                 "amount": direct_profit["amount"] + direct_tax["amount"],
@@ -353,9 +372,9 @@ def build_benchmark_series(
                 "period_type": "duration",
                 "limitations": (
                     ["direct_pbt_unusable_used_compatible_derivation"]
-                    + (direct_rejection.get("limitations") if direct_rejection else [])
-                ) if direct is not None or direct_rejection else [],
-                "rejected_rows": direct_rejection.get("rows") if direct_rejection else [],
+                    + direct_limitations
+                ) if direct_limitations else [],
+                "rejected_rows": direct_rejected_rows,
             })
         else:
             limitations = ["incompatible_operands"]
@@ -489,7 +508,8 @@ def prepare_audit_materiality_inputs(company: str, *, end_year: int = 2025, year
         )
         has_disclosures = inspector.has_table("disclosures")
         optional_fields = (
-            "unit", "period_type", "citation_rcept_no", "citation_report_nm",
+            "source_account_id", "source_table", "unit", "period_type",
+            "citation_rcept_no", "citation_report_nm",
             "citation_basis", "quality_status",
         )
         optional_select = ",\n                   ".join(

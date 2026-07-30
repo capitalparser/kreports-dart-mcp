@@ -103,6 +103,66 @@ def test_benchmark_series_rejects_conflicting_duplicates_and_deduplicates_identi
     assert identical["sources"] == [identical["source"]]
 
 
+def test_duplicate_identity_normalizes_amount_and_rejects_source_account_or_table_conflicts():
+    """Equivalent numeric literals deduplicate, but different compact origins never do."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    proven = {
+        "bsns_year": 2025, "fs_div": "CFS", "metric_key": "revenue", "amount": 100,
+        "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+        "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+        "source_account_id": "ifrs-full_Revenue", "source_table": "financial_facts",
+    }
+    normalized = build_benchmark_series([
+        {**proven, "amount": "100.0"},
+        proven,
+    ], years=[2025], fs_div="CFS")
+    permuted = build_benchmark_series([
+        proven,
+        {**proven, "amount": "100.0"},
+    ], years=[2025], fs_div="CFS")
+    account_conflict = build_benchmark_series([
+        proven,
+        {**proven, "source_account_id": "dart_Revenue"},
+    ], years=[2025], fs_div="CFS")
+    table_conflict = build_benchmark_series([
+        proven,
+        {**proven, "source_table": "financials"},
+    ], years=[2025], fs_div="CFS")
+
+    assert normalized["revenue"] == permuted["revenue"]
+    assert normalized["revenue"][0]["amount"] == Decimal("100")
+    assert all(
+        "conflicting_compact_series_rows" in series["revenue"][0]["limitations"]
+        for series in (account_conflict, table_conflict)
+    )
+
+
+def test_derived_pbt_retains_direct_observation_limitations_and_bounded_diagnostic():
+    """A valid fallback may not erase the rejected direct PBT's audit trail."""
+    from kreports.analysis.materiality_benchmark import build_benchmark_series
+
+    series = build_benchmark_series([
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_before_tax", "amount": 999,
+         "unit": None, "period_type": "duration", "quality_status": "limited",
+         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "profit_loss", "amount": 80,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
+        {"bsns_year": 2025, "fs_div": "CFS", "metric_key": "tax_expense", "amount": 20,
+         "unit": "KRW", "period_type": "duration", "quality_status": "usable",
+         "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS},
+    ], years=[2025], fs_div="CFS")
+
+    derived = series["profit_before_tax"][0]
+    assert derived["amount"] == Decimal("100")
+    assert {"missing_or_incompatible_unit", "limited_source_quality"} <= set(derived["limitations"])
+    assert derived["rejected_rows"] == [{
+        "metric_key": "profit_before_tax", "bsns_year": 2025, "fs_div": "CFS",
+        "citation_rcept_no": "20260318000001", "citation_basis": _ANNUAL_BASIS,
+    }]
+
+
 def test_materiality_public_surfaces_keep_rejected_rows_but_withhold_candidate_money(temp_engine):
     """Public envelope and answer pack expose the limitation, never money from rejected facts."""
     from sqlalchemy import text
@@ -134,6 +194,14 @@ def test_materiality_public_surfaces_keep_rejected_rows_but_withhold_candidate_m
     assert out["materiality_candidates"] == []
     candidate_table = next(table for table in out["answer_pack"]["tables"] if table["id"] == "materiality_candidates")
     assert candidate_table["rows"] == []
+    series_table = next(table for table in out["answer_pack"]["tables"] if table["id"] == "materiality_benchmark_series")
+    assert "rejected_rows" in {column["field"] for column in series_table["columns"]}
+    public_rejection = next(row["rejected_rows"] for row in series_table["rows"] if row["benchmark"] == "revenue")
+    assert public_rejection == [{
+        "metric_key": "revenue", "bsns_year": 2025, "fs_div": "CFS",
+        "citation_rcept_no": "20260318000001", "citation_basis": "wrong_basis",
+    }]
+    assert "100" not in str(public_rejection)
 
 
 def test_direct_pbt_wins_over_derived_pbt_and_keeps_annual_receipt():

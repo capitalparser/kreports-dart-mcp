@@ -226,12 +226,24 @@ def _build_materiality_pack(result: dict[str, Any]) -> dict[str, Any]:
                 str(source.get("operand_metric"))
                 for source in sources if isinstance(source, dict) and source.get("operand_metric")
             ) or "-"
+            rejected_rows = [
+                {
+                    field: rejected.get(field)
+                    for field in (
+                        "metric_key", "bsns_year", "fs_div",
+                        "citation_rcept_no", "citation_basis",
+                    )
+                }
+                for rejected in observation.get("rejected_rows") or []
+                if isinstance(rejected, dict)
+            ]
             series_rows.append({
                 "year": observation.get("year"), "benchmark": benchmark,
                 "amount": observation.get("amount"), "unit": observation.get("unit"),
                 "basis": observation.get("basis"),
                 "limitations": ", ".join(observation.get("limitations") or []) or "-",
                 "source_receipt": source_receipts, "source_roles": source_roles,
+                "rejected_rows": rejected_rows,
             })
     pack["tables"].append({
         "id": "materiality_benchmark_series", "title": "연도별 중요성 기준 관찰값",
@@ -239,6 +251,7 @@ def _build_materiality_pack(result: dict[str, Any]) -> dict[str, Any]:
             ("year", "연도"), ("benchmark", "기준"), ("amount", "금액"),
             ("unit", "단위"), ("basis", "산출 근거"), ("limitations", "한계"),
             ("source_receipt", "출처 접수번호"), ("source_roles", "파생 피연산자"),
+            ("rejected_rows", "제외된 행 출처 진단"),
         )], "rows": series_rows,
         "status": (result.get("data_quality") or {}).get("status", "limited"),
     })
