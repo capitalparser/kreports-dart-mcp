@@ -1849,6 +1849,7 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
             "data_year": row.get("data_year"),
             "fs_div": row.get("fs_div"),
             "financial_values": _flat_peer_policy_mapping(row.get("financial_values")),
+            "financial_status": row.get("financial_similarity_status"),
             "score_components": _flat_peer_policy_mapping(row.get("score_components")),
             "component_contributions": _flat_peer_policy_mapping(row.get("component_contributions")),
             "limitations": ", ".join(row.get("limitations") or []),
@@ -1859,6 +1860,7 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
          ("reason", "선정 사유"), ("score", "유사도 점수"),
          ("profile_or_weights", "유효 가중치"), ("data_year", "데이터 연도"),
          ("fs_div", "재무제표 기준"), ("financial_values", "재무값"),
+         ("financial_status", "재무 입력 출처 상태"),
          ("score_components", "지표별 점수"), ("component_contributions", "가중 기여도"),
          ("limitations", "데이터 한계")],
         selection_rows,
@@ -1932,6 +1934,7 @@ def _peer_policy_methodology_rows(
     return [
         {"criterion": "초기 후보군", "setting": str(criteria.get("candidate_universe") or "-"), "provenance": "업종/sector 로컬 캐시"},
         {"criterion": "재무 유사도", "setting": ", ".join(financial.get("components") or []), "provenance": str(financial.get("missing_value_policy") or "-")},
+        {"criterion": "재무 입력 출처 상태", "setting": str(financial.get("source_provenance") or "내부 캐시 스크리닝 입력"), "provenance": "DART 접수번호 근거로 검증하지 않음"},
         {"criterion": "가중치", "setting": _flat_peer_policy_mapping(selection_policy.get("weights")) or "프로필 기본값", "provenance": str(financial.get("weighting_status") or "내부 스크리닝 휴리스틱")},
         {"criterion": "지원 사용자 지정", "setting": ", ".join(sorted(supported)), "provenance": "입력 스키마 범위"},
         {"criterion": "미지원/제한", "setting": ", ".join(criteria.get("unsupported_customization") or []), "provenance": "값을 추정하거나 점수화하지 않음"},

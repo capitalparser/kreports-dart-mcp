@@ -1647,6 +1647,12 @@ def _policy_ratio(numerator: object, denominator: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _visible_policy_ratio(value: object) -> float | None:
+    """Bound a public screening ratio without changing scoring precision."""
+    finite_value = _finite_policy_number(value)
+    return round(float(finite_value), 4) if finite_value is not None else None
+
+
 def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float | None], dict[str, float | None]]:
     subject_assets, candidate_assets = subject.get("total_assets"), candidate.get("total_assets")
     subject_revenue, candidate_revenue = subject.get("revenue"), candidate.get("revenue")
@@ -1670,9 +1676,13 @@ def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float 
     metrics = {
         "revenue": _finite_policy_number(candidate.get("revenue")),
         "total_assets": _finite_policy_number(candidate.get("total_assets")),
-        "leverage": _policy_ratio(candidate.get("total_debt"), candidate.get("total_equity")),
-        "profitability": _policy_ratio(candidate.get("operating_profit"), candidate.get("revenue")),
-        "growth": _finite_policy_number(candidate.get("revenue_yoy")),
+        "leverage": _visible_policy_ratio(
+            _policy_ratio(candidate.get("total_debt"), candidate.get("total_equity")),
+        ),
+        "profitability": _visible_policy_ratio(
+            _policy_ratio(candidate.get("operating_profit"), candidate.get("revenue")),
+        ),
+        "growth": _visible_policy_ratio(candidate.get("revenue_yoy")),
     }
     return values, metrics
 
@@ -1833,6 +1843,9 @@ def compare_peer_accounting_policies(
             "component_contributions": component_contributions,
             "weights": weights,
             "financial_values": metric_values,
+            "financial_similarity_status": (
+                "internal_cached_screening_input_not_receipt_proven"
+            ),
             "data_year": selection_year,
             "fs_div": base["selection_policy"]["fs_div_used"],
             "limitations": limitations,
@@ -1866,7 +1879,9 @@ def compare_peer_accounting_policies(
                 "selection_status": "excluded", "selection_reason": "user_exclude_override",
                 "algorithmic_score": None, "score_components": {},
                 "component_contributions": {key: None for key in _POLICY_SELECTION_KEYS}, "weights": weights,
-                "financial_values": {}, "data_year": selection_year,
+                "financial_values": {},
+                "financial_similarity_status": "not_scored_explicitly_excluded",
+                "data_year": selection_year,
                 "fs_div": base["selection_policy"]["fs_div_used"],
                 "limitations": ["explicitly_excluded_before_candidate_scoring"],
             })
@@ -2088,10 +2103,10 @@ def compare_peer_accounting_policies(
             "weights": weights,
             "weight_provenance": "custom" if peer_weights else "profile_default",
             "override_provenance": "custom" if include_peers or exclude_peers else "default",
-            "candidate_universe": "industry/business-market candidates from adaptive KSIC and sector filters",
+            "candidate_universe": "adaptive KSIC prefix and sector filters only; market is display-only and business text is unindexed",
             "preselection_criteria": {
-                "candidate_universe": "initial industry/business/market pool from adaptive KSIC prefix and sector separation",
-                "industry_business_market": {
+                "candidate_universe": "adaptive KSIC prefix and sector filters only; market is display-only and business text is unindexed",
+                "industry_sector_market_context": {
                     "matched_prefix_len": base["selection_policy"].get("matched_prefix_len"),
                     "exclude_other_sectors": base["selection_policy"].get("exclude_other_sectors"),
                     "subject_market": base["subject"].get("market"),
@@ -2100,9 +2115,10 @@ def compare_peer_accounting_policies(
                 },
                 "financial_similarity": {
                     "components": ["size", "leverage", "profitability", "growth"],
-                    "size_basis": "revenue and total_assets only when both cached values are positive",
+                    "size_basis": "mean of available positive cached revenue and total_assets similarities; one available dimension is sufficient",
                     "missing_value_policy": "missing components receive no score or contribution; no value is fabricated",
                     "weighting_status": "internal screening heuristic; not an auditing, accounting, or external-standard methodology",
+                    "source_provenance": "internal cached financials screening inputs only; no receipt-proven filing provenance",
                 },
                 "supported_customization": {
                     "selection_profile": ["auditor", "investor", "balanced"],
@@ -2135,8 +2151,8 @@ def compare_peer_accounting_policies(
             "presentation_truncation": presentation_truncation,
             "methodology": {
             "selection_profile": selection_profile,
-            "candidate_universe": "industry/sector candidate universe; direct includes are overrides, not algorithmic matches",
-            "financial_similarity": "size uses revenue/total_assets where cached; leverage, profitability, and growth are scored only when both sides have reliable fields",
+            "candidate_universe": "adaptive KSIC prefix and sector candidate universe only; market is display-only and business text is unindexed. Direct includes are overrides, not algorithmic matches",
+            "financial_similarity": "cached financials are internal screening inputs with no receipt-proven filing provenance. Size averages available positive revenue/total-assets similarities; leverage, profitability, and growth are scored only when both sides have reliable fields.",
             "weighting_status": "auditor/investor/balanced weights are internal screening heuristics, not auditing or accounting standards.",
             "comparison_limitations": "Heading, placement and text differences are screening signals only; they are not an accounting treatment conclusion.",
             "source_rule": "DART links appear only when the cached exact 14-digit receipt matches the latest same-company, same-year annual filing.",

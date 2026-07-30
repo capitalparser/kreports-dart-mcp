@@ -12,6 +12,12 @@ selector activates the presentation-comparison extension.
   and asset-size range; exact explicit include/exclude selectors. The response
   exposes the candidate universe, selected/excluded status, component scores,
   weighted contributions, missing dimensions, and override provenance.
+- Candidate universe: adaptive KSIC-prefix and sector filters only. Market is
+  display context, and business text is not indexed for candidate selection.
+- Financial similarity: cached `financials` values are internal screening
+  inputs, not receipt-proven filing evidence. Size averages the available
+  positive revenue/total-assets similarities (one dimension is sufficient),
+  and visible ratio values are rounded to four decimal places.
 - These profiles and weights are internal screening heuristics, not auditing or
   accounting standards. A supplied weight map is complete: omitted components
   have zero weight. More direct includes than `peer_limit` fail closed.

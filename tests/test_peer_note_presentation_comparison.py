@@ -304,6 +304,34 @@ def test_no_financial_score_uses_industry_sector_fallback_and_nonfinite_is_not_p
     assert "Infinity" not in json.dumps(out, allow_nan=False)
 
 
+def test_peer_policy_methodology_truthfully_labels_cached_selection_inputs_and_rounds_visible_ratios(
+    temp_engine,
+):
+    """One-dimensional size and cached financials must not be presented as filing proof."""
+    _seed_peer_note_comparison(temp_engine)
+    session = sessionmaker(bind=temp_engine)()
+    peer = session.query(Financial).filter_by(corp_code="00000002", year=2024).one()
+    peer.revenue = None
+    session.commit()
+    session.close()
+
+    out = compare_peer_accounting_policies(
+        "00000001", year=2024, item_key="revenue_recognition", peer_limit=1,
+    )
+    peer_row = next(row for row in out["peer_selection"] if row["corp_code"] == "00000002")
+    criteria = out["selection_policy"]["preselection_criteria"]
+    pack = build_answer_pack("compare_peer_accounting_policies", out)
+    methodology = next(table for table in pack["tables"] if table["id"] == "peer_policy_methodology")
+
+    assert peer_row["score_components"]["size"] is not None
+    assert peer_row["financial_values"]["leverage"] == 0.2667
+    assert peer_row["financial_similarity_status"] == "internal_cached_screening_input_not_receipt_proven"
+    assert criteria["candidate_universe"] == "adaptive KSIC prefix and sector filters only; market is display-only and business text is unindexed"
+    assert criteria["financial_similarity"]["size_basis"] == "mean of available positive cached revenue and total_assets similarities; one available dimension is sufficient"
+    assert criteria["financial_similarity"]["source_provenance"] == "internal cached financials screening inputs only; no receipt-proven filing provenance"
+    assert any(row["criterion"] == "재무 입력 출처 상태" for row in methodology["rows"])
+
+
 @pytest.mark.parametrize("selector", ["", " " * 101])
 def test_peer_selector_bounds_and_finite_weight_validation(selector):
     with pytest.raises(ValidationError):
