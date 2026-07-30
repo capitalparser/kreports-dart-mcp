@@ -59,8 +59,8 @@ Result: `2 failed`.
   unproven, with an explicit Korean provenance limitation. A result with
   chapter rows but no proven annual filing is therefore never usable.
 - Promoted only `proven_annual_filing` rows into MCP `confirmed_facts` and
-  evidence. Legacy handler callers without provenance metadata retain their
-  existing behavior; the domain path always supplies the metadata.
+  evidence. Rows without explicit provenance metadata remain inspectable but
+  cannot become confirmed facts or answer-pack sources.
 - Added `접수번호 검증` to the policy-change answer-pack table and retained all
   changed rows for inspection. Only confirmed facts feed answer-pack sources,
   so invalid receipts are not cited.
@@ -106,3 +106,46 @@ policy/MCP suites above are the task-relevant verification evidence.
 - A valid changed chapter retains the same receipt through domain result,
   handler confirmed fact, MCP envelope evidence, answer-pack table, and
   answer-pack sources.
+
+## Whole-branch review remediation — canonical raw receipt exactness
+
+### RED
+
+Added literal fixtures for a contaminated chapter receipt and a contaminated
+disclosure receipt, then ran:
+
+```sh
+UV_CACHE_DIR=/tmp/kreports-db-hardening-uv-cache \
+  uv run --extra dev python -m pytest \
+    tests/test_policy_changes.py::test_accounting_policy_changes_rejects_contaminated_chapter_receipt \
+    tests/test_policy_changes.py::test_accounting_policy_changes_rejects_contaminated_disclosure_receipt -q
+```
+
+Result: `2 failed`. `valid_annual_filing_receipt` extracted a parent receipt
+from `synthetic-20250301000001-attachment`, allowing both contaminated source
+positions to participate in annual-filing proof.
+
+### GREEN
+
+- Disclosure admission now requires its trimmed raw receipt to equal the
+  canonical 14-digit receipt returned by the shared validator.
+- Chapter admission applies the same exactness rule. A contaminated chapter
+  retains its raw identifier for inspection, is classified
+  `invalid_receipt`, and has no filing source.
+- A contaminated disclosure cannot prove a plain chapter receipt; the chapter
+  remains `unproven_annual_filing`, limited, and source-free.
+
+Validated with:
+
+```sh
+UV_CACHE_DIR=/tmp/kreports-db-hardening-uv-cache \
+  uv run --extra dev python -m pytest \
+    tests/test_policy_changes.py tests/test_mcp_contracts.py \
+    tests/test_mcp_answer_pack.py tests/test_mcp_live_output_evidence.py -q
+UV_CACHE_DIR=/tmp/kreports-db-hardening-uv-cache \
+  uv run --extra dev ruff check \
+    kreports/analysis/policy_changes.py tests/test_policy_changes.py
+git diff --check
+```
+
+Results: `69 passed`; Ruff and diff check clean.

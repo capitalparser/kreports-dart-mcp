@@ -253,3 +253,98 @@ def test_accounting_policy_changes_rejects_receipt_date_mismatched_to_annual_dis
     assert changed["provenance_status"] == "unproven_annual_filing"
     assert changed["filing_source"] is None
     assert out["data_quality"]["status"] == "limited"
+
+
+def test_accounting_policy_changes_rejects_contaminated_chapter_receipt(
+    temp_engine,
+):
+    """A parent receipt embedded in a chapter identifier is not canonical evidence."""
+    import kreports.analysis.policy_changes as policy_changes
+    from kreports.mcp.handlers.auditor import _enrich_policy_change_evidence
+
+    Session = sessionmaker(bind=temp_engine)
+    with Session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add_all([
+            Disclosure(
+                rcept_no="20240301000001", corp_code="001", corp_name="A",
+                disc_date=date(2024, 3, 1), disc_type="A",
+                report_nm="사업보고서 (2023.12)",
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="001", corp_name="A",
+                disc_date=date(2025, 3, 1), disc_type="A",
+                report_nm="사업보고서 (2024.12)",
+            ),
+            AccountingNoteChapter(
+                corp_code="001", bsns_year=2023, fs_div="CFS",
+                rcept_no="20240301000001", source_type="business_report",
+                note_no="2", note_title="정책", section_type="policy",
+                body="기존 정책", body_hash="before", body_length=5,
+            ),
+            AccountingNoteChapter(
+                corp_code="001", bsns_year=2024, fs_div="CFS",
+                rcept_no="synthetic-20250301000001-attachment",
+                source_type="business_report", note_no="2", note_title="정책",
+                section_type="policy", body="변경 정책", body_hash="after",
+                body_length=5,
+            ),
+        ])
+        session.commit()
+
+    out = policy_changes.accounting_policy_changes("001", start_year=2023, end_year=2024)
+    changed = out["changed_items"][0]
+    public = _enrich_policy_change_evidence(out)
+
+    assert changed["rcept_no"] == "synthetic-20250301000001-attachment"
+    assert changed["provenance_status"] == "invalid_receipt"
+    assert changed["filing_source"] is None
+    assert public.get("confirmed_facts") is None
+    assert public["data_quality"]["status"] == "limited"
+
+
+def test_accounting_policy_changes_rejects_contaminated_disclosure_receipt(
+    temp_engine,
+):
+    """A parent receipt embedded in a disclosure identifier cannot prove a chapter."""
+    import kreports.analysis.policy_changes as policy_changes
+    from kreports.mcp.handlers.auditor import _enrich_policy_change_evidence
+
+    Session = sessionmaker(bind=temp_engine)
+    with Session() as session:
+        session.add(Company(corp_code="001", corp_name="A", stock_code="000001", market="KOSPI"))
+        session.add_all([
+            Disclosure(
+                rcept_no="20240301000001", corp_code="001", corp_name="A",
+                disc_date=date(2024, 3, 1), disc_type="A",
+                report_nm="사업보고서 (2023.12)",
+            ),
+            Disclosure(
+                rcept_no="synthetic-20250301000001-attachment",
+                corp_code="001", corp_name="A", disc_date=date(2025, 3, 1),
+                disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            AccountingNoteChapter(
+                corp_code="001", bsns_year=2023, fs_div="CFS",
+                rcept_no="20240301000001", source_type="business_report",
+                note_no="2", note_title="정책", section_type="policy",
+                body="기존 정책", body_hash="before", body_length=5,
+            ),
+            AccountingNoteChapter(
+                corp_code="001", bsns_year=2024, fs_div="CFS",
+                rcept_no="20250301000001", source_type="business_report",
+                note_no="2", note_title="정책", section_type="policy",
+                body="변경 정책", body_hash="after", body_length=5,
+            ),
+        ])
+        session.commit()
+
+    out = policy_changes.accounting_policy_changes("001", start_year=2023, end_year=2024)
+    changed = out["changed_items"][0]
+    public = _enrich_policy_change_evidence(out)
+
+    assert changed["rcept_no"] == "20250301000001"
+    assert changed["provenance_status"] == "unproven_annual_filing"
+    assert changed["filing_source"] is None
+    assert public.get("confirmed_facts") is None
+    assert public["data_quality"]["status"] == "limited"

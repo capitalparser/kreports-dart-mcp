@@ -51,10 +51,12 @@ def _annual_note_filing_sources(
             report_nm = str(row.get("report_nm") or "")
             if f"사업보고서 ({year}." not in report_nm:
                 continue
-            receipt = valid_annual_filing_receipt(row.get("rcept_no"), year)
+            raw_receipt = str(row.get("rcept_no") or "").strip()
+            receipt = valid_annual_filing_receipt(raw_receipt, year)
             disclosure_date = str(row.get("disc_date") or "")[:10].replace("-", "")
             if (
                 receipt is None
+                or raw_receipt != receipt
                 or receipt[:8] != disclosure_date
                 or (year, receipt) in sources
             ):
@@ -78,7 +80,7 @@ def _chapter_provenance(
     year = int(row["bsns_year"])
     raw_receipt = str(row.get("rcept_no") or "").strip()
     receipt = valid_annual_filing_receipt(raw_receipt, year)
-    if receipt is None:
+    if receipt is None or raw_receipt != receipt:
         return raw_receipt, "invalid_receipt", None
 
     annual_source = annual_sources.get((year, receipt))
