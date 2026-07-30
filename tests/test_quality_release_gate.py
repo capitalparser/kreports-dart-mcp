@@ -1,13 +1,19 @@
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from typer.testing import CliRunner
 
 from kreports.db.engine import get_session
 from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
-from kreports.db.models import Company, CompanyYearQuality, DatasetManifest
+from kreports.db.models import (
+    Company,
+    CompanyYearQuality,
+    DatasetManifest,
+    Disclosure,
+    FinancialFactCompact,
+)
 from kreports.quality.company_year_fingerprint import (
     build_quality_evidence_summary,
     quality_input_fingerprint,
@@ -152,6 +158,46 @@ def _seed_quality_row(
         )
 
 
+def _seed_materiality_fact_years(
+    corp_code: str,
+    years: tuple[int, ...],
+    *,
+    fact_receipt: str | None = None,
+    citation_basis: str = "company_year_annual_filing_match",
+    unit: str = "KRW",
+) -> None:
+    """Seed literal compact facts whose receipts prove each annual filing."""
+    with get_session() as session:
+        for year in years:
+            receipt = f"{year + 1}0331{int(corp_code):06d}"
+            session.add(
+                Disclosure(
+                    rcept_no=receipt,
+                    corp_code=corp_code,
+                    corp_name=f"회사-{corp_code}",
+                    disc_date=date(year + 1, 3, 31),
+                    disc_type="A",
+                    report_nm=f"사업보고서 ({year}.12)",
+                )
+            )
+            session.add(
+                FinancialFactCompact(
+                    corp_code=corp_code,
+                    bsns_year=year,
+                    fs_div="CFS",
+                    metric_key="revenue",
+                    metric_name="매출액",
+                    amount=100_000_000,
+                    source_account_id="ifrs-full_Revenue",
+                    source_table="financial_facts",
+                    unit=unit,
+                    period_type="duration",
+                    citation_rcept_no=fact_receipt or receipt,
+                    citation_report_nm=f"사업보고서 ({year}.12)",
+                    citation_basis=citation_basis,
+                    quality_status="usable",
+                )
+            )
 def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     temp_engine,
     monkeypatch,
@@ -209,6 +255,10 @@ def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
             policy_status="missing" if index < 2 else "full_body",
             procedure_status="missing" if index < 2 else "available",
         )
+        _seed_materiality_fact_years(
+            f"{index + 1:08d}",
+            (2023, 2024, 2025),
+        )
     _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
@@ -228,6 +278,134 @@ def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
     ]
 
 
+def test_zero_materiality_benchmark_coverage_degrades_public_and_blocks_auditor_full(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch an auditor-full pass when no proven three-year benchmark exists."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    public = evaluate_release_gate("public_runtime")
+    auditor = evaluate_release_gate("auditor_full")
+
+    assert public["ok"] is True
+    assert public["degraded_features"] == ["materiality_benchmark"]
+    assert auditor["ok"] is False
+    assert auditor["required_failures"] == [
+        "materiality_benchmark_coverage"
+    ]
+    assert auditor["coverage"]["materiality_benchmark"] == {
+        "numerator": 0,
+        "denominator": 1,
+        "coverage_pct": 0.0,
+        "threshold_pct": 95.0,
+    }
+    assert auditor["excluded_populations"]["materiality_benchmark"] == {
+        "not_listed": 0,
+        "outside_core_markets": 0,
+        "zero_proven_years": 1,
+        "one_proven_year": 0,
+        "two_proven_years": 0,
+    }
+
+
+def test_two_proven_years_are_partial_support_not_materiality_coverage(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a metric that counts two years as enough for stability coverage."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2024, 2025))
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["coverage"]["materiality_benchmark"]["numerator"] == 0
+    assert report["excluded_populations"]["materiality_benchmark"][
+        "two_proven_years"
+    ] == 1
+
+
+def test_three_exact_proven_years_pass_materiality_benchmark_coverage(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a release gate that ignores a complete exact annual-filing series."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years("00126380", (2023, 2024, 2025))
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert report["ok"] is True
+    assert report["coverage"]["materiality_benchmark"] == {
+        "numerator": 1,
+        "denominator": 1,
+        "coverage_pct": 100.0,
+        "threshold_pct": 95.0,
+    }
+    assert report["coverage_metadata"]["materiality_benchmark"] == {
+        "window_years": 3,
+        "metric_keys": [
+            "profit_before_tax",
+            "revenue",
+            "assets",
+            "equity",
+        ],
+        "fs_div_policy": "one_of_CFS_or_OFS_per_metric",
+        "unit": "KRW",
+        "citation_basis": "company_year_annual_filing_match",
+        "receipt_policy": "exact_canonical_company_year_annual_filing",
+    }
+
+
+@pytest.mark.parametrize(
+    ("fact_receipt", "citation_basis", "unit"),
+    [
+        ("20260331000999", "company_year_annual_filing_match", "KRW"),
+        (None, "uncitable", "KRW"),
+        (None, "company_year_annual_filing_match", "million_KRW"),
+    ],
+    ids=("wrong_receipt", "wrong_basis", "wrong_unit"),
+)
+def test_unproven_materiality_facts_do_not_count_toward_auditor_coverage(
+    temp_engine,
+    monkeypatch,
+    fact_receipt,
+    citation_basis,
+    unit,
+):
+    """Catch coverage that accepts forged, uncitable, or non-KRW facts."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(corp_code="00126380", grade="A", stock_code="005930")
+    _seed_materiality_fact_years(
+        "00126380",
+        (2023, 2024, 2025),
+        fact_receipt=fact_receipt,
+        citation_basis=citation_basis,
+        unit=unit,
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert "materiality_benchmark_coverage" in report["required_failures"]
+    assert report["coverage"]["materiality_benchmark"]["numerator"] == 0
+
+
 def test_explicit_no_kam_is_excluded_from_procedure_denominator(
     temp_engine,
     monkeypatch,
@@ -244,6 +422,10 @@ def test_explicit_no_kam_is_excluded_from_procedure_denominator(
                 "not_applicable" if no_kam else "available"
             ),
             kam_status="explicit_no_kam" if no_kam else "full_body",
+        )
+        _seed_materiality_fact_years(
+            f"{index + 1:08d}",
+            (2023, 2024, 2025),
         )
     _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
@@ -332,7 +514,7 @@ def test_release_gate_is_read_only_and_does_not_require_dart_key(
     assert report["ok"] is True
     assert statements
     assert all(
-        statement.lstrip().upper().startswith(("SELECT", "PRAGMA"))
+        statement.lstrip().upper().startswith(("SELECT", "WITH", "PRAGMA"))
         for statement in statements
     )
 
@@ -356,6 +538,12 @@ def test_quality_release_gate_cli_supports_json_and_human_output(monkeypatch):
                 "denominator": 20,
                 "coverage_pct": 90.0,
                 "threshold_pct": 95.0,
+            }
+        },
+        "coverage_metadata": {
+            "materiality_benchmark": {
+                "window_years": 3,
+                "receipt_policy": "exact_canonical_company_year_annual_filing",
             }
         },
         "denominators": {"audit_procedure": 20},
@@ -388,6 +576,11 @@ def test_quality_release_gate_cli_supports_json_and_human_output(monkeypatch):
     assert (
         "audit_procedure: explicit_no_kam=3, not_listed=2, "
         "outside_core_markets=1"
+    ) in human_result.stdout
+    assert (
+        "materiality_benchmark: "
+        "{\"receipt_policy\": \"exact_canonical_company_year_annual_filing\", "
+        "\"window_years\": 3}"
     ) in human_result.stdout
 
 

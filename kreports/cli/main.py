@@ -2326,6 +2326,18 @@ def quality_release_gate_cmd(
                 f"({values['coverage_pct']}%, "
                 f"threshold {values['threshold_pct']}%)"
             )
+        coverage_metadata = report.get("coverage_metadata") or {}
+        if coverage_metadata:
+            typer.echo("Coverage policy:")
+            for feature, values in sorted(coverage_metadata.items()):
+                typer.echo(
+                    f"- {feature}: "
+                    + json.dumps(
+                        values,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
         typer.echo("Excluded populations:")
         for feature, values in sorted(
             report["excluded_populations"].items()

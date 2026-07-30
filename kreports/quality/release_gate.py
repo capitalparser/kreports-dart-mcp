@@ -28,6 +28,22 @@ SUPPORTED_PROFILES = (PROFILE_PUBLIC_RUNTIME, PROFILE_AUDITOR_FULL)
 EXPECTED_TOOL_COUNT = 34
 FEATURE_COVERAGE_THRESHOLD_PCT = 95.0
 FEATURE_COVERAGE_THRESHOLD_BASIS_POINTS = 9500
+MATERIALITY_BENCHMARK_WINDOW_YEARS = 3
+MATERIALITY_BENCHMARK_METRICS = (
+    "profit_before_tax",
+    "revenue",
+    "assets",
+    "equity",
+)
+_MATERIALITY_CITATION_BASIS = "company_year_annual_filing_match"
+_MATERIALITY_COVERAGE_METADATA = {
+    "window_years": MATERIALITY_BENCHMARK_WINDOW_YEARS,
+    "metric_keys": list(MATERIALITY_BENCHMARK_METRICS),
+    "fs_div_policy": "one_of_CFS_or_OFS_per_metric",
+    "unit": "KRW",
+    "citation_basis": _MATERIALITY_CITATION_BASIS,
+    "receipt_policy": "exact_canonical_company_year_annual_filing",
+}
 STALE_BACKFILL_AGE = timedelta(hours=1)
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
 REQUIRED_TABLES = (
@@ -59,6 +75,7 @@ class ReleaseGateReport(TypedDict):
     tool_count: int
     coverage_year: int | None
     coverage: dict[str, CoverageResult]
+    coverage_metadata: dict[str, dict[str, Any]]
     denominators: dict[str, int]
     excluded_populations: dict[str, dict[str, int]]
 
@@ -66,10 +83,11 @@ class ReleaseGateReport(TypedDict):
 def _empty_quality_contract() -> tuple[
     int | None,
     dict[str, CoverageResult],
+    dict[str, dict[str, Any]],
     dict[str, int],
     dict[str, dict[str, int]],
 ]:
-    return None, {}, {}, {}
+    return None, {}, {}, {}, {}
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -360,12 +378,154 @@ def _coverage_result(numerator: int, denominator: int) -> CoverageResult:
     }
 
 
+def _materiality_benchmark_coverage(
+    session: Any,
+    *,
+    table_names: set[str],
+    coverage_year: int,
+    core_denominator: int,
+) -> tuple[CoverageResult, dict[str, int]]:
+    """Count only one-metric, one-statement three-year proven series.
+
+    This is deliberately a bounded SQL aggregation rather than a loop of MCP
+    calls.  A compact row is counted only when its exact (not parent/child)
+    receipt equals a matching annual disclosure for the same company and year.
+    """
+    excluded = {
+        "zero_proven_years": core_denominator,
+        "one_proven_year": 0,
+        "two_proven_years": 0,
+    }
+    required_tables = {"companies", "disclosures", "financial_facts_compact"}
+    required_columns = {
+        "corp_code",
+        "bsns_year",
+        "fs_div",
+        "metric_key",
+        "amount",
+        "source_account_id",
+        "source_table",
+        "unit",
+        "period_type",
+        "citation_rcept_no",
+        "citation_report_nm",
+        "citation_basis",
+        "quality_status",
+    }
+    if not required_tables.issubset(table_names):
+        return _coverage_result(0, core_denominator), excluded
+    columns = {
+        str(column["name"])
+        for column in inspect(session.get_bind()).get_columns(
+            "financial_facts_compact"
+        )
+    }
+    if not required_columns.issubset(columns):
+        return _coverage_result(0, core_denominator), excluded
+
+    start_year = coverage_year - MATERIALITY_BENCHMARK_WINDOW_YEARS + 1
+    metrics = ", ".join(
+        f":materiality_metric_{index}"
+        for index in range(len(MATERIALITY_BENCHMARK_METRICS))
+    )
+    result = session.execute(
+        text(
+            f"""
+            WITH listed AS (
+                SELECT corp_code
+                FROM companies
+                WHERE stock_code IS NOT NULL
+                  AND market IN ('KOSPI', 'KOSDAQ')
+            ),
+            qualified AS (
+                SELECT f.corp_code, f.bsns_year, f.fs_div, f.metric_key
+                FROM financial_facts_compact AS f
+                JOIN listed AS l ON l.corp_code=f.corp_code
+                JOIN disclosures AS d
+                  ON d.corp_code=f.corp_code
+                 AND d.rcept_no=f.citation_rcept_no
+                WHERE f.bsns_year BETWEEN :materiality_start_year
+                    AND :materiality_coverage_year
+                  AND f.fs_div IN ('CFS', 'OFS')
+                  AND f.metric_key IN ({metrics})
+                  AND f.amount IS NOT NULL
+                  AND TRIM(COALESCE(f.source_account_id, '')) != ''
+                  AND f.source_table IN ('financial_facts', 'financials')
+                  AND f.unit='KRW'
+                  AND f.quality_status='usable'
+                  AND f.citation_basis=:materiality_citation_basis
+                  AND LENGTH(f.citation_rcept_no)=14
+                  AND f.citation_rcept_no NOT GLOB '*[^0-9]*'
+                  AND SUBSTR(f.citation_rcept_no, 1, 8)=
+                      STRFTIME('%Y%m%d', d.disc_date)
+                  AND f.citation_report_nm=d.report_nm
+                  AND d.report_nm LIKE
+                      ('%사업보고서 (' || f.bsns_year || '.%')
+                  AND (
+                      (f.metric_key IN ('profit_before_tax', 'revenue')
+                       AND f.period_type='duration')
+                      OR
+                      (f.metric_key IN ('assets', 'equity')
+                       AND f.period_type='instant')
+                  )
+            ),
+            metric_support AS (
+                SELECT corp_code, fs_div, metric_key,
+                       COUNT(DISTINCT bsns_year) AS proven_year_count
+                FROM qualified
+                GROUP BY corp_code, fs_div, metric_key
+            ),
+            company_support AS (
+                SELECT l.corp_code,
+                       COALESCE(MAX(m.proven_year_count), 0)
+                           AS proven_year_count
+                FROM listed AS l
+                LEFT JOIN metric_support AS m ON m.corp_code=l.corp_code
+                GROUP BY l.corp_code
+            )
+            SELECT
+                COALESCE(SUM(CASE
+                    WHEN proven_year_count >= :materiality_window_years
+                    THEN 1 ELSE 0 END), 0) AS numerator,
+                COALESCE(SUM(CASE
+                    WHEN proven_year_count=0 THEN 1 ELSE 0 END), 0)
+                    AS zero_proven_years,
+                COALESCE(SUM(CASE
+                    WHEN proven_year_count=1 THEN 1 ELSE 0 END), 0)
+                    AS one_proven_year,
+                COALESCE(SUM(CASE
+                    WHEN proven_year_count=2 THEN 1 ELSE 0 END), 0)
+                    AS two_proven_years
+            FROM company_support
+            """
+        ),
+        {
+            "materiality_start_year": start_year,
+            "materiality_coverage_year": coverage_year,
+            "materiality_citation_basis": _MATERIALITY_CITATION_BASIS,
+            "materiality_window_years": MATERIALITY_BENCHMARK_WINDOW_YEARS,
+            **{
+                f"materiality_metric_{index}": metric
+                for index, metric in enumerate(MATERIALITY_BENCHMARK_METRICS)
+            },
+        },
+    ).mappings().one()
+    numerator = int(result["numerator"] or 0)
+    excluded = {
+        "zero_proven_years": int(result["zero_proven_years"] or 0),
+        "one_proven_year": int(result["one_proven_year"] or 0),
+        "two_proven_years": int(result["two_proven_years"] or 0),
+    }
+    return _coverage_result(numerator, core_denominator), excluded
+
+
 def _quality_coverage(
     manifest_year: int | None,
     session_scope=get_session,
 ) -> tuple[
     int | None,
     dict[str, CoverageResult],
+    dict[str, dict[str, Any]],
     dict[str, int],
     dict[str, dict[str, int]],
 ]:
@@ -477,6 +637,14 @@ def _quality_coverage(
             ).scalar()
             or 0
         )
+        materiality_coverage, materiality_exclusions = (
+            _materiality_benchmark_coverage(
+                session,
+                table_names=table_names,
+                coverage_year=coverage_year,
+                core_denominator=core_denominator,
+            )
+        )
 
     common_exclusions = {
         "not_listed": not_listed,
@@ -495,6 +663,7 @@ def _quality_coverage(
             procedure_numerator,
             procedure_denominator,
         ),
+        "materiality_benchmark": materiality_coverage,
     }
     denominators = {
         feature: result["denominator"]
@@ -507,8 +676,18 @@ def _quality_coverage(
             **common_exclusions,
             "explicit_no_kam": procedure_not_applicable,
         },
+        "materiality_benchmark": {
+            **common_exclusions,
+            **materiality_exclusions,
+        },
     }
-    return coverage_year, coverage, denominators, excluded_populations
+    return (
+        coverage_year,
+        coverage,
+        {"materiality_benchmark": dict(_MATERIALITY_COVERAGE_METADATA)},
+        denominators,
+        excluded_populations,
+    )
 
 
 def _tool_count() -> int:
@@ -524,7 +703,7 @@ def runtime_db_unavailable_report(
     profile: str = PROFILE_PUBLIC_RUNTIME,
 ) -> ReleaseGateReport:
     """Stable fail-closed response for readiness inspection failures."""
-    coverage_year, coverage, denominators, exclusions = (
+    coverage_year, coverage, coverage_metadata, denominators, exclusions = (
         _empty_quality_contract()
     )
     return {
@@ -537,6 +716,7 @@ def runtime_db_unavailable_report(
         "tool_count": _tool_count(),
         "coverage_year": coverage_year,
         "coverage": coverage,
+        "coverage_metadata": coverage_metadata,
         "denominators": denominators,
         "excluded_populations": exclusions,
     }
@@ -576,6 +756,7 @@ def evaluate_release_gate(
         (
             coverage_year,
             coverage,
+            coverage_metadata,
             denominators,
             excluded_populations,
         ) = _quality_coverage(manifest_year, session_scope)
@@ -603,6 +784,7 @@ def evaluate_release_gate(
     for coverage_key, public_key in (
         ("accounting_policy", "accounting_policy"),
         ("audit_procedure", "audit_procedure"),
+        ("materiality_benchmark", "materiality_benchmark"),
     ):
         if _below_threshold(coverage.get(coverage_key)):
             degraded_features.append(public_key)
@@ -642,6 +824,8 @@ def evaluate_release_gate(
             required_failures.append("accounting_policy_coverage")
         if "audit_procedure" in degraded_features:
             required_failures.append("audit_procedure_coverage")
+        if "materiality_benchmark" in degraded_features:
+            required_failures.append("materiality_benchmark_coverage")
 
     required_failures = sorted(set(required_failures))
     degraded_features = sorted(set(degraded_features))
@@ -655,6 +839,7 @@ def evaluate_release_gate(
         "tool_count": tool_count,
         "coverage_year": coverage_year,
         "coverage": coverage,
+        "coverage_metadata": coverage_metadata,
         "denominators": denominators,
         "excluded_populations": excluded_populations,
     }

@@ -78,6 +78,54 @@ def test_release_manifest_rejects_missing_unknown_and_malformed_fields():
         ReleaseManifest.model_validate(malformed)
 
 
+def test_release_manifest_preserves_materiality_coverage_metadata():
+    """Catch a release proof that drops the materiality denominator policy."""
+    from kreports.release_artifact import ReleaseManifest
+
+    payload = _minimal_manifest_payload()
+    payload["release_gate"]["feature_coverage"] = {
+        "materiality_benchmark": {
+            "numerator": 19,
+            "denominator": 20,
+            "coverage_pct": 95.0,
+            "threshold_pct": 95.0,
+        }
+    }
+    payload["release_gate"]["coverage_metadata"] = {
+        "materiality_benchmark": {
+            "window_years": 3,
+            "receipt_policy": "exact_canonical_company_year_annual_filing",
+        }
+    }
+    payload["release_gate"]["coverage_denominators"] = {
+        "materiality_benchmark": 20
+    }
+    payload["release_gate"]["coverage_exclusions"] = {
+        "materiality_benchmark": {
+            "two_proven_years": 1,
+            "zero_proven_years": 0,
+        }
+    }
+
+    parsed = ReleaseManifest.model_validate(payload)
+
+    assert parsed.release_gate.coverage_metadata == {
+        "materiality_benchmark": {
+            "window_years": 3,
+            "receipt_policy": "exact_canonical_company_year_annual_filing",
+        }
+    }
+    assert parsed.release_gate.coverage_denominators == {
+        "materiality_benchmark": 20
+    }
+    assert parsed.release_gate.coverage_exclusions == {
+        "materiality_benchmark": {
+            "two_proven_years": 1,
+            "zero_proven_years": 0,
+        }
+    }
+
+
 def _create_contract_db(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:

@@ -263,6 +263,11 @@ class ReleaseGateEvidence(_StrictModel):
     degraded_features: list[StrictStr]
     coverage_year: StrictInt | None
     feature_coverage: dict[StrictStr, Any]
+    coverage_metadata: dict[StrictStr, Any] = Field(default_factory=dict)
+    coverage_denominators: dict[StrictStr, StrictInt] = Field(
+        default_factory=dict
+    )
+    coverage_exclusions: dict[StrictStr, Any] = Field(default_factory=dict)
     feature_grades: dict[StrictStr, Any]
 
     @model_validator(mode="after")
@@ -1482,6 +1487,11 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
             ),
             "coverage_year": coverage_year,
             "feature_coverage": gate_report.get("coverage") or {},
+            "coverage_metadata": gate_report.get("coverage_metadata") or {},
+            "coverage_denominators": gate_report.get("denominators") or {},
+            "coverage_exclusions": (
+                gate_report.get("excluded_populations") or {}
+            ),
             "feature_grades": grades,
         },
         "inline_raw_count": inline_raw_count,
@@ -1590,6 +1600,9 @@ def evaluate_artifact_readiness(
         "tool_count": stored.tool_contract.tool_count,
         "coverage_year": gate.coverage_year,
         "coverage": gate.feature_coverage,
+        "coverage_metadata": gate.coverage_metadata,
+        "denominators": gate.coverage_denominators,
+        "excluded_populations": gate.coverage_exclusions,
         "feature_grades": gate.feature_grades,
     }
 
@@ -1625,6 +1638,9 @@ def _unavailable_artifact_readiness(
         "tool_count": FROZEN_TOOL_COUNT,
         "coverage_year": None,
         "coverage": {},
+        "coverage_metadata": {},
+        "denominators": {},
+        "excluded_populations": {},
         "feature_grades": {},
     }
 
