@@ -348,7 +348,7 @@ def test_quality_release_gate_cli_supports_json_and_human_output(monkeypatch):
         "dataset_version": "release-v1",
         "required_failures": ["audit_procedure_coverage"],
         "degraded_features": ["audit_procedure"],
-        "tool_count": 33,
+        "tool_count": 34,
         "coverage_year": 2025,
         "coverage": {
             "audit_procedure": {
