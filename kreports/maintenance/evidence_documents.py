@@ -354,7 +354,7 @@ def build_evidence_text(
         return "", 0
 
     header = [
-        f"# Evidence document",
+        "# Evidence document",
         f"- corp_code: {corp_code}",
         f"- bsns_year: {bsns_year}",
         f"- source_type: {source_type}",

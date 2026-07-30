@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
 
 from kreports.db import engine as engine_module
 from kreports.db.models import Base, Company

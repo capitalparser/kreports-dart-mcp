@@ -8,8 +8,6 @@ Phase 0 pure analytics 레이어 완결성 확인:
   - get_financial_snapshot / score_going_concern / get_audit_history 실데이터
   - NaN/inf → None 변환
 """
-import math
-
 import pandas as pd
 import pytest
 

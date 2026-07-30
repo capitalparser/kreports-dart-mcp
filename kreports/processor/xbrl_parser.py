@@ -18,7 +18,6 @@ import io
 import logging
 import re
 import zipfile
-from datetime import date
 from lxml import etree
 
 logger = logging.getLogger(__name__)

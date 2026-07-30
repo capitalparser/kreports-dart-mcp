@@ -11,7 +11,6 @@ test_policy_persistence.py — AccountingPolicyItem 모델·collector·idempoten
 """
 from __future__ import annotations
 
-import hashlib
 from unittest.mock import patch
 
 import pytest
@@ -19,8 +18,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from kreports.db import engine as engine_module
-from kreports.db.models import AccountingNoteChapter, AccountingPolicyItem, Base
-from kreports.collector import policy_collector
+from kreports.db.models import AccountingPolicyItem, Base
 from kreports.collector.policy_collector import (
     _sha1,
     collect_policies_for_company,

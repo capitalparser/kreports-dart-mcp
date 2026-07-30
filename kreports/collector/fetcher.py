@@ -1,4 +1,3 @@
-import asyncio
 import html
 import logging
 import time

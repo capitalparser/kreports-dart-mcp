@@ -1,4 +1,12 @@
-from kreports.analysis.peer import classify_sector, SectorGroup
+import pytest
+
+from kreports.analysis.peer import (
+    PeerResolution,
+    SectorGroup,
+    classify_sector,
+    confidence_band,
+    resolve_peers,
+)
 
 
 def test_classify_sector_financial():
@@ -29,9 +37,6 @@ def test_classify_sector_empty_or_invalid():
     assert classify_sector("abc") == SectorGroup.UNKNOWN
 
 
-from kreports.analysis.peer import PeerResolution, confidence_band
-
-
 def test_confidence_band_thresholds():
     assert confidence_band(50) == "high"
     assert confidence_band(20) == "high"
@@ -53,10 +58,6 @@ def test_peer_resolution_dataclass_defaults():
     assert pr.confidence == "insufficient"  # n<5
     assert pr.size_bucket_applied is None
     assert pr.excluded_categories == ["financial", "holding", "real_estate"]
-
-
-import pytest
-from kreports.analysis.peer import resolve_peers
 
 
 def test_resolve_peers_samsung_uses_p3_general():

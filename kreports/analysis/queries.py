@@ -1736,33 +1736,6 @@ def get_cached_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "
         }
 
 
-def get_cached_accounting_policy(corp_code: str, bsns_year: int, fs_div: str = "CFS") -> dict | None:
-    with get_session() as session:
-        rows = (
-            session.query(AccountingPolicyItem)
-            .filter_by(corp_code=corp_code, bsns_year=bsns_year, fs_div=fs_div)
-            .order_by(AccountingPolicyItem.item_key.asc())
-            .all()
-        )
-        if not rows:
-            return None
-        return {
-            "corp_code": corp_code,
-            "bsns_year": bsns_year,
-            "fs_div": fs_div,
-            "rcept_no": rows[0].rcept_no,
-            "items": {
-                row.item_key: {
-                    "heading": row.heading,
-                    "body": row.body,
-                    "body_length": row.body_length,
-                    "body_hash": row.body_hash,
-                }
-                for row in rows
-            }
-        }
-
-
 # 토픽 chapter label → item_key 매핑. 포함 검사(in) 기준.
 # 구체적인 키워드가 먼저 와야 일반 키워드 매칭을 덮어쓰지 않음.
 _TOPIC_CHAPTER_MAP: list[tuple[tuple[str, ...], str]] = [

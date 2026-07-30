@@ -307,7 +307,11 @@ def extract_top_risk_highlight(sections: dict) -> Optional[str]:
 
     body = risk_section.get("body_text", "")
     # 제목 행 건너뛰기
-    lines = [l.strip() for l in body.split("\n") if len(l.strip()) > 30]
+    lines = [
+        line.strip()
+        for line in body.split("\n")
+        if len(line.strip()) > 30
+    ]
     if not lines:
         return None
 
