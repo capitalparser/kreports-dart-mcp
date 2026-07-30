@@ -488,6 +488,16 @@ def _has_disclosure_document(result: dict[str, Any]) -> bool:
     )
 
 
+def _has_subsidiary_result(result: dict[str, Any]) -> bool:
+    if _has_result_rows(result, "subsidiaries"):
+        return True
+    graph = result.get("group_graph")
+    return (
+        isinstance(graph, dict)
+        and _has_result_rows(graph, "entities")
+    )
+
+
 # Each predicate is bound to a real handler result shape and explicitly rejects
 # its no-data shape.  Configuration, subject metadata, selection policy, and
 # cohort descriptors never establish answer usability.
@@ -504,7 +514,7 @@ _TOOL_PURPOSE_PREDICATES: dict[str, ToolPurposePredicate] = {
     "detect_restatement": lambda result: _has_result_rows(result, "restatements"),
     "get_accounting_policy": _has_policy_item_result,
     "get_audit_history": lambda result: _has_result_rows(result, "history"),
-    "get_subsidiary_auditors": lambda result: _has_result_rows(result, "subsidiaries"),
+    "get_subsidiary_auditors": _has_subsidiary_result,
     "compare_to_industry": lambda result: (
         _has_result_rows(result, "peers")
         or _has_positive_count(result, "n")

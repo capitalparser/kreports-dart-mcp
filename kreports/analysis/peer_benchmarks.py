@@ -1921,6 +1921,7 @@ def compare_peer_audit_report_matters(
     counts = {
         key: {
             "subject_count": 0,
+            "subject_signal_count": 0,
             "peer_companies_with_section": 0,
             "total_sections": 0,
         }
@@ -1937,6 +1938,8 @@ def compare_peer_audit_report_matters(
         counts[key]["total_sections"] += 1
         if row["corp_code"] == corp_code:
             counts[key]["subject_count"] += 1
+            if row.get("acceptance_signal") is True:
+                counts[key]["subject_signal_count"] += 1
         elif row["corp_code"] in peer_codes:
             peer_corp_by_key[key].add(row["corp_code"])
         by_corp.setdefault(row["corp_code"], []).append(row)

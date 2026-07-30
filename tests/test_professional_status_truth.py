@@ -71,6 +71,24 @@ def test_registered_business_records_keep_a_usable_status():
     assert out["answer_pack"]["summary"]["status"] == "usable"
 
 
+def test_canonical_group_graph_records_keep_a_usable_status():
+    out = enrich_answer_response("get_subsidiary_auditors", {
+        "subject": {"corp_name": "A"},
+        "subsidiaries": [],
+        "group_graph": {
+            "entities": [{
+                "name": "B",
+                "relation": "subsidiary",
+                "qsc_status": "undetermined",
+            }],
+        },
+        "data_quality": {"status": "usable"},
+    })
+
+    assert out["quality_status"] == "usable"
+    assert out["answer_pack"]["summary"]["status"] == "usable"
+
+
 @pytest.mark.parametrize("payload", [
     {"items": ["x"]},
     {"inputs": {"debug": "x"}},
