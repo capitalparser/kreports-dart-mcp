@@ -42,6 +42,12 @@ PUBLIC_ACCEPTANCE_LABELS = {
     "audit_report_emphasis_paragraph_present": "감사보고서 강조사항 문단이 확인됩니다.",
     "audit_report_going_concern_paragraph_present": "계속기업 관련 문단이 확인됩니다.",
 }
+PUBLIC_AUDIT_MATTER_LABELS = {
+    "basis_for_opinion": "의견근거",
+    "emphasis": "강조사항",
+    "going_concern": "계속기업",
+    "other_matter": "기타사항",
+}
 
 
 class AcceptanceRequirementV1(BaseModel):
@@ -311,6 +317,67 @@ def _canonical_receipt(row: dict[str, Any]) -> None:
     row["rcept_no"] = parent_rcept_no(str(row.get("rcept_no") or ""))
 
 
+def _matter_confirmed_facts(
+    subject: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    year: int,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        receipt = parent_rcept_no(str(row.get("rcept_no") or ""))
+        category = str(
+            row.get("matter_category")
+            or row.get("section_key")
+            or ""
+        )
+        excerpt = str(row.get("body_excerpt") or "").strip()[:260]
+        corp_code = str(
+            row.get("corp_code")
+            or subject.get("corp_code")
+            or ""
+        )
+        corp_name = str(
+            row.get("corp_name")
+            or subject.get("corp_name")
+            or corp_code
+        )
+        identity = (corp_code, category, receipt or "")
+        if (
+            not receipt
+            or category not in PUBLIC_AUDIT_MATTER_LABELS
+            or not excerpt
+            or identity in seen
+        ):
+            continue
+        seen.add(identity)
+        facts.append({
+            "statement": (
+                f"{year}년 {corp_name} 감사보고서에서 "
+                f"{PUBLIC_AUDIT_MATTER_LABELS[category]} 문단이 확인됩니다."
+            ),
+            "source": {
+                "corp_code": corp_code,
+                "corp_name": corp_name,
+                "report_nm": "감사보고서",
+                "bsns_year": year,
+                "rcept_no": receipt,
+                "section_title": (
+                    row.get("section_title")
+                    or PUBLIC_AUDIT_MATTER_LABELS[category]
+                ),
+                "section_key": category,
+                "source_table": "report_sections.audit_report",
+            },
+            "excerpt": excerpt,
+        })
+        if len(facts) >= limit:
+            break
+    return facts
+
+
 def compare_peer_kam_topics(
     company: str,
     year: int = 2025,
@@ -485,6 +552,25 @@ def compare_peer_audit_report_matters(
         counts[key] = bucket
     result["subject_matters"] = subject_matters
     result["matter_counts"] = counts
+    peer_matter_rows = [
+        row
+        for rows in (
+            peer_samples.values()
+            if isinstance(peer_samples, dict)
+            else []
+        )
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict)
+    ]
+    result["confirmed_facts"] = _matter_confirmed_facts(
+        (
+            result.get("subject")
+            if isinstance(result.get("subject"), dict)
+            else {}
+        ),
+        [*subject_matters, *peer_matter_rows],
+        year=year,
+    )
     return result
 
 

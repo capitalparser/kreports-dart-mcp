@@ -956,9 +956,14 @@ def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):
         "data_quality": {"status": "usable"},
     }
     matter_legacy = {
+        "subject": {"corp_code": "001", "corp_name": "대상회사"},
         "subject_matters": [{
+            "corp_code": "001",
+            "corp_name": "대상회사",
             "rcept_no": f"{receipt}_001_xml",
+            "source_type": "audit_report",
             "section_key": "emphasis",
+            "section_title": "강조사항",
             "matter_category": "emphasis",
             "body_excerpt": "감사인의 책임과 경영진과의 커뮤니케이션 사항",
         }],
@@ -995,12 +1000,56 @@ def test_auditor_owned_peer_wrappers_canonicalize_and_fail_closed(monkeypatch):
     assert matters["subject_matters"][0]["rcept_no"] == receipt
     assert matters["peer_matter_samples"]["002"][0]["rcept_no"] == receipt
     assert matters["matter_counts"]["emphasis"]["subject_signal_count"] == 0
+    assert matters["confirmed_facts"] == [{
+        "statement": "2025년 대상회사 감사보고서에서 강조사항 문단이 확인됩니다.",
+        "source": {
+            "corp_code": "001",
+            "corp_name": "대상회사",
+            "report_nm": "감사보고서",
+            "bsns_year": 2025,
+            "rcept_no": receipt,
+            "section_title": "강조사항",
+            "section_key": "emphasis",
+            "source_table": "report_sections.audit_report",
+        },
+        "excerpt": "감사인의 책임과 경영진과의 커뮤니케이션 사항",
+    }]
     assert (kam_legacy, matter_legacy) == originals
     assert auditor_handlers.compare_peer_kam_topics is auditor_decisions.compare_peer_kam_topics
     assert (
         auditor_handlers.compare_peer_audit_report_matters
         is auditor_decisions.compare_peer_audit_report_matters
     )
+
+
+def test_peer_matter_public_table_dedupes_identical_visible_rows():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    duplicate = {
+        "corp_code": "001",
+        "corp_name": "대상회사",
+        "rcept_no": "20260311000006",
+        "matter_category": "other_matter",
+        "acceptance_signal": True,
+    }
+    pack = build_answer_pack(
+        "compare_peer_audit_report_matters",
+        {
+            "subject": {"corp_code": "001", "corp_name": "대상회사"},
+            "subject_matters": [
+                {**duplicate, "dcm_no": "20260311000006_00760"},
+                {**duplicate, "dcm_no": "20260311000006_00761"},
+            ],
+            "peer_matter_samples": {},
+            "data_quality": {"status": "usable"},
+        },
+    )
+
+    table = next(
+        item for item in pack["tables"]
+        if item["id"] == "peer_audit_report_matters"
+    )
+    assert len(table["rows"]) == 1
 
 
 def test_acceptance_recomputes_matter_signals_from_hardened_counts(monkeypatch):

@@ -233,45 +233,45 @@ def test_samsung_fy2025_professional_public_result_matrix(immutable_live_databas
     if schema_gap:
         for tool_name in affected:
             out = outputs[tool_name]
-            assert out["data_quality"]["status"] == "error"
-            assert out["answer_pack"]["tables"][0]["id"] == "availability"
-        assert all(token not in rendered for token in (
-            "no such table", "no such column", "kam_items", "kam_item_id",
-            "audit_procedure_items", "OperationalError",
-        ))
+            assert out["data_quality"]["status"] == "limited"
+            assert out.get("error") is None
+            assert out.get("confirmed_facts")
+            assert (out.get("answer_pack") or {}).get("sources")
+        for tool_name in (
+            "get_audit_report_sections",
+            "get_kam_lifecycle",
+            "compare_peer_kam_topics",
+        ):
+            quality = outputs[tool_name]["data_quality"]
+            assert quality.get("semantic_complete") is False
+            assert quality.get("timeline_status") == "usable"
     else:
         assert all(outputs[name]["data_quality"]["status"] != "error" for name in affected)
+    assert all(
+        token not in rendered
+        for token in (
+            "no such table",
+            "no such column",
+            "OperationalError",
+        )
+    )
+    for tool_name, output in outputs.items():
+        pack = output.get("answer_pack") or {}
+        resource_uri = pack.get("resource_uri")
+        if not isinstance(resource_uri, str):
+            continue
+        resource = read_resource(resource_uri)
+        resource_rendered = json.dumps(resource, ensure_ascii=False)
+        assert output["data_quality"]["status"] in resource_rendered
         assert all(
-            token not in rendered
+            token not in resource_rendered
             for token in (
                 "no such table",
                 "no such column",
                 "OperationalError",
-                "kam_items",
-                "kam_item_id",
-                "audit_procedure_items",
             )
         )
-        for tool_name, output in outputs.items():
-            pack = output.get("answer_pack") or {}
-            resource_uri = pack.get("resource_uri")
-            if not isinstance(resource_uri, str):
-                continue
-            resource = read_resource(resource_uri)
-            resource_rendered = json.dumps(resource, ensure_ascii=False)
-            assert output["data_quality"]["status"] in resource_rendered
-            assert all(
-                token not in resource_rendered
-                for token in (
-                    "no such table",
-                    "no such column",
-                    "OperationalError",
-                    "kam_items",
-                    "kam_item_id",
-                    "audit_procedure_items",
-                )
-            )
-            for source in pack.get("sources") or []:
-                receipt = source.get("rcept_no") if isinstance(source, dict) else None
-                if receipt:
-                    assert str(receipt) in resource_rendered, tool_name
+        for source in pack.get("sources") or []:
+            receipt = source.get("rcept_no") if isinstance(source, dict) else None
+            if receipt:
+                assert str(receipt) in resource_rendered, tool_name

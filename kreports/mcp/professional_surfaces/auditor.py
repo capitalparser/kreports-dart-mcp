@@ -474,6 +474,7 @@ def _matter_pack(
 
     pack = _base_pack(f"{_subject_label(result)} 감사보고서 사항", result)
     rows = []
+    visible_row_keys: set[tuple[Any, ...]] = set()
     matter_sections = result.get("subject_matters")
     if not isinstance(matter_sections, list):
         matter_sections = [
@@ -517,6 +518,16 @@ def _matter_pack(
                     or default_corp_name
                     or role
                 )
+            visible_key = tuple(row.get(field) for field in (
+                "role",
+                "corp_name",
+                "category",
+                "signal",
+                "rcept_no",
+            ))
+            if visible_key in visible_row_keys:
+                continue
+            visible_row_keys.add(visible_key)
             rows.append(row)
 
     append_rows(
