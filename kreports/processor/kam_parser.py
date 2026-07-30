@@ -10,6 +10,8 @@ import re
 
 PARSER_VERSION = "v1"
 MAX_INPUT_CHARS = 2_000_000
+_PARSER_TITLE_TAG = "kam-title"
+_TITLE_TAG_RE = re.compile(r"<(?P<close>/?)title(?=[\s/>])", re.IGNORECASE)
 
 _TITLE_MARKER_RE = re.compile(
     r"^\s*(?:(?P<arabic>\(?\d{1,2}\)?)[.)]|"
@@ -325,10 +327,87 @@ def _input_structure_limitations(full_text: str) -> list[str]:
     return limitations
 
 
+def _htmlparser_safe_markup(value: str) -> tuple[str, list[str]]:
+    """Preserve DART pseudo-HTML boundaries before feeding ``HTMLParser``.
+
+    ``HTMLParser`` treats HTML ``TITLE`` as a CDATA element, although DART
+    documents frequently use it as a structural wrapper containing nested
+    pseudo-HTML.  The adapter changes only that token name and converts valid
+    XML-style CDATA payloads to literal text; it never strips source text.
+    """
+    limitations: list[str] = []
+    parts: list[str] = []
+    cursor = 0
+    lower_value = value.lower()
+    while cursor < len(value):
+        start = value.find("<", cursor)
+        if start < 0:
+            parts.append(value[cursor:])
+            break
+        parts.append(value[cursor:start])
+        remaining = value[start:]
+        lower_remaining = lower_value[start:]
+        if lower_remaining.startswith("<!--"):
+            end = value.find("-->", start + 4)
+            if end < 0:
+                parts.append(value[start:])
+                break
+            parts.append(value[start:end + 3])
+            cursor = end + 3
+            continue
+        if lower_remaining.startswith("<?"):
+            end = value.find("?>", start + 2)
+            if end < 0:
+                parts.append(value[start:])
+                break
+            parts.append(value[start:end + 2])
+            cursor = end + 2
+            continue
+        if lower_remaining.startswith("<!doctype"):
+            end = value.find(">", start + len("<!doctype"))
+            if end < 0:
+                parts.append(value[start:])
+                break
+            parts.append(value[start:end + 1])
+            cursor = end + 1
+            continue
+        script_open = re.match(r"<script\b[^>]*>", value[start:], re.IGNORECASE)
+        if script_open:
+            content_start = start + script_open.end()
+            script_close = re.search(r"</script\s*>", value[content_start:], re.IGNORECASE)
+            if script_close is None:
+                parts.append(value[start:])
+                break
+            end = content_start + script_close.end()
+            parts.append(value[start:end])
+            cursor = end
+            continue
+        if remaining[:9].lower() == "<![cdata[":
+            end = value.find("]]>", start + 9)
+            if end < 0:
+                limitations.append("malformed_cdata")
+                parts.append(escape(value[start:]))
+                cursor = len(value)
+                break
+            parts.append(escape(value[start + 9:end]))
+            cursor = end + 3
+            continue
+        if remaining[:8].lower() == "<![cdata":
+            limitations.append("malformed_cdata")
+        parts.append("<")
+        cursor = start + 1
+    normalized = _TITLE_TAG_RE.sub(
+        lambda match: f"<{match.group('close')}{_PARSER_TITLE_TAG}",
+        "".join(parts),
+    )
+    return normalized, list(dict.fromkeys(limitations))
+
+
 def _structured_lines(full_text: str) -> _StructureParseResult:
     bounded = (full_text or "")[:MAX_INPUT_CHARS]
+    bounded, markup_limitations = _htmlparser_safe_markup(bounded)
     lines: list[StructuredLine] = []
-    limitations: list[str] = []
+    limitations: list[str] = list(markup_limitations)
     tag_stack: list[_TagFrame] = []
     buffer: list[str] = []
     block_id = 0
@@ -545,6 +624,8 @@ def _structured_lines(full_text: str) -> _StructureParseResult:
             attrs: list[tuple[str, str | None]],
         ) -> None:
             tag = tag.lower()
+            if tag == _PARSER_TITLE_TAG:
+                tag = "title"
             raw_tag = self.get_starttag_text() or ""
             if re.search(r"/\s*>$", raw_tag):
                 self.handle_self_closing(tag)
@@ -571,10 +652,14 @@ def _structured_lines(full_text: str) -> _StructureParseResult:
             attrs: list[tuple[str, str | None]],
         ) -> None:
             del attrs
+            if tag.lower() == _PARSER_TITLE_TAG:
+                tag = "title"
             self.handle_self_closing(tag)
 
         def handle_endtag(self, tag: str) -> None:
             tag = tag.lower()
+            if tag == _PARSER_TITLE_TAG:
+                tag = "title"
             matching_index = next(
                 (
                     index
@@ -601,6 +686,12 @@ def _structured_lines(full_text: str) -> _StructureParseResult:
 
         def handle_charref(self, name: str) -> None:
             append_text(f"&#{name};")
+
+        def handle_comment(self, data: str) -> None:
+            del data
+
+        def handle_pi(self, data: str) -> None:
+            del data
 
         def unknown_decl(self, data: str) -> None:
             if data[:len("CDATA")].lower() != "cdata":
