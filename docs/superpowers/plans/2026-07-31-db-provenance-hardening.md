@@ -75,6 +75,7 @@ Model lane: Terra-high.
 Mutable paths:
 
 - `kreports/analysis/materiality_benchmark.py`
+- `kreports/mcp/professional_surfaces/audit_effort.py`
 - `tests/test_materiality_benchmark.py`
 
 Requirements:
@@ -106,7 +107,8 @@ Model lane: Terra-high.
 Mutable paths:
 
 - `kreports/analysis/policy_changes.py`
-- the corresponding MCP handler under `kreports/mcp/handlers/`
+- `kreports/mcp/handlers/auditor.py`
+- `kreports/mcp/answer_pack.py`
 - `tests/test_policy_changes.py`
 - `tests/test_mcp_contracts.py`
 - `tests/test_mcp_answer_pack.py`
