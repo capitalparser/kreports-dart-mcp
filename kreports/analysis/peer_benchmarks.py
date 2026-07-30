@@ -2394,8 +2394,8 @@ def estimate_audit_hours_proxy(
         band = "low"
 
     limitations = [
-        "This is not a standard audit hour calculation.",
-        "It is a public DART data proxy for planning discussion and peer comparison.",
+        "표준감사시간 산정 결과가 아니라 공개자료 기반 감사복잡도 프록시입니다.",
+        "감사계획 논의와 동종기업 비교를 위한 스크리닝 자료로만 사용해야 합니다.",
     ]
     if not audit_receipt:
         limitations.append(

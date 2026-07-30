@@ -41,6 +41,10 @@ def test_candidate_history_is_usable_while_valuation_readiness_is_blocked(monkey
     assert result["candidate_status"] == "usable"
     assert result["valuation_readiness"] == "blocked"
     assert result["data_quality"]["status"] == "usable"
+    assert result["limitations"] == [
+        "예측기간, 터미널가치 방법, 할인율, 세율, CAPEX 및 운전자본 가정은 분석가가 별도로 결정해야 합니다.",
+        "과거 실제값과 분석가 가정을 구분하여 가치평가 정밀도를 과장하지 않습니다.",
+    ]
     assert result["valuation_blockers"] == [
         {
             "field": "working_capital_delta",
@@ -238,6 +242,7 @@ def test_qoe_chatbot_answer_summarizes_groups_and_keeps_full_table():
         }
         for matter_type, excerpt, receipt in (
             ("basis_for_opinion", "감사의견근거 A", "20250311001081"),
+            ("basis_for_opinion", "감사의견근거 A-2", "20250311001081"),
             ("other_matter", "기타사항 B", "20250311001082"),
             ("emphasis", "강조사항 C", "20250311001083"),
             ("going_concern", "계속기업 D", "20250311001084"),
@@ -253,7 +258,7 @@ def test_qoe_chatbot_answer_summarizes_groups_and_keeps_full_table():
         "signals": [{"signal": "audit_matter_present"}],
         "audit_matter_summary": {
             "unique_receipt_count": 4,
-            "section_count": 4,
+            "section_count": 5,
             "dedupe_basis": (
                 "parent_rcept_no + matter_type + normalized_excerpt"
             ),
@@ -273,12 +278,19 @@ def test_qoe_chatbot_answer_summarizes_groups_and_keeps_full_table():
     assert enriched["answer"].count(
         "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
     ) <= 3
-    assert "나머지 1개 그룹은 표에서 확인하세요." in enriched["answer"]
+    assert enriched["answer"].count(
+        "2024년 basis_for_opinion 감사보고서 matter를 "
+        "접수번호 20250311001081에서 확인했습니다."
+    ) == 1
+    assert enriched["answer"].count(
+        "2024년 basis_for_opinion: 감사보고서 접수번호 20250311001081"
+    ) == 1
+    assert "나머지 2개 그룹은 표에서 확인하세요." in enriched["answer"]
     table = next(
         item for item in enriched["answer_pack"]["tables"]
         if item["id"] == "audit_matter_groups"
     )
-    assert len(table["rows"]) == 4
+    assert len(table["rows"]) == 5
 
 
 def test_enriched_dcf_candidate_keeps_public_readiness_and_input_immutable():
@@ -913,6 +925,10 @@ def test_qoe_matters_survive_missing_financial_series_across_public_surfaces(
     assert result == before
     assert result["metrics"]["years"] == 0
     assert result["data_quality"]["status"] == "limited"
+    assert result["limitations"][-2:] == [
+        "DART 기반 스크리닝 자료이며 투자 권고가 아닙니다.",
+        "구조화 재무값에서 일회성 손익이 분리되지 않으면 관련 주석을 추가 검토해야 합니다.",
+    ]
     assert result["audit_matter_summary"]["unique_receipt_count"] == 1
     assert result["audit_matter_summary"]["section_count"] == 1
     summary = next(

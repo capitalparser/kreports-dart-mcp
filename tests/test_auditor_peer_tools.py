@@ -983,6 +983,8 @@ def test_audit_hours_proxy_selects_one_requested_year_cohort(monkeypatch):
 ])
 def test_peer_comparators_select_the_requested_year_when_no_cohort_is_supplied(monkeypatch, comparator_name):
     """All peer comparisons must resolve their own cohort at the data year, never latest."""
+    from contextlib import nullcontext
+
     from kreports.analysis import peer_benchmarks
 
     selected_years = []
@@ -992,6 +994,17 @@ def test_peer_comparators_select_the_requested_year_when_no_cohort_is_supplied(m
         return {"error": "stop after selection"}
 
     monkeypatch.setattr(peer_benchmarks, "select_peer_group", no_cohort)
+    if comparator_name == "compare_peer_audit_procedures":
+        monkeypatch.setattr(
+            peer_benchmarks,
+            "procedure_database_preflight",
+            lambda _tables: (True, None),
+        )
+        monkeypatch.setattr(
+            peer_benchmarks,
+            "procedure_read_engine",
+            lambda _tables: nullcontext(None),
+        )
     result = getattr(peer_benchmarks, comparator_name)("001", year=2022)
 
     assert result == {"error": "stop after selection"}

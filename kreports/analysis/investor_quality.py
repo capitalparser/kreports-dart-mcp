@@ -290,8 +290,8 @@ def quality_of_earnings_pack(
         else "missing"
     )
     limitations = [
-        "This is a DART-based screening pack, not an investment recommendation.",
-        "One-off gains/losses require note-level review when compact facts do not expose them separately.",
+        "DART 기반 스크리닝 자료이며 투자 권고가 아닙니다.",
+        "구조화 재무값에서 일회성 손익이 분리되지 않으면 관련 주석을 추가 검토해야 합니다.",
     ]
     if not series:
         limitations.insert(

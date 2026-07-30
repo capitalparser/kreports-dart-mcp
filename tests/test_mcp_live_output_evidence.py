@@ -170,7 +170,10 @@ def test_audit_hours_proxy_carries_child_receipts_into_public_pack(monkeypatch):
     """Catches cited child inputs being reduced to source-free proxy metrics."""
     from kreports.analysis import peer_benchmarks
     from kreports.mcp.answer_pack import build_answer_pack
-    from kreports.mcp.contracts import build_answer_envelope
+    from kreports.mcp.contracts import (
+        build_answer_envelope,
+        enrich_answer_response,
+    )
 
     monkeypatch.setattr(
         peer_benchmarks,
@@ -231,6 +234,10 @@ def test_audit_hours_proxy_carries_child_receipts_into_public_pack(monkeypatch):
         year=2024,
         peer_limit=1,
     )
+    assert result["limitations"][:2] == [
+        "표준감사시간 산정 결과가 아니라 공개자료 기반 감사복잡도 프록시입니다.",
+        "감사계획 논의와 동종기업 비교를 위한 스크리닝 자료로만 사용해야 합니다.",
+    ]
     envelope = build_answer_envelope(
         "estimate_audit_hours_proxy",
         result,
@@ -256,6 +263,15 @@ def test_audit_hours_proxy_carries_child_receipts_into_public_pack(monkeypatch):
         table["rows"][0]["financial_source_rcept_no"]
         == "20250311001085"
     )
+    answer = enrich_answer_response(
+        "estimate_audit_hours_proxy",
+        result,
+    )["answer"]
+    assert "표 형태 결과:" in answer
+    assert "감사시간 공개자료 proxy" in answer
+    assert "7800" in answer
+    assert "76830" in answer
+    assert "20250311001085" in answer
 
 
 def test_multi_year_financial_envelope_keeps_hidden_growth_input_receipt(

@@ -495,17 +495,28 @@ def _render_quality_of_earnings(result: dict[str, Any]) -> str:
         for group in summary.get("groups") or []
         if isinstance(group, dict)
     ]
-    for group in groups[:3]:
-        if not isinstance(group, dict):
-            continue
+    displayed_groups: list[dict[str, Any]] = []
+    seen_display_keys: set[tuple[Any, Any, str]] = set()
+    for group in groups:
         receipt = str((group.get("source") or {}).get("rcept_no") or "")
         if not receipt:
             continue
+        display_key = (
+            group.get("year"),
+            group.get("matter_type"),
+            receipt,
+        )
+        if display_key in seen_display_keys:
+            continue
+        seen_display_keys.add(display_key)
+        displayed_groups.append(group)
         lines.append(
             f"- {group.get('year')}년 {group.get('matter_type')}: "
             f"감사보고서 접수번호 {receipt}"
         )
-    omitted = max(len(groups) - 3, 0)
+        if len(displayed_groups) == 3:
+            break
+    omitted = max(len(groups) - len(displayed_groups), 0)
     if omitted:
         lines.append(f"- 나머지 {omitted}개 그룹은 표에서 확인하세요.")
     return "\n".join(lines)

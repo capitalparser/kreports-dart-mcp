@@ -255,7 +255,7 @@ def test_prepare_standard_audit_hours_inputs_keeps_every_year_under_correction_v
     with get_session() as session:
         for index in range(1, 65):
             session.add(Disclosure(
-                rcept_no=f"2026{index:010d}",
+                rcept_no=f"20260401{index:06d}",
                 corp_code="00126380",
                 corp_name="삼성전자",
                 disc_date=date(2026, 4, 1),
@@ -273,7 +273,7 @@ def test_prepare_standard_audit_hours_inputs_keeps_every_year_under_correction_v
         "20240318000002",
     ]
     assert [row["financial_source"]["rcept_no"] for row in result["rows"]] == [
-        "20260000000064",
+        "20260401000064",
         "20250318000002",
         "20240318000002",
     ]

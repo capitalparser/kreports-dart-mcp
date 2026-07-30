@@ -339,7 +339,7 @@ def dcf_input_candidates(
             "missing_core_metrics": missing_core_metrics,
         },
         "limitations": [
-            "DCF requires analyst-selected forecast period, terminal value method, discount rate, tax rate, capex, and working capital assumptions.",
-            "The tool separates observed historical values from assumptions to avoid overstating precision.",
+            "예측기간, 터미널가치 방법, 할인율, 세율, CAPEX 및 운전자본 가정은 분석가가 별도로 결정해야 합니다.",
+            "과거 실제값과 분석가 가정을 구분하여 가치평가 정밀도를 과장하지 않습니다.",
         ],
     }

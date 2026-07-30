@@ -1232,8 +1232,18 @@ def _qoe_presentation_envelope(
     envelope: AnswerEnvelopeV1,
 ) -> AnswerEnvelopeV1:
     """Keep the chatbot summary compact while the answer pack retains all groups."""
+    facts: list[dict[str, Any]] = []
+    seen_fact_statements: set[str] = set()
+    for fact in envelope.confirmed_facts:
+        statement = str(fact.get("statement") or "").strip()
+        if statement in seen_fact_statements:
+            continue
+        seen_fact_statements.add(statement)
+        facts.append(fact)
+        if len(facts) == 3:
+            break
     return envelope.model_copy(update={
-        "confirmed_facts": envelope.confirmed_facts[:3],
+        "confirmed_facts": facts,
         "evidence": envelope.evidence[:3],
     })
 
@@ -1359,6 +1369,7 @@ def _append_visual_table(
         "get_audit_history",
         "get_accounting_policy_changes",
         "compare_peer_audit_fees",
+        "estimate_audit_hours_proxy",
         "build_audit_acceptance_pack",
         "get_kam_lifecycle",
         "search_disclosure_events",
@@ -1409,5 +1420,9 @@ def _append_visual_table(
     ):
         return narrative
     table_markdown = render_visualization_markdown(pack, mermaid=False)
-    heading = "표 형태 결과" if tool_name == "search_dataset" else "시각화 대체 표"
+    heading = (
+        "표 형태 결과"
+        if tool_name in {"search_dataset", "estimate_audit_hours_proxy"}
+        else "시각화 대체 표"
+    )
     return f"{narrative}\n\n{heading}:\n\n{table_markdown}"
