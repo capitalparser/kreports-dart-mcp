@@ -1644,6 +1644,14 @@ def test_parse_outcome_ignores_unrelated_empty_table_container(
             id="doctype",
         ),
         pytest.param(
+            '<!DOCTYPE audit SYSTEM "urn:x > <![CDATA[ literal">',
+            id="doctype-quoted-greater-than",
+        ),
+        pytest.param(
+            '<!DOCTYPE audit [ <!ENTITY sample "urn:x > <![CDATA[ literal"> ]>',
+            id="doctype-internal-subset",
+        ),
+        pytest.param(
             '<SCRIPT>const marker = "<![CDATA[not closed";</SCRIPT>',
             id="script",
         ),
@@ -1682,6 +1690,26 @@ def test_parse_outcome_ignores_cdata_literals_outside_declaration_context(
     assert [item.title for item in outcome.items] == [
         "Revenue recognition",
     ]
+
+
+def test_parse_outcome_fails_closed_for_unclosed_doctype_before_kam():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <!DOCTYPE audit SYSTEM "unterminated
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+    assert "malformed_doctype" in outcome.limitations
 
 
 @pytest.mark.parametrize("raw_tag", ["SCRIPT", "STYLE"])

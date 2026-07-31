@@ -22,6 +22,8 @@ ancestry across malformed boundaries.
 
 - scan tags by index, respecting quoted attributes, so a CDATA-like literal in
   an attribute is never treated as a declaration;
+- scan DOCTYPE declarations with the same quote awareness and internal-subset
+  bracket depth, while treating an unclosed declaration as `malformed_doctype`;
 - treat `SCRIPT` and `STYLE` payloads, including an unclosed payload through
   EOF, as non-evidence raw text in the structural projection; and
 - avoid per-tag remainder copies. The adapter now uses indexed prefix checks,
@@ -38,8 +40,8 @@ emitted from either outcome.
 
 ## Verification
 
-- `uv run --extra dev pytest -q tests/test_kam_parser.py` — 202 passed
-- Structural guard plus 2,000,000-character tag-dense probe — 0.266 seconds
+- `uv run --extra dev pytest -q tests/test_kam_parser.py` — 205 passed
+- Structural guard plus 2,000,000-character tag-dense probe — 0.254 seconds
   locally
 - `uv run --extra dev ruff check kreports/processor/kam_parser.py` and
   `git diff --check` — passed

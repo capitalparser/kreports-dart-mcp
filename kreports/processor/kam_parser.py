@@ -354,6 +354,29 @@ def _tag_end(value: str, start: int) -> int | None:
     return None
 
 
+def _doctype_end(value: str, start: int) -> int | None:
+    """Return the exclusive end of a DOCTYPE, respecting quotes and subsets."""
+    quote: str | None = None
+    subset_depth = 0
+    cursor = start + len("<!doctype")
+    value_length = len(value)
+    while cursor < value_length:
+        character = value[cursor]
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in {"\"", "'"}:
+            quote = character
+        elif character == "[":
+            subset_depth += 1
+        elif character == "]" and subset_depth:
+            subset_depth -= 1
+        elif character == ">" and subset_depth == 0:
+            return cursor + 1
+        cursor += 1
+    return None
+
+
 def _htmlparser_safe_markup(value: str) -> tuple[str, list[str]]:
     """Preserve DART pseudo-HTML boundaries before feeding ``HTMLParser``.
 
@@ -391,12 +414,16 @@ def _htmlparser_safe_markup(value: str) -> tuple[str, list[str]]:
             cursor = end + 2
             continue
         if value[start:start + 9].lower() == "<!doctype":
-            end = value.find(">", start + len("<!doctype"))
-            if end < 0:
-                parts.append(value[start:value_length])
+            end = _doctype_end(value, start)
+            if end is None:
+                limitations.append("malformed_doctype")
+                parts.append(f"<{_PARSER_SUPPRESSED_RAW_TAG}>")
+                parts.append(f"</{_PARSER_SUPPRESSED_RAW_TAG}>")
+                cursor = value_length
                 break
-            parts.append(value[start:end + 1])
-            cursor = end + 1
+            parts.append(f"<{_PARSER_SUPPRESSED_RAW_TAG}>")
+            parts.append(f"</{_PARSER_SUPPRESSED_RAW_TAG}>")
+            cursor = end
             continue
         tag_match = _TAG_NAME_RE.match(value, start)
         tag_end = _tag_end(value, start) if tag_match else None
