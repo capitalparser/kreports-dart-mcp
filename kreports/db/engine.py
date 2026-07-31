@@ -1,11 +1,16 @@
 import json
 import re
+import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 from sqlalchemy.sql.dml import Delete, Insert, Update
 from sqlalchemy.sql.elements import TextClause
 
@@ -25,17 +30,94 @@ from kreports.db.quality_snapshot import (
     QUALITY_VERSION,
     quality_content_digest,
 )
+from kreports.runtime import is_readonly_mode
 
 _sqlite_connect_args = {
     "check_same_thread": False,
     "timeout": 60,
 }
 
-engine = create_engine(
-    settings.db_url,
-    connect_args=_sqlite_connect_args if "sqlite" in settings.db_url else {},
-    echo=False,
-)
+
+class ReadonlySQLiteSnapshotUnavailable(RuntimeError):
+    """A readonly runtime cannot safely serve an uncheckpointed WAL snapshot."""
+
+
+class ReadonlySQLiteConfigurationError(RuntimeError):
+    """A readonly SQLite URI cannot retain parameters outside the safe subset."""
+
+
+def _readonly_sqlite_database_path(database_url: str) -> Path | None:
+    """Return the file-backed SQLite target eligible for immutable readonly use."""
+    if not is_readonly_mode():
+        return None
+    try:
+        parsed = make_url(database_url)
+    except Exception:
+        return None
+    if parsed.get_backend_name() != "sqlite":
+        return None
+    database = parsed.database
+    if not database or database == ":memory:":
+        return None
+    allowed_query_keys = {"immutable", "mode", "uri"}
+    unexpected_query_keys = set(parsed.query) - allowed_query_keys
+    if unexpected_query_keys:
+        raise ReadonlySQLiteConfigurationError(
+            "readonly SQLite URI has unsupported query parameters"
+        )
+    if not database.startswith("file:"):
+        if parsed.query:
+            raise ReadonlySQLiteConfigurationError(
+                "readonly SQLite URL must not discard query parameters"
+            )
+        return Path(database).resolve()
+
+    parsed_file_uri = urlsplit(database)
+    if (
+        parsed_file_uri.scheme != "file"
+        or parsed_file_uri.netloc not in {"", "localhost"}
+        or parsed_file_uri.query
+        or parsed_file_uri.fragment
+    ):
+        raise ReadonlySQLiteConfigurationError(
+            "readonly SQLite file URI is not safely normalizable"
+        )
+    return Path(unquote(parsed_file_uri.path)).resolve()
+
+
+def _open_checkpointed_readonly_sqlite(database_path: Path) -> sqlite3.Connection:
+    """Open a non-writing reader only when its immutable snapshot is complete."""
+    wal_path = Path(f"{database_path}-wal")
+    if wal_path.exists() and wal_path.stat().st_size > 0:
+        raise ReadonlySQLiteSnapshotUnavailable(
+            "runtime_db_unavailable:uncheckpointed_wal"
+        )
+    return sqlite3.connect(
+        f"{database_path.as_uri()}?mode=ro&immutable=1",
+        uri=True,
+        check_same_thread=False,
+        timeout=60,
+    )
+
+
+_readonly_sqlite_path = _readonly_sqlite_database_path(settings.db_url)
+if _readonly_sqlite_path is not None:
+    engine = create_engine(
+        "sqlite://",
+        creator=lambda: _open_checkpointed_readonly_sqlite(
+            _readonly_sqlite_path
+        ),
+        poolclass=NullPool,
+        echo=False,
+    )
+else:
+    engine = create_engine(
+        settings.db_url,
+        connect_args=(
+            _sqlite_connect_args if "sqlite" in settings.db_url else {}
+        ),
+        echo=False,
+    )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 

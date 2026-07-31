@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -181,7 +182,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
     from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
     from kreports.db.models import CompanyYearQuality
 
-    assert [migration.revision for migration in MIGRATIONS] == [
+    expected_prefix = [
         "20260711_01_quality_contract",
         "20260711_02_company_year_quality",
         "20260711_03_backfill_run_lifecycle",
@@ -194,24 +195,23 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
         "20260711_10_financial_compact_provenance",
         "20260711_11_company_year_quality_freshness",
     ]
+    expected_append_only_tail = [
+        "20260731_12_accounting_note_chapter_contract",
+        "20260731_13_accounting_note_chapter_storage_contract",
+        "20260731_14_schema_contract_repair",
+    ]
+    revisions = [migration.revision for migration in MIGRATIONS]
+    assert revisions[:len(expected_prefix)] == expected_prefix
+    assert revisions[len(expected_prefix):] == expected_append_only_tail
+    assert revisions == sorted(revisions)
+    assert len(revisions) == len(set(revisions))
+    assert all(re.fullmatch(r"\d{8}_\d{2}_[a-z0-9_]+", revision) for revision in revisions)
     assert CompanyYearQuality.__tablename__ == "company_year_quality"
 
     with temp_engine.begin() as connection:
         applied = apply_schema_migrations(connection)
 
-    assert applied == [
-        "20260711_01_quality_contract",
-        "20260711_02_company_year_quality",
-        "20260711_03_backfill_run_lifecycle",
-        "20260711_04_backfill_owner_identity",
-        "20260711_05_kam_items",
-        "20260711_06_audit_procedure_linkage",
-        "20260711_07_audit_fee_availability",
-        "20260711_08_group_audit_graph",
-        "20260711_09_audit_fee_observations",
-        "20260711_10_financial_compact_provenance",
-        "20260711_11_company_year_quality_freshness",
-    ]
+    assert applied == revisions
     columns = {
         column["name"]
         for column in inspect(temp_engine).get_columns("company_year_quality")

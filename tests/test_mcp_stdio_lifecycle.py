@@ -186,6 +186,19 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _sqlite_file_state(database_path: Path) -> dict[str, str | None]:
+    """Capture the main database and every SQLite sidecar without creating one."""
+    paths = {
+        "main": database_path,
+        "wal": Path(f"{database_path}-wal"),
+        "shm": Path(f"{database_path}-shm"),
+    }
+    return {
+        name: _sha256(path) if path.exists() else None
+        for name, path in paths.items()
+    }
+
+
 def _wait_for_path(path: Path, process: subprocess.Popen, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -214,7 +227,12 @@ def test_sigterm_disposes_read_handle_without_mutating_database(tmp_path):
         )
         connection.execute("INSERT INTO lifecycle_probe VALUES (1)")
         connection.commit()
-    initial_sha256 = _sha256(database_path)
+        assert connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (
+            0,
+            0,
+            0,
+        )
+    initial_file_state = _sqlite_file_state(database_path)
 
     probe = r"""
 import asyncio
@@ -289,8 +307,156 @@ server_module.main()
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=5) == 0
         assert disposed_marker.read_text() == "disposed"
-        assert _sha256(database_path) == initial_sha256
+        assert _sqlite_file_state(database_path) == initial_file_state
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_readonly_engine_rejects_committed_uncheckpointed_wal_without_touching_files(
+    tmp_path,
+):
+    """Catch a readonly engine returning stale WAL data or mutating its sidecars."""
+    database_path = tmp_path / "uncheckpointed-wal.db"
+    outcome_marker = tmp_path / "readonly-outcome.marker"
+    writer = sqlite3.connect(database_path)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE lifecycle_probe (value INTEGER NOT NULL)")
+        writer.execute("INSERT INTO lifecycle_probe VALUES (1)")
+        writer.commit()
+        assert Path(f"{database_path}-wal").stat().st_size > 0
+        initial_file_state = _sqlite_file_state(database_path)
+
+        probe = r"""
+import os
+from pathlib import Path
+
+import kreports.db.engine as engine_module
+
+try:
+    with engine_module.engine.connect() as connection:
+        connection.exec_driver_sql("SELECT COUNT(*) FROM lifecycle_probe").scalar_one()
+except Exception as error:
+    Path(os.environ["OUTCOME_MARKER"]).write_text(str(error))
+else:
+    Path(os.environ["OUTCOME_MARKER"]).write_text("unexpected_read")
+"""
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "DB_URL": f"sqlite:///{database_path}",
+                "DART_API_KEY": "",
+                "KREPORTS_RUNTIME_MODE": "readonly",
+                "OUTCOME_MARKER": str(outcome_marker),
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            }
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+        assert outcome_marker.read_text() == "runtime_db_unavailable:uncheckpointed_wal"
+        assert _sqlite_file_state(database_path) == initial_file_state
+    finally:
+        writer.close()
+
+
+def test_readonly_sqlite_file_uri_normalizes_percent_encoded_special_path(
+    tmp_path,
+    monkeypatch,
+):
+    """Catch a file: URI that loses a space, hash, or query character on reopen."""
+    from kreports.db.engine import _readonly_sqlite_database_path
+
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+    database_path = tmp_path / "snapshot % # question?.db"
+    encoded_file_uri = database_path.as_uri().removeprefix("file:")
+    configured_url = (
+        f"sqlite:///file:{encoded_file_uri}?mode=rw&uri=true"
+    )
+
+    assert _readonly_sqlite_database_path(configured_url) == database_path.resolve()
+
+
+def test_readonly_sqlite_uri_rejects_query_parameters_it_cannot_preserve(
+    tmp_path,
+    monkeypatch,
+):
+    """Catch readonly startup silently dropping a configured SQLite URI option."""
+    from kreports.db.engine import (
+        ReadonlySQLiteConfigurationError,
+        _readonly_sqlite_database_path,
+    )
+
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+    database_path = tmp_path / "configured.db"
+    configured_url = (
+        f"sqlite:///file:{database_path.as_uri().removeprefix('file:')}"
+        "?mode=rw&cache=shared&uri=true"
+    )
+
+    with pytest.raises(ReadonlySQLiteConfigurationError):
+        _readonly_sqlite_database_path(configured_url)
+
+
+def test_readonly_engine_overrides_configured_file_uri_write_mode(tmp_path):
+    """Catch a configured SQLite `mode=rw` URI bypassing readonly enforcement."""
+    database_path = tmp_path / "configured % # writable?.db"
+    outcome_marker = tmp_path / "readonly-uri-outcome.marker"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE lifecycle_probe (value INTEGER NOT NULL)")
+        connection.execute("INSERT INTO lifecycle_probe VALUES (1)")
+        connection.commit()
+    initial_file_state = _sqlite_file_state(database_path)
+    configured_url = (
+        f"sqlite:///file:{database_path.as_uri().removeprefix('file:')}"
+        "?mode=rw&uri=true"
+    )
+    probe = r"""
+import os
+from pathlib import Path
+
+import kreports.db.engine as engine_module
+
+with engine_module.engine.connect() as connection:
+    count = connection.exec_driver_sql("SELECT COUNT(*) FROM lifecycle_probe").scalar_one()
+    try:
+        connection.exec_driver_sql("INSERT INTO lifecycle_probe VALUES (2)")
+    except Exception as error:
+        Path(os.environ["OUTCOME_MARKER"]).write_text(f"{count}|{error}")
+    else:
+        Path(os.environ["OUTCOME_MARKER"]).write_text("unexpected_write")
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DB_URL": configured_url,
+            "DART_API_KEY": "",
+            "KREPORTS_RUNTIME_MODE": "readonly",
+            "OUTCOME_MARKER": str(outcome_marker),
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert outcome_marker.read_text().startswith("1|")
+    assert "readonly" in outcome_marker.read_text().lower()
+    assert _sqlite_file_state(database_path) == initial_file_state
