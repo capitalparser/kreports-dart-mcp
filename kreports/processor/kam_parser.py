@@ -365,6 +365,18 @@ def _doctype_end(value: str, start: int) -> int | None:
         if quote is not None:
             if character == quote:
                 quote = None
+        elif value.startswith("<!--", cursor):
+            comment_end = value.find("-->", cursor + 4)
+            if comment_end < 0:
+                return None
+            cursor = comment_end + 3
+            continue
+        elif value.startswith("<?", cursor):
+            pi_end = value.find("?>", cursor + 2)
+            if pi_end < 0:
+                return None
+            cursor = pi_end + 2
+            continue
         elif character in {"\"", "'"}:
             quote = character
         elif character == "[":

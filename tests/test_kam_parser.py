@@ -1652,6 +1652,14 @@ def test_parse_outcome_ignores_unrelated_empty_table_container(
             id="doctype-internal-subset",
         ),
         pytest.param(
+            "<!DOCTYPE audit [ <!-- literal [ ] \"' > bracket --> <!ELEMENT audit ANY> ]>",
+            id="doctype-internal-comment",
+        ),
+        pytest.param(
+            '<!DOCTYPE audit [ <?metadata literal ] > ?> <!ELEMENT audit ANY> ]>',
+            id="doctype-internal-processing-instruction",
+        ),
+        pytest.param(
             '<SCRIPT>const marker = "<![CDATA[not closed";</SCRIPT>',
             id="script",
         ),
@@ -1710,6 +1718,60 @@ def test_parse_outcome_fails_closed_for_unclosed_doctype_before_kam():
     assert outcome.status == "error"
     assert outcome.items == []
     assert "malformed_doctype" in outcome.limitations
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param(
+            "<!DOCTYPE audit [ <!-- unterminated",
+            id="unterminated-internal-comment",
+        ),
+        pytest.param(
+            "<!DOCTYPE audit [ <?metadata unterminated",
+            id="unterminated-internal-processing-instruction",
+        ),
+    ],
+)
+def test_parse_outcome_fails_closed_for_unclosed_doctype_metadata(metadata):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    {metadata}
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+    assert "malformed_doctype" in outcome.limitations
+
+
+def test_parse_outcome_does_not_accept_kam_like_text_after_doctype_comment():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <!DOCTYPE audit [
+    <!-- literal ] bracket -->
+    Key Audit Matters
+    1. Revenue recognition
+    Why the matter was determined to be a key audit matter
+    Contract cut-off requires significant judgment.
+    How the matter was addressed in the audit
+    We inspected contract samples.
+    ]>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "no_kam"
+    assert outcome.items == []
 
 
 @pytest.mark.parametrize("raw_tag", ["SCRIPT", "STYLE"])
