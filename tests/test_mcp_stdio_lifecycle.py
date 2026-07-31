@@ -370,6 +370,64 @@ else:
         writer.close()
 
 
+def test_readonly_engine_rejects_hot_rollback_journal_without_touching_files(
+    tmp_path,
+):
+    """Catch immutable readonly startup ignoring a recovery-required journal."""
+    database_path = tmp_path / "hot-rollback-journal.db"
+    outcome_marker = tmp_path / "rollback-journal-outcome.marker"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE lifecycle_probe (value INTEGER NOT NULL)")
+        connection.execute("INSERT INTO lifecycle_probe VALUES (1)")
+        connection.commit()
+    Path(f"{database_path}-journal").write_bytes(b"hot rollback journal")
+    initial_file_state = {
+        **_sqlite_file_state(database_path),
+        "journal": _sha256(Path(f"{database_path}-journal")),
+    }
+
+    probe = r"""
+import os
+from pathlib import Path
+
+import kreports.db.engine as engine_module
+
+try:
+    with engine_module.engine.connect() as connection:
+        connection.exec_driver_sql("SELECT COUNT(*) FROM lifecycle_probe").scalar_one()
+except Exception as error:
+    Path(os.environ["OUTCOME_MARKER"]).write_text(str(error))
+else:
+    Path(os.environ["OUTCOME_MARKER"]).write_text("unexpected_read")
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DB_URL": f"sqlite:///{database_path}",
+            "DART_API_KEY": "",
+            "KREPORTS_RUNTIME_MODE": "readonly",
+            "OUTCOME_MARKER": str(outcome_marker),
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert outcome_marker.read_text() == "runtime_db_unavailable:hot_rollback_journal"
+    assert {
+        **_sqlite_file_state(database_path),
+        "journal": _sha256(Path(f"{database_path}-journal")),
+    } == initial_file_state
+
+
 def test_readonly_sqlite_file_uri_normalizes_percent_encoded_special_path(
     tmp_path,
     monkeypatch,

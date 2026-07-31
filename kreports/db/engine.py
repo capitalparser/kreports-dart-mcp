@@ -87,6 +87,12 @@ def _readonly_sqlite_database_path(database_url: str) -> Path | None:
 
 def _open_checkpointed_readonly_sqlite(database_path: Path) -> sqlite3.Connection:
     """Open a non-writing reader only when its immutable snapshot is complete."""
+    journal_path = Path(f"{database_path}-journal")
+    if journal_path.exists() and journal_path.stat().st_size > 0:
+        raise ReadonlySQLiteSnapshotUnavailable(
+            "runtime_db_unavailable:hot_rollback_journal"
+        )
+
     wal_path = Path(f"{database_path}-wal")
     if wal_path.exists() and wal_path.stat().st_size > 0:
         raise ReadonlySQLiteSnapshotUnavailable(
