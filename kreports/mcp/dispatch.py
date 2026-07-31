@@ -28,6 +28,7 @@ from kreports.mcp.contracts import (
 from kreports.mcp.resources import release_context
 
 _MAX_TOOL_NAME_LENGTH = 120
+_ON_DEMAND_USER_KEY_ERROR = "user_dart_api_key is required"
 
 
 class ArgumentValidationError(ValueError):
@@ -114,6 +115,11 @@ def _attach_meta(name: str, result: Any) -> Any:
     """Attach the single shared metadata and professional-response layer."""
     if not isinstance(result, dict):
         return result
+    if (
+        name == "fetch_disclosure_on_demand"
+        and result.get("error") == _ON_DEMAND_USER_KEY_ERROR
+    ):
+        return _on_demand_key_preflight_result(result)
     enriched = dict(result)
     meta = dict(enriched.get("_meta") or {})
     meta.update(
@@ -229,6 +235,40 @@ def _handler_failure_context(
     if company:
         return f"{context} 요청 회사: {company}."
     return context
+
+
+def _on_demand_key_preflight_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the BYOK remediation without database or release enrichment."""
+    answer = str(result.get("answer") or "").strip()
+    if not answer:
+        answer = "\n".join([
+            "판정:",
+            "- error",
+            "",
+            "업무 결론:",
+            "- 온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다.",
+            "",
+            "데이터 한계:",
+            "- key는 요청 처리에만 사용되며 저장되지 않습니다.",
+            "",
+            "추가 확인사항:",
+            "- 사용자 DART API key를 요청에 제공한 뒤 다시 조회하세요.",
+        ])
+    return {
+        "error": _ON_DEMAND_USER_KEY_ERROR,
+        "answer": answer,
+        "confirmed_facts": [],
+        "analysis": [],
+        "evidence": [],
+        "data_quality": {
+            "status": "error",
+            "limitations": [_ON_DEMAND_USER_KEY_ERROR],
+        },
+        "warnings": [_ON_DEMAND_USER_KEY_ERROR],
+        "next_checks": [
+            "사용자 DART API key를 요청에 제공한 뒤 다시 조회하세요.",
+        ],
+    }
 
 
 def _handler_failure_result(

@@ -155,9 +155,12 @@ def fetch_disclosure_on_demand(
         return {
             "error": "user_dart_api_key is required",
             "answer": (
-                "판정: fail\n\n"
-                "온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다.\n\n"
-                "데이터 한계:\n- key는 요청 처리에만 사용되어야 하며 저장되면 안 됩니다."
+                "판정:\n- error\n\n"
+                "업무 결론:\n"
+                "- 온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다.\n\n"
+                "데이터 한계:\n- key는 요청 처리에만 사용되며 저장되지 않습니다.\n\n"
+                "추가 확인사항:\n"
+                "- 사용자 DART API key를 요청에 제공한 뒤 다시 조회하세요."
             ),
         }
 

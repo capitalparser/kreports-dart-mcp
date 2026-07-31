@@ -16,15 +16,38 @@ def _zip_bytes(name: str, content: str) -> bytes:
 
 
 def test_on_demand_requires_user_key_without_mentioning_server_key(monkeypatch):
+    import kreports.mcp.dispatch as dispatch
+
     monkeypatch.setenv("DART_API_KEY", "server-key-that-must-not-be-used")
+
+    def unexpected_dependency(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("no-key preflight must not access a dependency")
+
+    monkeypatch.setattr(on_demand, "_cached_source", unexpected_dependency)
+    monkeypatch.setattr(on_demand, "_fetch_document_xml_with_user_key", unexpected_dependency)
+    monkeypatch.setattr(dispatch, "release_context", unexpected_dependency)
 
     out = json.loads(call_tool("fetch_disclosure_on_demand", {"rcept_no": "20250101000001"}))
 
     assert out["error"]
     assert "사용자 DART API key" in out["answer"]
+    for section in ("판정:", "업무 결론:", "데이터 한계:", "추가 확인사항:"):
+        assert section in out["answer"]
     serialized = json.dumps(out, ensure_ascii=False)
     assert "server-key" not in serialized
     assert "DART_API_KEY" not in serialized
+    for forbidden in (
+        "배포 준비 상태",
+        "missing_table:",
+        "manifest_available",
+        "snapshot_version",
+        "required_failure",
+        "degraded_feature",
+        "schema_version",
+        "_meta",
+    ):
+        assert forbidden not in serialized
 
 
 def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypatch):
