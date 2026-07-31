@@ -41,10 +41,12 @@ class HandlerExecutionError(Exception):
         self,
         original: Exception,
         validated_secret: str | None,
+        public_context: dict[str, str],
     ) -> None:
         super().__init__(type(original).__name__)
         self.original = original
         self.validated_secret = validated_secret
+        self.public_context = public_context
 
 
 def _bounded_tool_name(name: object) -> str:
@@ -206,8 +208,34 @@ _HANDLER_FAILURE_MESSAGE = (
     "민감한 내부 오류 정보는 [REDACTED] 처리되었습니다."
 )
 
+_HANDLER_FAILURE_CONTEXT = {
+    "search_dataset": "요청한 공시 근거 조회를 완료하지 못했습니다.",
+    "compare_peer_kam_topics": "핵심감사사항(KAM) 동종업종 비교를 완료하지 못했습니다.",
+    "build_audit_acceptance_pack": "수임·계속감사 검토용 근거 구성을 완료하지 못했습니다.",
+    "search_audit_report_matters": "감사보고서 핵심사항 조회를 완료하지 못했습니다.",
+    "get_audit_report_sections": "감사보고서 KAM·감사절차 근거 조회를 완료하지 못했습니다.",
+}
 
-def _handler_failure_result(name: str) -> dict[str, Any]:
+
+def _handler_failure_context(
+    name: str,
+    public_context: dict[str, str] | None = None,
+) -> str:
+    context = _HANDLER_FAILURE_CONTEXT.get(
+        name,
+        "요청한 공시 근거 검토를 완료하지 못했습니다.",
+    )
+    company = (public_context or {}).get("company")
+    if company:
+        return f"{context} 요청 회사: {company}."
+    return context
+
+
+def _handler_failure_result(
+    name: str,
+    *,
+    public_context: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Return a standalone bounded error without using the enrichment path."""
     next_check = "로컬 캐시 스키마와 준비된 데이터 artifact를 확인한 뒤 다시 배포하세요."
     quality = {
@@ -232,7 +260,10 @@ def _handler_failure_result(name: str) -> dict[str, Any]:
         "- error",
         "",
         "업무 결론:",
-        "- 별도 결론 없음",
+        f"- {_handler_failure_context(name, public_context)}",
+        "",
+        "확인된 내용:",
+        "- 현재 오류 상태에서는 검증 가능한 근거를 제시하지 않습니다.",
         "",
         "데이터 한계:",
         f"- {_HANDLER_FAILURE_MESSAGE}",
@@ -274,8 +305,12 @@ def _handler_failure_result(name: str) -> dict[str, Any]:
     }
 
 
-def _handler_failure_envelope(name: str) -> AnswerEnvelopeV1:
-    result = _handler_failure_result(name)
+def _handler_failure_envelope(
+    name: str,
+    *,
+    public_context: dict[str, str] | None = None,
+) -> AnswerEnvelopeV1:
+    result = _handler_failure_result(name, public_context=public_context)
     return AnswerEnvelopeV1(
         tool_name=name,
         verdict="error",
@@ -333,6 +368,18 @@ def _validated_secret(arguments: BaseModel) -> str | None:
     return None
 
 
+def _validated_public_context(arguments: BaseModel) -> dict[str, str]:
+    company = getattr(arguments, "company", None)
+    if not isinstance(company, str):
+        return {}
+    company = company.strip()
+    if not company or len(company) > 120:
+        return {}
+    if not re.fullmatch(r"[0-9A-Za-z가-힣 .()&_-]+", company):
+        return {}
+    return {"company": company}
+
+
 def _invoke_handler(
     name: str,
     arguments: dict[str, Any] | None,
@@ -355,6 +402,7 @@ def _invoke_handler(
             raise HandlerExecutionError(
                 exc,
                 _validated_secret(validated),
+                _validated_public_context(validated),
             ) from None
         raise
     if not isinstance(result, dict):
@@ -387,8 +435,10 @@ def dispatch_tool(name: str, arguments: dict[str, Any] | None) -> AnswerEnvelope
     except (LookupError, ArgumentValidationError) as exc:
         return _error_envelope(public_name, str(exc))
     except HandlerExecutionError as exc:
-        del exc
-        return _handler_failure_envelope(public_name)
+        return _handler_failure_envelope(
+            public_name,
+            public_context=exc.public_context,
+        )
     except Exception:
         return _handler_failure_envelope(public_name)
 
@@ -407,8 +457,7 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
     except ArgumentValidationError as exc:
         return {"error": str(exc)}
     except HandlerExecutionError as exc:
-        del exc
-        return _handler_failure_result(name)
+        return _handler_failure_result(name, public_context=exc.public_context)
     except Exception:
         return _handler_failure_result(name)
 

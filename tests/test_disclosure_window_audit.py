@@ -7,7 +7,7 @@ from kreports.db.engine import get_session
 from kreports.db.models import Disclosure
 
 
-def test_audit_disclosure_window_detects_missing_and_filters(monkeypatch):
+def test_audit_disclosure_window_detects_missing_and_filters(temp_engine, monkeypatch):
     calls = []
     rcept_base = uuid4().hex[:8]
     target_rcept_no = f"2099{rcept_base[:8]}01"[:14]

@@ -22,7 +22,9 @@ def test_on_demand_requires_user_key_without_mentioning_server_key(monkeypatch):
 
     assert out["error"]
     assert "사용자 DART API key" in out["answer"]
-    assert "server-key" not in json.dumps(out, ensure_ascii=False)
+    serialized = json.dumps(out, ensure_ascii=False)
+    assert "server-key" not in serialized
+    assert "DART_API_KEY" not in serialized
 
 
 def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypatch):

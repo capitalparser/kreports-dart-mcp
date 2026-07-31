@@ -24,6 +24,7 @@ def test_search_dataset_returns_user_facing_narrative():
     assert "근거" in out["answer"]
     assert "데이터" in out["answer"]
     assert "삼성전자" in out["answer"] or "005930" in out["answer"]
+    assert "report_sections" not in out["answer"]
 
 
 def test_compare_peer_kam_topics_returns_user_facing_narrative():
@@ -33,6 +34,7 @@ def test_compare_peer_kam_topics_returns_user_facing_narrative():
     assert out["answer"].startswith("판정:")
     assert "핵심감사사항" in out["answer"] or "KAM" in out["answer"]
     assert "데이터" in out["answer"]
+    assert "no such table" not in out["answer"]
 
 
 def test_build_audit_acceptance_pack_returns_user_facing_narrative():
@@ -42,6 +44,7 @@ def test_build_audit_acceptance_pack_returns_user_facing_narrative():
     assert out["answer"].startswith("판정:")
     assert "수임" in out["answer"] or "감사" in out["answer"]
     assert "근거" in out["answer"]
+    assert "schema" not in out["answer"].lower()
 
 
 def test_acceptance_narrative_includes_three_year_scale_table_for_plain_chatbots():
@@ -106,6 +109,7 @@ def test_search_audit_report_matters_returns_user_facing_narrative():
     assert out["answer"].startswith("판정:")
     assert "감사보고서" in out["answer"]
     assert "데이터" in out["answer"]
+    assert "audit_procedure_items" not in out["answer"]
 
 
 def test_get_audit_report_sections_returns_user_facing_narrative():
@@ -115,6 +119,7 @@ def test_get_audit_report_sections_returns_user_facing_narrative():
     assert out["answer"].startswith("판정:")
     assert "근거" in out["answer"]
     assert "KAM" in out["answer"] or "감사절차" in out["answer"]
+    assert "report_sections" not in out["answer"]
 
 
 def test_generic_narrative_uses_professional_sections_without_internal_schema_labels():

@@ -150,6 +150,17 @@ def fetch_disclosure_on_demand(
     if cache_policy not in {"cache_first", "refresh"}:
         return {"error": "cache_policy must be cache_first or refresh"}
 
+    clean_key = _clean_key(user_dart_api_key)
+    if not clean_key:
+        return {
+            "error": "user_dart_api_key is required",
+            "answer": (
+                "판정: fail\n\n"
+                "온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다.\n\n"
+                "데이터 한계:\n- key는 요청 처리에만 사용되어야 하며 저장되면 안 됩니다."
+            ),
+        }
+
     cached = _cached_source(rcept_no)
     if cached is not None and cache_policy == "cache_first":
         return {
@@ -166,18 +177,6 @@ def fetch_disclosure_on_demand(
                 "status": "usable",
                 "source": "source_documents_cache",
             },
-        }
-
-    clean_key = _clean_key(user_dart_api_key)
-    if not clean_key:
-        return {
-            "error": "user_dart_api_key is required",
-            "answer": (
-                "판정: fail\n\n"
-                "온디맨드 수시공시 조회에는 사용자 DART API key가 필요합니다. "
-                "공개 MCP 서버의 DART_API_KEY는 사용하지 않습니다.\n\n"
-                "데이터 한계:\n- key는 요청 처리에만 사용되어야 하며 저장되면 안 됩니다."
-            ),
         }
 
     meta = _disclosure_meta(rcept_no, corp_code=corp_code, year=year)
