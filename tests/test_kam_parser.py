@@ -1191,6 +1191,23 @@ def test_parse_outcome_reports_bounded_input_truncation():
     assert "input_truncated" in outcome.limitations
 
 
+def test_htmlparser_markup_adapter_avoids_unbounded_suffix_copies_per_tag():
+    from kreports.processor.kam_parser import _htmlparser_safe_markup
+
+    class SourceWithoutUnboundedSuffixCopy(str):
+        def __getitem__(self, key):
+            if isinstance(key, slice) and key.stop is None:
+                raise AssertionError("markup adapter must use bounded indexes")
+            return super().__getitem__(key)
+
+    source = SourceWithoutUnboundedSuffixCopy("<P>x" * 100_000)
+
+    markup, limitations = _htmlparser_safe_markup(source)
+
+    assert markup == source
+    assert limitations == []
+
+
 @pytest.mark.parametrize(
     "invalid_matter",
     [
@@ -1630,6 +1647,18 @@ def test_parse_outcome_ignores_unrelated_empty_table_container(
             '<SCRIPT>const marker = "<![CDATA[not closed";</SCRIPT>',
             id="script",
         ),
+        pytest.param(
+            '<DIV data-marker="literal <![CDATA[ not a declaration">x</DIV>',
+            id="attribute-with-spaced-literal",
+        ),
+        pytest.param(
+            '<P title="<![CDATA[ docs">metadata</P>',
+            id="attribute-with-literal",
+        ),
+        pytest.param(
+            '<STYLE>.x:before{content:"<![CDATA["}</STYLE>',
+            id="style",
+        ),
     ],
 )
 def test_parse_outcome_ignores_cdata_literals_outside_declaration_context(
@@ -1652,6 +1681,80 @@ def test_parse_outcome_ignores_cdata_literals_outside_declaration_context(
     assert outcome.status == "complete"
     assert [item.title for item in outcome.items] == [
         "Revenue recognition",
+    ]
+
+
+@pytest.mark.parametrize("raw_tag", ["SCRIPT", "STYLE"])
+def test_parse_outcome_rejects_kam_evidence_inside_suppressed_raw_text(raw_tag):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <{raw_tag}>
+    Key Audit Matters
+    1. Revenue recognition
+    Why the matter was determined to be a key audit matter
+    Contract cut-off requires significant judgment.
+    How the matter was addressed in the audit
+    We inspected contract samples.
+    </{raw_tag}>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "no_kam"
+    assert outcome.items == []
+
+
+@pytest.mark.parametrize("raw_tag", ["SCRIPT", "STYLE"])
+def test_parse_outcome_rejects_kam_evidence_inside_unclosed_raw_text(raw_tag):
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = f"""
+    <{raw_tag}>
+    Key Audit Matters
+    1. Revenue recognition
+    Why the matter was determined to be a key audit matter
+    Contract cut-off requires significant judgment.
+    How the matter was addressed in the audit
+    We inspected contract samples.
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "no_kam"
+    assert outcome.items == []
+
+
+def test_parse_outcome_does_not_split_or_add_matters_from_script_payload():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    <TITLE>Key Audit Matters</TITLE>
+    <TITLE>Revenue recognition</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Contract cut-off requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected contract samples.</P>
+    <SCRIPT>
+    <TITLE>Inventory valuation</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Inventory estimates require significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We inspected inventory samples.</P>
+    </SCRIPT>
+    <TITLE>Classification of leases</TITLE>
+    <P>Why the matter was determined to be a key audit matter</P>
+    <P>Lease classification requires significant judgment.</P>
+    <P>How the matter was addressed in the audit</P>
+    <P>We reviewed management's classification.</P>
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "Revenue recognition",
+        "Classification of leases",
     ]
 
 

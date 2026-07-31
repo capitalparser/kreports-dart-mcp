@@ -11,7 +11,16 @@ import re
 PARSER_VERSION = "v1"
 MAX_INPUT_CHARS = 2_000_000
 _PARSER_TITLE_TAG = "kam-title"
+_PARSER_SUPPRESSED_RAW_TAG = "kam-parser-suppressed-raw-v1"
 _TITLE_TAG_RE = re.compile(r"<(?P<close>/?)title(?=[\s/>])", re.IGNORECASE)
+_TAG_NAME_RE = re.compile(
+    r"<(?P<close>/)?(?P<tag>[A-Za-z][A-Za-z0-9:_-]*)(?=[\s/>])"
+)
+_SELF_CLOSING_TAG_RE = re.compile(r"/\s*>$")
+_RAW_TEXT_CLOSE_RES = {
+    "script": re.compile(r"</script\s*>", re.IGNORECASE),
+    "style": re.compile(r"</style\s*>", re.IGNORECASE),
+}
 
 _TITLE_MARKER_RE = re.compile(
     r"^\s*(?:(?P<arabic>\(?\d{1,2}\)?)[.)]|"
@@ -327,72 +336,103 @@ def _input_structure_limitations(full_text: str) -> list[str]:
     return limitations
 
 
+def _tag_end(value: str, start: int) -> int | None:
+    """Return the exclusive end of a tag without treating quoted ``>`` as syntax."""
+    quote: str | None = None
+    cursor = start + 1
+    value_length = len(value)
+    while cursor < value_length:
+        character = value[cursor]
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in {"\"", "'"}:
+            quote = character
+        elif character == ">":
+            return cursor + 1
+        cursor += 1
+    return None
+
+
 def _htmlparser_safe_markup(value: str) -> tuple[str, list[str]]:
     """Preserve DART pseudo-HTML boundaries before feeding ``HTMLParser``.
 
     ``HTMLParser`` treats HTML ``TITLE`` as a CDATA element, although DART
     documents frequently use it as a structural wrapper containing nested
     pseudo-HTML.  The adapter changes only that token name and converts valid
-    XML-style CDATA payloads to literal text; it never strips source text.
+    XML-style CDATA payloads to literal text.  It also suppresses script and
+    style raw text from structured evidence extraction; the original document
+    remains available to the caller outside this intermediate markup.
     """
     limitations: list[str] = []
     parts: list[str] = []
     cursor = 0
-    lower_value = value.lower()
-    while cursor < len(value):
+    value_length = len(value)
+    while cursor < value_length:
         start = value.find("<", cursor)
         if start < 0:
-            parts.append(value[cursor:])
+            parts.append(value[cursor:value_length])
             break
         parts.append(value[cursor:start])
-        remaining = value[start:]
-        lower_remaining = lower_value[start:]
-        if lower_remaining.startswith("<!--"):
+        if value.startswith("<!--", start):
             end = value.find("-->", start + 4)
             if end < 0:
-                parts.append(value[start:])
+                parts.append(value[start:value_length])
                 break
             parts.append(value[start:end + 3])
             cursor = end + 3
             continue
-        if lower_remaining.startswith("<?"):
+        if value.startswith("<?", start):
             end = value.find("?>", start + 2)
             if end < 0:
-                parts.append(value[start:])
+                parts.append(value[start:value_length])
                 break
             parts.append(value[start:end + 2])
             cursor = end + 2
             continue
-        if lower_remaining.startswith("<!doctype"):
+        if value[start:start + 9].lower() == "<!doctype":
             end = value.find(">", start + len("<!doctype"))
             if end < 0:
-                parts.append(value[start:])
+                parts.append(value[start:value_length])
                 break
             parts.append(value[start:end + 1])
             cursor = end + 1
             continue
-        script_open = re.match(r"<script\b[^>]*>", value[start:], re.IGNORECASE)
-        if script_open:
-            content_start = start + script_open.end()
-            script_close = re.search(r"</script\s*>", value[content_start:], re.IGNORECASE)
-            if script_close is None:
-                parts.append(value[start:])
-                break
-            end = content_start + script_close.end()
-            parts.append(value[start:end])
-            cursor = end
+        tag_match = _TAG_NAME_RE.match(value, start)
+        tag_end = _tag_end(value, start) if tag_match else None
+        if tag_match and tag_end is not None:
+            tag = tag_match.group("tag").lower()
+            is_closing = tag_match.group("close") is not None
+            raw_tag = value[start:tag_end]
+            if (
+                tag in _RAW_TEXT_CLOSE_RES
+                and not is_closing
+                and not _SELF_CLOSING_TAG_RE.search(raw_tag)
+            ):
+                raw_close = _RAW_TEXT_CLOSE_RES[tag].search(value, tag_end)
+                if raw_close is None:
+                    parts.append(f"<{_PARSER_SUPPRESSED_RAW_TAG}>")
+                    parts.append(f"</{_PARSER_SUPPRESSED_RAW_TAG}>")
+                    cursor = value_length
+                    break
+                parts.append(f"<{_PARSER_SUPPRESSED_RAW_TAG}>")
+                parts.append(f"</{_PARSER_SUPPRESSED_RAW_TAG}>")
+                cursor = raw_close.end()
+                continue
+            parts.append(raw_tag)
+            cursor = tag_end
             continue
-        if remaining[:9].lower() == "<![cdata[":
+        if value[start:start + 9].lower() == "<![cdata[":
             end = value.find("]]>", start + 9)
             if end < 0:
                 limitations.append("malformed_cdata")
-                parts.append(escape(value[start:]))
-                cursor = len(value)
+                parts.append(escape(value[start:value_length]))
+                cursor = value_length
                 break
             parts.append(escape(value[start + 9:end]))
             cursor = end + 3
             continue
-        if remaining[:8].lower() == "<![cdata":
+        if value[start:start + 8].lower() == "<![cdata":
             limitations.append("malformed_cdata")
         parts.append("<")
         cursor = start + 1

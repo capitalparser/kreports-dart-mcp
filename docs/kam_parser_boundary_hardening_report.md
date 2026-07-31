@@ -18,13 +18,29 @@ ancestry across malformed boundaries.
 - ignore comments and processing instructions as metadata while preserving
   decoded entity text.
 
+## Follow-up: lexical boundaries and raw-text evidence isolation
+
+- scan tags by index, respecting quoted attributes, so a CDATA-like literal in
+  an attribute is never treated as a declaration;
+- treat `SCRIPT` and `STYLE` payloads, including an unclosed payload through
+  EOF, as non-evidence raw text in the structural projection; and
+- avoid per-tag remainder copies. The adapter now uses indexed prefix checks,
+  compiled regexes with `match`/`search` positions, and a bounded-suffix guard
+  regression to retain linear behavior on tag-dense reports.
+
+The raw filing body is retained by its document/evidence layer. This parser
+only builds the intermediate structural projection, where script and style
+text must never be accepted as audit evidence.
+
 This keeps malformed structure fail-closed: ambiguous title boundaries remain
 `ambiguous`, incomplete explicit matters remain `error`, and no KAM evidence is
 emitted from either outcome.
 
 ## Verification
 
-- `uv run --extra dev pytest -q tests/test_kam_parser.py` — 193 passed
+- `uv run --extra dev pytest -q tests/test_kam_parser.py` — 200 passed
+- Structural guard plus 2,000,000-character tag-dense probe — 0.266 seconds
+  locally (the pre-remediation probe required about 26 seconds)
 - Parent independent regression: 10 related parser/report/persistence/procedure
   files — 438 passed
 - `uv run --extra dev ruff check kreports/processor/kam_parser.py` and
