@@ -38,11 +38,9 @@ emitted from either outcome.
 
 ## Verification
 
-- `uv run --extra dev pytest -q tests/test_kam_parser.py` — 200 passed
+- `uv run --extra dev pytest -q tests/test_kam_parser.py` — 202 passed
 - Structural guard plus 2,000,000-character tag-dense probe — 0.266 seconds
-  locally (the pre-remediation probe required about 26 seconds)
-- Parent independent regression: 10 related parser/report/persistence/procedure
-  files — 438 passed
+  locally
 - `uv run --extra dev ruff check kreports/processor/kam_parser.py` and
   `git diff --check` — passed
 
