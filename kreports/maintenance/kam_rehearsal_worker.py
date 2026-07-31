@@ -126,8 +126,15 @@ QUALITY_FRESHNESS_FIELDS = (
 class WorkerActionError(RuntimeError):
     """A stable public failure code for the parent rehearsal orchestrator."""
 
-    def __init__(self, code: str, message: object) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: object,
+        *,
+        evidence: dict[str, object] | None = None,
+    ) -> None:
         self.code = code
+        self.evidence = evidence
         super().__init__(_bounded_message(message))
 
 
@@ -682,7 +689,53 @@ def _bounded_rebuild_result(result: dict[str, Any]) -> dict[str, object]:
         value = result.get(field)
         if isinstance(value, list):
             bounded[field] = value[:20]
+    receipts = result.get("receipts")
+    if isinstance(receipts, list):
+        bounded["error_receipts"] = [
+            _bounded_error_receipt(receipt)
+            for receipt in receipts
+            if isinstance(receipt, dict)
+            and str(receipt.get("quality_status") or receipt.get("status"))
+            in {"error", "failed"}
+        ][:20]
     return bounded
+
+
+def _bounded_error_receipt(receipt: dict[str, Any]) -> dict[str, object]:
+    limitations = receipt.get("limitations")
+    limitation_codes = ""
+    if isinstance(limitations, list):
+        limitation_codes = ";".join(
+            _bounded_message(value)
+            for value in limitations[:10]
+        )[:500]
+    return {
+        "rcept_no": _bounded_message(receipt.get("rcept_no") or ""),
+        "corp_code": _bounded_message(receipt.get("corp_code") or ""),
+        "quality_status": _bounded_message(
+            receipt.get("quality_status") or receipt.get("status") or "error",
+        ),
+        "source_basis": _bounded_message(receipt.get("source_basis") or "none"),
+        "item_count": int(receipt.get("item_count") or 0),
+        "limitation_codes": limitation_codes,
+    }
+
+
+def _rebuild_failure_evidence(
+    result: dict[str, object],
+) -> dict[str, object]:
+    return {
+        field: result.get(field)
+        for field in (
+            "year",
+            "total",
+            "receipt_counts",
+            "item_counts",
+            "items_total",
+            "rows_written",
+            "error_receipts",
+        )
+    }
 
 
 def _validate_state_after_migration(state: dict[str, object]) -> None:
@@ -970,12 +1023,14 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
                     dry_run=action == "kam-dry-run",
                 )
             )
-            if int(result.get("error") or 0) or int(
-                result.get("failed") or 0
+            if action != "kam-dry-run" and (
+                int(result.get("error") or 0)
+                or int(result.get("failed") or 0)
             ):
                 raise WorkerActionError(
                     "backfill_failed",
                     "KAM rebuild reported receipt errors",
+                    evidence=_rebuild_failure_evidence(result),
                 )
             return result
         if action == "procedure-index":
@@ -1053,7 +1108,17 @@ def main(argv: list[str] | None = None) -> int:
         _write_json({**execute_action(action, year=year), "ok": True})
         return 0
     except WorkerActionError as exc:
-        _write_json({"ok": False, "action": action, "error": {"code": exc.code, "message": _bounded_message(exc)}})
+        payload: dict[str, object] = {
+            "ok": False,
+            "action": action,
+            "error": {
+                "code": exc.code,
+                "message": _bounded_message(exc),
+            },
+        }
+        if exc.evidence is not None:
+            payload["evidence"] = exc.evidence
+        _write_json(payload)
         return 2
     except Exception as exc:  # noqa: BLE001  # pragma: no cover - containment boundary
         _write_json({"ok": False, "action": action, "error": {"code": "worker_failed", "message": _bounded_message(exc)}})

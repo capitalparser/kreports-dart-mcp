@@ -1173,6 +1173,238 @@ def test_kam_rebuild_fails_closed_on_failed_count(
     assert caught.value.code == "backfill_failed"
 
 
+def test_kam_rebuild_failure_keeps_tail_error_receipts_as_bounded_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch aggregate-only failures that discard the actual blocked receipts."""
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        execute_action,
+    )
+
+    _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
+    usable_receipts = [
+        {
+            "rcept_no": f"20250331{index:06d}",
+            "corp_code": "00000001",
+            "quality_status": "full_body",
+            "source_basis": "report_sections",
+            "item_count": 1,
+            "titles": ["정상 핵심감사사항"],
+            "limitations": [],
+        }
+        for index in range(20)
+    ]
+    blocked_receipts = [
+        {
+            "rcept_no": "20250331990001",
+            "corp_code": "00000002",
+            "quality_status": "error",
+            "source_basis": "none",
+            "item_count": 0,
+            "titles": ["must not enter failure evidence"],
+            "storage_uri": "gs://private-bucket/must-not-leak.xml.gz",
+            "limitations": [
+                "source_documents.raw_body:read_error:RuntimeError",
+            ],
+        },
+        {
+            "rcept_no": "20250331990002",
+            "corp_code": "00000003",
+            "quality_status": "error",
+            "source_basis": "source_documents.raw_body",
+            "item_count": 0,
+            "titles": ["must not enter failure evidence"],
+            "limitations": [
+                "source_documents.raw_body:ambiguous_boundary",
+            ],
+        },
+    ]
+    rebuild_result = {
+        "year": 2025,
+        "market": None,
+        "dry_run": False,
+        "database_status": "available",
+        "total": 22,
+        "full_body": 20,
+        "summary_only": 0,
+        "missing": 0,
+        "error": 2,
+        "receipt_counts": {
+            "full_body": 20,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 2,
+        },
+        "item_counts": {
+            "full_body": 20,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 0,
+        },
+        "items_total": 20,
+        "rows_written": 20,
+        "receipts": [*usable_receipts, *blocked_receipts],
+        "limitations": [],
+    }
+    monkeypatch.setattr(
+        collector_module,
+        "rebuild_kam_items",
+        lambda **_kwargs: rebuild_result,
+    )
+
+    with pytest.raises(WorkerActionError) as caught:
+        execute_action("kam-rebuild", year=2025)
+
+    assert caught.value.code == "backfill_failed"
+    assert caught.value.evidence == {
+        "year": 2025,
+        "total": 22,
+        "receipt_counts": {
+            "full_body": 20,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 2,
+        },
+        "item_counts": {
+            "full_body": 20,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 0,
+        },
+        "items_total": 20,
+        "rows_written": 20,
+        "error_receipts": [
+            {
+                "rcept_no": "20250331990001",
+                "corp_code": "00000002",
+                "quality_status": "error",
+                "source_basis": "none",
+                "item_count": 0,
+                "limitation_codes": (
+                    "source_documents.raw_body:read_error:RuntimeError"
+                ),
+            },
+            {
+                "rcept_no": "20250331990002",
+                "corp_code": "00000003",
+                "quality_status": "error",
+                "source_basis": "source_documents.raw_body",
+                "item_count": 0,
+                "limitation_codes": (
+                    "source_documents.raw_body:ambiguous_boundary"
+                ),
+            },
+        ],
+    }
+    serialized = json.dumps(caught.value.evidence, sort_keys=True)
+    assert "private-bucket" not in serialized
+    assert "must not enter failure evidence" not in serialized
+
+
+def test_kam_dry_run_returns_bounded_errors_for_cross_year_diagnosis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a read-only diagnostic worker stopping the five-year scan early."""
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.maintenance.kam_rehearsal_worker import execute_action
+
+    _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        collector_module,
+        "rebuild_kam_items",
+        lambda **_kwargs: {
+            "year": 2025,
+            "total": 21,
+            "error": 21,
+            "failed": 0,
+            "receipt_counts": {
+                "full_body": 0,
+                "summary_only": 0,
+                "missing": 0,
+                "error": 21,
+            },
+            "item_counts": {
+                "full_body": 0,
+                "summary_only": 0,
+                "missing": 0,
+                "error": 0,
+            },
+            "items_total": 0,
+            "rows_written": 0,
+            "receipts": [
+                {
+                    "rcept_no": f"2025033199{index:04d}",
+                    "corp_code": "00000002",
+                    "quality_status": "error",
+                    "source_basis": "none",
+                    "item_count": 0,
+                    "limitations": [
+                        "source_documents.raw_body:read_error:RuntimeError",
+                    ],
+                }
+                for index in range(21)
+            ],
+            "limitations": [],
+        },
+    )
+
+    result = execute_action("kam-dry-run", year=2025)
+
+    assert result["error"] == 21
+    assert result["rows_written"] == 0
+    assert len(result["error_receipts"]) == 20
+    assert result["error_receipts"][0] == {
+        "rcept_no": "20250331990000",
+        "corp_code": "00000002",
+        "quality_status": "error",
+        "source_basis": "none",
+        "item_count": 0,
+        "limitation_codes": (
+            "source_documents.raw_body:read_error:RuntimeError"
+        ),
+    }
+    assert result["error_receipts"][-1]["rcept_no"] == "20250331990019"
+
+
+def test_worker_main_serializes_bounded_action_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Catch the process boundary dropping evidence attached to a worker error."""
+    from kreports.maintenance import kam_rehearsal_worker as worker
+
+    def fail_action(_action: str, *, year: int | None) -> dict[str, object]:
+        raise worker.WorkerActionError(
+            "backfill_failed",
+            "bounded failure",
+            evidence={
+                "year": year,
+                "error_receipts": [{"rcept_no": "20250331990001"}],
+            },
+        )
+
+    monkeypatch.setattr(worker, "execute_action", fail_action)
+
+    exit_code = worker.main(["kam-rebuild", "--year", "2025"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload == {
+        "ok": False,
+        "action": "kam-rebuild",
+        "error": {
+            "code": "backfill_failed",
+            "message": "bounded failure",
+        },
+        "evidence": {
+            "year": 2025,
+            "error_receipts": [{"rcept_no": "20250331990001"}],
+        },
+    }
+
+
 def test_procedure_index_fails_closed_on_error_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

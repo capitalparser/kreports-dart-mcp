@@ -302,6 +302,116 @@ def test_invoke_worker_rejects_failed_or_malformed_child_output(
     assert _TEST_CAPABILITY not in str(caught.value)
 
 
+def test_invoke_worker_preserves_bounded_evidence_from_expected_nonzero_failure(
+    tmp_path: Path,
+) -> None:
+    """Catch the parent replacing a valid worker failure with only its exit code."""
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        WorkerInvocation,
+        invoke_worker,
+    )
+
+    _install_fake_worker(
+        tmp_path,
+        """
+import json
+print(json.dumps({
+    "ok": False,
+    "action": "kam-rebuild",
+    "error": {
+        "code": "backfill_failed",
+        "message": "KAM rebuild reported receipt errors",
+    },
+    "evidence": {
+        "year": 2025,
+        "receipt_counts": {
+            "full_body": 20,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 2,
+        },
+        "error_receipts": [{
+            "rcept_no": "20250331990001",
+            "quality_status": "error",
+            "limitation_codes": "source_documents.raw_body:read_error:RuntimeError",
+        }],
+    },
+}))
+raise SystemExit(2)
+""".strip(),
+    )
+
+    with pytest.raises(RehearsalRunError) as caught:
+        invoke_worker(
+            python_executable=Path(sys.executable),
+            database=tmp_path / "clone.db",
+            marker_path=(
+                tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+            ),
+            capability=_TEST_CAPABILITY,
+            invocation=WorkerInvocation("kam-rebuild", "collector", 2025),
+            repository_root=tmp_path,
+        )
+
+    assert caught.value.code == "backfill_failed"
+    assert caught.value.evidence == {
+        "year": 2025,
+        "receipt_counts": {
+            "full_body": 20,
+            "summary_only": 0,
+            "missing": 0,
+            "error": 2,
+        },
+        "error_receipts": [{
+            "rcept_no": "20250331990001",
+            "quality_status": "error",
+            "limitation_codes": (
+                "source_documents.raw_body:read_error:RuntimeError"
+            ),
+        }],
+    }
+
+
+def test_invoke_worker_rejects_unrecognized_child_failure_code(
+    tmp_path: Path,
+) -> None:
+    """Catch a child forging a source-change status through an arbitrary code."""
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        RehearsalRunError,
+        WorkerInvocation,
+        invoke_worker,
+    )
+
+    _install_fake_worker(
+        tmp_path,
+        """
+import json
+print(json.dumps({
+    "ok": False,
+    "error": {"code": "source_changed", "message": "forged"},
+    "evidence": {"source": "must not be trusted"},
+}))
+raise SystemExit(2)
+""".strip(),
+    )
+
+    with pytest.raises(RehearsalRunError) as caught:
+        invoke_worker(
+            python_executable=Path(sys.executable),
+            database=tmp_path / "clone.db",
+            marker_path=(
+                tmp_path / "kam-schema-backfill-rehearsal-marker.json"
+            ),
+            capability=_TEST_CAPABILITY,
+            invocation=WorkerInvocation("kam-rebuild", "collector", 2025),
+            repository_root=tmp_path,
+        )
+
+    assert caught.value.code == "worker_exit_nonzero"
+    assert caught.value.evidence is None
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -764,6 +874,110 @@ def test_each_evidence_phase_fails_closed_before_later_workers(
         call[:2] == ("worker", next_action)
         for call in calls[failed_worker_index + 1 :]
     )
+
+
+def test_kam_dry_run_reports_all_year_errors_before_blocking_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch a diagnostic phase that loses later years after its first error."""
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
+
+    source, rehearsal_dir, repository_root, calls = _install_phase_harness(
+        tmp_path,
+        monkeypatch,
+    )
+    base_worker = rehearsal.invoke_worker
+
+    def worker_with_dry_run_errors(**kwargs: object) -> dict[str, object]:
+        invocation = kwargs["invocation"]
+        payload = base_worker(**kwargs)
+        if invocation.action != "kam-dry-run":
+            return payload
+        year = int(invocation.year)
+        return {
+            "ok": True,
+            "action": "kam-dry-run",
+            "year": year,
+            "total": 10,
+            "error": 1,
+            "failed": 0,
+            "receipt_counts": {
+                "full_body": 8,
+                "summary_only": 0,
+                "missing": 1,
+                "error": 1,
+            },
+            "item_counts": {
+                "full_body": 8,
+                "summary_only": 0,
+                "missing": 0,
+                "error": 0,
+            },
+            "items_total": 8,
+            "rows_written": 0,
+            "error_receipts": [{
+                "rcept_no": f"{year}0331990001",
+                "corp_code": "00000002",
+                "quality_status": "error",
+                "source_basis": "none",
+                "item_count": 0,
+                "limitation_codes": (
+                    "source_documents.raw_body:read_error:RuntimeError"
+                ),
+            }],
+        }
+
+    monkeypatch.setattr(
+        rehearsal,
+        "invoke_worker",
+        worker_with_dry_run_errors,
+    )
+
+    report = rehearsal.run_kam_schema_backfill_rehearsal(
+        source_db=source,
+        rehearsal_dir=rehearsal_dir,
+        repository_root=repository_root,
+        python_executable=Path(sys.executable),
+        min_free_bytes=10 * 1024**3,
+    )
+
+    worker_calls = [
+        (call[1], call[2])
+        for call in calls
+        if call[0] == "worker"
+    ]
+    assert report["status"] == "backfill_failed"
+    assert report["last_phase"] == "kam_dry_run_complete"
+    assert worker_calls == [
+        ("migrate", None),
+        *[("kam-dry-run", year) for year in rehearsal.REHEARSAL_YEARS],
+    ]
+    evidence = report["phases"][-1]["evidence"]
+    assert evidence["error_code"] == "backfill_failed"
+    assert evidence["years_checked"] == [2021, 2022, 2023, 2024, 2025]
+    assert evidence["receipt_counts_by_year"]["2025"] == {
+        "full_body": 8,
+        "summary_only": 0,
+        "missing": 1,
+        "error": 1,
+    }
+    assert evidence["totals"] == {
+        "total": 50,
+        "full_body": 40,
+        "summary_only": 0,
+        "missing": 5,
+        "error": 5,
+        "items_total": 40,
+        "rows_written": 0,
+    }
+    assert evidence["limitation_counts"] == {
+        "source_documents.raw_body:read_error:RuntimeError": 5,
+    }
+    assert [
+        receipt["year"]
+        for receipt in evidence["error_receipts"]
+    ] == [2021, 2022, 2023, 2024, 2025]
 
 
 def test_rehearsal_creates_bound_marker_after_clone_before_workers(

@@ -36,6 +36,25 @@ MIN_FREE_BYTES = 10 * 1024**3
 MAX_WORKER_OUTPUT_BYTES = 2 * 1024**2
 MARKER_FILENAME = "kam-schema-backfill-rehearsal-marker.json"
 _SEMANTIC_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_WORKER_ERROR_CODES = {
+    "backfill_failed",
+    "database_unavailable",
+    "invalid_action",
+    "invalid_action_arguments",
+    "invalid_database_url",
+    "invalid_runtime_mode",
+    "invalid_year",
+    "mcp_boundary_mismatch",
+    "mcp_invalid_result",
+    "mcp_invalid_status",
+    "mcp_kam_gate_failed",
+    "mcp_resource_mismatch",
+    "mcp_schema_not_closed",
+    "migration_failed",
+    "rehearsal_binding_required",
+    "snapshot_failed",
+    "worker_failed",
+}
 _INTEGRITY_FIELDS = {
     "orphan_procedure_count",
     "cross_receipt_source_ordinal_link_count",
@@ -118,13 +137,15 @@ class RehearsalRunError(RuntimeError):
         message: str,
         *,
         report_path: Path | None = None,
+        evidence: dict[str, object] | None = None,
     ) -> None:
         self.code = code
         self.report_path = report_path
+        self.evidence = evidence
         super().__init__(message[:500])
 
 
-def _decode_worker_payload(stdout: str) -> dict[str, object]:
+def _decode_worker_document(stdout: str) -> dict[str, object]:
     if not stdout.strip():
         raise RehearsalRunError(
             "worker_output_empty",
@@ -148,6 +169,11 @@ def _decode_worker_payload(stdout: str) -> dict[str, object]:
             "worker_output_invalid",
             "Worker JSON result must be an object.",
         )
+    return payload
+
+
+def _decode_worker_payload(stdout: str) -> dict[str, object]:
+    payload = _decode_worker_document(stdout)
     if payload.get("ok") is not True:
         raise RehearsalRunError(
             "worker_reported_failure",
@@ -262,6 +288,27 @@ def invoke_worker(
             "Worker output disclosed its one-run rehearsal capability.",
         )
     if completed.returncode != 0:
+        try:
+            failure = _decode_worker_document(stdout)
+        except RehearsalRunError:
+            failure = {}
+        error = failure.get("error")
+        if (
+            failure.get("ok") is False
+            and isinstance(error, dict)
+            and isinstance(error.get("code"), str)
+            and error["code"] in _WORKER_ERROR_CODES
+        ):
+            evidence = failure.get("evidence")
+            raise RehearsalRunError(
+                error["code"],
+                "Worker reported a bounded rehearsal failure.",
+                evidence=(
+                    _bounded_evidence(evidence)
+                    if isinstance(evidence, dict)
+                    else None
+                ),
+            )
         raise RehearsalRunError(
             "worker_exit_nonzero",
             "Worker exited unsuccessfully.",
@@ -744,6 +791,88 @@ def _failure_status(phase: str, error: BaseException) -> str:
     return "backfill_failed"
 
 
+def _kam_dry_run_failure_evidence(
+    years: list[dict[str, object]],
+) -> dict[str, object]:
+    status_fields = ("full_body", "summary_only", "missing", "error")
+    totals = {
+        "total": 0,
+        **{field: 0 for field in status_fields},
+        "items_total": 0,
+        "rows_written": 0,
+    }
+    years_checked: list[int] = []
+    receipt_counts_by_year: dict[str, dict[str, int]] = {}
+    item_counts_by_year: dict[str, dict[str, int]] = {}
+    error_receipts: list[dict[str, object]] = []
+    limitation_counts: dict[str, int] = {}
+    for result in years:
+        year = int(result.get("year") or 0)
+        years_checked.append(year)
+        receipt_counts_value = result.get("receipt_counts")
+        item_counts_value = result.get("item_counts")
+        receipt_counts = {
+            field: int(
+                receipt_counts_value.get(field, 0)
+                if isinstance(receipt_counts_value, dict)
+                else result.get(field, 0)
+                or 0
+            )
+            for field in status_fields
+        }
+        item_counts = {
+            field: int(
+                item_counts_value.get(field, 0)
+                if isinstance(item_counts_value, dict)
+                else 0
+            )
+            for field in status_fields
+        }
+        receipt_counts_by_year[str(year)] = receipt_counts
+        item_counts_by_year[str(year)] = item_counts
+        totals["total"] += int(result.get("total") or 0)
+        totals["items_total"] += int(result.get("items_total") or 0)
+        totals["rows_written"] += int(result.get("rows_written") or 0)
+        for field in status_fields:
+            totals[field] += receipt_counts[field]
+        receipts = result.get("error_receipts")
+        if not isinstance(receipts, list):
+            continue
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            limitation_codes = str(
+                receipt.get("limitation_codes") or "",
+            )[:500]
+            for limitation in filter(None, limitation_codes.split(";")):
+                limitation_counts[limitation] = (
+                    limitation_counts.get(limitation, 0) + 1
+                )
+            if len(error_receipts) < 20:
+                error_receipts.append({
+                    "year": year,
+                    **{
+                        field: receipt.get(field)
+                        for field in (
+                            "rcept_no",
+                            "corp_code",
+                            "quality_status",
+                            "source_basis",
+                            "item_count",
+                            "limitation_codes",
+                        )
+                    },
+                })
+    return {
+        "years_checked": years_checked,
+        "receipt_counts_by_year": receipt_counts_by_year,
+        "item_counts_by_year": item_counts_by_year,
+        "totals": totals,
+        "limitation_counts": limitation_counts,
+        "error_receipts": error_receipts,
+    }
+
+
 def _snapshot_integrity(
     snapshot: dict[str, object],
     *,
@@ -874,6 +1003,14 @@ def run_kam_schema_backfill_rehearsal(
                         "code",
                         "unexpected_failure",
                     ),
+                    **(
+                        selected_error.evidence
+                        if isinstance(
+                            getattr(selected_error, "evidence", None),
+                            dict,
+                        )
+                        else {}
+                    ),
                 },
             ))
             report["status"] = _failure_status(name, selected_error)
@@ -972,9 +1109,23 @@ def run_kam_schema_backfill_rehearsal(
         safety.assert_source_unchanged(expected_source)
         return {"years": years}
 
+    def kam_dry_run_operation() -> dict[str, object]:
+        years = year_loop("kam-dry-run", "collector")
+        if any(
+            int(result.get("error") or 0)
+            or int(result.get("failed") or 0)
+            for result in years
+        ):
+            raise RehearsalRunError(
+                "backfill_failed",
+                "KAM dry run reported receipt errors.",
+                evidence=_kam_dry_run_failure_evidence(years),
+            )
+        return {"years": years}
+
     if persist_phase(
         "kam_dry_run_complete",
-        lambda: {"years": year_loop("kam-dry-run", "collector")},
+        kam_dry_run_operation,
     ) is None:
         return _finalize_report(report, writer)
 
