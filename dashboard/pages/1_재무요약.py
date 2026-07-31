@@ -4,14 +4,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 import pandas as pd
 from dashboard.db import get_financials, get_financials_extended, get_company
 from dashboard.styles import CSS, page_header, kpi_card, section_title, insight, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE
 
 st.set_page_config(page_title="재무 요약", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 render_sidebar()
 
 stock = st.session_state.get("selected_stock")

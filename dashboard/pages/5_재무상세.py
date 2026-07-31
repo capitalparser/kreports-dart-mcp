@@ -12,7 +12,7 @@ from dashboard.styles import CSS, page_header, section_title, no_data
 
 st.set_page_config(page_title="재무 상세", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 render_sidebar()
 
 _UNIT = 1e8  # 억원

@@ -10,7 +10,7 @@ from dashboard.styles import CSS, page_header, section_title, no_data, PRIMARY, 
 
 st.set_page_config(page_title="공시 타임라인", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 render_sidebar()
 
 DART_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="

@@ -39,9 +39,7 @@ from sqlalchemy import text
 
 from kreports.config import settings
 from kreports.db.engine import get_session, init_db
-from kreports.db.models import Company, FetchLog
 from kreports.collector.fin_collector import collect_financial
-from kreports.collector.corp_sync import get_corp_code
 
 logging.basicConfig(
     level=logging.INFO,

@@ -31,7 +31,7 @@ from kreports.processor.report_section_parser import SECTION_LABELS
 st.set_page_config(page_title="사업 개요", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
 
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 
 render_sidebar()
 

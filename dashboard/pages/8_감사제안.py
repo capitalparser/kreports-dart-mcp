@@ -15,13 +15,10 @@ from dashboard.db import (
     get_governance_communications,
 )
 from dashboard.styles import (
-    BORDER,
     CSS,
     NAVY,
     PRIMARY,
     TEXT_DARK,
-    TEXT_MID,
-    WHITE,
     insight,
     kpi_card,
     no_data,

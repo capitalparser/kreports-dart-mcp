@@ -36,11 +36,19 @@ else:
     except ImportError:
         st = _HeadlessST()  # type: ignore
 
-import pandas as pd
-from sqlalchemy import func as sa_func
-from kreports.config import settings
-from kreports.db.engine import get_session, init_db
-from kreports.db.models import Company, Financial, FinancialFact, Disclosure, Auditor, AuditFee
+# These imports must follow the optional Streamlit binding above.
+import pandas as pd  # noqa: E402
+from sqlalchemy import func as sa_func  # noqa: E402
+from kreports.config import settings  # noqa: E402
+from kreports.db.engine import get_session, init_db  # noqa: E402
+from kreports.db.models import (  # noqa: E402
+    AuditFee,
+    Auditor,
+    Company,
+    Disclosure,
+    Financial,
+    FinancialFact,
+)
 
 _UNIT = 1e8  # 억원
 
@@ -2130,7 +2138,6 @@ def _extract_topic_chapter_items(note_section: str) -> dict[str, dict]:
             continue
 
         # label 매칭
-        label_lower = label.lower()
         for keywords, item_key in _TOPIC_CHAPTER_MAP:
             if item_key in items:
                 continue  # 이미 매칭됨
@@ -2780,7 +2787,6 @@ def get_subsidiaries_with_auditors(corp_code: str) -> dict:
         "parse_errors": [str],
     }
     """
-    import re as _re
     from kreports.collector.fetcher import fetch_document_xml
     from kreports.processor.subsidiary_parser import extract_affiliates_from_report
 

@@ -2,9 +2,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pandas as pd
 import streamlit as st
-from dashboard.db import search_companies, get_financials, get_auditors, get_risk_summary, get_data_freshness, get_bootstrap_status
-from dashboard.styles import CSS, page_header, kpi_card, section_title, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE, TEXT_MID
+from dashboard.db import search_companies, get_risk_summary, get_data_freshness, get_bootstrap_status
+from dashboard.styles import CSS, page_header, kpi_card, section_title, no_data, TEXT_MID
 
 st.set_page_config(
     page_title="DART 감사·투자 분석",
@@ -24,7 +25,7 @@ if not master_data_ready:
 
 # 사이드바 — 종목 선택
 with st.sidebar:
-    st.markdown(f"""
+    st.markdown("""
     <div style="padding:1rem 0 0.5rem 0;">
       <div style="font-size:1.1rem; font-weight:700; letter-spacing:-0.3px;">DART 분석</div>
       <div style="font-size:0.72rem; opacity:0.7; margin-top:0.1rem;">감사팀 · 투자분석 플랫폼</div>
@@ -89,8 +90,6 @@ with col_search:
     query = st.text_input(" ", placeholder="회사명 또는 종목코드 입력 (예: SK하이닉스, 000660)", label_visibility="collapsed", disabled=not master_data_ready)
 with col_btn:
     st.markdown("<div style='margin-top:0.4rem'></div>", unsafe_allow_html=True)
-
-import pandas as pd
 
 if query:
     results = search_companies(query)

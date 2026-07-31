@@ -9,11 +9,11 @@ from dashboard.db import (
     get_financials_both, get_auditors, get_audit_fees, get_risk_summary, get_company,
     get_going_concern_score, get_restatement_delta,
 )
-from dashboard.styles import CSS, page_header, kpi_card, section_title, insight, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE
+from dashboard.styles import CSS, page_header, kpi_card, section_title, insight, no_data, PRIMARY, RED, GREEN, ORANGE
 
 st.set_page_config(page_title="위험 신호", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 render_sidebar()
 
 stock = st.session_state.get("selected_stock")
@@ -473,7 +473,7 @@ if not df.empty and "Beneish_M" in df.columns:
 
             # 실제 DB에서 상세 인덱스 가져오기
             from dashboard.db import get_session
-            from kreports.db.models import Financial, Company
+            from kreports.db.models import Financial
             with get_session() as _sess:
                 _corp_code = company["corp_code"]
                 _fin_rows = _sess.query(Financial).filter_by(

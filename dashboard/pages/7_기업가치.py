@@ -7,8 +7,8 @@ import plotly.graph_objects as go
 import pandas as pd
 from dashboard.db import get_company, get_dcf_inputs
 from dashboard.styles import (
-    CSS, page_header, kpi_card, section_title, insight, no_data,
-    PRIMARY, NAVY, RED, GREEN, ORANGE, WHITE, BORDER, TEXT_DARK, TEXT_MID,
+    CSS, page_header, kpi_card, section_title, no_data,
+    PRIMARY, NAVY, RED, GREEN, ORANGE, BORDER, TEXT_DARK,
 )
 
 
@@ -26,7 +26,7 @@ def _fmt_krw(v):
 
 st.set_page_config(page_title="기업가치 — DCF 지원", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 render_sidebar()
 
 stock = st.session_state.get("selected_stock")

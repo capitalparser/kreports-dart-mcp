@@ -453,12 +453,12 @@ def no_data(msg: str = "수집된 데이터가 없습니다.", state: str = "not
     """
     if state == "empty":
         icon = "🔍"
-        sub = (f'<div style="font-size:0.78rem;margin-top:0.3rem;opacity:0.7;">'
-               f'DART 공시 데이터에 해당 항목이 없습니다.</div>')
+        sub = ('<div style="font-size:0.78rem;margin-top:0.3rem;opacity:0.7;">'
+               'DART 공시 데이터에 해당 항목이 없습니다.</div>')
     else:
         icon = "📭"
-        sub = (f'<div style="font-size:0.78rem;margin-top:0.3rem;opacity:0.7;">'
-               f'아래 버튼으로 데이터를 수집하세요.</div>')
+        sub = ('<div style="font-size:0.78rem;margin-top:0.3rem;opacity:0.7;">'
+               '아래 버튼으로 데이터를 수집하세요.</div>')
     return (
         f'<div style="background:{WHITE};border:1px dashed {BORDER};border-radius:10px;'
         f'padding:2rem;text-align:center;color:{TEXT_MID};">'

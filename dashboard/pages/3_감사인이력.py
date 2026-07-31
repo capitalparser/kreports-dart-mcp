@@ -4,13 +4,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import streamlit as st
 import plotly.graph_objects as go
-import pandas as pd
-from dashboard.db import get_auditors, get_company, get_audit_fees, get_audit_fee_history, get_auditors_for_corp_codes, get_companies_by_corp_codes, get_subsidiaries_with_auditors
-from dashboard.styles import CSS, page_header, kpi_card, section_title, insight, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE, WHITE, BORDER, TEXT_DARK, TEXT_MID, LIGHT_BG
+from dashboard.db import get_auditors, get_company, get_audit_fees, get_audit_fee_history, get_subsidiaries_with_auditors
+from dashboard.styles import CSS, page_header, kpi_card, section_title, insight, no_data, PRIMARY, NAVY, RED, GREEN, ORANGE, TEXT_DARK, TEXT_MID
 
 st.set_page_config(page_title="감사인 이력", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-from dashboard.sidebar import render_sidebar
+from dashboard.sidebar import render_sidebar  # noqa: E402  # Configure Streamlit first.
 render_sidebar()
 
 stock = st.session_state.get("selected_stock")
@@ -282,7 +281,7 @@ if st.session_state.get("show_affiliates"):
                     f'<td style="padding:0.4rem 0.7rem;border-bottom:1px solid #E5E7EB;color:{TEXT_MID};font-size:0.78rem;">{pct}</td>'
                     f'<td style="padding:0.4rem 0.7rem;border-bottom:1px solid #E5E7EB;color:{TEXT_MID};font-size:0.78rem;">{market_label}</td>'
                     + aud_cell +
-                    f'</tr>'
+                    '</tr>'
                 )
             st.markdown(f"""
 <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
@@ -308,7 +307,9 @@ if st.session_state.get("show_affiliates"):
 
         # CSV 다운로드
         def _build_csv(rows: list[dict]) -> bytes:
-            import csv, io, re as _re
+            import csv
+            import io
+            import re as _re
             cols = ["관계", "회사명", "지분율", "시장구분", "감사인", "감사의견", "감사연도", "모회사대비"]
             buf = io.StringIO()
             w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
