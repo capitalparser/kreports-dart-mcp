@@ -247,6 +247,26 @@ def extract_audit_report_sections(xml_content: str) -> dict[str, dict]:
     return result
 
 
+def extract_audit_semantic_evidence(
+    xml_content: str,
+    *,
+    corp_code: str,
+    bsns_year: int,
+    source_document_id: int | None,
+    rcept_no: str | None,
+):
+    """Additive typed evidence view over the existing audit parser output."""
+    from kreports.processor.semantic_contracts import build_audit_semantic_evidence
+
+    return build_audit_semantic_evidence(
+        extract_audit_report_sections(xml_content),
+        corp_code=corp_code,
+        bsns_year=bsns_year,
+        source_document_id=source_document_id,
+        rcept_no=rcept_no,
+    )
+
+
 def _extract_by_text_headings(text: str) -> dict[str, dict]:
     if not text:
         return {}
