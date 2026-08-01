@@ -33,9 +33,9 @@ def _minimal_manifest_payload() -> dict:
         },
         "tool_contract": {
             "version": "1.0",
-            "tool_count": 33,
+            "tool_count": 34,
             "wire_sha256": (
-                "c9eb59cfe41052851a1e48bc0136dc6a84f682693b44fed33f1a261a05ba698c"
+                "4f63c50bd91bb5fb69197bcef3d79e4ac8cdf0b354abc6b0c65e81fa043b3c51"
             ),
         },
         "release_gate": {
@@ -49,7 +49,7 @@ def _minimal_manifest_payload() -> dict:
         },
         "inline_raw_count": 0,
         "contracts": {
-            "all_tools": {"passed": True, "checks": 33},
+            "all_tools": {"passed": True, "checks": 34},
             "golden_contract_sha256": "b" * 64,
             "golden_contract_passed": True,
         },
@@ -673,7 +673,7 @@ def test_release_gate_readiness_predicate_requires_ok_and_no_failures():
         "dataset_version": "fixture",
         "required_failures": [],
         "degraded_features": [],
-        "tool_count": 33,
+        "tool_count": 34,
     }
     assert release_gate_is_ready(ambiguous) is False
 
@@ -856,7 +856,7 @@ def test_readyz_and_manifest_share_the_same_fail_closed_predicate(monkeypatch):
         "dataset_version": "fixture",
         "required_failures": [],
         "degraded_features": [],
-        "tool_count": 33,
+        "tool_count": 34,
     }
     monkeypatch.setattr(
         http_server,

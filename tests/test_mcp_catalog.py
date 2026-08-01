@@ -28,6 +28,7 @@ EXPECTED_TOOL_NAMES = [
     "compare_peer_audit_fees",
     "compare_peer_risk_profile",
     "compare_peer_accounting_policies",
+    "compare_peer_accounting_notes",
     "compare_peer_kam_topics",
     "compare_peer_audit_report_matters",
     "search_dataset",
@@ -46,7 +47,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "c9eb59cfe41052851a1e48bc0136dc6a84f682693b44fed33f1a261a05ba698c"
+EXPECTED_INTERFACE_SHA256 = "4f63c50bd91bb5fb69197bcef3d79e4ac8cdf0b354abc6b0c65e81fa043b3c51"
 
 
 MINIMAL_ARGUMENTS = {
@@ -69,6 +70,7 @@ MINIMAL_ARGUMENTS = {
     "compare_peer_audit_fees": {"company": "__task7_no_such_company__"},
     "compare_peer_risk_profile": {"company": "__task7_no_such_company__"},
     "compare_peer_accounting_policies": {"company": "__task7_no_such_company__"},
+    "compare_peer_accounting_notes": {"company": "__task7_no_such_company__", "year": 2025},
     "compare_peer_kam_topics": {"company": "__task7_no_such_company__"},
     "compare_peer_audit_report_matters": {"company": "__task7_no_such_company__"},
     "search_dataset": {"dataset": "financials", "company": "__task7_no_such_company__"},
@@ -98,7 +100,7 @@ def test_catalog_is_complete_ordered_and_immutable():
 
     assert list(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
     assert [tool.name for tool in list_mcp_tools()] == EXPECTED_TOOL_NAMES
-    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 33
+    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 34
     assert all(
         spec.input_model.model_config.get("extra") == "forbid"
         for spec in TOOL_CATALOG.values()
@@ -107,7 +109,7 @@ def test_catalog_is_complete_ordered_and_immutable():
         TOOL_CATALOG["search_company"].name = "changed"
 
 
-def test_generated_tool_interface_keeps_the_approved_33_tool_snapshot_hash():
+def test_generated_tool_interface_keeps_the_approved_34_tool_snapshot_hash():
     from kreports.mcp.dispatch import list_mcp_tools
 
     snapshot = []

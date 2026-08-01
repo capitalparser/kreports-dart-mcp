@@ -4,6 +4,7 @@ from __future__ import annotations
 from kreports.mcp.handlers.auditor import (
     handle_build_audit_acceptance_pack,
     handle_compare_peer_accounting_policies,
+    handle_compare_peer_accounting_notes,
     handle_compare_peer_audit_fees,
     handle_compare_peer_audit_procedures,
     handle_compare_peer_audit_report_matters,
@@ -61,6 +62,7 @@ HANDLERS = {
     "compare_peer_audit_fees": handle_compare_peer_audit_fees,
     "compare_peer_risk_profile": handle_compare_peer_risk_profile,
     "compare_peer_accounting_policies": handle_compare_peer_accounting_policies,
+    "compare_peer_accounting_notes": handle_compare_peer_accounting_notes,
     "compare_peer_kam_topics": handle_compare_peer_kam_topics,
     "compare_peer_audit_report_matters": handle_compare_peer_audit_report_matters,
     "search_dataset": handle_search_dataset,

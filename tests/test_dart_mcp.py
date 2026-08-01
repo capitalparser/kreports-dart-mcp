@@ -38,7 +38,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 33  # approved catalog including semantic context and DCF model pack
+EXPECTED_TOOL_COUNT = 34  # approved catalog including semantic context, note comparison, and DCF model pack
 
 
 class TestToolRegistryConsistency:

@@ -1,4 +1,4 @@
-"""Strict typed arguments for the 33 public MCP tools."""
+"""Strict typed arguments for the 34 public MCP tools."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
@@ -246,6 +246,27 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
     peer_limit: int = Field(30, ge=1, le=200)
     fs_div: FsDiv = "CFS"
     fs_strategy: FsStrategy = "auto"
+
+
+class ComparePeerAccountingNotesInput(ToolInput):
+    company: str
+    year: Year = 2025
+    topics: list[Literal[
+        "revenue", "leases", "financial_instruments", "related_parties",
+        "provisions_contingencies", "impairment", "subsidiaries",
+        "subsequent_events", "accounting_policies",
+    ]] | None = Field(None, max_length=9)
+    peer_limit: int = Field(30, ge=1, le=200)
+    fs_strategy: FsStrategy = "auto"
+    peer_criteria: PeerCriteriaProfile | list[str] | None = Field(
+        None,
+        description="선택한 동종업종 기준. 생략하면 기존 adaptive peer 정책을 사용한다.",
+    )
+
+    @field_validator("topics")
+    @classmethod
+    def unique_note_topics(cls, value):
+        return list(dict.fromkeys(value)) if value is not None else value
 
 
 class ComparePeerKamTopicsInput(ComparePeerRiskProfileInput):

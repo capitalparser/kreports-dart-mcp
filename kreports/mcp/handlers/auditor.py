@@ -11,6 +11,7 @@ from kreports.analysis.audit_reporting import (
     search_audit_report_matters,
 )
 from kreports.analysis.group_audit import get_subsidiary_auditors
+from kreports.analysis.note_comparison import compare_peer_accounting_notes
 from kreports.analysis.peer_benchmarks import (
     build_audit_acceptance_pack,
     compare_peer_accounting_policies,
@@ -25,6 +26,7 @@ from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     BuildAuditAcceptancePackInput,
     ComparePeerAccountingPoliciesInput,
+    ComparePeerAccountingNotesInput,
     ComparePeerAuditFeesInput,
     ComparePeerAuditProceduresInput,
     ComparePeerAuditReportMattersInput,
@@ -98,6 +100,19 @@ def handle_compare_peer_accounting_policies(
         peer_limit=args.peer_limit,
         fs_div=args.fs_div,
         fs_strategy=args.fs_strategy,
+    )
+
+
+def handle_compare_peer_accounting_notes(
+    args: ComparePeerAccountingNotesInput,
+) -> dict:
+    return compare_peer_accounting_notes(
+        company=resolve_company(args.company),
+        year=args.year,
+        topics=args.topics,
+        peer_limit=args.peer_limit,
+        fs_strategy=args.fs_strategy,
+        peer_criteria=args.peer_criteria,
     )
 
 
