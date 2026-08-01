@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 
 def test_source_separated_answer_contract_keeps_facts_claims_context_and_analysis_distinct():
@@ -79,3 +80,28 @@ def test_source_separated_answer_rejects_analysis_without_a_known_source():
             pack,
             analysis=[{"statement": "근거 없는 해석", "source_ids": ["unknown"]}],
         )
+
+
+def test_context_and_answer_contracts_reject_mislabelled_source_buckets_and_precedence():
+    from kreports.mcp.answer_contracts import ContextPackV1, SourceSeparatedAnswerV1
+
+    wrong_dart_evidence = {
+        "source_class": "company_ir",
+        "source_id": "ir-1",
+        "excerpt": "경영진 주장",
+    }
+    with pytest.raises(ValidationError, match="dart_filing"):
+        ContextPackV1(
+            subject={"corp_code": "00000001"},
+            year=2024,
+            source_precedence=["dart_filing", "company_ir", "web_news", "llm_analysis"],
+            dart_filing=[wrong_dart_evidence],
+        )
+    with pytest.raises(ValidationError, match="fixed source precedence"):
+        ContextPackV1(
+            subject={"corp_code": "00000001"},
+            year=2024,
+            source_precedence=["company_ir", "dart_filing", "web_news", "llm_analysis"],
+        )
+    with pytest.raises(ValidationError, match="dart_filing"):
+        SourceSeparatedAnswerV1(confirmed_facts=[wrong_dart_evidence])

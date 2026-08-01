@@ -11,12 +11,12 @@ from kreports.mcp.answer_contracts import (
     MissingEvidenceV1,
     PeerNoteComparisonV1,
     SourceConflictV1,
+    SOURCE_PRECEDENCE,
     SuppliedExternalEvidenceV1,
 )
 
 
 CONTEXT_PACK_VERSION = "context_pack.v1"
-SOURCE_PRECEDENCE = ["dart_filing", "company_ir", "web_news", "llm_analysis"]
 MAX_SUPPLIED_EVIDENCE_PER_SOURCE_CLASS = 50
 DART_BUCKETS = (
     "business_report",

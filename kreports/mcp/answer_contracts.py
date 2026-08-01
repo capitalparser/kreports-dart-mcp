@@ -3,10 +3,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 SourceClass = Literal["dart_filing", "company_ir", "web_news", "llm_analysis"]
+SOURCE_PRECEDENCE: list[SourceClass] = [
+    "dart_filing",
+    "company_ir",
+    "web_news",
+    "llm_analysis",
+]
 
 
 class _ContractModel(BaseModel):
@@ -77,6 +83,50 @@ class LLMAnalysisV1(_ContractModel):
         return sorted(dict.fromkeys(cleaned))
 
 
+def _validate_source_buckets(
+    *,
+    dart_filing: list[ContextEvidenceV1],
+    company_ir: list[ContextEvidenceV1],
+    web_news: list[ContextEvidenceV1],
+) -> set[str]:
+    buckets = (
+        ("dart_filing", dart_filing),
+        ("company_ir", company_ir),
+        ("web_news", web_news),
+    )
+    for expected_source_class, evidence in buckets:
+        wrong = [item.source_id for item in evidence if item.source_class != expected_source_class]
+        if wrong:
+            raise ValueError(
+                f"{expected_source_class} bucket only accepts {expected_source_class} evidence: "
+                f"{', '.join(sorted(wrong))}"
+            )
+    source_ids = [
+        item.source_id
+        for _, evidence in buckets
+        for item in evidence
+    ]
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for source_id in source_ids:
+        if source_id in seen:
+            duplicates.add(source_id)
+        seen.add(source_id)
+    if duplicates:
+        raise ValueError(
+            f"duplicate source_id across evidence buckets: {', '.join(sorted(duplicates))}"
+        )
+    return set(source_ids)
+
+
+def _validate_analysis_citations(
+    items: list[LLMAnalysisV1], source_ids: set[str]
+) -> None:
+    unknown = sorted({source_id for item in items for source_id in item.source_ids} - source_ids)
+    if unknown:
+        raise ValueError(f"unknown source_ids: {', '.join(unknown)}")
+
+
 class ContextPackV1(_ContractModel):
     schema_version: Literal["context_pack.v1"] = "context_pack.v1"
     subject: dict[str, Any]
@@ -92,6 +142,18 @@ class ContextPackV1(_ContractModel):
     conflicts: list[SourceConflictV1] = Field(default_factory=list)
     llm_guidance: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def enforce_source_separation(self):
+        if self.source_precedence != SOURCE_PRECEDENCE:
+            raise ValueError("context packs require fixed source precedence")
+        source_ids = _validate_source_buckets(
+            dart_filing=self.dart_filing,
+            company_ir=self.company_ir,
+            web_news=self.web_news,
+        )
+        _validate_analysis_citations(self.llm_analysis, source_ids)
+        return self
+
 
 class SourceSeparatedAnswerV1(_ContractModel):
     schema_version: Literal["source_separated_answer.v1"] = "source_separated_answer.v1"
@@ -105,14 +167,32 @@ class SourceSeparatedAnswerV1(_ContractModel):
     sources: list[ContextEvidenceV1] = Field(default_factory=list)
     llm_guidance: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def enforce_answer_source_separation(self):
+        source_ids = _validate_source_buckets(
+            dart_filing=self.confirmed_facts,
+            company_ir=self.management_claims,
+            web_news=self.external_context,
+        )
+        _validate_analysis_citations(self.analysis, source_ids)
+        _validate_analysis_citations(self.counterpoints, source_ids)
+        expected_sources = [
+            *self.confirmed_facts,
+            *self.management_claims,
+            *self.external_context,
+        ]
+        if self.sources and self.sources != expected_sources:
+            raise ValueError("sources must match the fixed source-separated order")
+        if expected_sources and not self.sources:
+            raise ValueError("sources must include every source-separated evidence item")
+        return self
+
 
 def _validate_analysis_sources(
     items: list[LLMAnalysisV1],
     source_ids: set[str],
 ) -> list[LLMAnalysisV1]:
-    unknown = sorted({source_id for item in items for source_id in item.source_ids} - source_ids)
-    if unknown:
-        raise ValueError(f"unknown source_ids: {', '.join(unknown)}")
+    _validate_analysis_citations(items, source_ids)
     return items
 
 

@@ -130,3 +130,32 @@ def test_context_pack_bounds_caller_supplied_external_evidence():
                 for index in range(51)
             ],
         )
+
+
+def test_context_pack_rejects_cross_bucket_duplicate_source_ids_before_llm_citation():
+    from kreports.analysis.context_pack import build_context_pack
+
+    with pytest.raises(ValueError, match="duplicate source_id"):
+        build_context_pack(
+            _local_context(),
+            company_ir=[
+                {
+                    "source_class": "company_ir",
+                    "source_id": "shared-source",
+                    "excerpt": "IR self-description",
+                }
+            ],
+            web_news=[
+                {
+                    "source_class": "web_news",
+                    "source_id": "shared-source",
+                    "excerpt": "News coverage",
+                }
+            ],
+            llm_analysis=[
+                {
+                    "statement": "This citation would otherwise be ambiguous.",
+                    "source_ids": ["shared-source"],
+                }
+            ],
+        )
