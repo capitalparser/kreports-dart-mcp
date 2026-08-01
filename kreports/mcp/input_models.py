@@ -1,7 +1,9 @@
 """Strict typed arguments for the 33 public MCP tools."""
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Annotated, Literal
 
 from kreports.analysis.dcf_model import (
@@ -256,6 +258,13 @@ class FetchDisclosureOnDemandInput(ToolInput):
     corp_code: str | None = Field(None, description="선택. disclosures 메타가 없을 때 캐시 메타데이터로 사용.")
     year: Annotated[int, Field(ge=1900, le=2100, description="선택. disclosures 메타가 없을 때 캐시 메타데이터로 사용.")] | None = None
 
+    @field_validator("rcept_no")
+    @classmethod
+    def validate_receipt_number(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{14}", value):
+            raise ValueError("rcept_no는 DART 14자리 숫자여야 합니다.")
+        return value
+
 
 class SearchAuditReportMattersInput(ToolInput):
     company: str | None = Field(None, description="선택. corp_code/stock_code/company name")
@@ -406,6 +415,25 @@ class SearchDisclosureEventsInput(ToolInput):
     )
     market: str | None = None
     limit: int = Field(50, ge=1, le=500)
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def validate_date_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) != 10 or value[4] != "-" or value[7] != "-":
+            raise ValueError("날짜는 YYYY-MM-DD 형식이어야 합니다.")
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("날짜는 YYYY-MM-DD 형식이어야 합니다.") from exc
+        return value
+
+    @model_validator(mode="after")
+    def validate_date_range(self):
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("start_date는 end_date보다 늦을 수 없습니다.")
+        return self
 
 
 class GetAuditReportSectionsInput(ToolInput):
