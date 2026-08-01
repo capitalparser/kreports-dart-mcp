@@ -88,6 +88,16 @@ def test_typed_custom_codes_profile_is_applied_and_explained(temp_engine):
     assert policy["criteria_applied"]["industry_basis"] == "ksic"
     assert policy["exclusion_reasons"]["00000003"] == ["excluded_by_user"]
     assert policy["coverage"]["by_peer"]["00000002"] == 1.0
+    industry = out["peers"][0]["reason_components"]["industry_match"]
+    assert industry == {
+        "matched": False,
+        "basis": "explicit_override",
+        "requested_basis": "ksic",
+        "override": True,
+        "matched_prefix_len": 3,
+        "subject_induty_code": "26410",
+        "peer_induty_code": "64110",
+    }
 
 
 def test_mcp_input_accepts_profile_alias_and_rejects_duplicate_profile():

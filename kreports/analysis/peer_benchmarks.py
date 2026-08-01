@@ -1167,21 +1167,47 @@ def select_peer_group(
             rows = rows[:peer_limit]
         for row in rows:
             reasons = list(peer_inclusions.get(row["corp_code"], []))
+            peer_induty_code = row["induty_code"]
+            same_ksic_prefix = bool(
+                subject_row[3]
+                and peer_induty_code
+                and subject_row[3][:pr.matched_prefix_len]
+                == peer_induty_code[:pr.matched_prefix_len]
+            )
+            explicit_ksic_override = (
+                profile.industry_basis == "ksic"
+                and row["corp_code"] in profile.included_corp_codes
+                and not same_ksic_prefix
+            )
+            if profile.industry_basis == "ksic":
+                industry_matched = same_ksic_prefix
+                industry_basis = (
+                    "explicit_override"
+                    if explicit_ksic_override
+                    else "same_ksic_prefix"
+                )
+            elif profile.industry_basis == "sector_group":
+                industry_matched = (
+                    classify_sector(peer_induty_code).value
+                    == pr.sector_group.value
+                )
+                industry_basis = "sector_group"
+            else:
+                industry_matched = row["corp_code"] in profile.included_corp_codes
+                industry_basis = "custom_codes"
             if effective_size_bucket is not None:
                 reasons.append("asset_size_bucket")
             if row["audit_fee_m"] is not None:
                 reasons.append("audit_fee_available")
             reason_components = {
                 "industry_match": {
-                    "matched": bool(reasons),
-                    "basis": (
-                        "custom_codes"
-                        if profile.industry_basis == "custom_codes"
-                        else profile.industry_basis
-                    ),
+                    "matched": industry_matched,
+                    "basis": industry_basis,
+                    "requested_basis": profile.industry_basis,
+                    "override": explicit_ksic_override,
                     "matched_prefix_len": pr.matched_prefix_len,
                     "subject_induty_code": subject_row[3],
-                    "peer_induty_code": row["induty_code"],
+                    "peer_induty_code": peer_induty_code,
                 },
                 "sector_match": {
                     "matched": classify_sector(row["induty_code"]).value == pr.sector_group.value,
