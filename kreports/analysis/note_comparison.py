@@ -19,6 +19,7 @@ NOTE_TOPICS = (
     "subsequent_events",
     "accounting_policies",
 )
+_STANDARD_FS_DIVS = ("CFS", "OFS")
 
 
 def _availability(row: dict) -> str:
@@ -38,6 +39,42 @@ def _note_topic(row: dict) -> str:
     if row.get("section_type") == "policy" and "회계정책" in str(row.get("note_title") or ""):
         return "accounting_policies"
     return normalize_note_topic(str(row.get("note_title") or ""), str(row.get("body") or ""))
+
+
+def _select_note_row(
+    rows: list[dict],
+    requested_fs_div: str | None,
+) -> tuple[dict, dict] | tuple[None, dict]:
+    """Select one note row without mixing CFS/OFS implicitly."""
+    if not rows:
+        return None, {
+            "requested": requested_fs_div,
+            "used": None,
+            "status": "unavailable_no_cached_note",
+        }
+    by_fs_div: dict[str, list[dict]] = {}
+    for row in rows:
+        fs_div = str(row.get("fs_div") or "unknown")
+        by_fs_div.setdefault(fs_div, []).append(row)
+    if requested_fs_div and by_fs_div.get(requested_fs_div):
+        return by_fs_div[requested_fs_div][0], {
+            "requested": requested_fs_div,
+            "used": requested_fs_div,
+            "status": "exact",
+        }
+    fallback_order = [
+        fs_div for fs_div in _STANDARD_FS_DIVS if fs_div in by_fs_div
+    ] + sorted(fs_div for fs_div in by_fs_div if fs_div not in _STANDARD_FS_DIVS)
+    used_fs_div = fallback_order[0]
+    return by_fs_div[used_fs_div][0], {
+        "requested": requested_fs_div,
+        "used": used_fs_div,
+        "status": (
+            "fallback_requested_fs_div_unavailable"
+            if requested_fs_div
+            else "fallback_no_cohort_fs_div"
+        ),
+    }
 
 
 def _resolve_peer_group(
@@ -77,6 +114,9 @@ def compare_peer_accounting_notes(
     )
     if "error" in peer_group:
         return peer_group
+    peer_selection = dict(peer_group.get("selection_policy") or {})
+    cohort_fs_div = peer_selection.get("fs_div_used")
+    requested_fs_div = cohort_fs_div if cohort_fs_div in _STANDARD_FS_DIVS else None
     subject = dict(peer_group.get("subject") or {})
     subject_code = subject.get("corp_code")
     if not subject_code:
@@ -131,8 +171,8 @@ def compare_peer_accounting_notes(
         comparison_rows: list[dict] = []
         for code in codes:
             rows = notes_by_key.get((code, topic), [])
-            if rows:
-                row = rows[0]
+            row, fs_div_selection = _select_note_row(rows, requested_fs_div)
+            if row:
                 comparison_rows.append({
                     "company": {"corp_code": code, "corp_name": names.get(code)},
                     "value_or_excerpt": row["body"],
@@ -143,6 +183,7 @@ def compare_peer_accounting_notes(
                     "note_no": row["note_no"],
                     "note_title": row["note_title"],
                     "fs_div": row["fs_div"],
+                    "fs_div_selection": fs_div_selection,
                     "full_text_uri": row["full_text_uri"],
                     "full_text_hash": row["full_text_hash"],
                     "full_text_length": row["full_text_length"],
@@ -156,6 +197,7 @@ def compare_peer_accounting_notes(
                     "value_or_excerpt": None,
                     "availability": "unavailable",
                     "source_locator": None,
+                    "fs_div_selection": fs_div_selection,
                     "evidence_documents": evidence_by_code.get(code, []),
                     "comparison_note": "no_cached_note_for_exact_business_year",
                 })
@@ -168,9 +210,12 @@ def compare_peer_accounting_notes(
     return {
         "subject": subject,
         "year": year,
-        "peer_selection": dict(peer_group.get("selection_policy") or {}),
+        "peer_selection": peer_selection,
         "peer_confidence": peer_group.get("confidence"),
         "topics": topic_results,
         "read_only": True,
-        "limitations": ["Only cached accounting_note_chapters for the exact requested business year are compared."],
+        "limitations": [
+            "Only cached accounting_note_chapters for the exact requested business year are compared.",
+            "Rows without the cohort fs_div use the documented CFS, then OFS fallback order and expose fs_div_selection.",
+        ],
     }

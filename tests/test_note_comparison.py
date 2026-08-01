@@ -57,3 +57,67 @@ def test_note_comparison_never_reads_a_different_business_year(temp_engine):
     )
 
     assert all(row["availability"] == "unavailable" for row in result["topics"][0]["rows"])
+
+
+def test_note_comparison_uses_shared_cohort_fs_div_for_mixed_notes(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Peer", induty_code="26410"),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="연결 리스"),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="OFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="별도 리스"),
+            AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="Peer 연결 리스"),
+            AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="OFS", rcept_no="20250301000002", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="Peer 별도 리스"),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+            "selection_policy": {"fs_div_used": "OFS"},
+        },
+        _read_engine=temp_engine,
+    )
+
+    rows = result["topics"][0]["rows"]
+    assert [row["value_or_excerpt"] for row in rows] == ["별도 리스", "Peer 별도 리스"]
+    assert all(row["fs_div_selection"]["requested"] == "OFS" for row in rows)
+    assert all(row["fs_div_selection"]["used"] == "OFS" for row in rows)
+    assert all(row["fs_div_selection"]["status"] == "exact" for row in rows)
+
+
+def test_note_comparison_labels_fs_div_fallback_when_requested_notes_are_missing(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Peer", induty_code="26410"),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="OFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="별도 리스"),
+            AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="Peer 연결 리스"),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+            "selection_policy": {"fs_div_used": "OFS"},
+        },
+        _read_engine=temp_engine,
+    )
+
+    peer_row = result["topics"][0]["rows"][1]
+    assert peer_row["value_or_excerpt"] == "Peer 연결 리스"
+    assert peer_row["fs_div_selection"] == {
+        "requested": "OFS",
+        "used": "CFS",
+        "status": "fallback_requested_fs_div_unavailable",
+    }
