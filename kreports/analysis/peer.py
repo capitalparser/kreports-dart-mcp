@@ -475,6 +475,7 @@ class PeerResolution:
 def resolve_peers(
     corp_code: str,
     prefix_len_start: int = 3,
+    fallback_prefix_len: Optional[int] = 2,
     min_n: int = 5,
     exclude_other_sectors: bool = True,
     size_bucket_decade: Optional[float] = None,
@@ -485,7 +486,8 @@ def resolve_peers(
     """동종업종 비교를 위한 peer corp_code 목록을 해석한다.
 
     Adaptive ladder: prefix_len_start(기본 3자리)로 매칭 → peer 수가 min_n 미만이면
-    2자리로 fallback. subject 본인은 항상 제외. exclude_other_sectors=True인 경우
+    fallback_prefix_len(기본 2자리)로 fallback. ``None``이면 ladder를 완전히
+    비활성화한다. subject 본인은 항상 제외. exclude_other_sectors=True인 경우
     subject와 다른 sector group(금융/지주/부동산/일반)은 제외한다.
 
     size_bucket_decade가 주어지면 subject의 total_assets 대비 log10 거리가 해당 값
@@ -526,7 +528,10 @@ def resolve_peers(
 
         peers: list[str] = []
         matched_plen = prefix_len_start
-        for plen in (prefix_len_start, 2):
+        ladder = [prefix_len_start]
+        if fallback_prefix_len is not None and fallback_prefix_len != prefix_len_start:
+            ladder.append(fallback_prefix_len)
+        for plen in ladder:
             peers = _query_peers(
                 conn=conn,
                 subject_induty=subject_induty,

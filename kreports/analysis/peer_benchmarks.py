@@ -18,6 +18,7 @@ from kreports.analysis.peer import (
     resolve_fs_div_for_company,
     resolve_peers,
 )
+from kreports.analysis.peer_criteria import PeerCriteriaProfile, coerce_peer_criteria
 
 from kreports.analysis._shared import _clean_dict, _display_text, _has_db_column
 from kreports.analysis.audit_procedure_evidence import (
@@ -769,9 +770,193 @@ def compare_to_industry_multi(
     return _with_typed_cohort_metadata(result, _cohort)
 
 
+def _profile_candidate_codes(
+    conn,
+    *,
+    profile: PeerCriteriaProfile,
+    resolution: PeerResolution,
+    subject_corp_code: str,
+    subject_sector: str,
+    fs_div: str,
+) -> list[str]:
+    """Return the deterministic candidate universe for a peer profile.
+
+    This is intentionally limited to company metadata and already-collected Q4
+    financial rows.  It never materializes a cache or asks a collector for
+    missing data.
+    """
+    if resolution.resolved_year is None:
+        return []
+    if profile.industry_basis == "custom_codes":
+        return [code for code in profile.included_corp_codes if code != subject_corp_code]
+    if profile.industry_basis == "sector_group":
+        rows = conn.execute(
+            text(
+                """
+                SELECT DISTINCT c.corp_code
+                FROM companies c
+                JOIN financials f ON f.corp_code=c.corp_code
+                WHERE c.corp_code != :subject_corp_code
+                  AND f.year=:year AND f.quarter=4 AND f.fs_div=:fs_div
+                ORDER BY c.corp_code
+                """
+            ),
+            {
+                "subject_corp_code": subject_corp_code,
+                "year": resolution.resolved_year,
+                "fs_div": fs_div,
+            },
+        ).all()
+        return [
+            row[0]
+            for row in rows
+            if classify_sector(
+                conn.execute(
+                    text("SELECT induty_code FROM companies WHERE corp_code=:corp_code"),
+                    {"corp_code": row[0]},
+                ).scalar(),
+            ).value == subject_sector
+        ]
+    candidates = list(resolution.peer_corp_codes)
+    # An explicit inclusion is a transparent user override, not an implicit
+    # similarity claim.  It remains subject to exclusion and feature gates.
+    for code in profile.included_corp_codes:
+        if code != subject_corp_code and code not in candidates:
+            candidates.append(code)
+    return sorted(candidates)
+
+
+def _feature_coverage(
+    conn,
+    *,
+    corp_code: str,
+    year: int | None,
+    fs_div: str,
+    profile: PeerCriteriaProfile,
+) -> tuple[float, list[str]]:
+    """Assess only evidence that is already present in the local database."""
+    required = list(profile.required_features)
+    if profile.required_business_tags:
+        required.append("business_tags")
+    if not required:
+        return 1.0, []
+    if year is None:
+        return 0.0, required
+    checks = {
+        "financials": (
+            "SELECT 1 FROM financials WHERE corp_code=:corp_code AND year=:year "
+            "AND quarter=4 AND fs_div=:fs_div LIMIT 1"
+        ),
+        "business_report": (
+            "SELECT 1 FROM source_documents WHERE corp_code=:corp_code AND bsns_year=:year "
+            "AND source_type='business_report' LIMIT 1"
+        ),
+        "audit_report": (
+            "SELECT 1 FROM source_documents WHERE corp_code=:corp_code AND bsns_year=:year "
+            "AND source_type='audit_report' LIMIT 1"
+        ),
+        "audit_fees": "SELECT 1 FROM audit_fees WHERE corp_code=:corp_code AND bsns_year=:year LIMIT 1",
+        "notes": "SELECT 1 FROM accounting_note_chapters WHERE corp_code=:corp_code AND bsns_year=:year LIMIT 1",
+        "kam": (
+            "SELECT 1 FROM report_sections WHERE corp_code=:corp_code AND bsns_year=:year "
+            "AND section_key='kam' LIMIT 1"
+        ),
+    }
+    unavailable: list[str] = []
+    for feature in required:
+        if feature == "business_tags":
+            # Semantic-tag extraction is a later adapter.  Do not claim a
+            # narrative match before an evidence index exists.
+            unavailable.append(feature)
+            continue
+        try:
+            present = conn.execute(
+                text(checks[feature]),
+                {"corp_code": corp_code, "year": year, "fs_div": fs_div},
+            ).first()
+        except Exception:  # schema may be an older read-only runtime artifact
+            present = None
+        if not present:
+            unavailable.append(feature)
+    return (len(required) - len(unavailable)) / len(required), unavailable
+
+
+def _apply_peer_profile(
+    conn,
+    *,
+    profile: PeerCriteriaProfile,
+    resolution: PeerResolution,
+    subject_corp_code: str,
+    subject_sector: str,
+    fs_div: str,
+) -> tuple[list[str], dict[str, list[str]], dict[str, float], dict[str, float]]:
+    """Filter and score peer candidates without changing source tables."""
+    candidates = _profile_candidate_codes(
+        conn,
+        profile=profile,
+        resolution=resolution,
+        subject_corp_code=subject_corp_code,
+        subject_sector=subject_sector,
+        fs_div=fs_div,
+    )
+    selected: list[tuple[str, float]] = []
+    excluded: dict[str, list[str]] = {}
+    coverage: dict[str, float] = {}
+    scores: dict[str, float] = {}
+    for code in candidates:
+        reasons: list[str] = []
+        row = conn.execute(
+            text("SELECT induty_code FROM companies WHERE corp_code=:corp_code"),
+            {"corp_code": code},
+        ).first()
+        if row is None:
+            excluded[code] = ["company_not_found"]
+            continue
+        sector = classify_sector(row[0]).value
+        if code in profile.excluded_corp_codes:
+            reasons.append("excluded_by_user")
+        if sector in profile.excluded_sector_groups:
+            reasons.append(f"excluded_sector_group:{sector}")
+        candidate_coverage, missing_features = _feature_coverage(
+            conn,
+            corp_code=code,
+            year=resolution.resolved_year,
+            fs_div=fs_div,
+            profile=profile,
+        )
+        coverage[code] = candidate_coverage
+        if candidate_coverage < profile.minimum_coverage:
+            reasons.append("minimum_coverage_not_met")
+        if profile.mode == "strict" and missing_features:
+            reasons.extend(f"missing_feature:{feature}" for feature in missing_features)
+        if reasons:
+            excluded[code] = reasons
+            continue
+        # The baseline universe proves industry/sector membership.  Ranking is
+        # intentionally deterministic and only uses declared dimensions.
+        score_components = {
+            "industry": 1.0,
+            "sector": 1.0 if sector == subject_sector else 0.0,
+            "coverage": candidate_coverage,
+            "business": 0.0 if profile.required_business_tags else 1.0,
+            "size": 1.0,
+        }
+        if profile.weights:
+            score = sum(profile.weights[key] * score_components[key] for key in profile.weights)
+        else:
+            score = candidate_coverage
+        scores[code] = round(score, 6)
+        selected.append((code, score))
+    if profile.mode == "ranked":
+        selected.sort(key=lambda item: (-item[1], item[0]))
+    else:
+        selected.sort(key=lambda item: item[0])
+    return [code for code, _score in selected], excluded, coverage, scores
+
+
 def select_peer_group(
     company: str,
-    criteria: Optional[list[str]] = None,
+    criteria: Optional[list[str] | PeerCriteriaProfile | dict] = None,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
     prefix_len_start: int = 3,
@@ -783,7 +968,12 @@ def select_peer_group(
 ) -> dict:
     if _cohort is not None:
         return cohort_to_peer_group(_cohort)
-    criteria = criteria or ["industry", "sector", "financial_data"]
+    profile, criteria_requested, legacy_criteria = coerce_peer_criteria(
+        criteria,
+        prefix_len_start=prefix_len_start,
+        size_bucket_decade=size_bucket_decade,
+        exclude_other_sectors=exclude_other_sectors,
+    )
     active_engine = _read_engine or _engine_module.engine
     if _read_engine is None:
         corp_code = resolve_corp_code(company)
@@ -838,12 +1028,19 @@ def select_peer_group(
             fs_strategy,
             read_engine=_read_engine,
         )
+    effective_prefix_len = profile.prefix_len
+    effective_fallback_prefix_len = (
+        None if profile.mode == "strict" else profile.fallback_prefix_len
+    )
+    effective_size_bucket = profile.size_log10_tolerance if profile.size_metric == "total_assets" else None
+    effective_exclude_other_sectors = exclude_other_sectors
     peer_kwargs = {
         "corp_code": corp_code,
-        "prefix_len_start": prefix_len_start,
+        "prefix_len_start": effective_prefix_len,
+        "fallback_prefix_len": effective_fallback_prefix_len,
         "min_n": 5,
-        "exclude_other_sectors": exclude_other_sectors,
-        "size_bucket_decade": size_bucket_decade,
+        "exclude_other_sectors": effective_exclude_other_sectors,
+        "size_bucket_decade": effective_size_bucket,
         "fs_div": fs_div_used,
         "year": year,
     }
@@ -853,8 +1050,18 @@ def select_peer_group(
         **peer_kwargs,
     )
 
+    with active_engine.connect() as conn:
+        peer_codes, profile_exclusions, feature_coverage, peer_scores = _apply_peer_profile(
+            conn,
+            profile=profile,
+            resolution=pr,
+            subject_corp_code=corp_code,
+            subject_sector=pr.sector_group.value,
+            fs_div=fs_div_used,
+        )
+
     peers: list[dict] = []
-    if pr.peer_corp_codes:
+    if peer_codes:
         stmt = text(
             """
             SELECT c.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
@@ -875,7 +1082,7 @@ def select_peer_group(
             rows = conn.execute(
                 stmt,
                 {
-                    "ccs": pr.peer_corp_codes,
+                    "ccs": peer_codes,
                     "year": pr.resolved_year,
                     "fs": fs_div_used,
                     "limit": peer_limit,
@@ -883,7 +1090,7 @@ def select_peer_group(
             ).mappings().all()
         for row in rows:
             reasons = ["same_ksic_prefix", f"sector_group:{pr.sector_group.value}"]
-            if size_bucket_decade is not None:
+            if effective_size_bucket is not None:
                 reasons.append("asset_size_bucket")
             if row["audit_fee_m"] is not None:
                 reasons.append("audit_fee_available")
@@ -900,8 +1107,8 @@ def select_peer_group(
                     "basis": f"sector_group:{pr.sector_group.value}",
                 },
                 "size_bucket_match": {
-                    "matched": bool(size_bucket_decade is not None),
-                    "basis": "asset_size_bucket" if size_bucket_decade is not None else "not_requested",
+                    "matched": bool(effective_size_bucket is not None),
+                    "basis": "asset_size_bucket" if effective_size_bucket is not None else "not_requested",
                 },
                 "audit_evidence_available": {
                     "matched": row["audit_fee_m"] is not None,
@@ -922,7 +1129,13 @@ def select_peer_group(
                     "basis": "not_indexed_for_peer_scoring",
                 },
             }
-            peers.append({**dict(row), "include_reasons": reasons, "reason_components": reason_components})
+            peers.append({
+                **dict(row),
+                "include_reasons": reasons,
+                "reason_components": reason_components,
+                "feature_coverage": feature_coverage.get(row["corp_code"], 0.0),
+                "selection_score": peer_scores.get(row["corp_code"]),
+            })
 
     return {
         "subject": {
@@ -933,11 +1146,19 @@ def select_peer_group(
             "induty_code": subject_row[3],
         },
         "selection_policy": {
-            "criteria": criteria,
-            "prefix_len_start": prefix_len_start,
+            "criteria": criteria_requested or ["industry", "sector", "financial_data"],
+            "criteria_requested": criteria_requested or ["industry", "sector", "financial_data"],
+            "criteria_applied": profile.requested_policy(),
+            "selection_mode": profile.mode,
+            "legacy_criteria": legacy_criteria,
+            "prefix_len_start": effective_prefix_len,
             "matched_prefix_len": pr.matched_prefix_len,
-            "exclude_other_sectors": exclude_other_sectors,
-            "size_bucket_decade": size_bucket_decade,
+            "fallback_used": (
+                effective_fallback_prefix_len is not None
+                and pr.matched_prefix_len < effective_prefix_len
+            ),
+            "exclude_other_sectors": effective_exclude_other_sectors,
+            "size_bucket_decade": effective_size_bucket,
             "fs_strategy": fs_strategy,
             "fs_div_used": fs_div_used,
             "requested_year": year,
@@ -946,8 +1167,15 @@ def select_peer_group(
                 "industry/sector/audit availability are populated now; business text, KAM topic, "
                 "and audit matter overlap are exposed as nullable components until those indexes are fully backfilled."
             ),
+            "inclusion_reasons": ["same_ksic_prefix", f"sector_group:{pr.sector_group.value}"],
+            "exclusion_reasons": profile_exclusions,
+            "coverage": {
+                "minimum_required": profile.minimum_coverage,
+                "by_peer": feature_coverage,
+            },
+            "confidence": pr.confidence,
         },
-        "peer_count": pr.n_peers,
+        "peer_count": len(peer_codes),
         "returned_peer_count": len(peers),
         "confidence": pr.confidence,
         "peers": peers,

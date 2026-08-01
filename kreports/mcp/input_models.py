@@ -8,6 +8,7 @@ from kreports.analysis.dcf_model import (
     MIN_DECIMAL_ADJUSTED,
     dcf_decimal_fits_serialization,
 )
+from kreports.analysis.peer_criteria import PeerCriteriaProfile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -151,12 +152,28 @@ class GetInvestorSignalsInput(ToolInput):
 
 class SelectPeerGroupInput(ToolInput):
     company: str
-    criteria: list[str] | None = None
+    criteria: list[str] | PeerCriteriaProfile | None = Field(
+        None,
+        description=(
+            "기존 문자열 기준 목록 또는 strict/adaptive/ranked 동종업종 프로필. "
+            "프로필은 KSIC·sector·규모·포함/제외 기업·증빙 충족률을 명시한다."
+        ),
+    )
+    peer_criteria: PeerCriteriaProfile | None = Field(
+        None,
+        description="criteria의 명시적 별칭. criteria와 동시에 지정할 수 없다.",
+    )
     peer_limit: int = Field(30, ge=1, le=200)
     fs_strategy: FsStrategy = "auto"
     prefix_len_start: int = Field(3, ge=2, le=5)
     size_bucket_decade: float | None = Field(None, ge=0.5, le=3.0)
     exclude_other_sectors: bool = True
+
+    @model_validator(mode="after")
+    def reject_duplicate_peer_criteria(self):
+        if self.criteria is not None and self.peer_criteria is not None:
+            raise ValueError("criteria와 peer_criteria는 동시에 지정할 수 없습니다.")
+        return self
 
 
 class CompareToIndustryMultiInput(ToolInput):
