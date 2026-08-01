@@ -1068,7 +1068,13 @@ def select_peer_group(
         None if profile.mode == "strict" else profile.fallback_prefix_len
     )
     effective_size_bucket = profile.size_log10_tolerance if profile.size_metric == "total_assets" else None
-    effective_exclude_other_sectors = exclude_other_sectors
+    # The old boolean remains authoritative only for the legacy argument
+    # shape.  A typed profile expresses sector exclusions explicitly; applying
+    # the old implicit mutual-exclusion rule here would make a requested
+    # profile impossible to reproduce from its returned policy.
+    effective_exclude_other_sectors = (
+        exclude_other_sectors if legacy_criteria else False
+    )
     peer_kwargs = {
         "corp_code": corp_code,
         "prefix_len_start": effective_prefix_len,

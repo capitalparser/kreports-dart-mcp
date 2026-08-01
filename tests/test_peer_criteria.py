@@ -160,3 +160,36 @@ def test_revenue_size_metric_excludes_outside_tolerance(temp_engine):
     assert out["selection_policy"]["exclusion_reasons"]["00000003"] == [
         "size_metric_outside_tolerance:revenue"
     ]
+
+
+def test_typed_sector_exclusion_is_explicit_not_implicit(temp_engine):
+    from kreports.analysis.peer_benchmarks import select_peer_group
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="64201"),
+            Company(corp_code="00000002", corp_name="Financial", induty_code="64202"),
+            Financial(corp_code="00000001", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+            Financial(corp_code="00000002", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+        ])
+
+    allowed = select_peer_group(
+        "00000001",
+        criteria={"prefix_len": 3},
+        year=2024,
+        _read_engine=temp_engine,
+    )
+    excluded = select_peer_group(
+        "00000001",
+        criteria={"prefix_len": 3, "excluded_sector_groups": ["financial"]},
+        year=2024,
+        _read_engine=temp_engine,
+    )
+
+    assert [peer["corp_code"] for peer in allowed["peers"]] == ["00000002"]
+    assert excluded["peer_count"] == 0
+    assert excluded["selection_policy"]["exclusion_reasons"]["00000002"] == [
+        "excluded_sector_group:financial"
+    ]
