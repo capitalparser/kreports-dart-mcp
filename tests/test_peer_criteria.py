@@ -129,3 +129,34 @@ def test_strict_profile_does_not_use_ksic_fallback(temp_engine):
 
     assert out["peer_count"] == 0
     assert out["selection_policy"]["fallback_used"] is False
+
+
+def test_revenue_size_metric_excludes_outside_tolerance(temp_engine):
+    from kreports.analysis.peer_benchmarks import select_peer_group
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Comparable", induty_code="26420"),
+            Company(corp_code="00000003", corp_name="Revenue outlier", induty_code="26430"),
+            Financial(corp_code="00000001", year=2024, quarter=4, fs_div="CFS", total_assets=100, revenue=100),
+            Financial(corp_code="00000002", year=2024, quarter=4, fs_div="CFS", total_assets=100, revenue=500),
+            Financial(corp_code="00000003", year=2024, quarter=4, fs_div="CFS", total_assets=100, revenue=100_000),
+        ])
+
+    out = select_peer_group(
+        "00000001",
+        criteria={
+            "size_metric": "revenue",
+            "size_log10_tolerance": 1.0,
+        },
+        year=2024,
+        _read_engine=temp_engine,
+    )
+
+    assert [peer["corp_code"] for peer in out["peers"]] == ["00000002"]
+    assert out["selection_policy"]["exclusion_reasons"]["00000003"] == [
+        "size_metric_outside_tolerance:revenue"
+    ]

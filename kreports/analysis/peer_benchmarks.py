@@ -1,6 +1,7 @@
 """Industry and peer selection, comparisons, and engagement benchmarks."""
 from __future__ import annotations
 
+import math
 import statistics
 from typing import Optional
 
@@ -917,6 +918,40 @@ def _apply_peer_profile(
             reasons.append("excluded_by_user")
         if sector in profile.excluded_sector_groups:
             reasons.append(f"excluded_sector_group:{sector}")
+        if profile.size_metric is not None and profile.size_log10_tolerance is not None:
+            if profile.size_metric == "employees":
+                # No employee-count evidence exists in the current runtime
+                # schema.  Exclude rather than pretending an asset proxy is an
+                # employee comparison.
+                reasons.append("size_metric_unavailable:employees")
+            else:
+                metric = profile.size_metric
+                subject_size = conn.execute(
+                    text(
+                        f"SELECT {metric} FROM financials WHERE corp_code=:corp_code "
+                        "AND year=:year AND quarter=4 AND fs_div=:fs_div"
+                    ),
+                    {
+                        "corp_code": subject_corp_code,
+                        "year": resolution.resolved_year,
+                        "fs_div": fs_div,
+                    },
+                ).scalar()
+                peer_size = conn.execute(
+                    text(
+                        f"SELECT {metric} FROM financials WHERE corp_code=:corp_code "
+                        "AND year=:year AND quarter=4 AND fs_div=:fs_div"
+                    ),
+                    {
+                        "corp_code": code,
+                        "year": resolution.resolved_year,
+                        "fs_div": fs_div,
+                    },
+                ).scalar()
+                if not (subject_size and subject_size > 0 and peer_size and peer_size > 0):
+                    reasons.append(f"size_metric_unavailable:{metric}")
+                elif abs(math.log10(float(peer_size)) - math.log10(float(subject_size))) > profile.size_log10_tolerance:
+                    reasons.append(f"size_metric_outside_tolerance:{metric}")
         candidate_coverage, missing_features = _feature_coverage(
             conn,
             corp_code=code,
