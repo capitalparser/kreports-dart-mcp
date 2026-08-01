@@ -475,13 +475,13 @@ class PeerResolution:
 def resolve_peers(
     corp_code: str,
     prefix_len_start: int = 3,
-    fallback_prefix_len: Optional[int] = 2,
     min_n: int = 5,
     exclude_other_sectors: bool = True,
     size_bucket_decade: Optional[float] = None,
     fs_div: str = "CFS",
     year: Optional[int] = None,
     read_engine=None,
+    fallback_prefix_len: Optional[int] = 2,
 ) -> PeerResolution:
     """동종업종 비교를 위한 peer corp_code 목록을 해석한다.
 

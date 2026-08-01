@@ -19,7 +19,7 @@ def test_legacy_arguments_normalize_to_explainable_profile():
     assert profile.prefix_len == 3
     assert profile.fallback_prefix_len == 2
     assert profile.size_metric == "total_assets"
-    assert profile.excluded_sector_groups == ["financial", "holding", "real_estate"]
+    assert profile.excluded_sector_groups == []
 
 
 @pytest.mark.parametrize(
@@ -193,3 +193,104 @@ def test_typed_sector_exclusion_is_explicit_not_implicit(temp_engine):
     assert excluded["selection_policy"]["exclusion_reasons"]["00000002"] == [
         "excluded_sector_group:financial"
     ]
+
+
+def test_legacy_sector_filter_keeps_same_holding_sector_peers(temp_engine):
+    from kreports.analysis.peer_benchmarks import select_peer_group
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject holding", induty_code="64201"),
+            Company(corp_code="00000002", corp_name="Peer holding", induty_code="64201"),
+            Financial(corp_code="00000001", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+            Financial(corp_code="00000002", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+        ])
+
+    out = select_peer_group(
+        "00000001",
+        criteria=["industry"],
+        year=2024,
+        _read_engine=temp_engine,
+    )
+
+    assert [peer["corp_code"] for peer in out["peers"]] == ["00000002"]
+
+
+def test_ranked_mode_preserves_score_order_before_peer_limit(temp_engine):
+    from kreports.analysis.peer_benchmarks import select_peer_group
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditFee, Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="High score", induty_code="26420"),
+            Company(corp_code="00000003", corp_name="High assets", induty_code="26430"),
+            Financial(corp_code="00000001", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+            Financial(corp_code="00000002", year=2024, quarter=4, fs_div="CFS", total_assets=10),
+            Financial(corp_code="00000003", year=2024, quarter=4, fs_div="CFS", total_assets=10_000),
+            AuditFee(corp_code="00000002", bsns_year=2024, audit_fee_m=1),
+        ])
+
+    out = select_peer_group(
+        "00000001",
+        criteria={
+            "mode": "ranked",
+            "required_features": ["audit_fees"],
+            "weights": {"coverage": 1.0},
+        },
+        peer_limit=1,
+        year=2024,
+        _read_engine=temp_engine,
+    )
+
+    assert [peer["corp_code"] for peer in out["peers"]] == ["00000002"]
+    assert out["peers"][0]["selection_score"] == 1.0
+
+
+def test_custom_codes_have_truthful_reasons_and_own_confidence(temp_engine):
+    from kreports.analysis.peer_benchmarks import select_peer_group
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    included_codes = [f"{index:08d}" for index in range(2, 7)]
+    with get_session() as session:
+        session.add(Company(corp_code="00000001", corp_name="Subject", induty_code="26410"))
+        session.add(Financial(corp_code="00000001", year=2024, quarter=4, fs_div="CFS", total_assets=100))
+        for code in included_codes:
+            session.add(Company(corp_code=code, corp_name=f"Custom {code}", induty_code="64110"))
+            session.add(Financial(corp_code=code, year=2024, quarter=4, fs_div="CFS", total_assets=100))
+
+    out = select_peer_group(
+        "00000001",
+        criteria={"industry_basis": "custom_codes", "included_corp_codes": included_codes},
+        year=2024,
+        _read_engine=temp_engine,
+    )
+
+    assert out["confidence"] == "low"
+    assert out["selection_policy"]["confidence"] == "low"
+    assert out["peers"][0]["include_reasons"] == ["explicit_custom_code"]
+    assert out["peers"][0]["reason_components"]["industry_match"]["basis"] == "custom_codes"
+
+
+def test_resolve_peers_keeps_existing_positional_parameter_order(temp_engine):
+    from kreports.analysis.peer import resolve_peers
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Peer", induty_code="26420"),
+            Financial(corp_code="00000001", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+            Financial(corp_code="00000002", year=2024, quarter=4, fs_div="CFS", total_assets=100),
+        ])
+
+    resolution = resolve_peers(
+        "00000001", 3, 1, False, None, "CFS", 2024, temp_engine
+    )
+
+    assert resolution.peer_corp_codes == ["00000002"]

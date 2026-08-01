@@ -890,7 +890,13 @@ def _apply_peer_profile(
     subject_corp_code: str,
     subject_sector: str,
     fs_div: str,
-) -> tuple[list[str], dict[str, list[str]], dict[str, float], dict[str, float]]:
+) -> tuple[
+    list[str],
+    dict[str, list[str]],
+    dict[str, float],
+    dict[str, float],
+    dict[str, list[str]],
+]:
     """Filter and score peer candidates without changing source tables."""
     candidates = _profile_candidate_codes(
         conn,
@@ -904,6 +910,8 @@ def _apply_peer_profile(
     excluded: dict[str, list[str]] = {}
     coverage: dict[str, float] = {}
     scores: dict[str, float] = {}
+    inclusions: dict[str, list[str]] = {}
+    automatic_candidates = set(resolution.peer_corp_codes)
     for code in candidates:
         reasons: list[str] = []
         row = conn.execute(
@@ -967,6 +975,21 @@ def _apply_peer_profile(
         if reasons:
             excluded[code] = reasons
             continue
+        if profile.industry_basis == "custom_codes":
+            inclusions[code] = ["explicit_custom_code"]
+        elif code in profile.included_corp_codes:
+            inclusions[code] = ["explicit_included_corp_code"]
+            if code in automatic_candidates:
+                inclusions[code].append("same_ksic_prefix")
+        elif profile.industry_basis == "sector_group":
+            inclusions[code] = ["same_sector_group"]
+        else:
+            inclusions[code] = ["same_ksic_prefix"]
+        if (
+            sector == subject_sector
+            and profile.industry_basis != "custom_codes"
+        ):
+            inclusions[code].append(f"sector_group:{subject_sector}")
         # The baseline universe proves industry/sector membership.  Ranking is
         # intentionally deterministic and only uses declared dimensions.
         score_components = {
@@ -986,7 +1009,7 @@ def _apply_peer_profile(
         selected.sort(key=lambda item: (-item[1], item[0]))
     else:
         selected.sort(key=lambda item: item[0])
-    return [code for code, _score in selected], excluded, coverage, scores
+    return [code for code, _score in selected], excluded, coverage, scores, inclusions
 
 
 def select_peer_group(
@@ -1092,7 +1115,13 @@ def select_peer_group(
     )
 
     with active_engine.connect() as conn:
-        peer_codes, profile_exclusions, feature_coverage, peer_scores = _apply_peer_profile(
+        (
+            peer_codes,
+            profile_exclusions,
+            feature_coverage,
+            peer_scores,
+            peer_inclusions,
+        ) = _apply_peer_profile(
             conn,
             profile=profile,
             resolution=pr,
@@ -1116,7 +1145,6 @@ def select_peer_group(
               ON af.corp_code=c.corp_code AND af.bsns_year=:year
             WHERE c.corp_code IN :ccs
             ORDER BY (f.total_assets IS NULL), f.total_assets DESC
-            LIMIT :limit
             """
         ).bindparams(bindparam("ccs", expanding=True))
         with active_engine.connect() as conn:
@@ -1126,26 +1154,42 @@ def select_peer_group(
                     "ccs": peer_codes,
                     "year": pr.resolved_year,
                     "fs": fs_div_used,
-                    "limit": peer_limit,
                 },
             ).mappings().all()
+        if profile.mode == "ranked":
+            rows_by_corp_code = {row["corp_code"]: row for row in rows}
+            rows = [
+                rows_by_corp_code[code]
+                for code in peer_codes[:peer_limit]
+                if code in rows_by_corp_code
+            ]
+        else:
+            rows = rows[:peer_limit]
         for row in rows:
-            reasons = ["same_ksic_prefix", f"sector_group:{pr.sector_group.value}"]
+            reasons = list(peer_inclusions.get(row["corp_code"], []))
             if effective_size_bucket is not None:
                 reasons.append("asset_size_bucket")
             if row["audit_fee_m"] is not None:
                 reasons.append("audit_fee_available")
             reason_components = {
                 "industry_match": {
-                    "matched": True,
-                    "basis": "same_ksic_prefix",
+                    "matched": bool(reasons),
+                    "basis": (
+                        "custom_codes"
+                        if profile.industry_basis == "custom_codes"
+                        else profile.industry_basis
+                    ),
                     "matched_prefix_len": pr.matched_prefix_len,
                     "subject_induty_code": subject_row[3],
                     "peer_induty_code": row["induty_code"],
                 },
                 "sector_match": {
-                    "matched": True,
-                    "basis": f"sector_group:{pr.sector_group.value}",
+                    "matched": classify_sector(row["induty_code"]).value == pr.sector_group.value,
+                    "basis": (
+                        f"sector_group:{pr.sector_group.value}"
+                        if classify_sector(row["induty_code"]).value == pr.sector_group.value
+                        else "not_required"
+                    ),
                 },
                 "size_bucket_match": {
                     "matched": bool(effective_size_bucket is not None),
@@ -1178,6 +1222,7 @@ def select_peer_group(
                 "selection_score": peer_scores.get(row["corp_code"]),
             })
 
+    selection_confidence = confidence_band(len(peer_codes))
     return {
         "subject": {
             "corp_code": corp_code,
@@ -1208,17 +1253,21 @@ def select_peer_group(
                 "industry/sector/audit availability are populated now; business text, KAM topic, "
                 "and audit matter overlap are exposed as nullable components until those indexes are fully backfilled."
             ),
-            "inclusion_reasons": ["same_ksic_prefix", f"sector_group:{pr.sector_group.value}"],
+            "inclusion_reasons": sorted({
+                reason
+                for reasons in peer_inclusions.values()
+                for reason in reasons
+            }),
             "exclusion_reasons": profile_exclusions,
             "coverage": {
                 "minimum_required": profile.minimum_coverage,
                 "by_peer": feature_coverage,
             },
-            "confidence": pr.confidence,
+            "confidence": selection_confidence,
         },
         "peer_count": len(peer_codes),
         "returned_peer_count": len(peers),
-        "confidence": pr.confidence,
+        "confidence": selection_confidence,
         "peers": peers,
         "excluded_categories": pr.excluded_categories,
         "note": pr.note,

@@ -129,7 +129,10 @@ def coerce_peer_criteria(
     profile = PeerCriteriaProfile(
         prefix_len=prefix_len_start,
         fallback_prefix_len=2 if prefix_len_start > 2 else None,
-        excluded_sector_groups=([] if not exclude_other_sectors else ["financial", "holding", "real_estate"]),
+        # Legacy sector behavior is relative to the subject and is enforced by
+        # resolve_peers' boolean.  It must not become an absolute exclusion
+        # list (which would reject a holding company's holding peers).
+        excluded_sector_groups=[],
         size_metric="total_assets" if size_bucket_decade is not None else None,
         size_log10_tolerance=size_bucket_decade,
     )
