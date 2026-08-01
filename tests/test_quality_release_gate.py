@@ -106,7 +106,7 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     temp_engine,
     monkeypatch,
 ):
-    from kreports.quality.release_gate import evaluate_release_gate
+    from kreports.quality import release_gate
 
     for index in range(20):
         _seed_quality_row(
@@ -128,9 +128,10 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
-    report = evaluate_release_gate("public_runtime")
+    report = release_gate.evaluate_release_gate("public_runtime")
 
     assert report["ok"] is True
+    assert report["tool_count"] == 33
     assert report["denominators"]["investor_core"] == 20
     assert report["coverage"]["investor_core"] == {
         "numerator": 19,
@@ -143,6 +144,11 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
         "outside_core_markets": 1,
     }
     assert "investor_core_coverage" not in report["required_failures"]
+
+    monkeypatch.setattr(release_gate, "_tool_count", lambda: 32)
+    mismatch = release_gate.evaluate_release_gate("public_runtime")
+    assert mismatch["ok"] is False
+    assert "unexpected_tool_count" in mismatch["required_failures"]
 
 
 def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
@@ -298,7 +304,7 @@ def test_quality_release_gate_cli_supports_json_and_human_output(monkeypatch):
         "dataset_version": "release-v1",
         "required_failures": ["audit_procedure_coverage"],
         "degraded_features": ["audit_procedure"],
-        "tool_count": 32,
+        "tool_count": 33,
         "coverage_year": 2025,
         "coverage": {
             "audit_procedure": {

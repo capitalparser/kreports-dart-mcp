@@ -191,7 +191,7 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
             {
                 "tool_contract": {
                     "version": "1.0",
-                    "tool_count": 32,
+                    "tool_count": 33,
                 }
             }
         ),

@@ -107,7 +107,7 @@ def test_catalog_is_complete_ordered_and_immutable():
         TOOL_CATALOG["search_company"].name = "changed"
 
 
-def test_generated_tool_interface_keeps_the_approved_32_tool_snapshot_hash():
+def test_generated_tool_interface_keeps_the_approved_33_tool_snapshot_hash():
     from kreports.mcp.dispatch import list_mcp_tools
 
     snapshot = []
