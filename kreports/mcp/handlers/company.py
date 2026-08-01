@@ -5,6 +5,7 @@ from kreports.analysis.company_profile import (
     get_business_overview,
     search_company,
 )
+from kreports.analysis.semantic_index import build_company_context
 from kreports.analysis.financial_analysis import (
     _annual_report_source,
     get_financial_snapshot,
@@ -13,6 +14,7 @@ from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     GetBusinessOverviewInput,
     GetFinancialSnapshotInput,
+    GetSemanticCompanyContextInput,
     SearchCompanyInput,
 )
 
@@ -67,4 +69,15 @@ def handle_get_business_overview(args: GetBusinessOverviewInput) -> dict:
     return get_business_overview(
         resolve_company(args.company),
         bsns_year=args.bsns_year,
+    )
+
+
+def handle_get_semantic_company_context(
+    args: GetSemanticCompanyContextInput,
+) -> dict:
+    """Expose existing cached filing evidence without collection or writes."""
+    return build_company_context(
+        resolve_company(args.company),
+        args.year,
+        topics=args.topics,
     )

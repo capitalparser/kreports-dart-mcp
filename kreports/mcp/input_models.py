@@ -32,6 +32,18 @@ Metric = Literal[
     "Beneish_M",
 ]
 Year = Annotated[int, Field(ge=2000, le=2100)]
+SemanticContextTopic = Literal[
+    "business_overview",
+    "major_shareholders_board",
+    "risks",
+    "raw_materials",
+    "facilities",
+    "contracts",
+    "accounting_policies",
+    "kam",
+    "audit_opinion",
+    "subsequent_events",
+]
 
 
 class ToolInput(BaseModel):
@@ -141,6 +153,26 @@ class CompareToIndustryInput(ToolInput):
 class GetBusinessOverviewInput(ToolInput):
     company: str = Field(description="corp_code / 종목코드 / 회사명")
     bsns_year: Year | None = Field(None, description="사업연도. 생략 시 최신 사업보고서.")
+
+
+class GetSemanticCompanyContextInput(ToolInput):
+    company: str = Field(description="corp_code / 종목코드 / 회사명")
+    year: Year = Field(description="대상 사업연도")
+    topics: list[SemanticContextTopic] | None = Field(
+        None,
+        max_length=10,
+        description=(
+            "선택한 의미 증빙 주제만 반환. 생략하면 사업·감사·주석·공시·재무의 "
+            "로컬 캐시 버킷을 모두 반환한다."
+        ),
+    )
+
+    @field_validator("topics")
+    @classmethod
+    def unique_topics(cls, value: list[SemanticContextTopic] | None):
+        if value is None:
+            return value
+        return list(dict.fromkeys(value))
 
 
 class GetInvestorSignalsInput(ToolInput):

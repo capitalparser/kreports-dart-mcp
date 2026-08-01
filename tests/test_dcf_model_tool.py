@@ -67,12 +67,13 @@ def _model_result():
     return out
 
 
-def test_build_dcf_model_pack_is_the_only_additive_32nd_tool():
+def test_semantic_context_and_dcf_model_pack_are_additive_tools():
     from kreports.mcp.catalog import TOOL_CATALOG
     from kreports.mcp.handlers import HANDLERS
     from kreports.mcp.tools import ALL_TOOLS
 
-    assert len(TOOL_CATALOG) == 32
+    assert len(TOOL_CATALOG) == 33
+    assert list(TOOL_CATALOG)[9] == "get_semantic_company_context"
     assert list(TOOL_CATALOG)[-1] == "build_dcf_model_pack"
     assert [tool.name for tool in ALL_TOOLS][-1] == "build_dcf_model_pack"
     assert "build_dcf_model_pack" in HANDLERS

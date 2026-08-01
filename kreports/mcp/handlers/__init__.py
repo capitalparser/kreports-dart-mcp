@@ -22,6 +22,7 @@ from kreports.mcp.handlers.auditor import (
 from kreports.mcp.handlers.company import (
     handle_get_business_overview,
     handle_get_financial_snapshot,
+    handle_get_semantic_company_context,
     handle_search_company,
 )
 from kreports.mcp.handlers.investor import (
@@ -53,6 +54,7 @@ HANDLERS = {
     "get_subsidiary_auditors": handle_get_subsidiary_auditors,
     "compare_to_industry": handle_compare_to_industry,
     "get_business_overview": handle_get_business_overview,
+    "get_semantic_company_context": handle_get_semantic_company_context,
     "get_investor_signals": handle_get_investor_signals,
     "select_peer_group": handle_select_peer_group,
     "compare_to_industry_multi": handle_compare_to_industry_multi,

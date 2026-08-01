@@ -21,6 +21,7 @@ EXPECTED_TOOL_NAMES = [
     "get_subsidiary_auditors",
     "compare_to_industry",
     "get_business_overview",
+    "get_semantic_company_context",
     "get_investor_signals",
     "select_peer_group",
     "compare_to_industry_multi",
@@ -45,7 +46,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "055f54993bf45f2e4a1388642871d09c1e2f45fc0b5fde1e83228bb910b38339"
+EXPECTED_INTERFACE_SHA256 = "c9eb59cfe41052851a1e48bc0136dc6a84f682693b44fed33f1a261a05ba698c"
 
 
 MINIMAL_ARGUMENTS = {
@@ -61,6 +62,7 @@ MINIMAL_ARGUMENTS = {
     "get_subsidiary_auditors": {"company": "__task7_no_such_company__"},
     "compare_to_industry": {},
     "get_business_overview": {"company": "__task7_no_such_company__"},
+    "get_semantic_company_context": {"company": "__task7_no_such_company__", "year": 2025},
     "get_investor_signals": {"company": "__task7_no_such_company__"},
     "select_peer_group": {"company": "__task7_no_such_company__"},
     "compare_to_industry_multi": {"company": "__task7_no_such_company__"},
@@ -96,7 +98,7 @@ def test_catalog_is_complete_ordered_and_immutable():
 
     assert list(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
     assert [tool.name for tool in list_mcp_tools()] == EXPECTED_TOOL_NAMES
-    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 32
+    assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 33
     assert all(
         spec.input_model.model_config.get("extra") == "forbid"
         for spec in TOOL_CATALOG.values()
