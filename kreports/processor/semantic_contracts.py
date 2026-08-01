@@ -87,6 +87,8 @@ def _matches(text: str, keywords: tuple[str, ...]) -> bool:
 
 def normalize_note_topic(title: str, body: str) -> str:
     """Return a stable note topic, retaining ``other_note`` when unknown."""
+    if _matches(title or "", _NOTE_TOPIC_RULES["accounting_policies"]):
+        return "accounting_policies"
     value = f"{title or ''}\n{body or ''}"
     for topic, keywords in _NOTE_TOPIC_RULES.items():
         if _matches(value, keywords):

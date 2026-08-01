@@ -37,6 +37,20 @@ _BUCKETS = (
 )
 
 
+def _excerpt_availability(row: dict, *, body_key: str) -> str:
+    """Do not present an externalized or shortened body as complete evidence."""
+    body = str(row.get(body_key) or "")
+    full_length = row.get("full_text_length")
+    storage_status = str(row.get("full_text_storage_status") or "").lower()
+    if (
+        row.get("full_text_uri")
+        or storage_status in {"externalized", "truncated", "compressed"}
+        or (isinstance(full_length, int) and full_length > len(body))
+    ):
+        return "summary_only"
+    return "available"
+
+
 def _resolve_company(conn, company: str) -> dict | None:
     row = conn.execute(
         text(
@@ -81,8 +95,14 @@ def _section_rows(conn, *, corp_code: str, year: int, source_type: str, topics: 
         text(
             """
             SELECT rs.id, rs.rcept_no, rs.dcm_no, rs.source_type, rs.section_key,
-                   rs.section_title, rs.body_text, rs.body_length, sd.id AS source_document_id,
-                   sd.doc_hash
+                   rs.section_title, rs.body_text, rs.body_length, rs.ordinal,
+                   rs.full_text_uri, rs.full_text_hash, rs.full_text_length,
+                   rs.full_text_compressed_length, rs.full_text_storage_status,
+                   sd.id AS source_document_id, sd.doc_hash AS source_doc_hash,
+                   sd.storage_uri AS source_storage_uri,
+                   sd.content_length AS source_content_length,
+                   sd.compressed_length AS source_compressed_length,
+                   sd.storage_status AS source_storage_status
             FROM report_sections rs
             LEFT JOIN source_documents sd
               ON sd.rcept_no=rs.rcept_no AND sd.source_type=rs.source_type
@@ -99,8 +119,11 @@ def _section_rows(conn, *, corp_code: str, year: int, source_type: str, topics: 
         if requested_keys is not None and item["section_key"] not in requested_keys:
             continue
         item.update(
-            source_locator=f"report_sections:{item['rcept_no']}:{item['section_key']}",
-            availability="available",
+            source_locator=(
+                f"report_sections:{item['id']}:{item['rcept_no']}:"
+                f"{item['section_key']}:{item['ordinal']}"
+            ),
+            availability=_excerpt_availability(item, body_key="body_text"),
             parser_version="semantic-v1",
             extraction_method="normalized_report_section",
             excerpt=item.pop("body_text"),
@@ -115,7 +138,13 @@ def _note_rows(conn, *, corp_code: str, year: int, topics: list[str] | None) -> 
             """
             SELECT anc.id, anc.rcept_no, anc.dcm_no, anc.fs_div, anc.note_no,
                    anc.note_title, anc.section_type, anc.body, anc.body_length,
-                   sd.id AS source_document_id
+                   anc.full_text_uri, anc.full_text_hash, anc.full_text_length,
+                   anc.full_text_compressed_length, anc.full_text_storage_status,
+                   sd.id AS source_document_id, sd.doc_hash AS source_doc_hash,
+                   sd.storage_uri AS source_storage_uri,
+                   sd.content_length AS source_content_length,
+                   sd.compressed_length AS source_compressed_length,
+                   sd.storage_status AS source_storage_status
             FROM accounting_note_chapters anc
             LEFT JOIN source_documents sd
               ON sd.rcept_no=anc.rcept_no AND sd.source_type=anc.source_type
@@ -129,13 +158,19 @@ def _note_rows(conn, *, corp_code: str, year: int, topics: list[str] | None) -> 
     for row in rows:
         item = dict(row)
         topic = normalize_note_topic(item["note_title"] or "", item["body"] or "")
-        if topics is not None and not (set(topics) & {topic, "accounting_policies"}):
-            continue
+        if topics is not None:
+            requested = set(topics)
+            policy_match = (
+                "accounting_policies" in requested
+                and (topic == "accounting_policies" or item["section_type"] == "policy")
+            )
+            if not (topic in requested or policy_match):
+                continue
         item.update(
             topic=topic,
             section_key=item["section_type"],
             source_locator=f"accounting_note_chapters:{item['id']}",
-            availability="available",
+            availability=_excerpt_availability(item, body_key="body"),
             parser_version="semantic-v1",
             extraction_method="normalized_note_chapter",
             excerpt=item.pop("body"),
@@ -149,8 +184,14 @@ def _evidence_document_rows(conn, *, corp_code: str, year: int) -> list[dict]:
         text(
             """
             SELECT ed.id, ed.rcept_no, ed.dcm_no, ed.source_type, ed.evidence_scope,
-                   ed.title, ed.normalized_text, ed.text_hash, ed.source_count,
-                   sd.id AS source_document_id
+                   ed.title, ed.normalized_text, ed.text_hash, ed.text_length,
+                   ed.full_text_uri, ed.full_text_hash, ed.full_text_length,
+                   ed.full_text_compressed_length, ed.full_text_storage_status,
+                   ed.source_count, sd.id AS source_document_id,
+                   sd.doc_hash AS source_doc_hash, sd.storage_uri AS source_storage_uri,
+                   sd.content_length AS source_content_length,
+                   sd.compressed_length AS source_compressed_length,
+                   sd.storage_status AS source_storage_status
             FROM evidence_documents ed
             LEFT JOIN source_documents sd
               ON sd.rcept_no=ed.rcept_no AND sd.source_type=ed.source_type
