@@ -22,6 +22,8 @@ def test_business_profile_keeps_tags_and_receipt_provenance():
     )
 
     assert profile.corp_code == "00000001"
+    assert profile.source_document_id == 17
+    assert profile.availability == "available"
     assert profile.tags["products_services"] == ["products_services"]
     assert profile.tags["customers_markets"] == ["customers_markets"]
     assert profile.tags["raw_materials"] == ["raw_materials"]

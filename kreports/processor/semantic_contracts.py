@@ -61,6 +61,13 @@ class BusinessSemanticProfile(BaseModel):
 
     corp_code: str = Field(min_length=8, max_length=8)
     bsns_year: int = Field(ge=1900, le=2100)
+    source_document_id: int | None = Field(default=None, ge=1)
+    rcept_no: str | None = None
+    section_key: str = "business_profile"
+    source_locator: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    availability: Availability
+    extraction_method: str = Field(min_length=1)
     tags: dict[str, list[str]] = Field(default_factory=dict)
     evidence: list[SemanticEvidence] = Field(default_factory=list)
     parser_version: str = "semantic-v1"
@@ -128,6 +135,12 @@ def build_business_semantic_profile(
     return BusinessSemanticProfile(
         corp_code=corp_code,
         bsns_year=bsns_year,
+        source_document_id=source_document_id,
+        rcept_no=rcept_no,
+        source_locator=f"source_documents:{source_document_id or 'unknown'}",
+        confidence=0.8 if evidence else 0.0,
+        availability="available" if evidence else "unavailable",
+        extraction_method="heading_keyword",
         tags={topic: list(dict.fromkeys(values)) for topic, values in tags.items()},
         evidence=evidence,
         parser_version=parser_version,
