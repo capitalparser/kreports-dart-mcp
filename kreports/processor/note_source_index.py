@@ -39,10 +39,6 @@ _NUMBERED_HEADING_RE = re.compile(
     r"^\s*(?:주석\s*)?(?P<number>\d{1,3})\s*[\.．\)]\s*(?P<title>[^\n]{1,200}?)\s*$",
     re.IGNORECASE,
 )
-_FS_DIV_MARKER_RE = re.compile(
-    r"연\s*결\s*재\s*무\s*제\s*표\s*주\s*석|별\s*도\s*재\s*무\s*제\s*표\s*주\s*석",
-    re.IGNORECASE,
-)
 _TOPIC_KEYWORDS = {
     "financial_instruments": ("금융상품", "금융자산", "금융부채", "금융위험"),
     "related_parties": ("특수관계자", "관계기업과의 거래"),
@@ -88,10 +84,12 @@ def _heading_hits(content: str) -> list[tuple[int, int, str, str]]:
 
 
 def _fs_div_for_offset(content: str, offset: int, source_type: str | None) -> str:
-    markers = [match for match in _FS_DIV_MARKER_RE.finditer(content) if match.start() <= offset]
-    if not markers:
+    marker_text = re.sub(r"\s+", "", _plain_text(content[:offset]))
+    cfs_marker = marker_text.rfind("연결재무제표주석")
+    ofs_marker = marker_text.rfind("별도재무제표주석")
+    if cfs_marker < 0 and ofs_marker < 0:
         return "OFS" if source_type == "audit_report" else "CFS"
-    return "CFS" if "연결" in markers[-1].group(0) else "OFS"
+    return "CFS" if cfs_marker > ofs_marker else "OFS"
 
 
 def _topics_for(value: str) -> list[str]:

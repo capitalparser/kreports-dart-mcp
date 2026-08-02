@@ -166,6 +166,10 @@ def test_note_source_parser_normalizes_spaced_korean_topics_without_risk_false_p
 def test_note_source_parser_supports_spaced_fs_div_marker_and_markerless_audit_rule():
     from kreports.processor.note_source_index import parse_note_source_document
 
+    spaced_cfs = parse_note_source_document(
+        {"id": 8, "source_type": "business_report", "storage_status": "inline"},
+        "<DOCUMENT><TITLE>연 결 재 무 제 표 주 석</TITLE><P>1. 리스</P><P>리스부채입니다.</P></DOCUMENT>",
+    )
     spaced_ofs = parse_note_source_document(
         {"id": 9, "source_type": "business_report", "storage_status": "inline"},
         "<DOCUMENT><TITLE>별 도 재 무 제 표 주 석</TITLE><P>1. 리스</P><P>리스부채입니다.</P></DOCUMENT>",
@@ -175,6 +179,7 @@ def test_note_source_parser_supports_spaced_fs_div_marker_and_markerless_audit_r
         "<DOCUMENT><P>1. 금융상품</P><P>공정가치 공시입니다.</P></DOCUMENT>",
     )
 
+    assert spaced_cfs["chapters"][0]["fs_div"] == "CFS"
     assert spaced_ofs["chapters"][0]["fs_div"] == "OFS"
     assert markerless_audit["chapters"][0]["fs_div"] == "OFS"
 
