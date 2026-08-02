@@ -11,6 +11,7 @@ from kreports.mcp.workflows import (
     audit_acceptance_review,
     group_audit_scope,
     investor_first_pass,
+    semantic_peer_context_review,
 )
 
 
@@ -58,6 +59,137 @@ def test_workflow_specialists_run_once_in_declared_order():
     assert [name for name, _ in calls] == expected
     assert len(calls) == len({name for name, _ in calls})
     assert [child["tool_name"] for child in result["children"]] == expected
+
+
+def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_separation():
+    calls = []
+    shared_cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+        "peers": [{"corp_code": "00000002", "corp_name": "Peer Corp"}],
+        "selection_policy": {
+            "selection_mode": "strict",
+            "fs_div_used": "OFS",
+            "requested_year": 2024,
+        },
+        "confidence": "medium",
+    }
+
+    def context_builder(company, year, topics=None):
+        calls.append(("context", company, year, topics))
+        return {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "availability": {
+                "business_report": "available",
+                "audit_report": "unavailable",
+                "notes": "available",
+                "evidence_documents": "unavailable",
+                "disclosures": "unavailable",
+                "financials": "unavailable",
+            },
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART risk disclosure",
+                    "full_text_hash": "a" * 40,
+                    "rcept_no": "20250301000001",
+                }
+            ],
+            "notes": [
+                {
+                    "source_locator": "accounting_note_chapters:10",
+                    "fs_div": "CFS",
+                    "topic": "leases",
+                    "excerpt": "CFS lease note",
+                    "full_text_hash": "b" * 40,
+                },
+                {
+                    "source_locator": "accounting_note_chapters:11",
+                    "fs_div": "OFS",
+                    "topic": "leases",
+                    "excerpt": "OFS lease note",
+                    "full_text_hash": "c" * 40,
+                },
+            ],
+        }
+
+    def cohort_selector(company, **kwargs):
+        calls.append(("cohort", company, kwargs))
+        return shared_cohort
+
+    def note_builder(company, year, **kwargs):
+        calls.append(("notes", company, year, kwargs))
+        assert kwargs["_peer_group"] is shared_cohort
+        return {
+            "subject": shared_cohort["subject"],
+            "year": year,
+            "peer_selection": shared_cohort["selection_policy"],
+            "topics": [
+                {
+                    "topic": "leases",
+                    "rows": [
+                        {
+                            "company": {"corp_code": "00000001"},
+                            "availability": "available",
+                            "source_locator": "accounting_note_chapters:11",
+                            "fs_div": "OFS",
+                        },
+                        {
+                            "company": {"corp_code": "00000002"},
+                            "availability": "summary_only",
+                            "source_locator": "accounting_note_chapters:12",
+                            "fs_div": "OFS",
+                        },
+                    ],
+                }
+            ],
+            "read_only": True,
+        }
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks", "leases"],
+        peer_criteria={"mode": "strict", "prefix_len": 3},
+        fs_strategy="auto",
+        company_ir=[
+            {
+                "source_class": "company_ir",
+                "source_id": "ir-1",
+                "excerpt": "Management target",
+            }
+        ],
+        web_news=[
+            {
+                "source_class": "web_news",
+                "source_id": "news-1",
+                "excerpt": "External coverage",
+            }
+        ],
+        context_builder=context_builder,
+        cohort_selector=cohort_selector,
+        note_builder=note_builder,
+    )
+
+    assert [call[0] for call in calls] == ["context", "cohort", "notes"]
+    assert calls[0][2] == calls[1][2]["year"] == calls[2][2] == 2024
+    assert calls[1][2]["criteria"] == {"mode": "strict", "prefix_len": 3}
+    assert result["read_only"] is True
+    assert result["fs_div_used"] == "OFS"
+    assert result["peer_selection"] == shared_cohort["selection_policy"]
+    assert [item["fs_div"] for item in result["semantic_context"]["notes"]] == ["OFS"]
+    pack = result["context_pack"]
+    assert pack["source_precedence"] == ["dart_filing", "company_ir", "web_news", "llm_analysis"]
+    assert [item["source_id"] for item in pack["dart_filing"]] == [
+        "report_sections:1",
+        "accounting_note_chapters:11",
+    ]
+    assert [item["source_id"] for item in pack["company_ir"]] == ["ir-1"]
+    assert [item["source_id"] for item in pack["web_news"]] == ["news-1"]
+    assert pack["peer_note_comparison"]["data"]["topics"][0]["rows"][1]["availability"] == "summary_only"
+    assert pack["peer_note_comparison"]["data"]["topics"][0]["rows"][1]["source_locator"] == "accounting_note_chapters:12"
+    assert {item["evidence_type"] for item in pack["missing_evidence"]} >= {"audit_report"}
 
 
 def test_investor_workflow_uses_non_overlapping_specialists():
