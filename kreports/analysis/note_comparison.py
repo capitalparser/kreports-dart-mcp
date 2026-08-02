@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import html
+import hashlib
+import json
 import re
 import unicodedata
 
@@ -25,6 +27,8 @@ NOTE_TOPICS = (
 )
 _STANDARD_FS_DIVS = ("CFS", "OFS")
 _MAX_RAW_TEXT_OUTPUT_CHARS = 12_000
+_MAX_COMPARISON_TEXT_OUTPUT_CHARS = 4_000
+MAX_NOTE_COMPARISON_OUTPUT_BYTES = 100_000
 
 
 def _availability(row: dict) -> str:
@@ -60,7 +64,7 @@ def _raw_text_format(value: str) -> str:
 
 def _comparison_text(value: str) -> str:
     cleaned = "".join(
-        " " if unicodedata.category(char).startswith("C") else char
+        " " if unicodedata.category(char).startswith(("C", "Zl", "Zp")) else char
         for char in value
     )
     return " ".join(cleaned.split())
@@ -71,8 +75,10 @@ def _table_safe_display(value: str) -> tuple[str, dict[str, bool]]:
     metadata = {
         "line_breaks_escaped": False,
         "markdown_table_escaped": False,
+        "markdown_link_or_image_escaped": False,
         "html_escaped": False,
         "control_characters_escaped": False,
+        "unicode_separators_escaped": False,
     }
     for char in value:
         if char == "\n":
@@ -84,6 +90,9 @@ def _table_safe_display(value: str) -> tuple[str, dict[str, bool]]:
         elif char == "\t":
             rendered.append("\\t")
             metadata["control_characters_escaped"] = True
+        elif char in {"\u2028", "\u2029"}:
+            rendered.append(f"\\u{ord(char):04x}")
+            metadata["unicode_separators_escaped"] = True
         elif unicodedata.category(char).startswith("C"):
             rendered.append(f"\\u{ord(char):04x}")
             metadata["control_characters_escaped"] = True
@@ -92,6 +101,9 @@ def _table_safe_display(value: str) -> tuple[str, dict[str, bool]]:
             metadata["markdown_table_escaped"] = True
         elif char == "\\":
             rendered.append("\\\\")
+        elif char in "![]()":
+            rendered.append(f"\\{char}")
+            metadata["markdown_link_or_image_escaped"] = True
         else:
             escaped = html.escape(char, quote=False)
             if escaped != char:
@@ -102,20 +114,191 @@ def _table_safe_display(value: str) -> tuple[str, dict[str, bool]]:
 
 def _raw_text_fields(value: object) -> dict:
     raw_text = str(value or "")
+    normalized_text = _comparison_text(raw_text)
     raw_text_truncated = len(raw_text) > _MAX_RAW_TEXT_OUTPUT_CHARS
     output_text = raw_text[:_MAX_RAW_TEXT_OUTPUT_CHARS]
+    comparison_text_truncated = len(normalized_text) > _MAX_COMPARISON_TEXT_OUTPUT_CHARS
     display_text, rendering = _table_safe_display(output_text)
-    return {
+    result = {
         "raw_text": output_text,
         "raw_text_length": len(raw_text),
         "raw_text_truncated": raw_text_truncated,
         "raw_text_format": _raw_text_format(raw_text),
-        "comparison_text": _comparison_text(output_text),
+        "comparison_text": normalized_text[:_MAX_COMPARISON_TEXT_OUTPUT_CHARS],
+        "comparison_text_length": len(normalized_text),
+        "comparison_text_hash": hashlib.sha256(normalized_text.encode("utf-8")).hexdigest(),
+        "comparison_text_truncated": comparison_text_truncated,
         "display": {
             "text": display_text,
             **rendering,
         },
     }
+    return result
+
+
+def _output_bytes(value: dict) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _compact_row_for_output_budget(row: dict) -> None:
+    """Keep provenance while removing repeated large text payloads."""
+    raw_text = row.get("raw_text")
+    if raw_text is not None:
+        compact_raw = str(raw_text)[:360]
+        compact_comparison = str(row.get("comparison_text") or "")[:240]
+        display_text, rendering = _table_safe_display(compact_raw)
+        row.update({
+            "raw_text": compact_raw,
+            "raw_text_truncated": row.get("raw_text_length", 0) > len(compact_raw),
+            "comparison_text": compact_comparison,
+            "comparison_text_truncated": (
+                row.get("comparison_text_length", 0) > len(compact_comparison)
+            ),
+            "value_or_excerpt": compact_comparison,
+            "display": {"text": display_text, **rendering},
+        })
+    original_evidence_documents = list(row.get("evidence_documents") or [])
+    evidence_documents = original_evidence_documents[:3]
+    row["evidence_documents"] = [
+        {
+            "source_locator": str(item.get("source_locator") or "")[:160],
+            "availability": str(item.get("availability") or "")[:40],
+            "rcept_no": str(item.get("rcept_no") or "")[:80],
+            "source_type": str(item.get("source_type") or "")[:80],
+            "evidence_scope": str(item.get("evidence_scope") or "")[:120],
+            "title": str(item.get("title") or "")[:240],
+            "full_text_uri": str(item.get("full_text_uri") or "")[:500],
+            "full_text_hash": item.get("full_text_hash"),
+            "full_text_length": item.get("full_text_length"),
+            "full_text_storage_status": str(item.get("full_text_storage_status") or "")[:80],
+        }
+        for item in evidence_documents
+        if isinstance(item, dict)
+    ]
+    row["evidence_documents_truncated"] = len(original_evidence_documents) > 3
+    row["output_budget_truncated"] = True
+
+
+def _emergency_budget_result(result: dict) -> dict:
+    """Last-resort, deterministic response that remains valid for hostile metadata."""
+    topics = []
+    for topic_result in result["topics"]:
+        subject_row = topic_result["rows"][0] if topic_result["rows"] else None
+        topics.append({
+            "topic": str(topic_result["topic"])[:120],
+            "subject": (
+                {
+                    "corp_code": str(subject_row["company"]["corp_code"])[:80],
+                    "availability": subject_row["availability"],
+                    "source_locator": str(subject_row["source_locator"] or "")[:160],
+                    "rcept_no": str(subject_row["rcept_no"] or "")[:80],
+                    "full_text_hash": subject_row["full_text_hash"],
+                }
+                if subject_row is not None
+                else None
+            ),
+            "omitted_peer_rows": max(0, len(topic_result["rows"]) - 1)
+            + topic_result.get("omitted_peer_rows", 0),
+        })
+    compact = {
+        "subject": {"corp_code": str((result.get("subject") or {}).get("corp_code") or "")[:80]},
+        "year": result.get("year"),
+        "pagination": result["pagination"],
+        "truncation": {
+            "applied": True,
+            "reason": "note_comparison_output_budget",
+            "output_budget_applied": True,
+            "max_output_bytes": MAX_NOTE_COMPARISON_OUTPUT_BYTES,
+        },
+        "topics": topics,
+        "read_only": True,
+        "limitations": ["note_comparison_output_truncated"],
+    }
+    compact["truncation"]["output_bytes"] = _output_bytes(compact)
+    return compact
+
+
+def _refresh_coverage_matrix(result: dict) -> None:
+    matrix_topics: list[dict] = []
+    for topic_result in result["topics"]:
+        cells = [
+            {
+                "corp_code": row["company"]["corp_code"],
+                "availability": row["availability"],
+                "source_locator": row["source_locator"],
+                "rcept_no": row["rcept_no"],
+                "full_text_hash": row["full_text_hash"],
+                "fs_div_selection": row["fs_div_selection"],
+            }
+            for row in topic_result["rows"]
+        ]
+        matrix_topics.append({
+            "topic": topic_result["topic"],
+            "coverage": {
+                status: sum(cell["availability"] == status for cell in cells)
+                for status in ("available", "summary_only", "unavailable")
+            },
+            "cells": cells,
+            "omitted_peer_rows": topic_result.get("omitted_peer_rows", 0),
+        })
+    result["coverage_matrix"]["topics"] = matrix_topics
+
+
+def _apply_output_budget(result: dict) -> dict:
+    truncation = result["truncation"]
+    truncation.update({
+        "output_budget_applied": False,
+        "max_output_bytes": MAX_NOTE_COMPARISON_OUTPUT_BYTES,
+        "output_bytes": 0,
+    })
+    truncation["output_bytes"] = _output_bytes(result)
+    if _output_bytes(result) <= MAX_NOTE_COMPARISON_OUTPUT_BYTES:
+        return result
+
+    for topic_result in result["topics"]:
+        for row in topic_result["rows"]:
+            _compact_row_for_output_budget(row)
+    truncation["applied"] = True
+    if truncation["reason"] is None:
+        truncation["reason"] = "note_comparison_output_budget"
+    truncation["output_budget_applied"] = True
+    truncation["output_budget_reason"] = "note_comparison_output_budget"
+    _refresh_coverage_matrix(result)
+
+    while _output_bytes(result) > MAX_NOTE_COMPARISON_OUTPUT_BYTES:
+        candidates = [topic for topic in result["topics"] if len(topic["rows"]) > 1]
+        if not candidates:
+            break
+        topic_result = max(candidates, key=lambda item: len(item["rows"]))
+        omitted = topic_result["rows"].pop()
+        topic_result["omitted_peer_rows"] = topic_result.get("omitted_peer_rows", 0) + 1
+        peer_code = omitted["company"]["corp_code"]
+        topic_result["differences"] = [
+            item for item in topic_result["differences"]
+            if item["peer_corp_code"] != peer_code
+        ]
+        result["differences"] = [
+            item for item in result["differences"]
+            if not (
+                item["topic"] == topic_result["topic"]
+                and item["peer_corp_code"] == peer_code
+            )
+        ]
+    _refresh_coverage_matrix(result)
+    truncation["output_bytes"] = _output_bytes(result)
+    while (
+        _output_bytes(result) > MAX_NOTE_COMPARISON_OUTPUT_BYTES
+        and result["cohort"]["peers"]
+    ):
+        result["cohort"]["peers"].pop()
+        result["coverage_matrix"]["companies"].pop()
+        truncation["cohort_metadata_omitted"] = truncation.get("cohort_metadata_omitted", 0) + 1
+        truncation["output_bytes"] = _output_bytes(result)
+    return (
+        result
+        if _output_bytes(result) <= MAX_NOTE_COMPARISON_OUTPUT_BYTES
+        else _emergency_budget_result(result)
+    )
 
 
 def _select_note_row(
@@ -176,6 +359,8 @@ def compare_peer_accounting_notes(
     *,
     topics: list[str] | None = None,
     peer_limit: int = 30,
+    peer_offset: int = 0,
+    page_size: int | None = None,
     fs_strategy: str = "auto",
     peer_criteria: list[str] | dict | None = None,
     _peer_group: dict | None = None,
@@ -184,12 +369,21 @@ def compare_peer_accounting_notes(
     """Compare cached note excerpts for one exact business year only."""
     if not 1 <= peer_limit <= 200:
         raise ValueError("peer_limit must be between 1 and 200")
+    if peer_offset < 0:
+        raise ValueError("peer_offset must be zero or greater")
+    resolved_page_size = page_size if page_size is not None else peer_limit
+    if not 1 <= resolved_page_size <= 200:
+        raise ValueError("page_size must be between 1 and 200")
     requested_topics = list(dict.fromkeys(topics or NOTE_TOPICS))
     unknown = set(requested_topics) - set(NOTE_TOPICS)
     if unknown:
         raise ValueError(f"unsupported note topics: {sorted(unknown)}")
     peer_group = _peer_group or _resolve_peer_group(
-        company, year, peer_limit, fs_strategy, peer_criteria
+        company,
+        year,
+        peer_offset + resolved_page_size,
+        fs_strategy,
+        peer_criteria,
     )
     if "error" in peer_group:
         return peer_group
@@ -204,7 +398,7 @@ def compare_peer_accounting_notes(
         dict(row) for row in (peer_group.get("peers") or [])
         if isinstance(row, dict) and row.get("corp_code")
     ]
-    peer_rows = all_peer_rows[:peer_limit]
+    peer_rows = all_peer_rows[peer_offset:peer_offset + resolved_page_size]
     codes = [str(subject_code)] + [str(row["corp_code"]) for row in peer_rows if row.get("corp_code")]
     names = {str(subject_code): subject.get("corp_name")}
     names.update({str(row["corp_code"]): row.get("corp_name") for row in peer_rows if row.get("corp_code")})
@@ -260,7 +454,7 @@ def compare_peer_accounting_notes(
                 raw_fields = _raw_text_fields(row["body"])
                 comparison_rows.append({
                     "company": {"corp_code": code, "corp_name": names.get(code)},
-                    "value_or_excerpt": raw_fields["raw_text"],
+                    "value_or_excerpt": raw_fields["comparison_text"],
                     **raw_fields,
                     "availability": _availability(row),
                     "source_locator": f"accounting_note_chapters:{row['id']}",
@@ -286,12 +480,17 @@ def compare_peer_accounting_notes(
                     "raw_text_truncated": False,
                     "raw_text_format": "unavailable",
                     "comparison_text": None,
+                    "comparison_text_length": 0,
+                    "comparison_text_hash": None,
+                    "comparison_text_truncated": False,
                     "display": {
                         "text": None,
                         "line_breaks_escaped": False,
                         "markdown_table_escaped": False,
+                        "markdown_link_or_image_escaped": False,
                         "html_escaped": False,
                         "control_characters_escaped": False,
+                        "unicode_separators_escaped": False,
                     },
                     "availability": "unavailable",
                     "source_locator": None,
@@ -305,15 +504,29 @@ def compare_peer_accounting_notes(
         subject_row = comparison_rows[0]
         for peer_row in comparison_rows[1:]:
             if (
-                subject_row["comparison_text"] is not None
-                and peer_row["comparison_text"] is not None
-                and subject_row["comparison_text"] != peer_row["comparison_text"]
+                subject_row["comparison_text_hash"] is not None
+                and peer_row["comparison_text_hash"] is not None
+                and (
+                    subject_row["comparison_text_hash"], subject_row["comparison_text_length"]
+                ) != (
+                    peer_row["comparison_text_hash"], peer_row["comparison_text_length"]
+                )
             ):
                 differences.append({
                     "topic": topic,
                     "subject_corp_code": str(subject_code),
                     "peer_corp_code": peer_row["company"]["corp_code"],
-                    "status": "different_normalized_text",
+                    "status": (
+                        "indeterminate_truncated"
+                        if (
+                            subject_row["comparison_text"] == peer_row["comparison_text"]
+                            and (
+                                subject_row["comparison_text_truncated"]
+                                or peer_row["comparison_text_truncated"]
+                            )
+                        )
+                        else "different_normalized_text"
+                    ),
                     "subject_source_locator": subject_row["source_locator"],
                     "peer_source_locator": peer_row["source_locator"],
                 })
@@ -347,8 +560,14 @@ def compare_peer_accounting_notes(
             },
             "cells": cells,
         })
-    truncated = len(all_peer_rows) > len(peer_rows)
-    return {
+    selector_peer_count = peer_group.get("peer_count")
+    total_peer_count = (
+        int(selector_peer_count)
+        if isinstance(selector_peer_count, int) and selector_peer_count >= 0
+        else len(all_peer_rows)
+    )
+    has_more = peer_offset + len(peer_rows) < total_peer_count
+    result = {
         "subject": subject,
         "year": year,
         "peer_selection": peer_selection,
@@ -372,16 +591,25 @@ def compare_peer_accounting_notes(
             "topics": coverage_topics,
         },
         "pagination": {
-            "offset": 0,
+            "offset": peer_offset,
+            "page_size": resolved_page_size,
             "peer_limit": peer_limit,
-            "available_peer_count": len(all_peer_rows),
+            "total_peer_count": total_peer_count,
+            "available_peer_count": total_peer_count,
             "returned_peer_count": len(peer_rows),
-            "has_more": truncated,
+            "has_more": has_more,
+            "next_page_token": (
+                f"offset:{peer_offset + len(peer_rows)}"
+                if has_more and peer_rows
+                else None
+            ),
         },
         "truncation": {
-            "applied": truncated,
-            "reason": "peer_limit" if truncated else None,
+            "applied": has_more,
+            "reason": "peer_pagination" if has_more else None,
             "peer_limit": peer_limit,
+            "peer_offset": peer_offset,
+            "page_size": resolved_page_size,
         },
         "differences": differences,
         "topics": topic_results,
@@ -391,3 +619,4 @@ def compare_peer_accounting_notes(
             "Rows without the cohort fs_div use the documented CFS, then OFS fallback order and expose fs_div_selection.",
         ],
     }
+    return _apply_output_budget(result)

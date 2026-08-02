@@ -111,6 +111,8 @@ def handle_compare_peer_accounting_notes(
         year=args.year,
         topics=args.topics,
         peer_limit=args.peer_limit,
+        peer_offset=args.peer_offset,
+        page_size=args.page_size,
         fs_strategy=args.fs_strategy,
         peer_criteria=args.peer_criteria,
     )

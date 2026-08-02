@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 
 def test_note_comparison_returns_side_by_side_rows_and_explicit_absence(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
@@ -105,16 +107,18 @@ def test_note_comparison_preserves_raw_text_and_returns_table_safe_peer_matrix(t
     assert result["selection_policy"] == {"selection_mode": "strict", "fs_div_used": "CFS"}
     assert result["pagination"] == {
         "offset": 0,
+        "page_size": 2,
         "peer_limit": 2,
+        "total_peer_count": 3,
         "available_peer_count": 3,
         "returned_peer_count": 2,
         "has_more": True,
+        "next_page_token": "offset:2",
     }
-    assert result["truncation"] == {
-        "applied": True,
-        "reason": "peer_limit",
-        "peer_limit": 2,
-    }
+    assert result["truncation"]["applied"] is True
+    assert result["truncation"]["reason"] == "peer_pagination"
+    assert result["truncation"]["peer_limit"] == 2
+    assert result["truncation"]["output_budget_applied"] is False
     assert result["differences"] == [
         {
             "topic": "leases",
@@ -133,6 +137,150 @@ def test_note_comparison_preserves_raw_text_and_returns_table_safe_peer_matrix(t
             "peer_source_locator": result["topics"][0]["rows"][2]["source_locator"],
         },
     ]
+
+
+def test_note_comparison_paginates_against_selector_total_peer_count(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"], peer_limit=2,
+        peer_offset=1, page_size=2,
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [
+                {"corp_code": "00000002", "corp_name": "Peer 1"},
+                {"corp_code": "00000003", "corp_name": "Peer 2"},
+                {"corp_code": "00000004", "corp_name": "Peer 3"},
+                {"corp_code": "00000005", "corp_name": "Peer 4"},
+            ],
+            "peer_count": 5,
+            "selection_policy": {"selection_mode": "adaptive"},
+        },
+        _read_engine=temp_engine,
+    )
+
+    assert [peer["corp_code"] for peer in result["cohort"]["peers"]] == [
+        "00000003", "00000004",
+    ]
+    assert result["pagination"] == {
+        "offset": 1,
+        "page_size": 2,
+        "peer_limit": 2,
+        "total_peer_count": 5,
+        "available_peer_count": 5,
+        "returned_peer_count": 2,
+        "has_more": True,
+        "next_page_token": "offset:3",
+    }
+    assert result["truncation"]["reason"] == "peer_pagination"
+
+
+def test_note_comparison_is_indeterminate_when_only_truncated_text_differs(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    common_prefix = "가" * 12_500
+    with get_session() as session:
+        session.add_all([
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="10", note_title="리스", section_type="policy",
+                body=f"{common_prefix}기준",
+            ),
+            AccountingNoteChapter(
+                corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002",
+                source_type="business_report", note_no="10", note_title="리스", section_type="policy",
+                body=f"{common_prefix}동종",
+            ),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+            "peer_count": 1,
+            "selection_policy": {},
+        },
+        _read_engine=temp_engine,
+    )
+
+    subject_row, peer_row = result["topics"][0]["rows"]
+    assert subject_row["comparison_text_truncated"] is True
+    assert peer_row["comparison_text_truncated"] is True
+    assert subject_row["comparison_text"] == peer_row["comparison_text"]
+    assert subject_row["comparison_text_hash"] != peer_row["comparison_text_hash"]
+    assert result["differences"][0]["status"] == "indeterminate_truncated"
+
+
+def test_note_comparison_enforces_utf8_budget_without_unbounded_raw_duplicates(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    large_body = "본문 " + ("가나다라마바사" * 2_000)
+    peer_codes = [f"0000000{number}" for number in range(2, 8)]
+    with get_session() as session:
+        session.add(AccountingNoteChapter(
+            corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+            source_type="business_report", note_no="10", note_title="리스", section_type="policy",
+            body=large_body,
+        ))
+        session.add_all([
+            AccountingNoteChapter(
+                corp_code=code, bsns_year=2024, fs_div="CFS", rcept_no=f"2025030100000{index + 2}",
+                source_type="business_report", note_no="10", note_title="리스", section_type="policy",
+                body=large_body,
+            )
+            for index, code in enumerate(peer_codes)
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"], peer_limit=6,
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [{"corp_code": code, "corp_name": f"Peer {index}"} for index, code in enumerate(peer_codes)],
+            "peer_count": 6,
+            "selection_policy": {},
+        },
+        _read_engine=temp_engine,
+    )
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 100_000
+    assert result["truncation"]["applied"] is True
+    assert result["truncation"]["reason"] == "note_comparison_output_budget"
+    assert result["truncation"]["output_budget_applied"] is True
+    assert result["truncation"]["max_output_bytes"] == 100_000
+    for row in result["topics"][0]["rows"]:
+        assert row["raw_text_length"] > len(row["raw_text"] or "")
+        assert len(row["value_or_excerpt"] or "") <= len(row["raw_text"] or "")
+
+
+def test_note_comparison_display_escapes_markdown_links_and_unicode_separators():
+    from kreports.analysis.note_comparison import _raw_text_fields
+
+    display = _raw_text_fields("![alt](https://example.com/a)|[label](url)\r\nA\u2028B\u2029C\x1f")["display"]
+
+    assert "![" not in display["text"]
+    assert "\\[label\\]\\(url\\)" in display["text"]
+    assert "\\u2028" in display["text"]
+    assert "\\u2029" in display["text"]
+    assert display["markdown_link_or_image_escaped"] is True
+    assert display["unicode_separators_escaped"] is True
+    assert display["control_characters_escaped"] is True
+
+
+def test_note_comparison_mcp_input_accepts_additive_page_size_and_offset():
+    from kreports.mcp.input_models import ComparePeerAccountingNotesInput
+
+    args = ComparePeerAccountingNotesInput(
+        company="00000001", year=2024, peer_limit=30, peer_offset=30, page_size=10,
+    )
+
+    assert args.peer_limit == 30
+    assert args.peer_offset == 30
+    assert args.page_size == 10
 
 
 def test_note_comparison_never_reads_a_different_business_year(temp_engine):

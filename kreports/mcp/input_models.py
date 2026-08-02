@@ -279,6 +279,8 @@ class ComparePeerAccountingNotesInput(ToolInput):
     year: Year = 2025
     topics: list[NoteTopic] | None = Field(None, max_length=9)
     peer_limit: int = Field(30, ge=1, le=200)
+    peer_offset: int = Field(0, ge=0, description="동종기업 비교 페이지의 0-기반 offset")
+    page_size: int | None = Field(None, ge=1, le=200, description="선택. 생략하면 peer_limit을 페이지 크기로 사용한다.")
     fs_strategy: FsStrategy = "auto"
     peer_criteria: PeerCriteriaProfile | list[str] | None = Field(
         None,
