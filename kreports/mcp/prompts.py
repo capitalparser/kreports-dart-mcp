@@ -44,7 +44,29 @@ _WORKFLOW_TEXT = {
         "회계정책 peer 검토 워크플로를 실행하여 정책 본문, 변경 이력, "
         "peer 차이와 KAM 연계를 검토한다."
     ),
+    "semantic_peer_context_review": (
+        "사업·감사·주석·공시의 로컬 DART 증빙과 하나의 설명 가능한 peer cohort를 "
+        "결합하고, caller-supplied IR·web/news를 출처별로 분리하는 읽기 전용 워크플로를 실행한다."
+    ),
 }
+
+_SEMANTIC_PEER_CONTEXT_GUIDANCE = """
+호스트 통합 환경에서는 `semantic_peer_context_review` adapter를 사용한다. 이 adapter는
+`get_semantic_company_context`, customizable `peer_criteria` cohort, 그리고
+`compare_peer_accounting_notes`를 하나의 read-only 요청으로 조합하며 cohort를 한 번만
+선택한다. 일반 MCP 도구를 각각 호출해 새 cohort를 재계산한 결과를 동일 peer 비교로
+표시하지 않는다.
+
+출처 우선순위는 **DART → company IR → web/news → LLM** 이다. DART는 `confirmed facts`,
+company IR는 `management claims`, web/news는 `external context`, LLM 산출물은 `analysis`로
+분리한다. 모든 analysis와 counterpoint에는 source_id를 인용한다. IR·web/news는
+caller-supplied evidence만 받으며 이 workflow는 외부 검색, API 호출, 백필, DB 쓰기를 하지 않는다.
+
+`selection_policy.fs_div_used`와 정확한 사업연도를 재무·주석에 공통 적용한다. 선택된
+CFS/OFS 주석이 캐시에 없으면 `fs_div_selection`의 명시적 fallback 상태와 locator를 유지하며,
+fallback을 동일 기준 증거로 숨기지 않는다. `unavailable`은 로컬 캐시 부재, `summary_only`는
+원문이 외부화·절단되었음을 뜻하므로 원 공시 부재나 완전한 원문으로 해석하지 않는다.
+""".strip()
 
 
 @dataclass(frozen=True)
@@ -105,11 +127,16 @@ def get_prompt(
     if description is None:
         raise PromptRequestError("unknown_prompt")
     company, year = _validated_arguments(arguments)
+    if name == "semantic_peer_context_review":
+        workflow_instruction = _SEMANTIC_PEER_CONTEXT_GUIDANCE
+    else:
+        workflow_instruction = (
+            "호출 순서(각 specialist는 한 번만 호출): "
+            f"{', '.join(WORKFLOW_SPECS[name])}"
+        )
     text = (
         f"{description}\n\n대상 회사: {company}\n사업연도: {year}\n\n"
-        "호출 순서(각 specialist는 한 번만 호출): "
-        f"{', '.join(WORKFLOW_SPECS[name])}\n\n"
-        f"{_COMMON_SAFETY}"
+        f"{workflow_instruction}\n\n{_COMMON_SAFETY}"
     )
     return GetPromptResult(
         description=description,

@@ -158,7 +158,7 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Beneish M-Score for this company — earnings manipulation risk"
 ```
 
-### MCP Tools (32)
+### MCP Tools (34)
 
 KReports exposes 32 catalog-bound MCP tools. The tools are grouped around the
 maintenance questions that usually force analysts and auditors back into DART:
@@ -173,6 +173,7 @@ maintenance questions that usually force analysts and auditors back into DART:
 | Auditor and group audit | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | Auditor tenure, opinion history, group auditor matrix, audit fee/NAS peer view |
 | Audit report evidence | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | Audit report sections, KAM matters, audit procedures, year-to-year KAM lifecycle |
 | Accounting policies | `get_accounting_policy`, `compare_peer_accounting_policies`, `get_accounting_policy_changes` | K-IFRS policy notes, peer policy comparison, policy change candidates |
+| Semantic filing and peer context | `get_semantic_company_context`, `compare_peer_accounting_notes`, `select_peer_group` | Local DART evidence buckets, explainable cohort selection, side-by-side note excerpts and provenance |
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
@@ -456,7 +457,7 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
 ```
 
-### MCP 도구 (32개)
+### MCP 도구 (34개)
 
 KReports는 catalog에 고정된 MCP 도구 32개를 제공합니다. 투자자와 감사인이
 DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
@@ -471,6 +472,7 @@ DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
 | 감사인·그룹감사 | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | 감사인 연속연수, 의견 이력, 그룹 감사인 매트릭스, 보수/NAS 피어 비교 |
 | 감사보고서 근거 | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | 감사보고서 본문, KAM, 감사절차, KAM 연도별 변화 |
 | 회계정책 | `get_accounting_policy`, `compare_peer_accounting_policies`, `get_accounting_policy_changes` | K-IFRS 주석, 피어 정책 비교, 정책 변경 후보 |
+| 의미 공시·피어 맥락 | `get_semantic_company_context`, `compare_peer_accounting_notes`, `select_peer_group` | 로컬 DART 증빙 버킷, 설명 가능한 피어 선정, 주석 원문·출처 비교 |
 
 회사명, 종목코드(6자리), corp_code(8자리) 중 아무거나 입력 가능합니다.
 
