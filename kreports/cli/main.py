@@ -1889,6 +1889,23 @@ def run_document_extractors_cmd(
             typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
 
 
+@app.command("index-note-sources")
+def index_note_sources_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 검사 문서 수"),
+):
+    """기존 원문 캐시를 읽기 전용으로 주석 후보/커버리지만 점검한다."""
+    from kreports.processor.note_source_index import build_note_source_index
+
+    _json_print(build_note_source_index(
+        year=year,
+        source_type=source_type,
+        limit=limit,
+        include_chapters=False,
+    ))
+
+
 @app.command("index-audit-procedures")
 def index_audit_procedures_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
