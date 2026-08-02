@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from collections.abc import Iterable
 from typing import Any, TypedDict
 
 from sqlalchemy import inspect, text
@@ -49,6 +50,12 @@ class CoverageResult(TypedDict):
     threshold_pct: float
 
 
+class BlockerGuidance(TypedDict):
+    blocker: str
+    owner: str
+    action: str
+
+
 class ReleaseGateReport(TypedDict):
     ok: bool
     profile: str
@@ -61,6 +68,55 @@ class ReleaseGateReport(TypedDict):
     coverage: dict[str, CoverageResult]
     denominators: dict[str, int]
     excluded_populations: dict[str, dict[str, int]]
+    blocker_guidance: list[BlockerGuidance]
+
+
+_EXACT_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
+    "investor_core_coverage": (
+        "dataset_backfill_maintainer",
+        "backfill and validate investor-core company-year coverage before release",
+    ),
+    "release_manifest_unavailable": (
+        "dataset_release_maintainer",
+        "write a validated dataset manifest from the prepared runtime DB",
+    ),
+    "schema_migration_contract_mismatch": (
+        "database_schema_maintainer",
+        "migrate the release DB to the approved schema revision before release",
+    ),
+    "unexpected_tool_count": (
+        "mcp_contract_maintainer",
+        "restore the approved 34-tool catalog before release",
+    ),
+    "runtime_not_readonly": (
+        "runtime_operator",
+        "run release verification with KREPORTS_RUNTIME_MODE=readonly",
+    ),
+}
+
+
+def describe_release_blockers(
+    blockers: Iterable[str],
+) -> list[BlockerGuidance]:
+    """Return deterministic owner/action guidance without altering readiness."""
+    guidance: list[BlockerGuidance] = []
+    for blocker in sorted(set(str(item) for item in blockers)):
+        owner, action = _EXACT_BLOCKER_GUIDANCE.get(
+            blocker,
+            (
+                "dataset_release_maintainer",
+                "inspect the named release blocker and rebuild proof only after remediation",
+            ),
+        )
+        if blocker.startswith("missing_required_index:"):
+            owner = "database_schema_maintainer"
+            action = "create the required index in a prepared release DB before release"
+        guidance.append({
+            "blocker": blocker,
+            "owner": owner,
+            "action": action,
+        })
+    return guidance
 
 
 def _empty_quality_contract() -> tuple[
@@ -539,6 +595,9 @@ def runtime_db_unavailable_report(
         "coverage": coverage,
         "denominators": denominators,
         "excluded_populations": exclusions,
+        "blocker_guidance": describe_release_blockers([
+            "runtime_db_unavailable",
+        ]),
     }
 
 
@@ -657,4 +716,5 @@ def evaluate_release_gate(
         "coverage": coverage,
         "denominators": denominators,
         "excluded_populations": excluded_populations,
+        "blocker_guidance": describe_release_blockers(required_failures),
     }

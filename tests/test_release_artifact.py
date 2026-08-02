@@ -270,6 +270,59 @@ def test_verify_recomputes_current_gate_and_ignores_tampered_pass(
     assert "release_gate_evidence_mismatch" in result.failures
 
 
+def test_verify_explains_stale_32_tool_proof_against_current_34_tool_contract(
+    tmp_path,
+    monkeypatch,
+):
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    stored = _minimal_manifest_payload()
+    stored["database"] = {
+        "file_name": db_path.name,
+        "byte_count": db_path.stat().st_size,
+        "sha256": hashlib.sha256(db_path.read_bytes()).hexdigest(),
+    }
+    stored["release_gate"] = {
+        **stored["release_gate"],
+        "passed": True,
+        "blockers": [],
+    }
+    stored["tool_contract"] = {
+        **stored["tool_contract"],
+        "tool_count": 32,
+        "wire_sha256": "0" * 64,
+    }
+    stored["contracts"] = {
+        **stored["contracts"],
+        "all_tools": {"passed": True, "checks": 32},
+    }
+    current = _minimal_manifest_payload()
+    current["database"] = dict(stored["database"])
+    current["release_gate"] = dict(stored["release_gate"])
+    calls = iter((stored, current))
+    monkeypatch.setattr(
+        release_artifact,
+        "_collect_current_evidence",
+        lambda _db, _profile: json.loads(json.dumps(next(calls))),
+    )
+
+    manifest_path = release_artifact.build_release_manifest(db_path)
+    result = release_artifact.verify_release_artifact(db_path, manifest_path)
+
+    assert result.ok is False
+    assert "tool_contract_evidence_mismatch" in result.failures
+    diagnostics = {
+        item.failure: item.model_dump() for item in result.diagnostics
+    }
+    assert diagnostics["tool_contract_evidence_mismatch"] == {
+        "failure": "tool_contract_evidence_mismatch",
+        "owner": "dataset_release_maintainer",
+        "action": "rebuild the release manifest from the current approved 34-tool catalog",
+    }
+
+
 def test_explicit_db_path_cannot_mix_with_global_engine(tmp_path, monkeypatch):
     from kreports import release_artifact
     import kreports.db.engine as global_engine

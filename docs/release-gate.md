@@ -20,6 +20,14 @@ fail-closed when no request-scoped key is supplied; the release check never
 injects or persists a credential.
 Drift or any current blocker returns non-zero.
 
+The read-only quality gate returns `blocker_guidance` alongside each named
+failure. Each entry identifies the responsible maintainer role and the next
+required action; it never performs that action. Artifact verification likewise
+returns `diagnostics` for proof-contract drift. In particular, a stale
+32-tool proof versus the frozen 34-tool catalog directs the dataset-release
+maintainer to rebuild the manifest from the current approved catalog rather
+than weakening the contract or masking the failure.
+
 ## Readiness meaning
 
 The common predicate is:

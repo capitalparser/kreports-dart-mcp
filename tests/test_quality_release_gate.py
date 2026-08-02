@@ -247,6 +247,38 @@ def test_invalid_manifest_fails_closed(temp_engine, monkeypatch):
     assert "release_manifest_unavailable" in report["required_failures"]
 
 
+def test_empty_manifest_and_quality_ledger_fail_closed_with_actionable_guidance(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    with temp_engine.begin() as connection:
+        apply_schema_migrations(connection)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert report["ok"] is False
+    assert report["required_failures"] == [
+        "investor_core_coverage",
+        "release_manifest_unavailable",
+    ]
+    guidance = {
+        item["blocker"]: item for item in report["blocker_guidance"]
+    }
+    assert guidance["release_manifest_unavailable"] == {
+        "blocker": "release_manifest_unavailable",
+        "owner": "dataset_release_maintainer",
+        "action": "write a validated dataset manifest from the prepared runtime DB",
+    }
+    assert guidance["investor_core_coverage"] == {
+        "blocker": "investor_core_coverage",
+        "owner": "dataset_backfill_maintainer",
+        "action": "backfill and validate investor-core company-year coverage before release",
+    }
+
+
 def test_release_gate_is_read_only_and_does_not_require_dart_key(
     temp_engine,
     monkeypatch,
