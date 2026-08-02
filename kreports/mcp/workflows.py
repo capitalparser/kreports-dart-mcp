@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from kreports.analysis.context_pack import build_mcp_context_pack
-from kreports.analysis.note_comparison import compare_peer_accounting_notes
+from kreports.analysis.note_comparison import NOTE_TOPICS, compare_peer_accounting_notes
 from kreports.analysis.peer_benchmarks import select_peer_group
 from kreports.analysis.semantic_index import build_company_context
 from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
@@ -469,22 +469,57 @@ def accounting_policy_peer_review(
 def _filter_semantic_context_fs_div(
     context: dict[str, Any],
     fs_div_used: str | None,
+    *,
+    peer_note_comparison: dict[str, Any] | None = None,
+    subject_code: str | None = None,
 ) -> dict[str, Any]:
-    """Keep note evidence aligned with the single cohort financial statement."""
+    """Keep financials and notes aligned with cohort or explicit note fallback."""
     filtered = dict(context)
     if fs_div_used not in {"CFS", "OFS"}:
         filtered["fs_div_used"] = fs_div_used
         return filtered
+    note_selections: dict[str, dict[str, Any]] = {}
+    for topic_result in (peer_note_comparison or {}).get("topics") or []:
+        if not isinstance(topic_result, dict):
+            continue
+        topic = topic_result.get("topic")
+        if not isinstance(topic, str):
+            continue
+        for row in topic_result.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            row_company = row.get("company")
+            if not isinstance(row_company, dict) or row_company.get("corp_code") != subject_code:
+                continue
+            selection = row.get("fs_div_selection")
+            if isinstance(selection, dict) and selection.get("used") in {"CFS", "OFS"}:
+                note_selections[topic] = dict(selection)
+            break
     original_notes = list(context.get("notes") or [])
-    filtered_notes = [
-        dict(note)
-        for note in original_notes
-        if isinstance(note, dict) and note.get("fs_div") == fs_div_used
-    ]
+    filtered_notes = []
+    for raw_note in original_notes:
+        if not isinstance(raw_note, dict):
+            continue
+        note = dict(raw_note)
+        selection = note_selections.get(note.get("topic"))
+        note_fs_div = selection.get("used") if selection else fs_div_used
+        if note.get("fs_div") == note_fs_div:
+            if selection:
+                note["fs_div_selection"] = selection
+            filtered_notes.append(note)
     filtered["notes"] = filtered_notes
+    original_financials = list(context.get("financials") or [])
+    filtered_financials = [
+        dict(financial)
+        for financial in original_financials
+        if isinstance(financial, dict) and financial.get("fs_div") == fs_div_used
+    ]
+    filtered["financials"] = filtered_financials
     availability = dict(context.get("availability") or {})
     if original_notes and not filtered_notes:
         availability["notes"] = "unavailable"
+    if original_financials and not filtered_financials:
+        availability["financials"] = "unavailable"
     filtered["availability"] = availability
     filtered["fs_div_used"] = fs_div_used
     return filtered
@@ -539,6 +574,9 @@ def semantic_peer_context_review(
         normalized_year,
         topics=topics,
     )
+    requested_note_topics = list(dict.fromkeys(
+        NOTE_TOPICS if topics is None else [topic for topic in topics if topic in NOTE_TOPICS]
+    ))
     subject = dict(semantic_context.get("subject") or {})
     subject_code = subject.get("corp_code")
     if not subject_code:
@@ -578,10 +616,6 @@ def semantic_peer_context_review(
     )
     peer_selection = dict(peer_group.get("selection_policy") or {})
     fs_div_used = peer_selection.get("fs_div_used")
-    filtered_context = _filter_semantic_context_fs_div(
-        semantic_context,
-        fs_div_used,
-    )
     if "error" in peer_group:
         peer_note_comparison: dict[str, Any] = {
             "error": peer_group["error"],
@@ -589,16 +623,31 @@ def semantic_peer_context_review(
             "read_only": True,
             "limitations": ["peer_cohort_unavailable"],
         }
-    else:
+    elif requested_note_topics:
         peer_note_comparison = note_builder(
             subject_code,
             normalized_year,
-            topics=topics,
+            topics=requested_note_topics,
             peer_limit=peer_limit,
             fs_strategy=fs_strategy,
             peer_criteria=peer_criteria,
             _peer_group=peer_group,
         )
+    else:
+        peer_note_comparison = {
+            "subject": subject,
+            "year": normalized_year,
+            "peer_selection": peer_selection,
+            "topics": [],
+            "read_only": True,
+            "limitations": ["no_note_topics_requested"],
+        }
+    filtered_context = _filter_semantic_context_fs_div(
+        semantic_context,
+        fs_div_used,
+        peer_note_comparison=peer_note_comparison,
+        subject_code=str(subject_code),
+    )
     context_pack = build_mcp_context_pack(
         filtered_context,
         peer_note_comparison=peer_note_comparison,

@@ -80,6 +80,8 @@ def _local_evidence(bucket: str, rows: Iterable[object]) -> list[ContextEvidence
                 "availability": row.get("availability"),
                 "rcept_no": row.get("rcept_no"),
                 "source_document_id": row.get("source_document_id"),
+                "fs_div": row.get("fs_div"),
+                "fs_div_selection": row.get("fs_div_selection"),
             },
         ))
     return sorted(evidence, key=lambda item: (item.source_id, item.title or ""))

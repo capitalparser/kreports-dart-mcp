@@ -121,6 +121,7 @@ def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_s
     def note_builder(company, year, **kwargs):
         calls.append(("notes", company, year, kwargs))
         assert kwargs["_peer_group"] is shared_cohort
+        assert kwargs["topics"] == ["leases"]
         return {
             "subject": shared_cohort["subject"],
             "year": year,
@@ -190,6 +191,104 @@ def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_s
     assert pack["peer_note_comparison"]["data"]["topics"][0]["rows"][1]["availability"] == "summary_only"
     assert pack["peer_note_comparison"]["data"]["topics"][0]["rows"][1]["source_locator"] == "accounting_note_chapters:12"
     assert {item["evidence_type"] for item in pack["missing_evidence"]} >= {"audit_report"}
+
+
+def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenance():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    def context_builder(_company, _year, topics=None):
+        assert topics == ["risks", "leases"]
+        return {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "availability": {
+                "business_report": "available",
+                "notes": "available",
+                "financials": "available",
+            },
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART risk disclosure",
+                    "full_text_hash": "a" * 40,
+                }
+            ],
+            "notes": [
+                {
+                    "source_locator": "accounting_note_chapters:10",
+                    "fs_div": "CFS",
+                    "topic": "leases",
+                    "excerpt": "CFS fallback lease note",
+                    "full_text_hash": "b" * 40,
+                }
+            ],
+            "financials": [
+                {
+                    "source_locator": "financials:00000001:2024:CFS:Q4",
+                    "fs_div": "CFS",
+                    "excerpt": "CFS financials",
+                },
+                {
+                    "source_locator": "financials:00000001:2024:OFS:Q4",
+                    "fs_div": "OFS",
+                    "excerpt": "OFS financials",
+                },
+            ],
+        }
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+        "peers": [],
+        "selection_policy": {"fs_div_used": "OFS", "requested_year": 2024},
+    }
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks", "leases"],
+        context_builder=context_builder,
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda _company, _year, **kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "peer_selection": cohort["selection_policy"],
+            "topics": [
+                {
+                    "topic": "leases",
+                    "rows": [
+                        {
+                            "company": {"corp_code": "00000001"},
+                            "availability": "available",
+                            "source_locator": "accounting_note_chapters:10",
+                            "fs_div": "CFS",
+                            "fs_div_selection": {
+                                "requested": "OFS",
+                                "used": "CFS",
+                                "status": "fallback_requested_fs_div_unavailable",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "read_only": True,
+        },
+    )
+
+    assert [item["fs_div"] for item in result["semantic_context"]["financials"]] == ["OFS"]
+    assert [item["fs_div"] for item in result["semantic_context"]["notes"]] == ["CFS"]
+    assert result["semantic_context"]["notes"][0]["fs_div_selection"] == {
+        "requested": "OFS",
+        "used": "CFS",
+        "status": "fallback_requested_fs_div_unavailable",
+    }
+    pack_notes = [
+        item for item in result["context_pack"]["dart_filing"]
+        if item["metadata"]["bucket"] == "notes"
+    ]
+    assert pack_notes[0]["metadata"]["fs_div"] == "CFS"
+    assert pack_notes[0]["metadata"]["fs_div_selection"]["status"] == "fallback_requested_fs_div_unavailable"
+    assert [item["source_id"] for item in result["context_pack"]["dart_filing"] if item["metadata"]["bucket"] == "financials"] == ["financials:00000001:2024:OFS:Q4"]
 
 
 def test_investor_workflow_uses_non_overlapping_specialists():
