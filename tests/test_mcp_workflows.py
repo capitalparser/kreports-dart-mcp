@@ -408,6 +408,62 @@ def test_semantic_workflow_surfaces_note_comparison_summary_with_peer_evidence()
     }]
 
 
+def test_semantic_workflow_marks_requested_note_missing_when_cohort_fails():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks"],
+        note_topics=["leases"],
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "year": 2024,
+            "business_report": [],
+            "notes": [],
+        },
+        cohort_selector=lambda *_args, **_kwargs: {
+            "error": "no_eligible_peers",
+            "selection_policy": {},
+        },
+    )
+
+    assert result["note_comparison_summary"]["topic_coverage"] == [{
+        "topic": "leases",
+        "subject_availability": "unavailable",
+        "peer_available": 0,
+        "peer_total": 0,
+    }]
+    assert result["note_comparison_summary"]["missing_evidence"] == [{
+        "topic": "leases",
+        "reason": "no_comparison_rows",
+        "cohort_failure": "no_eligible_peers",
+    }]
+
+
+def test_semantic_workflow_marks_requested_note_missing_when_subject_fails():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    result = semantic_peer_context_review(
+        "missing-company",
+        2024,
+        note_topics=["leases"],
+        context_builder=lambda *_args, **_kwargs: {
+            "error": "company_not_found",
+            "company": "missing-company",
+            "year": 2024,
+            "read_only": True,
+        },
+    )
+
+    assert result["status"] == "missing"
+    assert result["note_comparison_summary"]["missing_evidence"] == [{
+        "topic": "leases",
+        "reason": "no_comparison_rows",
+        "subject_failure": "semantic_subject_unavailable",
+    }]
+
+
 def test_semantic_peer_context_workflow_applies_total_output_budget():
     from kreports.mcp.workflows import semantic_peer_context_review
 

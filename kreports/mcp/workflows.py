@@ -570,6 +570,8 @@ def _note_comparison_summary(
     *,
     subject_code: str | None,
     requested_topics: list[str],
+    subject_failure: str | None = None,
+    cohort_failure: str | None = None,
 ) -> dict[str, Any]:
     """Promote peer-note evidence into a small, non-inferential workflow view."""
     topic_results = {
@@ -587,6 +589,16 @@ def _note_comparison_summary(
     peer_available_all = 0
     for topic in requested_topics:
         rows = list((topic_results.get(topic) or {}).get("rows") or [])
+        if not rows:
+            missing = {
+                "topic": topic,
+                "reason": "no_comparison_rows",
+            }
+            if subject_failure:
+                missing["subject_failure"] = subject_failure
+            if cohort_failure:
+                missing["cohort_failure"] = cohort_failure
+            missing_evidence.append(missing)
         subject_row = next(
             (
                 row for row in rows
@@ -853,6 +865,7 @@ def semantic_peer_context_review(
                 None,
                 subject_code=None,
                 requested_topics=requested_note_topics,
+                subject_failure="semantic_subject_unavailable",
             ),
             "context_pack": context_pack,
             "source_precedence": context_pack["source_precedence"],
@@ -926,6 +939,11 @@ def semantic_peer_context_review(
             peer_note_comparison,
             subject_code=str(subject_code),
             requested_topics=requested_note_topics,
+            cohort_failure=(
+                str(peer_group["error"])
+                if "error" in peer_group
+                else None
+            ),
         ),
         "context_pack": context_pack,
         "source_precedence": context_pack["source_precedence"],

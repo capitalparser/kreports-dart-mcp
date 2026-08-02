@@ -273,6 +273,20 @@ def _local_note_comparison_summary(
     requested_topics: list[str] | None,
 ) -> dict:
     """Expose local note coverage without implying a peer comparison occurred."""
+
+    def aggregate_availability(rows: list[dict]) -> str:
+        statuses = {
+            str(row.get("availability") or "unavailable")
+            for row in rows
+        }
+        if not statuses or statuses == {"unavailable"}:
+            return "unavailable"
+        if statuses == {"available"}:
+            return "available"
+        if statuses == {"summary_only"}:
+            return "summary_only"
+        return "partial"
+
     topics = requested_topics or sorted({
         str(note.get("topic"))
         for note in notes
@@ -284,7 +298,7 @@ def _local_note_comparison_summary(
     fs_div_selection = []
     for topic in topics:
         topic_notes = [note for note in notes if note.get("topic") == topic]
-        availability = "available" if topic_notes else "unavailable"
+        availability = aggregate_availability(topic_notes)
         topic_coverage.append({
             "topic": topic,
             "subject_availability": availability,
@@ -313,8 +327,7 @@ def _local_note_comparison_summary(
     return {
         "topic_coverage": topic_coverage,
         "subject_availability": (
-            "available" if any(note.get("availability") != "unavailable" for note in notes)
-            else "unavailable"
+            aggregate_availability(notes)
         ),
         "peer_availability": "not_requested",
         "differences": [],

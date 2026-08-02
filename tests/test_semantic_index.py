@@ -82,6 +82,12 @@ def test_company_context_composes_local_evidence_buckets_read_only(temp_engine):
     assert note["topic"] == "leases"
     assert note["full_text_uri"] == "raw://notes/10"
     assert note["availability"] == "summary_only"
+    assert context["note_comparison_summary"]["topic_coverage"] == [{
+        "topic": "leases",
+        "subject_availability": "summary_only",
+        "peer_availability": "not_requested",
+    }]
+    assert context["note_comparison_summary"]["subject_availability"] == "summary_only"
     assert context["financials"][0]["source_locator"] == "financials:00000001:2024:CFS:Q4"
 
 
@@ -126,3 +132,36 @@ def test_company_context_accounting_policy_topic_does_not_include_other_notes(te
 
     assert [item["note_no"] for item in context["notes"]] == ["1"]
     assert context["notes"][0]["topic"] == "accounting_policies"
+
+
+def test_company_context_note_summary_marks_mixed_excerpt_coverage_partial(temp_engine):
+    from kreports.analysis.semantic_index import build_company_context
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Partial Notes", induty_code="26410"),
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="1", note_title="리스", section_type="other_note",
+                body="로컬 리스 주석",
+            ),
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="OFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="2", note_title="리스", section_type="other_note",
+                body="외부화된 리스 주석", full_text_uri="raw://notes/2",
+                full_text_length=500, full_text_storage_status="externalized",
+            ),
+        ])
+
+    context = build_company_context(
+        "00000001", 2024, note_topics=["leases"], read_engine=temp_engine
+    )
+
+    assert context["note_comparison_summary"]["topic_coverage"] == [{
+        "topic": "leases",
+        "subject_availability": "partial",
+        "peer_availability": "not_requested",
+    }]
+    assert context["note_comparison_summary"]["subject_availability"] == "partial"
