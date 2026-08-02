@@ -8,6 +8,7 @@ mutated.
 from __future__ import annotations
 
 import html
+import hashlib
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -39,11 +40,10 @@ _NUMBERED_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _FS_DIV_MARKER_RE = re.compile(
-    r"연결\s*재무제표\s*주석|별도\s*재무제표\s*주석",
+    r"연\s*결\s*재\s*무\s*제\s*표\s*주\s*석|별\s*도\s*재\s*무\s*제\s*표\s*주\s*석",
     re.IGNORECASE,
 )
 _TOPIC_KEYWORDS = {
-    "leases": ("리스", "사용권자산", "리스부채"),
     "financial_instruments": ("금융상품", "금융자산", "금융부채", "금융위험"),
     "related_parties": ("특수관계자", "관계기업과의 거래"),
     "impairment": ("손상", "손상차손", "손상검사"),
@@ -52,6 +52,8 @@ _TOPIC_KEYWORDS = {
     "subsequent_events": ("보고기간후", "후발사건", "후속사건"),
     "accounting_policies": ("회계정책", "회계처리방침", "재무제표 작성기준"),
 }
+_LEASE_STANDALONE_RE = re.compile(r"(?<![가-힣])리\s*스(?![가-힣])")
+_LEASE_COMPOUND_KEYWORDS = ("사용권자산", "리스부채", "리스계약", "운용리스", "금융리스")
 
 
 def _plain_text(value: str) -> str:
@@ -85,19 +87,29 @@ def _heading_hits(content: str) -> list[tuple[int, int, str, str]]:
     return hits
 
 
-def _fs_div_for_offset(content: str, offset: int) -> str:
+def _fs_div_for_offset(content: str, offset: int, source_type: str | None) -> str:
     markers = [match for match in _FS_DIV_MARKER_RE.finditer(content) if match.start() <= offset]
     if not markers:
-        return "CFS"
+        return "OFS" if source_type == "audit_report" else "CFS"
     return "CFS" if "연결" in markers[-1].group(0) else "OFS"
 
 
 def _topics_for(value: str) -> list[str]:
-    return [
+    compact = re.sub(r"\s+", "", value)
+    topics = []
+    if (
+        _LEASE_STANDALONE_RE.search(value)
+        or any(keyword in compact for keyword in _LEASE_COMPOUND_KEYWORDS)
+    ):
+        topics.append("leases")
+    topics.extend(
         topic
         for topic in NOTE_TOPICS
-        if any(keyword in value for keyword in _TOPIC_KEYWORDS[topic])
-    ]
+        if topic != "leases" and any(
+            keyword in compact for keyword in _TOPIC_KEYWORDS[topic]
+        )
+    )
+    return topics
 
 
 def _section_type(topics: list[str]) -> str:
@@ -109,7 +121,7 @@ def parse_note_source_document(metadata: dict, content: str | None) -> dict:
     raw_content = content or ""
     if not raw_content.strip():
         return {
-            "status": "summary_only" if metadata.get("storage_uri") else "unavailable",
+            "status": "unavailable",
             "chapters": [],
             "parser_version": PARSER_VERSION,
         }
@@ -132,12 +144,20 @@ def parse_note_source_document(metadata: dict, content: str | None) -> dict:
             "source_type": metadata.get("source_type"),
             "rcept_no": metadata.get("rcept_no"),
             "dcm_no": metadata.get("dcm_no"),
-            "fs_div": _fs_div_for_offset(raw_content, start),
+            "fs_div": _fs_div_for_offset(
+                raw_content, start, metadata.get("source_type")
+            ),
             "note_no": note_no,
             "note_title": note_title,
             "section_type": _section_type(topics),
             "topics": topics,
             "raw_body": raw_body,
+            "raw_start": start,
+            "raw_end": end,
+            "raw_span_locator": (
+                f"source_documents:{metadata.get('id')}#chars={start}-{end}"
+            ),
+            "raw_body_hash": hashlib.sha1(raw_body.encode("utf-8")).hexdigest(),
             "body_text": body_text,
             "full_text_uri": metadata.get("storage_uri"),
             "full_text_hash": metadata.get("doc_hash"),
@@ -219,7 +239,7 @@ def build_note_source_index(
         try:
             content = _default_content_loader(row) if str(row.get("raw_content") or "").strip() else loader(row)
         except Exception:
-            documents["summary_only"] += 1
+            documents["unavailable"] += 1
             limitations.append(f"raw_content_unavailable:{row['rcept_no']}")
             continue
         parsed = parse_note_source_document(row, content)
