@@ -163,6 +163,57 @@ def test_mcp_context_pack_applies_a_documented_total_output_budget():
     assert result["dart_filing"]
 
 
+def test_mcp_context_pack_emergency_budget_retains_compact_provenance():
+    import json
+
+    from kreports.analysis.context_pack import (
+        MAX_MCP_CONTEXT_PACK_BYTES,
+        build_mcp_context_pack,
+    )
+
+    huge_peer_payload = [[["x" * 4_000 for _ in range(20)] for _ in range(20)] for _ in range(20)]
+    result = build_mcp_context_pack(
+        {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART excerpt",
+                    "full_text_hash": "a" * 40,
+                    "availability": "summary_only",
+                    "rcept_no": "20250301000001",
+                    "fs_div_selection": {
+                        "requested": "OFS",
+                        "used": "CFS",
+                        "status": "fallback_requested_fs_div_unavailable",
+                    },
+                }
+            ],
+        },
+        peer_note_comparison={"nested": huge_peer_payload},
+        company_ir=[
+            {"source_class": "company_ir", "source_id": "ir-1", "excerpt": "IR"}
+        ],
+        web_news=[
+            {"source_class": "web_news", "source_id": "news-1", "excerpt": "News"}
+        ],
+    )
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_MCP_CONTEXT_PACK_BYTES
+    assert result["truncation"]["applied"] is True
+    dart = result["dart_filing"][0]
+    assert dart["source_class"] == "dart_filing"
+    assert dart["source_id"] == "report_sections:1"
+    assert dart["metadata"]["availability"] == "summary_only"
+    assert dart["metadata"]["rcept_no"] == "20250301000001"
+    assert dart["metadata"]["fs_div_selection"]["used"] == "CFS"
+    assert dart["metadata"]["source_locator"] == "report_sections:1"
+    assert [item["source_id"] for item in result["company_ir"]] == ["ir-1"]
+    assert [item["source_id"] for item in result["web_news"]] == ["news-1"]
+
+
 def test_context_pack_rejects_cross_bucket_duplicate_source_ids_before_llm_citation():
     from kreports.analysis.context_pack import build_context_pack
 

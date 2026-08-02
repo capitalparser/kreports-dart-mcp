@@ -600,7 +600,7 @@ def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, A
         "year": result.get("year"),
         "read_only": True,
         "status": "limited" if result.get("status") != "missing" else "missing",
-        "context_pack": _compact_semantic_workflow_value(result.get("context_pack"), depth=1),
+        "context_pack": result.get("context_pack"),
         "source_precedence": result.get("source_precedence") or [],
         "limitations": ["semantic_peer_context_output_budget"],
         "truncation": _semantic_workflow_truncation(

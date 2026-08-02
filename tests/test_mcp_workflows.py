@@ -333,6 +333,60 @@ def test_semantic_peer_context_workflow_applies_total_output_budget():
     assert result["context_pack"]["truncation"]["max_output_bytes"]
 
 
+def test_semantic_workflow_budget_preserves_an_already_bounded_context_pack():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    huge_selection = [[["x" * 4_000 for _ in range(20)] for _ in range(20)] for _ in range(20)]
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART excerpt",
+                    "full_text_hash": "a" * 40,
+                    "availability": "summary_only",
+                    "rcept_no": "20250301000001",
+                    "fs_div_selection": {
+                        "requested": "OFS",
+                        "used": "CFS",
+                        "status": "fallback_requested_fs_div_unavailable",
+                    },
+                }
+            ],
+        },
+        cohort_selector=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "peers": [],
+            "selection_policy": {
+                "fs_div_used": "CFS",
+                "large_selection_metadata": huge_selection,
+            },
+        },
+        note_builder=lambda *_args, **_kwargs: {"year": 2024, "topics": [], "read_only": True},
+        company_ir=[
+            {"source_class": "company_ir", "source_id": "ir-1", "excerpt": "IR"}
+        ],
+        web_news=[
+            {"source_class": "web_news", "source_id": "news-1", "excerpt": "News"}
+        ],
+    )
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES
+    assert result["truncation"]["applied"] is True
+    dart = result["context_pack"]["dart_filing"][0]
+    assert dart["source_id"] == "report_sections:1"
+    assert dart["metadata"]["availability"] == "summary_only"
+    assert dart["metadata"]["rcept_no"] == "20250301000001"
+    assert dart["metadata"]["fs_div_selection"]["used"] == "CFS"
+    assert [item["source_id"] for item in result["context_pack"]["company_ir"]] == ["ir-1"]
+    assert [item["source_id"] for item in result["context_pack"]["web_news"]] == ["news-1"]
+
+
 def test_investor_workflow_uses_non_overlapping_specialists():
     calls = []
 

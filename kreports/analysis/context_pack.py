@@ -73,6 +73,9 @@ def _compact_evidence(record: dict[str, Any]) -> dict[str, Any]:
         )
         if isinstance(metadata, dict) and metadata.get(key) is not None
     }
+    compact_metadata["source_locator"] = _bounded_text(
+        record.get("source_id"), limit=300
+    )
     return {
         "source_class": record.get("source_class"),
         "source_id": _bounded_text(record.get("source_id"), limit=300),
@@ -140,26 +143,17 @@ def _bounded_mcp_context_pack(payload: dict[str, Any]) -> dict[str, Any]:
         "read_only": payload.get("read_only"),
         "source_precedence": payload.get("source_precedence") or [],
         "dart_filing": [
-            {
-                "source_class": record.get("source_class"),
-                "source_id": _bounded_text(record.get("source_id"), limit=300),
-            }
+            _compact_evidence(record)
             for record in (payload.get("dart_filing") or [])[:5]
             if isinstance(record, dict)
         ],
         "company_ir": [
-            {
-                "source_class": record.get("source_class"),
-                "source_id": _bounded_text(record.get("source_id"), limit=300),
-            }
+            _compact_evidence(record)
             for record in (payload.get("company_ir") or [])[:5]
             if isinstance(record, dict)
         ],
         "web_news": [
-            {
-                "source_class": record.get("source_class"),
-                "source_id": _bounded_text(record.get("source_id"), limit=300),
-            }
+            _compact_evidence(record)
             for record in (payload.get("web_news") or [])[:5]
             if isinstance(record, dict)
         ],
