@@ -1,7 +1,7 @@
 """Deterministic workflow packs composed solely from public MCP specialists."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import json
 from typing import Any
 
@@ -574,6 +574,21 @@ def _note_comparison_summary(
     cohort_failure: str | None = None,
 ) -> dict[str, Any]:
     """Promote peer-note evidence into a small, non-inferential workflow view."""
+
+    def aggregate_availability(statuses: Iterable[object]) -> str:
+        normalized = {
+            "summary_only" if status in {"summary_only", "truncated"}
+            else str(status or "unavailable")
+            for status in statuses
+        }
+        if not normalized or normalized == {"unavailable"}:
+            return "unavailable"
+        if normalized == {"available"}:
+            return "available"
+        if normalized == {"summary_only"}:
+            return "summary_only"
+        return "partial"
+
     topic_results = {
         str(item.get("topic")): item
         for item in (comparison or {}).get("topics") or []
@@ -584,9 +599,8 @@ def _note_comparison_summary(
     selections: list[dict[str, Any]] = []
     source_locators: list[str] = []
     missing_evidence: list[dict[str, Any]] = []
-    subject_available = False
-    peer_total_all = 0
-    peer_available_all = 0
+    subject_topic_statuses: list[str] = []
+    peer_topic_statuses: list[str] = []
     for topic in requested_topics:
         rows = list((topic_results.get(topic) or {}).get("rows") or [])
         if not rows:
@@ -615,20 +629,22 @@ def _note_comparison_summary(
         subject_status = str(
             (subject_row or {}).get("availability") or "unavailable"
         )
-        if subject_status != "unavailable":
-            subject_available = True
+        subject_topic_statuses.append(subject_status)
         peer_available = sum(
             str(row.get("availability") or "unavailable") != "unavailable"
             for row in peer_rows
         )
         peer_total = len(peer_rows)
-        peer_total_all += peer_total
-        peer_available_all += peer_available
+        peer_status = aggregate_availability(
+            row.get("availability") for row in peer_rows
+        )
+        peer_topic_statuses.append(peer_status)
         topic_coverage.append({
             "topic": topic,
             "subject_availability": subject_status,
             "peer_available": peer_available,
             "peer_total": peer_total,
+            "peer_availability": peer_status,
         })
         for row in rows:
             company = row.get("company") or {}
@@ -676,14 +692,13 @@ def _note_comparison_summary(
     if not requested_topics:
         missing_evidence.append({"reason": "no_note_topics_requested"})
     peer_availability = (
-        "not_requested" if peer_total_all == 0 and not requested_topics
-        else "unavailable" if peer_available_all == 0
-        else "available" if peer_available_all == peer_total_all
-        else "partial"
+        "not_requested"
+        if not requested_topics
+        else aggregate_availability(peer_topic_statuses)
     )
     return {
         "topic_coverage": topic_coverage,
-        "subject_availability": "available" if subject_available else "unavailable",
+        "subject_availability": aggregate_availability(subject_topic_statuses),
         "peer_availability": peer_availability,
         "differences": differences,
         "fs_div_selection": selections,

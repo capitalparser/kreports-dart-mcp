@@ -368,6 +368,7 @@ def test_semantic_workflow_surfaces_note_comparison_summary_with_peer_evidence()
         "subject_availability": "available",
         "peer_available": 1,
         "peer_total": 2,
+        "peer_availability": "partial",
     }]
     assert summary["subject_availability"] == "available"
     assert summary["peer_availability"] == "partial"
@@ -433,6 +434,7 @@ def test_semantic_workflow_marks_requested_note_missing_when_cohort_fails():
         "subject_availability": "unavailable",
         "peer_available": 0,
         "peer_total": 0,
+        "peer_availability": "unavailable",
     }]
     assert result["note_comparison_summary"]["missing_evidence"] == [{
         "topic": "leases",
@@ -462,6 +464,114 @@ def test_semantic_workflow_marks_requested_note_missing_when_subject_fails():
         "reason": "no_comparison_rows",
         "subject_failure": "semantic_subject_unavailable",
     }]
+
+
+def test_semantic_workflow_note_summary_keeps_externalized_only_as_summary_only():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+        "selection_policy": {"fs_div_used": "CFS"},
+    }
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        note_topics=["leases"],
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"], "year": 2024, "notes": [],
+        },
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "topics": [{
+                "topic": "leases",
+                "rows": [
+                    {
+                        "company": {"corp_code": "00000001"},
+                        "availability": "summary_only",
+                        "source_locator": "accounting_note_chapters:10",
+                    },
+                    {
+                        "company": {"corp_code": "00000002"},
+                        "availability": "summary_only",
+                        "source_locator": "accounting_note_chapters:11",
+                    },
+                ],
+            }],
+            "read_only": True,
+        },
+    )
+
+    summary = result["note_comparison_summary"]
+    assert summary["subject_availability"] == "summary_only"
+    assert summary["peer_availability"] == "summary_only"
+
+
+def test_semantic_workflow_note_summary_marks_mixed_subject_and_peer_rows_partial():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "peers": [
+            {"corp_code": "00000002", "corp_name": "Peer A"},
+            {"corp_code": "00000003", "corp_name": "Peer B"},
+        ],
+        "selection_policy": {"fs_div_used": "CFS"},
+    }
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        note_topics=["leases", "revenue"],
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"], "year": 2024, "notes": [],
+        },
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "topics": [
+                {
+                    "topic": "leases",
+                    "rows": [
+                        {"company": {"corp_code": "00000001"}, "availability": "available"},
+                        {"company": {"corp_code": "00000002"}, "availability": "available"},
+                        {"company": {"corp_code": "00000003"}, "availability": "summary_only"},
+                    ],
+                },
+                {
+                    "topic": "revenue",
+                    "rows": [
+                        {"company": {"corp_code": "00000001"}, "availability": "summary_only"},
+                        {"company": {"corp_code": "00000002"}, "availability": "summary_only"},
+                        {"company": {"corp_code": "00000003"}, "availability": "summary_only"},
+                    ],
+                },
+            ],
+            "read_only": True,
+        },
+    )
+
+    summary = result["note_comparison_summary"]
+    assert summary["subject_availability"] == "partial"
+    assert summary["peer_availability"] == "partial"
+    assert summary["topic_coverage"] == [
+        {
+            "topic": "leases",
+            "subject_availability": "available",
+            "peer_available": 2,
+            "peer_total": 2,
+            "peer_availability": "partial",
+        },
+        {
+            "topic": "revenue",
+            "subject_availability": "summary_only",
+            "peer_available": 2,
+            "peer_total": 2,
+            "peer_availability": "summary_only",
+        },
+    ]
 
 
 def test_semantic_peer_context_workflow_applies_total_output_budget():
