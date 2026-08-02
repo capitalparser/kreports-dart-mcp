@@ -80,4 +80,5 @@ def handle_get_semantic_company_context(
         resolve_company(args.company),
         args.year,
         topics=args.topics,
+        note_topics=args.note_topics,
     )

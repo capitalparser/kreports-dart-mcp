@@ -565,6 +565,121 @@ def _compact_semantic_workflow_value(value: Any, *, depth: int = 0) -> Any:
     return value
 
 
+def _note_comparison_summary(
+    comparison: dict[str, Any] | None,
+    *,
+    subject_code: str | None,
+    requested_topics: list[str],
+) -> dict[str, Any]:
+    """Promote peer-note evidence into a small, non-inferential workflow view."""
+    topic_results = {
+        str(item.get("topic")): item
+        for item in (comparison or {}).get("topics") or []
+        if isinstance(item, dict) and item.get("topic")
+    }
+    topic_coverage: list[dict[str, Any]] = []
+    differences: list[dict[str, Any]] = []
+    selections: list[dict[str, Any]] = []
+    source_locators: list[str] = []
+    missing_evidence: list[dict[str, Any]] = []
+    subject_available = False
+    peer_total_all = 0
+    peer_available_all = 0
+    for topic in requested_topics:
+        rows = list((topic_results.get(topic) or {}).get("rows") or [])
+        subject_row = next(
+            (
+                row for row in rows
+                if isinstance(row, dict)
+                and str((row.get("company") or {}).get("corp_code") or "")
+                == str(subject_code or "")
+            ),
+            None,
+        )
+        peer_rows = [
+            row for row in rows
+            if isinstance(row, dict) and row is not subject_row
+        ]
+        subject_status = str(
+            (subject_row or {}).get("availability") or "unavailable"
+        )
+        if subject_status != "unavailable":
+            subject_available = True
+        peer_available = sum(
+            str(row.get("availability") or "unavailable") != "unavailable"
+            for row in peer_rows
+        )
+        peer_total = len(peer_rows)
+        peer_total_all += peer_total
+        peer_available_all += peer_available
+        topic_coverage.append({
+            "topic": topic,
+            "subject_availability": subject_status,
+            "peer_available": peer_available,
+            "peer_total": peer_total,
+        })
+        for row in rows:
+            company = row.get("company") or {}
+            corp_code = str(company.get("corp_code") or "")
+            locator = row.get("source_locator")
+            if locator:
+                source_locators.append(str(locator))
+            selection = row.get("fs_div_selection")
+            if isinstance(selection, dict):
+                selections.append({
+                    "topic": topic,
+                    "corp_code": corp_code,
+                    "requested": selection.get("requested"),
+                    "used": selection.get("used"),
+                    "status": selection.get("status"),
+                })
+            if str(row.get("availability") or "unavailable") == "unavailable":
+                missing_evidence.append({
+                    "topic": topic,
+                    "corp_code": corp_code,
+                    "reason": str(
+                        row.get("comparison_note")
+                        or "no_cached_note_for_exact_business_year"
+                    ),
+                })
+        if subject_row and subject_status != "unavailable":
+            subject_text = subject_row.get("value_or_excerpt")
+            subject_locator = subject_row.get("source_locator")
+            for peer in peer_rows:
+                if (
+                    str(peer.get("availability") or "unavailable") != "unavailable"
+                    and isinstance(subject_text, str)
+                    and isinstance(peer.get("value_or_excerpt"), str)
+                    and peer["value_or_excerpt"] != subject_text
+                ):
+                    differences.append({
+                        "topic": topic,
+                        "peer_corp_code": str(
+                            (peer.get("company") or {}).get("corp_code") or ""
+                        ),
+                        "status": "different_cached_excerpt",
+                        "subject_source_locator": subject_locator,
+                        "peer_source_locator": peer.get("source_locator"),
+                    })
+    if not requested_topics:
+        missing_evidence.append({"reason": "no_note_topics_requested"})
+    peer_availability = (
+        "not_requested" if peer_total_all == 0 and not requested_topics
+        else "unavailable" if peer_available_all == 0
+        else "available" if peer_available_all == peer_total_all
+        else "partial"
+    )
+    return {
+        "topic_coverage": topic_coverage,
+        "subject_availability": "available" if subject_available else "unavailable",
+        "peer_availability": peer_availability,
+        "differences": differences,
+        "fs_div_selection": selections,
+        "source_locators": sorted(set(source_locators)),
+        "missing_evidence": missing_evidence,
+    }
+
+
 def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, Any]:
     candidate = {
         **result,
@@ -584,6 +699,7 @@ def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, A
         "peer_confidence": result.get("peer_confidence"),
         "semantic_context": _compact_semantic_workflow_value(result.get("semantic_context")),
         "peer_note_comparison": _compact_semantic_workflow_value(result.get("peer_note_comparison")),
+        "note_comparison_summary": _compact_semantic_workflow_value(result.get("note_comparison_summary")),
         "context_pack": result.get("context_pack"),
         "source_precedence": result.get("source_precedence") or [],
         "limitations": _compact_semantic_workflow_value(result.get("limitations") or []),
@@ -610,6 +726,9 @@ def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, A
         "read_only": True,
         "status": "limited" if result.get("status") != "missing" else "missing",
         "context_pack": context_pack,
+        "note_comparison_summary": _compact_semantic_workflow_value(
+            result.get("note_comparison_summary")
+        ),
         "source_precedence": [
             str(item)[:40]
             for item in (result.get("source_precedence") or [])[:4]
@@ -657,6 +776,7 @@ def semantic_peer_context_review(
     year: int,
     *,
     topics: list[str] | None = None,
+    note_topics: list[str] | None = None,
     peer_criteria: list[str] | dict[str, Any] | None = None,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
@@ -685,14 +805,25 @@ def semantic_peer_context_review(
     if not 1 <= peer_limit <= 200:
         raise ValueError("invalid_peer_limit")
 
+    if note_topics is not None:
+        requested_note_topics = list(dict.fromkeys(note_topics))
+        unknown_note_topics = set(requested_note_topics) - set(NOTE_TOPICS)
+        if unknown_note_topics:
+            raise ValueError(f"unsupported_note_topics:{sorted(unknown_note_topics)}")
+    else:
+        requested_note_topics = list(dict.fromkeys(
+            NOTE_TOPICS if topics is None else [
+                topic for topic in topics if topic in NOTE_TOPICS
+            ]
+        ))
+    context_kwargs: dict[str, Any] = {"topics": topics}
+    if note_topics is not None:
+        context_kwargs["note_topics"] = requested_note_topics
     semantic_context = context_builder(
         normalized_company,
         normalized_year,
-        topics=topics,
+        **context_kwargs,
     )
-    requested_note_topics = list(dict.fromkeys(
-        NOTE_TOPICS if topics is None else [topic for topic in topics if topic in NOTE_TOPICS]
-    ))
     subject = dict(semantic_context.get("subject") or {})
     subject_code = subject.get("corp_code")
     if not subject_code:
@@ -718,6 +849,11 @@ def semantic_peer_context_review(
             "semantic_context": semantic_context,
             "peer_selection": None,
             "peer_note_comparison": None,
+            "note_comparison_summary": _note_comparison_summary(
+                None,
+                subject_code=None,
+                requested_topics=requested_note_topics,
+            ),
             "context_pack": context_pack,
             "source_precedence": context_pack["source_precedence"],
             "limitations": ["semantic_subject_unavailable"],
@@ -786,6 +922,11 @@ def semantic_peer_context_review(
         "peer_confidence": peer_group.get("confidence"),
         "semantic_context": filtered_context,
         "peer_note_comparison": peer_note_comparison,
+        "note_comparison_summary": _note_comparison_summary(
+            peer_note_comparison,
+            subject_code=str(subject_code),
+            requested_topics=requested_note_topics,
+        ),
         "context_pack": context_pack,
         "source_precedence": context_pack["source_precedence"],
         "limitations": [

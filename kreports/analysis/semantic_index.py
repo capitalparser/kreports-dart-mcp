@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from sqlalchemy import text
 
 import kreports.db.engine as _engine_module
+from kreports.analysis.note_comparison import NOTE_TOPICS
 from kreports.processor.semantic_contracts import normalize_note_topic
 
 
@@ -267,11 +268,68 @@ def _financial_rows(conn, *, corp_code: str, year: int) -> list[dict]:
     ]
 
 
+def _local_note_comparison_summary(
+    notes: list[dict],
+    requested_topics: list[str] | None,
+) -> dict:
+    """Expose local note coverage without implying a peer comparison occurred."""
+    topics = requested_topics or sorted({
+        str(note.get("topic"))
+        for note in notes
+        if note.get("topic")
+    })
+    topic_coverage = []
+    missing_evidence = []
+    source_locators = []
+    fs_div_selection = []
+    for topic in topics:
+        topic_notes = [note for note in notes if note.get("topic") == topic]
+        availability = "available" if topic_notes else "unavailable"
+        topic_coverage.append({
+            "topic": topic,
+            "subject_availability": availability,
+            "peer_availability": "not_requested",
+        })
+        if not topic_notes:
+            missing_evidence.append({
+                "topic": topic,
+                "reason": "no_cached_subject_note_for_exact_business_year",
+            })
+        for note in topic_notes:
+            locator = note.get("source_locator")
+            if locator:
+                source_locators.append(str(locator))
+            fs_div = note.get("fs_div")
+            if fs_div:
+                fs_div_selection.append({
+                    "topic": topic,
+                    "requested": None,
+                    "used": str(fs_div),
+                    "status": "local_context_only",
+                })
+    missing_evidence.append({
+        "reason": "peer_note_comparison_not_requested",
+    })
+    return {
+        "topic_coverage": topic_coverage,
+        "subject_availability": (
+            "available" if any(note.get("availability") != "unavailable" for note in notes)
+            else "unavailable"
+        ),
+        "peer_availability": "not_requested",
+        "differences": [],
+        "fs_div_selection": fs_div_selection,
+        "source_locators": sorted(set(source_locators)),
+        "missing_evidence": missing_evidence,
+    }
+
+
 def build_company_context(
     company: str,
     year: int,
     topics: list[str] | None = None,
     *,
+    note_topics: list[str] | None = None,
     read_engine=None,
 ) -> dict:
     """Build a local, read-only evidence context for one company-year.
@@ -281,6 +339,20 @@ def build_company_context(
     """
     active_engine = read_engine or _engine_module.engine
     normalized_topics = sorted(dict.fromkeys(topics)) if topics else None
+    normalized_note_topics = (
+        sorted(dict.fromkeys(note_topics))
+        if note_topics is not None
+        else normalized_topics
+    )
+    summary_note_topics = (
+        normalized_note_topics
+        if note_topics is not None
+        else (
+            [topic for topic in normalized_note_topics if topic in NOTE_TOPICS]
+            if normalized_note_topics is not None
+            else None
+        )
+    )
     with active_engine.connect() as conn:
         subject = _resolve_company(conn, company)
         if subject is None:
@@ -295,10 +367,11 @@ def build_company_context(
             "subject": subject,
             "year": year,
             "topics_requested": normalized_topics,
+            "note_topics_requested": normalized_note_topics,
             "read_only": True,
             "business_report": _section_rows(conn, corp_code=corp_code, year=year, source_type="business_report", topics=normalized_topics),
             "audit_report": _section_rows(conn, corp_code=corp_code, year=year, source_type="audit_report", topics=normalized_topics),
-            "notes": _note_rows(conn, corp_code=corp_code, year=year, topics=normalized_topics),
+            "notes": _note_rows(conn, corp_code=corp_code, year=year, topics=normalized_note_topics),
             "evidence_documents": _evidence_document_rows(conn, corp_code=corp_code, year=year),
             "disclosures": _disclosure_rows(conn, corp_code=corp_code, year=year),
             "financials": _financial_rows(conn, corp_code=corp_code, year=year),
@@ -307,6 +380,10 @@ def build_company_context(
         bucket: "available" if result[bucket] else "unavailable"
         for bucket in _BUCKETS
     }
+    result["note_comparison_summary"] = _local_note_comparison_summary(
+        result["notes"],
+        summary_note_topics,
+    )
     result["interpretation"] = (
         "Local cached evidence only. unavailable means no matching cached row, not a claim that DART has no filing."
     )

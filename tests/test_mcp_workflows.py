@@ -292,6 +292,122 @@ def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenan
     assert [item["source_id"] for item in result["context_pack"]["dart_filing"] if item["metadata"]["bucket"] == "financials"] == ["financials:00000001:2024:OFS:Q4"]
 
 
+def test_semantic_workflow_surfaces_note_comparison_summary_with_peer_evidence():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "peers": [
+            {"corp_code": "00000002", "corp_name": "Peer A"},
+            {"corp_code": "00000003", "corp_name": "Peer B"},
+        ],
+        "selection_policy": {"fs_div_used": "CFS"},
+    }
+
+    def context_builder(_company, _year, *, topics=None, note_topics=None):
+        assert topics == ["risks"]
+        assert note_topics == ["leases"]
+        return {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "business_report": [],
+            "notes": [],
+        }
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks"],
+        note_topics=["leases"],
+        context_builder=context_builder,
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda _company, _year, **kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "peer_selection": cohort["selection_policy"],
+            "topics": [{
+                "topic": "leases",
+                "rows": [
+                    {
+                        "company": {"corp_code": "00000001"},
+                        "availability": "available",
+                        "value_or_excerpt": "subject lease policy",
+                        "source_locator": "accounting_note_chapters:10",
+                        "fs_div_selection": {
+                            "requested": "CFS", "used": "CFS", "status": "exact",
+                        },
+                    },
+                    {
+                        "company": {"corp_code": "00000002"},
+                        "availability": "available",
+                        "value_or_excerpt": "peer lease policy differs",
+                        "source_locator": "accounting_note_chapters:11",
+                        "fs_div_selection": {
+                            "requested": "CFS", "used": "CFS", "status": "exact",
+                        },
+                    },
+                    {
+                        "company": {"corp_code": "00000003"},
+                        "availability": "unavailable",
+                        "value_or_excerpt": None,
+                        "source_locator": None,
+                        "fs_div_selection": {
+                            "requested": "CFS", "used": None,
+                            "status": "unavailable_no_cached_note",
+                        },
+                    },
+                ],
+            }],
+            "read_only": True,
+        },
+    )
+
+    summary = result["note_comparison_summary"]
+    assert summary["topic_coverage"] == [{
+        "topic": "leases",
+        "subject_availability": "available",
+        "peer_available": 1,
+        "peer_total": 2,
+    }]
+    assert summary["subject_availability"] == "available"
+    assert summary["peer_availability"] == "partial"
+    assert summary["differences"] == [{
+        "topic": "leases",
+        "peer_corp_code": "00000002",
+        "status": "different_cached_excerpt",
+        "subject_source_locator": "accounting_note_chapters:10",
+        "peer_source_locator": "accounting_note_chapters:11",
+    }]
+    assert summary["fs_div_selection"] == [{
+        "topic": "leases",
+        "corp_code": "00000001",
+        "requested": "CFS",
+        "used": "CFS",
+        "status": "exact",
+    }, {
+        "topic": "leases",
+        "corp_code": "00000002",
+        "requested": "CFS",
+        "used": "CFS",
+        "status": "exact",
+    }, {
+        "topic": "leases",
+        "corp_code": "00000003",
+        "requested": "CFS",
+        "used": None,
+        "status": "unavailable_no_cached_note",
+    }]
+    assert summary["source_locators"] == [
+        "accounting_note_chapters:10",
+        "accounting_note_chapters:11",
+    ]
+    assert summary["missing_evidence"] == [{
+        "topic": "leases",
+        "corp_code": "00000003",
+        "reason": "no_cached_note_for_exact_business_year",
+    }]
+
+
 def test_semantic_peer_context_workflow_applies_total_output_budget():
     from kreports.mcp.workflows import semantic_peer_context_review
 

@@ -47,7 +47,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "4f63c50bd91bb5fb69197bcef3d79e4ac8cdf0b354abc6b0c65e81fa043b3c51"
+EXPECTED_INTERFACE_SHA256 = "d02a3a78fc06506f5fa71b359d638eea447d5a4fcee41c88dfab6f16caa3b6a8"
 
 
 MINIMAL_ARGUMENTS = {

@@ -44,6 +44,17 @@ SemanticContextTopic = Literal[
     "audit_opinion",
     "subsequent_events",
 ]
+NoteTopic = Literal[
+    "revenue",
+    "leases",
+    "financial_instruments",
+    "related_parties",
+    "provisions_contingencies",
+    "impairment",
+    "subsidiaries",
+    "subsequent_events",
+    "accounting_policies",
+]
 
 
 class ToolInput(BaseModel):
@@ -166,10 +177,25 @@ class GetSemanticCompanyContextInput(ToolInput):
             "로컬 캐시 버킷을 모두 반환한다."
         ),
     )
+    note_topics: list[NoteTopic] | None = Field(
+        None,
+        max_length=9,
+        description=(
+            "회계주석 비교용 주제. topics의 사업·감사 증빙 필터와 독립적으로 "
+            "적용되며, 둘을 함께 지정해도 각 버킷은 별도로 필터링한다."
+        ),
+    )
 
     @field_validator("topics")
     @classmethod
     def unique_topics(cls, value: list[SemanticContextTopic] | None):
+        if value is None:
+            return value
+        return list(dict.fromkeys(value))
+
+    @field_validator("note_topics")
+    @classmethod
+    def unique_note_topics(cls, value: list[NoteTopic] | None):
         if value is None:
             return value
         return list(dict.fromkeys(value))
@@ -251,11 +277,7 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
 class ComparePeerAccountingNotesInput(ToolInput):
     company: str
     year: Year = 2025
-    topics: list[Literal[
-        "revenue", "leases", "financial_instruments", "related_parties",
-        "provisions_contingencies", "impairment", "subsidiaries",
-        "subsequent_events", "accounting_policies",
-    ]] | None = Field(None, max_length=9)
+    topics: list[NoteTopic] | None = Field(None, max_length=9)
     peer_limit: int = Field(30, ge=1, le=200)
     fs_strategy: FsStrategy = "auto"
     peer_criteria: PeerCriteriaProfile | list[str] | None = Field(

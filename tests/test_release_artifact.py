@@ -35,7 +35,7 @@ def _minimal_manifest_payload() -> dict:
             "version": "1.0",
             "tool_count": 34,
             "wire_sha256": (
-                "4f63c50bd91bb5fb69197bcef3d79e4ac8cdf0b354abc6b0c65e81fa043b3c51"
+                "d02a3a78fc06506f5fa71b359d638eea447d5a4fcee41c88dfab6f16caa3b6a8"
             ),
         },
         "release_gate": {
