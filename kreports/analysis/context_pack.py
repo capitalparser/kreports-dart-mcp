@@ -65,14 +65,26 @@ def _bounded_value(value: Any, *, depth: int = 0) -> Any:
 
 def _compact_evidence(record: dict[str, Any]) -> dict[str, Any]:
     metadata = record.get("metadata")
-    compact_metadata = {
-        key: metadata.get(key)
-        for key in (
-            "bucket", "availability", "rcept_no", "source_document_id",
-            "fs_div", "fs_div_selection",
-        )
-        if isinstance(metadata, dict) and metadata.get(key) is not None
-    }
+    compact_metadata = {}
+    if isinstance(metadata, dict):
+        for key, limit in (
+            ("bucket", 80),
+            ("availability", 80),
+            ("rcept_no", 80),
+            ("source_document_id", 80),
+            ("fs_div", 20),
+        ):
+            if metadata.get(key) is not None:
+                compact_metadata[key] = _bounded_text(metadata[key], limit=limit)
+        selection = metadata.get("fs_div_selection")
+        if isinstance(selection, dict):
+            compact_selection = {
+                key: _bounded_text(selection[key], limit=120)
+                for key in ("requested", "used", "status")
+                if selection.get(key) is not None
+            }
+            if compact_selection:
+                compact_metadata["fs_div_selection"] = compact_selection
     compact_metadata["source_locator"] = _bounded_text(
         record.get("source_id"), limit=300
     )
@@ -85,6 +97,50 @@ def _compact_evidence(record: dict[str, Any]) -> dict[str, Any]:
         "checksum": _bounded_text(record.get("checksum"), limit=128) or None,
         "claim_key": _bounded_text(record.get("claim_key"), limit=120) or None,
         "metadata": _bounded_value(compact_metadata),
+    }
+
+
+def _hard_minimal_context_pack(payload: dict[str, Any]) -> dict[str, Any]:
+    """Last-resort bounded surface retaining one provenance-bearing source per class."""
+    subject = payload.get("subject")
+    subject_values = subject if isinstance(subject, dict) else {}
+    return {
+        "schema_version": _bounded_text(payload.get("schema_version"), limit=40),
+        "subject": {
+            key: _bounded_text(subject_values.get(key), limit=120)
+            for key in ("corp_code", "corp_name", "stock_code")
+            if subject_values.get(key) is not None
+        },
+        "year": _bounded_value(payload.get("year")),
+        "read_only": bool(payload.get("read_only")),
+        "source_precedence": [
+            _bounded_text(item, limit=40)
+            for item in (payload.get("source_precedence") or [])[:4]
+        ],
+        "dart_filing": [
+            _compact_evidence(record)
+            for record in (payload.get("dart_filing") or [])[:1]
+            if isinstance(record, dict)
+        ],
+        "company_ir": [
+            _compact_evidence(record)
+            for record in (payload.get("company_ir") or [])[:1]
+            if isinstance(record, dict)
+        ],
+        "web_news": [
+            _compact_evidence(record)
+            for record in (payload.get("web_news") or [])[:1]
+            if isinstance(record, dict)
+        ],
+        "llm_analysis": [],
+        "peer_note_comparison": {"truncated": True},
+        "missing_evidence": [],
+        "conflicts": [],
+        "llm_guidance": [],
+        "truncation": _truncation(
+            applied=True,
+            reason="context_pack_output_budget",
+        ),
     }
 
 
@@ -136,7 +192,7 @@ def _bounded_mcp_context_pack(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if _serialized_bytes(bounded) <= MAX_MCP_CONTEXT_PACK_BYTES:
         return bounded
-    return {
+    emergency = {
         "schema_version": payload.get("schema_version"),
         "subject": _bounded_value(payload.get("subject") or {}, depth=2),
         "year": payload.get("year"),
@@ -167,6 +223,37 @@ def _bounded_mcp_context_pack(payload: dict[str, Any]) -> dict[str, Any]:
             reason="context_pack_output_budget",
         ),
     }
+    if _serialized_bytes(emergency) <= MAX_MCP_CONTEXT_PACK_BYTES:
+        return emergency
+    hard_minimal = _hard_minimal_context_pack(payload)
+    if _serialized_bytes(hard_minimal) <= MAX_MCP_CONTEXT_PACK_BYTES:
+        return hard_minimal
+    hard_final = {
+        "schema_version": "context_pack.v1",
+        "year": _bounded_value(payload.get("year")),
+        "read_only": True,
+        "source_precedence": [],
+        "dart_filing": [],
+        "company_ir": [],
+        "web_news": [],
+        "truncation": _truncation(
+            applied=True,
+            reason="context_pack_output_budget",
+        ),
+    }
+    if _serialized_bytes(hard_final) <= MAX_MCP_CONTEXT_PACK_BYTES:
+        return hard_final
+    final = {
+        "schema_version": "context_pack.v1",
+        "read_only": True,
+        "truncation": _truncation(
+            applied=True,
+            reason="context_pack_output_budget",
+        ),
+    }
+    if _serialized_bytes(final) <= MAX_MCP_CONTEXT_PACK_BYTES:
+        return final
+    return {"truncation": {"applied": True}}
 
 
 def _local_excerpt(row: dict[str, Any]) -> str:

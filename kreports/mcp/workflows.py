@@ -594,20 +594,62 @@ def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, A
     }
     if _serialized_bytes(bounded) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
         return bounded
-    return {
-        "workflow_version": result.get("workflow_version"),
-        "workflow_name": result.get("workflow_name"),
+    context_pack = result.get("context_pack")
+    if not isinstance(context_pack, dict) or _serialized_bytes(context_pack) > 60_000:
+        context_pack = {
+            "truncation": {
+                "applied": True,
+                "max_output_bytes": 60_000,
+                "reason": "context_pack_output_budget",
+            }
+        }
+    emergency = {
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
         "year": result.get("year"),
         "read_only": True,
         "status": "limited" if result.get("status") != "missing" else "missing",
-        "context_pack": result.get("context_pack"),
-        "source_precedence": result.get("source_precedence") or [],
+        "context_pack": context_pack,
+        "source_precedence": [
+            str(item)[:40]
+            for item in (result.get("source_precedence") or [])[:4]
+        ],
         "limitations": ["semantic_peer_context_output_budget"],
         "truncation": _semantic_workflow_truncation(
             applied=True,
             reason="semantic_peer_context_output_budget",
         ),
     }
+    if _serialized_bytes(emergency) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return emergency
+    hard_final = {
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
+        "year": _compact_semantic_workflow_value(result.get("year")),
+        "read_only": True,
+        "status": "limited",
+        "context_pack": {"truncated": True},
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(hard_final) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return hard_final
+    final = {
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
+        "read_only": True,
+        "status": "limited",
+        "context_pack": {"truncated": True},
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(final) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return final
+    return {"truncation": {"applied": True}}
 
 
 def semantic_peer_context_review(

@@ -188,6 +188,7 @@ def test_mcp_context_pack_emergency_budget_retains_compact_provenance():
                         "requested": "OFS",
                         "used": "CFS",
                         "status": "fallback_requested_fs_div_unavailable",
+                        "huge_nested_metadata": huge_peer_payload,
                     },
                 }
             ],
@@ -208,7 +209,11 @@ def test_mcp_context_pack_emergency_budget_retains_compact_provenance():
     assert dart["source_id"] == "report_sections:1"
     assert dart["metadata"]["availability"] == "summary_only"
     assert dart["metadata"]["rcept_no"] == "20250301000001"
-    assert dart["metadata"]["fs_div_selection"]["used"] == "CFS"
+    assert dart["metadata"]["fs_div_selection"] == {
+        "requested": "OFS",
+        "used": "CFS",
+        "status": "fallback_requested_fs_div_unavailable",
+    }
     assert dart["metadata"]["source_locator"] == "report_sections:1"
     assert [item["source_id"] for item in result["company_ir"]] == ["ir-1"]
     assert [item["source_id"] for item in result["web_news"]] == ["news-1"]

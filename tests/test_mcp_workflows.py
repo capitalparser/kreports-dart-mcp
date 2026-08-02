@@ -355,6 +355,7 @@ def test_semantic_workflow_budget_preserves_an_already_bounded_context_pack():
                         "requested": "OFS",
                         "used": "CFS",
                         "status": "fallback_requested_fs_div_unavailable",
+                        "huge_nested_metadata": huge_selection,
                     },
                 }
             ],
@@ -382,7 +383,11 @@ def test_semantic_workflow_budget_preserves_an_already_bounded_context_pack():
     assert dart["source_id"] == "report_sections:1"
     assert dart["metadata"]["availability"] == "summary_only"
     assert dart["metadata"]["rcept_no"] == "20250301000001"
-    assert dart["metadata"]["fs_div_selection"]["used"] == "CFS"
+    assert dart["metadata"]["fs_div_selection"] == {
+        "requested": "OFS",
+        "used": "CFS",
+        "status": "fallback_requested_fs_div_unavailable",
+    }
     assert [item["source_id"] for item in result["context_pack"]["company_ir"]] == ["ir-1"]
     assert [item["source_id"] for item in result["context_pack"]["web_news"]] == ["news-1"]
 
