@@ -132,6 +132,37 @@ def test_context_pack_bounds_caller_supplied_external_evidence():
         )
 
 
+def test_mcp_context_pack_applies_a_documented_total_output_budget():
+    import json
+
+    from kreports.analysis.context_pack import (
+        MAX_MCP_CONTEXT_PACK_BYTES,
+        build_mcp_context_pack,
+    )
+
+    result = build_mcp_context_pack({
+        "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+        "year": 2024,
+        "business_report": [
+            {
+                "source_locator": f"report_sections:{index}",
+                "section_key": "risks",
+                "excerpt": "x" * 4_000,
+                "full_text_hash": f"{index:040d}",
+            }
+            for index in range(80)
+        ],
+    })
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_MCP_CONTEXT_PACK_BYTES
+    assert result["truncation"] == {
+        "applied": True,
+        "max_output_bytes": MAX_MCP_CONTEXT_PACK_BYTES,
+        "reason": "context_pack_output_budget",
+    }
+    assert result["dart_filing"]
+
+
 def test_context_pack_rejects_cross_bucket_duplicate_source_ids_before_llm_citation():
     from kreports.analysis.context_pack import build_context_pack
 

@@ -50,6 +50,8 @@ peer-note comparison. It does not add a public MCP tool, call an external API,
 search the web, backfill DART, write SQLite, or create a runtime artifact.
 Existing `kreports://company/{corp_code}/{year}` and filing-evidence resources
 remain local-DART resources; they do not store or fetch external IR/news.
+The host-only adapter is intentionally not advertised as a public MCP prompt:
+public prompt names must correspond to callable MCP surfaces.
 
 ### Evidence and answer boundary
 
@@ -118,3 +120,13 @@ result = semantic_peer_context_review(
 Use `get_semantic_company_context` or `compare_peer_accounting_notes` directly
 when only a single local-DART surface is needed. Their local-cache limitations
 and provenance remain visible; neither call obtains IR or web/news evidence.
+
+### Output budget
+
+`build_mcp_context_pack` caps its JSON-safe adapter response at **60,000 UTF-8
+bytes**. `semantic_peer_context_review` caps its complete workflow response at
+**100,000 UTF-8 bytes**. When either boundary is reached, the response sets
+`truncation.applied=true`, states `max_output_bytes`, and gives the applicable
+budget reason. The bounded response retains source class, source ID, source
+precedence, availability, and the compact provenance fields required to state
+the limitation; it never fetches or stores more evidence to fill the budget.

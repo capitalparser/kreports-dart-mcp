@@ -6,6 +6,7 @@ from kreports.mcp.contracts import build_answer_envelope
 from kreports.mcp.workflows import (
     MAX_WORKFLOW_OUTPUT_BYTES,
     MAX_WORKFLOW_OUTPUT_CHARACTERS,
+    MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES,
     WORKFLOW_SPECS,
     accounting_policy_peer_review,
     audit_acceptance_review,
@@ -289,6 +290,47 @@ def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenan
     assert pack_notes[0]["metadata"]["fs_div"] == "CFS"
     assert pack_notes[0]["metadata"]["fs_div_selection"]["status"] == "fallback_requested_fs_div_unavailable"
     assert [item["source_id"] for item in result["context_pack"]["dart_filing"] if item["metadata"]["bucket"] == "financials"] == ["financials:00000001:2024:OFS:Q4"]
+
+
+def test_semantic_peer_context_workflow_applies_total_output_budget():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    huge = "x" * 4_000
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "business_report": [
+                {
+                    "source_locator": f"report_sections:{index}",
+                    "section_key": "risks",
+                    "excerpt": huge,
+                    "full_text_hash": f"{index:040d}",
+                }
+                for index in range(80)
+            ],
+        },
+        cohort_selector=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "peers": [],
+            "selection_policy": {"fs_div_used": "CFS"},
+        },
+        note_builder=lambda *_args, **_kwargs: {
+            "year": 2024,
+            "topics": [{"topic": "leases", "rows": [{"excerpt": huge}] * 80}],
+            "read_only": True,
+        },
+    )
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES
+    assert result["truncation"] == {
+        "applied": True,
+        "max_output_bytes": MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES,
+        "reason": "semantic_peer_context_output_budget",
+    }
+    assert result["context_pack"]["truncation"]["max_output_bytes"]
 
 
 def test_investor_workflow_uses_non_overlapping_specialists():

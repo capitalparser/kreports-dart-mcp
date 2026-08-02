@@ -9,7 +9,7 @@ not inferred from README counts, HTTP 200 responses, or a successful test suite.
 - Evidence: receipt-bound excerpts, section identity, source hashes, and DART
   links or an explicit source-access limitation.
 - Structured: normalized financial, audit, peer, group, and company-year quality
-  rows consumed by the 32-tool catalog.
+  rows consumed by the 34-tool catalog.
 
 Every professional response must expose DART provenance or say why the source is
 not locally accessible. A caller-supplied DART key is request-scoped and never

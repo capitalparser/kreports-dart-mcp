@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import json
 from typing import Any
 
 from kreports.mcp.answer_contracts import (
@@ -18,6 +19,9 @@ from kreports.mcp.answer_contracts import (
 
 CONTEXT_PACK_VERSION = "context_pack.v1"
 MAX_SUPPLIED_EVIDENCE_PER_SOURCE_CLASS = 50
+MAX_MCP_CONTEXT_PACK_BYTES = 60_000
+_MAX_ADAPTER_EVIDENCE_PER_BUCKET = 20
+_MAX_ADAPTER_EXCERPT_CHARS = 400
 DART_BUCKETS = (
     "business_report",
     "audit_report",
@@ -35,6 +39,140 @@ LLM_SOURCE_GUIDANCE = [
 
 def _bounded_text(value: object, *, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _serialized_bytes(value: dict[str, Any]) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _bounded_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return None
+    if isinstance(value, str):
+        return value[:_MAX_ADAPTER_EXCERPT_CHARS]
+    if isinstance(value, list):
+        return [
+            _bounded_value(item, depth=depth + 1)
+            for item in value[:_MAX_ADAPTER_EVIDENCE_PER_BUCKET]
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key)[:120]: _bounded_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:20]
+        }
+    return value
+
+
+def _compact_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = record.get("metadata")
+    compact_metadata = {
+        key: metadata.get(key)
+        for key in (
+            "bucket", "availability", "rcept_no", "source_document_id",
+            "fs_div", "fs_div_selection",
+        )
+        if isinstance(metadata, dict) and metadata.get(key) is not None
+    }
+    return {
+        "source_class": record.get("source_class"),
+        "source_id": _bounded_text(record.get("source_id"), limit=300),
+        "title": _bounded_text(record.get("title"), limit=120) or None,
+        "excerpt": _bounded_text(record.get("excerpt"), limit=_MAX_ADAPTER_EXCERPT_CHARS),
+        "url": _bounded_text(record.get("url"), limit=500) or None,
+        "checksum": _bounded_text(record.get("checksum"), limit=128) or None,
+        "claim_key": _bounded_text(record.get("claim_key"), limit=120) or None,
+        "metadata": _bounded_value(compact_metadata),
+    }
+
+
+def _truncation(*, applied: bool, reason: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "applied": applied,
+        "max_output_bytes": MAX_MCP_CONTEXT_PACK_BYTES,
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return result
+
+
+def _bounded_mcp_context_pack(payload: dict[str, Any]) -> dict[str, Any]:
+    """Enforce the public adapter byte budget without changing stored evidence."""
+    candidate = {**payload, "truncation": _truncation(applied=False)}
+    if _serialized_bytes(candidate) <= MAX_MCP_CONTEXT_PACK_BYTES:
+        return candidate
+    bounded = {
+        "schema_version": payload.get("schema_version"),
+        "subject": _bounded_value(payload.get("subject") or {}),
+        "year": payload.get("year"),
+        "read_only": payload.get("read_only"),
+        "source_precedence": payload.get("source_precedence") or [],
+        "dart_filing": [
+            _compact_evidence(record)
+            for record in (payload.get("dart_filing") or [])[:_MAX_ADAPTER_EVIDENCE_PER_BUCKET]
+            if isinstance(record, dict)
+        ],
+        "company_ir": [
+            _compact_evidence(record)
+            for record in (payload.get("company_ir") or [])[:_MAX_ADAPTER_EVIDENCE_PER_BUCKET]
+            if isinstance(record, dict)
+        ],
+        "web_news": [
+            _compact_evidence(record)
+            for record in (payload.get("web_news") or [])[:_MAX_ADAPTER_EVIDENCE_PER_BUCKET]
+            if isinstance(record, dict)
+        ],
+        "llm_analysis": _bounded_value(payload.get("llm_analysis") or []),
+        "peer_note_comparison": _bounded_value(payload.get("peer_note_comparison")),
+        "missing_evidence": _bounded_value(payload.get("missing_evidence") or []),
+        "conflicts": _bounded_value(payload.get("conflicts") or []),
+        "llm_guidance": _bounded_value(payload.get("llm_guidance") or []),
+        "truncation": _truncation(
+            applied=True,
+            reason="context_pack_output_budget",
+        ),
+    }
+    if _serialized_bytes(bounded) <= MAX_MCP_CONTEXT_PACK_BYTES:
+        return bounded
+    return {
+        "schema_version": payload.get("schema_version"),
+        "subject": _bounded_value(payload.get("subject") or {}, depth=2),
+        "year": payload.get("year"),
+        "read_only": payload.get("read_only"),
+        "source_precedence": payload.get("source_precedence") or [],
+        "dart_filing": [
+            {
+                "source_class": record.get("source_class"),
+                "source_id": _bounded_text(record.get("source_id"), limit=300),
+            }
+            for record in (payload.get("dart_filing") or [])[:5]
+            if isinstance(record, dict)
+        ],
+        "company_ir": [
+            {
+                "source_class": record.get("source_class"),
+                "source_id": _bounded_text(record.get("source_id"), limit=300),
+            }
+            for record in (payload.get("company_ir") or [])[:5]
+            if isinstance(record, dict)
+        ],
+        "web_news": [
+            {
+                "source_class": record.get("source_class"),
+                "source_id": _bounded_text(record.get("source_id"), limit=300),
+            }
+            for record in (payload.get("web_news") or [])[:5]
+            if isinstance(record, dict)
+        ],
+        "llm_analysis": [],
+        "peer_note_comparison": {"truncated": True},
+        "missing_evidence": _bounded_value((payload.get("missing_evidence") or [])[:10]),
+        "conflicts": _bounded_value((payload.get("conflicts") or [])[:10]),
+        "llm_guidance": _bounded_value((payload.get("llm_guidance") or [])[:3]),
+        "truncation": _truncation(
+            applied=True,
+            reason="context_pack_output_budget",
+        ),
+    }
 
 
 def _local_excerpt(row: dict[str, Any]) -> str:
@@ -221,4 +359,5 @@ def build_mcp_context_pack(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Return a JSON-safe bounded adapter without registering a new MCP tool."""
-    return build_context_pack(local_dart_context, **kwargs).model_dump(mode="json")
+    payload = build_context_pack(local_dart_context, **kwargs).model_dump(mode="json")
+    return _bounded_mcp_context_pack(payload)

@@ -14,7 +14,7 @@ allowed to finish when live data is not ready; the artifact then contains
 Verify is the deployment gate. It reopens the explicit DB immutably and
 recomputes its hash and size, schema/table/index contract, dataset manifest,
 inline raw count, current release gate, feature coverage and grades, the frozen
-32-tool wire hash, isolated real-dispatch smoke for all catalog tools, and the
+34-tool wire hash, isolated real-dispatch smoke for all catalog tools, and the
 approved packaged golden-contract hash. The user-keyed DART fetch is proven
 fail-closed when no request-scoped key is supplied; the release check never
 injects or persists a credential.
@@ -29,7 +29,7 @@ report.ok is true AND report.required_failures is empty
 ```
 
 `/readyz` returns HTTP 200 only for that state. It reads the deployment artifact
-without rerunning 32 tools on every probe and fails closed on a missing/invalid
+without rerunning 34 tools on every probe and fails closed on a missing/invalid
 artifact, non-empty WAL, DB file-name/size/hash drift, catalog drift, golden
 drift, or stored blockers. The DB digest is computed once per process and file
 identity, then reused until device, inode, size, mtime, or ctime changes.

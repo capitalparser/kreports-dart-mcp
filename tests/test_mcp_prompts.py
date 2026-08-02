@@ -10,7 +10,6 @@ EXPECTED_NAMES = {
     "audit_acceptance_review",
     "group_audit_scope",
     "accounting_policy_peer_review",
-    "semantic_peer_context_review",
 }
 
 
@@ -44,21 +43,12 @@ def test_prompt_arguments_are_bounded_and_unknown_prompt_fails_closed():
         )
 
 
-def test_semantic_peer_context_prompt_declares_source_and_statement_boundaries():
-    result = get_prompt(
-        "semantic_peer_context_review",
-        {"company": "00126380", "year": "2025"},
-    )
-    text = result.messages[0].content.text
-
-    assert "semantic_peer_context_review" in text
-    assert "get_semantic_company_context" in text
-    assert "compare_peer_accounting_notes" in text
-    assert "DART → company IR → web/news → LLM" in text
-    assert "confirmed facts" in text
-    assert "management claims" in text
-    assert "external context" in text
-    assert "analysis" in text
-    assert "caller-supplied" in text
-    assert "summary_only" in text
-    assert "fs_div_selection" in text
+def test_host_only_semantic_peer_adapter_is_not_advertised_as_a_public_prompt():
+    assert "semantic_peer_context_review" not in {
+        prompt.name for prompt in list_prompts()
+    }
+    with pytest.raises(PromptRequestError, match="unknown_prompt"):
+        get_prompt(
+            "semantic_peer_context_review",
+            {"company": "00126380", "year": "2025"},
+        )

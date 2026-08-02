@@ -63,6 +63,7 @@ WORKFLOW_CATEGORIES: dict[str, tuple[str, ...]] = {
 
 MAX_WORKFLOW_OUTPUT_BYTES = 100_000
 MAX_WORKFLOW_OUTPUT_CHARACTERS = MAX_WORKFLOW_OUTPUT_BYTES
+MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES = 100_000
 _MAX_ANSWER_CHARACTERS = 8_000
 _MAX_ITEMS = 20
 _MAX_NESTED_TEXT = 1_000
@@ -536,6 +537,79 @@ def _semantic_workflow_status(context_pack: dict[str, Any]) -> str:
     return "usable"
 
 
+def _semantic_workflow_truncation(*, applied: bool, reason: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "applied": applied,
+        "max_output_bytes": MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES,
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return result
+
+
+def _compact_semantic_workflow_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return None
+    if isinstance(value, str):
+        return value[:400]
+    if isinstance(value, list):
+        return [
+            _compact_semantic_workflow_value(item, depth=depth + 1)
+            for item in value[:10]
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key)[:120]: _compact_semantic_workflow_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:20]
+        }
+    return value
+
+
+def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, Any]:
+    candidate = {
+        **result,
+        "truncation": _semantic_workflow_truncation(applied=False),
+    }
+    if _serialized_bytes(candidate) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return candidate
+    bounded = {
+        "workflow_version": result.get("workflow_version"),
+        "workflow_name": result.get("workflow_name"),
+        "subject": _compact_semantic_workflow_value(result.get("subject") or {}),
+        "year": result.get("year"),
+        "fs_div_used": result.get("fs_div_used"),
+        "read_only": result.get("read_only"),
+        "status": "limited" if result.get("status") != "missing" else "missing",
+        "peer_selection": _compact_semantic_workflow_value(result.get("peer_selection")),
+        "peer_confidence": result.get("peer_confidence"),
+        "semantic_context": _compact_semantic_workflow_value(result.get("semantic_context")),
+        "peer_note_comparison": _compact_semantic_workflow_value(result.get("peer_note_comparison")),
+        "context_pack": result.get("context_pack"),
+        "source_precedence": result.get("source_precedence") or [],
+        "limitations": _compact_semantic_workflow_value(result.get("limitations") or []),
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(bounded) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return bounded
+    return {
+        "workflow_version": result.get("workflow_version"),
+        "workflow_name": result.get("workflow_name"),
+        "year": result.get("year"),
+        "read_only": True,
+        "status": "limited" if result.get("status") != "missing" else "missing",
+        "context_pack": _compact_semantic_workflow_value(result.get("context_pack"), depth=1),
+        "source_precedence": result.get("source_precedence") or [],
+        "limitations": ["semantic_peer_context_output_budget"],
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+
+
 def semantic_peer_context_review(
     company: str,
     year: int,
@@ -593,7 +667,7 @@ def semantic_peer_context_review(
                 },
             ],
         )
-        return {
+        return _bounded_semantic_peer_context_result({
             "workflow_version": "semantic_peer_context.v1",
             "workflow_name": "semantic_peer_context_review",
             "year": normalized_year,
@@ -605,7 +679,7 @@ def semantic_peer_context_review(
             "context_pack": context_pack,
             "source_precedence": context_pack["source_precedence"],
             "limitations": ["semantic_subject_unavailable"],
-        }
+        })
 
     peer_group = cohort_selector(
         subject_code,
@@ -658,7 +732,7 @@ def semantic_peer_context_review(
     status = _semantic_workflow_status(context_pack)
     if "error" in peer_group and status != "missing":
         status = "limited"
-    return {
+    return _bounded_semantic_peer_context_result({
         "workflow_version": "semantic_peer_context.v1",
         "workflow_name": "semantic_peer_context_review",
         "subject": subject,
@@ -676,4 +750,4 @@ def semantic_peer_context_review(
             *list(filtered_context.get("limitations") or []),
             *list(peer_note_comparison.get("limitations") or []),
         ],
-    }
+    })
