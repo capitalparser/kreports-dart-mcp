@@ -2,8 +2,9 @@
 
 The audit deliberately treats a raw object URI as *unverified metadata*, not
 as a readable filing.  It therefore never fetches raw storage and never calls
-an extractor: a missing derived row is reported as a real gap only when the
-inline source was successfully parseable by the note-source dry run.
+an extractor.  A missing note chapter is reported only for an actual chapter
+candidate found by the inline note parser; report-section absences have no
+equivalent source parser and remain ``unverified``.
 """
 from __future__ import annotations
 
@@ -32,18 +33,8 @@ REQUIRED_REPORT_SECTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
-_RAW_STATUSES = (
-    "inline_readable",
-    "external_raw_unverified",
-    "raw_unavailable",
-)
-_GAP_STATUSES = (
-    "available",
-    "missing_derived",
-    "external_raw_unverified",
-    "raw_unavailable",
-    "inline_parser_malformed",
-)
+_NOTE_GAP_STATUSES = ("available", "missing_derived")
+_SECTION_GAP_STATUSES = ("available", "unverified")
 
 
 def _where(*, year: int | None, source_type: str | None) -> tuple[str, dict[str, object]]:
@@ -71,30 +62,24 @@ def _raw_status(row: dict) -> str:
     return "raw_unavailable"
 
 
-def _expected_fs_div(source_type: str) -> str:
-    return "OFS" if source_type == "audit_report" else "CFS"
-
-
 def _chapter_topic(row: dict) -> str:
     if row.get("section_type") == "policy":
         return "accounting_policies"
     return normalize_note_topic(str(row.get("note_title") or ""), str(row.get("body") or ""))
 
 
-def _gap_status(*, present: bool, raw_status: str, parser_status: str | None) -> str:
-    if present:
-        return "available"
-    if raw_status == "external_raw_unverified":
-        return raw_status
-    if raw_status == "raw_unavailable":
-        return raw_status
-    if parser_status != "available":
-        return "inline_parser_malformed"
-    return "missing_derived"
+def _counter_payload(counter: Counter[str], statuses: tuple[str, ...]) -> dict[str, int]:
+    return {status: int(counter[status]) for status in statuses if counter[status]}
 
 
-def _counter_payload(counter: Counter[str]) -> dict[str, int]:
-    return {status: int(counter[status]) for status in _GAP_STATUSES if counter[status]}
+def _source_key(row: dict) -> tuple[str, int, str, str]:
+    """Return the complete logical filing identity used in every cross-table map."""
+    return (
+        str(row["corp_code"]),
+        int(row["bsns_year"]),
+        str(row["rcept_no"]),
+        str(row["source_type"]),
+    )
 
 
 def build_extraction_gap_audit(
@@ -130,21 +115,21 @@ def build_extraction_gap_audit(
         ORDER BY sd.bsns_year, sd.source_type, sd.corp_code, sd.rcept_no, sd.id
     """)
     section_stmt = text(f"""
-        SELECT rcept_no, source_type, section_key
+        SELECT corp_code, bsns_year, rcept_no, source_type, section_key
         FROM report_sections
         WHERE source_type IN ('business_report', 'audit_report')
           {"AND bsns_year=:year" if year is not None else ""}
           {"AND source_type=:source_type" if source_type is not None else ""}
     """)
     chapter_stmt = text(f"""
-        SELECT rcept_no, source_type, fs_div, note_title, section_type, body
+        SELECT corp_code, bsns_year, rcept_no, source_type, fs_div, note_title, section_type, body
         FROM accounting_note_chapters
         WHERE source_type IN ('business_report', 'audit_report')
           {"AND bsns_year=:year" if year is not None else ""}
           {"AND source_type=:source_type" if source_type is not None else ""}
     """)
     evidence_stmt = text(f"""
-        SELECT rcept_no, source_type
+        SELECT corp_code, bsns_year, rcept_no, source_type
         FROM evidence_documents
         WHERE source_type IN ('business_report', 'audit_report')
           {"AND bsns_year=:year" if year is not None else ""}
@@ -156,15 +141,15 @@ def build_extraction_gap_audit(
         chapters = [dict(row) for row in connection.execute(chapter_stmt, params).mappings().all()]
         evidence = [dict(row) for row in connection.execute(evidence_stmt, params).mappings().all()]
 
-    section_keys: dict[tuple[str, str], set[str]] = defaultdict(set)
+    section_keys: dict[tuple[str, int, str, str], set[str]] = defaultdict(set)
     for row in sections:
-        section_keys[(str(row["rcept_no"]), str(row["source_type"]))].add(str(row["section_key"]))
-    chapter_topics: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        section_keys[_source_key(row)].add(str(row["section_key"]))
+    chapter_topics: dict[tuple[str, int, str, str], set[tuple[str, str]]] = defaultdict(set)
     for row in chapters:
         topic = _chapter_topic(row)
         if topic in NOTE_TOPICS:
-            chapter_topics[(str(row["rcept_no"]), str(row["source_type"]))].add((str(row["fs_div"]), topic))
-    evidence_keys = {(str(row["rcept_no"]), str(row["source_type"])) for row in evidence}
+            chapter_topics[_source_key(row)].add((str(row["fs_div"]), topic))
+    evidence_keys = {_source_key(row) for row in evidence}
 
     raw_counts: Counter[str] = Counter()
     parser_counts: Counter[str] = Counter()
@@ -180,7 +165,7 @@ def build_extraction_gap_audit(
     rows: list[dict] = []
 
     for source in sources:
-        receipt_key = (str(source["rcept_no"]), str(source["source_type"]))
+        receipt_key = _source_key(source)
         raw_status = _raw_status(source)
         raw_counts[raw_status] += 1
         parser_status: str | None = None
@@ -188,38 +173,35 @@ def build_extraction_gap_audit(
             parsed = parse_note_source_document(source, str(source["raw_content"]))
             parser_status = str(parsed["status"])
             parser_counts[parser_status] += 1
-        expected_fs_div = _expected_fs_div(str(source["source_type"]))
         present_topics = chapter_topics[receipt_key]
+        parsed_candidates: set[tuple[str, str]] = set()
         missing_topics: list[str] = []
-        raw_unverified_topics: list[str] = []
-        for topic in NOTE_TOPICS:
-            status = _gap_status(
-                present=(expected_fs_div, topic) in present_topics,
-                raw_status=raw_status,
-                parser_status=parser_status,
-            )
+        if raw_status == "inline_readable" and parser_status == "available":
+            for chapter in parsed["chapters"]:
+                for topic in chapter["topics"]:
+                    if topic in NOTE_TOPICS:
+                        parsed_candidates.add((str(chapter["fs_div"]), topic))
+        for fs_div, topic in sorted(parsed_candidates):
+            status = "available" if (fs_div, topic) in present_topics else "missing_derived"
             note_counts[topic][status] += 1
-            note_breakdown[(str(source["source_type"]), expected_fs_div, topic)][status] += 1
+            note_breakdown[(str(source["source_type"]), fs_div, topic)][status] += 1
             if status == "missing_derived":
                 missing_topics.append(topic)
-            elif status in {"external_raw_unverified", "raw_unavailable", "inline_parser_malformed"}:
-                raw_unverified_topics.append(topic)
+        # Existing derived rows are useful coverage even if the corresponding
+        # raw document is no longer inline; do not turn them into a synthetic
+        # missing-topic matrix.
+        for fs_div, topic in sorted(present_topics - parsed_candidates):
+            note_counts[topic]["available"] += 1
+            note_breakdown[(str(source["source_type"]), fs_div, topic)]["available"] += 1
 
         present_keys = section_keys[receipt_key]
-        missing_sections: list[str] = []
-        raw_unverified_sections: list[str] = []
+        unverified_sections: list[str] = []
         for name, aliases in REQUIRED_REPORT_SECTIONS[str(source["source_type"])].items():
-            status = _gap_status(
-                present=bool(present_keys.intersection(aliases)),
-                raw_status=raw_status,
-                parser_status=parser_status,
-            )
+            status = "available" if present_keys.intersection(aliases) else "unverified"
             section_counts[name][status] += 1
             section_breakdown[(str(source["source_type"]), name)][status] += 1
-            if status == "missing_derived":
-                missing_sections.append(name)
-            elif status in {"external_raw_unverified", "raw_unavailable", "inline_parser_malformed"}:
-                raw_unverified_sections.append(name)
+            if status == "unverified":
+                unverified_sections.append(name)
 
         evidence_status = "available" if receipt_key in evidence_keys else "missing_derived"
         evidence_counts[evidence_status] += 1
@@ -228,17 +210,22 @@ def build_extraction_gap_audit(
             "corp_name": source["corp_name"],
             "bsns_year": source["bsns_year"],
             "source_type": source["source_type"],
-            "fs_div": expected_fs_div,
+            "fs_divs": sorted({fs_div for fs_div, _topic in present_topics | parsed_candidates}),
             "rcept_no": source["rcept_no"],
             "report_nm": source["report_nm"],
             "raw_status": raw_status,
             "parser_status": parser_status,
-            "present_note_topics": sorted(topic for fs_div, topic in present_topics if fs_div == expected_fs_div),
+            "parsed_note_candidates": [
+                {"fs_div": fs_div, "topic": topic}
+                for fs_div, topic in sorted(parsed_candidates)
+            ],
+            "present_note_topics": [
+                {"fs_div": fs_div, "topic": topic}
+                for fs_div, topic in sorted(present_topics)
+            ],
             "missing_note_topics": sorted(missing_topics),
-            "raw_unverified_note_topics": sorted(raw_unverified_topics),
             "present_report_section_keys": sorted(present_keys),
-            "missing_report_sections": sorted(missing_sections),
-            "raw_unverified_report_sections": sorted(raw_unverified_sections),
+            "unverified_report_sections": sorted(unverified_sections),
             "evidence_document_status": evidence_status,
         })
 
@@ -274,14 +261,29 @@ def build_extraction_gap_audit(
                 "evidence_documents": len(evidence),
             },
         },
-        "note_topic_gaps": {topic: _counter_payload(note_counts[topic]) for topic in NOTE_TOPICS},
+        "note_topic_gaps": {
+            topic: _counter_payload(note_counts[topic], _NOTE_GAP_STATUSES)
+            for topic in NOTE_TOPICS
+        },
         "note_topic_gap_breakdown": [
-            {"source_type": source, "fs_div": fs_div, "topic": topic, **_counter_payload(counts)}
+            {
+                "source_type": source,
+                "fs_div": fs_div,
+                "topic": topic,
+                **_counter_payload(counts, _NOTE_GAP_STATUSES),
+            }
             for (source, fs_div, topic), counts in sorted(note_breakdown.items())
         ],
-        "report_section_gaps": {name: _counter_payload(section_counts[name]) for name in sorted(section_counts)},
+        "report_section_gaps": {
+            name: _counter_payload(section_counts[name], _SECTION_GAP_STATUSES)
+            for name in sorted(section_counts)
+        },
         "report_section_gap_breakdown": [
-            {"source_type": source, "section": section, **_counter_payload(counts)}
+            {
+                "source_type": source,
+                "section": section,
+                **_counter_payload(counts, _SECTION_GAP_STATUSES),
+            }
             for (source, section), counts in sorted(section_breakdown.items())
         ],
         "evidence_document_gaps": {
