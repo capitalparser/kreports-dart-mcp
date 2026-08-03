@@ -119,12 +119,15 @@ def build_extraction_gap_audit(
     where, params = _where(year=year, source_type=source_type)
     active_engine = _read_engine or _engine_module.engine
     source_stmt = text(f"""
-        SELECT id, rcept_no, dcm_no, corp_code, bsns_year, source_type,
-               report_nm, content_type, raw_content, doc_hash, storage_uri,
-               content_length, compressed_length, storage_status
-        FROM source_documents
+        SELECT sd.id, sd.rcept_no, sd.dcm_no, sd.corp_code, MAX(c.corp_name) AS corp_name,
+               sd.bsns_year, sd.source_type, sd.report_nm, sd.content_type,
+               sd.raw_content, sd.doc_hash, sd.storage_uri, sd.content_length,
+               sd.compressed_length, sd.storage_status
+        FROM source_documents sd
+        LEFT JOIN companies c ON c.corp_code = sd.corp_code
         {where}
-        ORDER BY bsns_year, source_type, corp_code, rcept_no, id
+        GROUP BY sd.id
+        ORDER BY sd.bsns_year, sd.source_type, sd.corp_code, sd.rcept_no, sd.id
     """)
     section_stmt = text(f"""
         SELECT rcept_no, source_type, section_key
@@ -222,6 +225,7 @@ def build_extraction_gap_audit(
         evidence_counts[evidence_status] += 1
         rows.append({
             "corp_code": source["corp_code"],
+            "corp_name": source["corp_name"],
             "bsns_year": source["bsns_year"],
             "source_type": source["source_type"],
             "fs_div": expected_fs_div,
