@@ -231,3 +231,106 @@ def test_note_source_index_cli_exposes_read_only_coverage(monkeypatch):
     payload = json.loads(result.output)
     assert payload["mode"] == "dry_run_read_only"
     assert payload["arguments"]["include_chapters"] is False
+
+
+def test_note_source_inventory_reports_all_company_raw_states_and_batch_plan(temp_engine):
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+    from kreports.processor.note_source_index import build_note_source_inventory
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250331000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서", content_type="xml",
+                raw_content="<DOCUMENT><P>1. 리스</P><P>리스부채입니다.</P></DOCUMENT>",
+                doc_hash="a" * 40, content_length=80, storage_status="inline",
+            ),
+            SourceDocument(
+                rcept_no="20250401000002", corp_code="00000002", bsns_year=2024,
+                source_type="audit_report", report_nm="감사보고서", content_type="xml",
+                raw_content="", doc_hash="b" * 40, storage_uri="gs://bucket/audit.xml.gz",
+                content_length=200, compressed_length=50, storage_status="externalized",
+            ),
+            SourceDocument(
+                rcept_no="20250331000003", corp_code="00000003", bsns_year=2023,
+                source_type="business_report", report_nm="사업보고서", content_type="xml",
+                raw_content="", doc_hash="c" * 40, content_length=300, storage_status="inline",
+            ),
+        ])
+
+    result = build_note_source_inventory(
+        company_limit=1,
+        _read_engine=temp_engine,
+        _free_kb=1,
+    )
+
+    assert result["mode"] == "dry_run_read_only_inventory"
+    assert result["raw_availability"] == {
+        "inline_readable": 1,
+        "external_uri_unverified": 1,
+        "unavailable": 1,
+    }
+    assert result["parser_eligibility"] == {
+        "inline_parse_attempted": 1,
+        "inline_candidate_documents": 1,
+        "external_read_preflight_required": 1,
+        "unavailable": 1,
+    }
+    assert result["topic_coverage_candidates"] == {
+        "inline_parsed": {"leases": 1},
+        "external_unverified_documents": 1,
+        "not_inferred_from_metadata": True,
+    }
+    assert result["estimated_note_rows"] == {
+        "inline_parsed_candidates": 1,
+        "external_topic_heuristic": 8,
+        "total_planning_estimate": 9,
+        "external_estimate_method": "eight supported topics per external document; verify raw before write",
+    }
+    assert result["estimated_raw_bytes"] == {
+        "inline": 80,
+        "external": 200,
+        "total": 280,
+    }
+    assert result["year_source_counts"] == [
+        {"bsns_year": 2023, "source_type": "business_report", "documents": 1, "inline_readable": 0, "external_uri_unverified": 0, "unavailable": 1, "estimated_raw_bytes": 0},
+        {"bsns_year": 2024, "source_type": "audit_report", "documents": 1, "inline_readable": 0, "external_uri_unverified": 1, "unavailable": 0, "estimated_raw_bytes": 200},
+        {"bsns_year": 2024, "source_type": "business_report", "documents": 1, "inline_readable": 1, "external_uri_unverified": 0, "unavailable": 0, "estimated_raw_bytes": 80},
+    ]
+    assert result["company_year_source_page"]["total_groups"] == 3
+    assert len(result["company_year_source_page"]["rows"]) == 1
+    assert result["company_year_source_page"]["rows"][0]["estimated_raw_bytes"] == 0
+    assert result["company_year_source_page"]["has_more"] is True
+    assert result["write_preflight"]["safe_to_write"] is False
+    assert result["idempotent_batch_plan"]["target_key"] == [
+        "corp_code", "bsns_year", "fs_div", "note_no", "section_type",
+    ]
+    assert result["peer_query_behavior"]["cohort_resolution"] == "query_time_customizable"
+
+
+def test_note_source_inventory_cli_exposes_paginated_read_only_plan(monkeypatch):
+    from typer.testing import CliRunner
+
+    import kreports.processor.note_source_index as index_module
+    from kreports.cli.main import app
+
+    monkeypatch.setattr(index_module, "build_note_source_inventory", lambda **kwargs: {
+        "mode": "dry_run_read_only_inventory",
+        "arguments": kwargs,
+    })
+
+    result = CliRunner().invoke(
+        app,
+        ["inventory-note-sources", "--year", "2024", "--company-offset", "20", "--company-limit", "10"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["mode"] == "dry_run_read_only_inventory"
+    assert payload["arguments"] == {
+        "year": 2024,
+        "source_type": None,
+        "company_offset": 20,
+        "company_limit": 10,
+    }

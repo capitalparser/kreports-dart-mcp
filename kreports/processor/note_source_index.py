@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import hashlib
+import os
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -274,4 +275,218 @@ def build_note_source_index(
         "chapter_count": chapter_count,
         "chapters": chapters,
         "limitations": limitations,
+    }
+
+
+def _source_where(
+    *,
+    year: int | None,
+    source_type: str | None,
+) -> tuple[str, dict[str, object]]:
+    if source_type is not None and source_type not in {"business_report", "audit_report"}:
+        raise ValueError("source_type must be business_report or audit_report")
+    where = """
+        WHERE sd.source_type IN ('business_report', 'audit_report')
+          AND sd.content_type != 'derived_report_sections'
+    """
+    params: dict[str, object] = {}
+    if year is not None:
+        where += " AND sd.bsns_year=:year"
+        params["year"] = year
+    if source_type is not None:
+        where += " AND sd.source_type=:source_type"
+        params["source_type"] = source_type
+    return where, params
+
+
+def _free_space_kb() -> int:
+    stats = os.statvfs(".")
+    return int(stats.f_bavail * stats.f_frsize // 1024)
+
+
+def build_note_source_inventory(
+    *,
+    year: int | None = None,
+    source_type: str | None = None,
+    company_offset: int = 0,
+    company_limit: int = 500,
+    _read_engine=None,
+    _free_kb: int | None = None,
+) -> dict:
+    """Inventory all cached note sources without reading external objects or writing.
+
+    Inline raw bodies are parsed only to establish exact candidate topics.  A
+    ``gs://``/``file://`` reference with no inline raw remains explicitly
+    unverified: this all-company plan never turns URI metadata into a claim
+    about a filing's note coverage.
+    """
+    if company_offset < 0:
+        raise ValueError("company_offset must be zero or greater")
+    if not 1 <= company_limit <= 1_000:
+        raise ValueError("company_limit must be between 1 and 1000")
+
+    where, params = _source_where(year=year, source_type=source_type)
+    active_engine = _read_engine or _engine_module.engine
+    summary_stmt = text(f"""
+        SELECT
+            COUNT(*) AS documents,
+            COALESCE(SUM(CASE WHEN sd.raw_content IS NOT NULL AND sd.raw_content != '' THEN 1 ELSE 0 END), 0) AS inline_readable,
+            COALESCE(SUM(CASE
+                WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                 AND sd.storage_uri IS NOT NULL AND sd.storage_uri != '' THEN 1 ELSE 0 END), 0) AS external_uri_unverified,
+            COALESCE(SUM(CASE
+                WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                 AND (sd.storage_uri IS NULL OR sd.storage_uri = '') THEN 1 ELSE 0 END), 0) AS unavailable,
+            COALESCE(SUM(CASE WHEN sd.raw_content IS NOT NULL AND sd.raw_content != ''
+                THEN COALESCE(sd.content_length, length(sd.raw_content), 0) ELSE 0 END), 0) AS inline_bytes,
+            COALESCE(SUM(CASE
+                WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                 AND sd.storage_uri IS NOT NULL AND sd.storage_uri != ''
+                THEN COALESCE(sd.content_length, 0) ELSE 0 END), 0) AS external_bytes
+        FROM source_documents sd
+        {where}
+    """)
+    group_count_stmt = text(f"""
+        SELECT COUNT(*) FROM (
+            SELECT sd.bsns_year, sd.source_type, sd.corp_code
+            FROM source_documents sd
+            {where}
+            GROUP BY sd.bsns_year, sd.source_type, sd.corp_code
+        )
+    """)
+    year_source_stmt = text(f"""
+        SELECT sd.bsns_year, sd.source_type, COUNT(*) AS documents,
+               COALESCE(SUM(CASE WHEN sd.raw_content IS NOT NULL AND sd.raw_content != '' THEN 1 ELSE 0 END), 0) AS inline_readable,
+               COALESCE(SUM(CASE
+                   WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                    AND sd.storage_uri IS NOT NULL AND sd.storage_uri != '' THEN 1 ELSE 0 END), 0) AS external_uri_unverified,
+               COALESCE(SUM(CASE
+                   WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                    AND (sd.storage_uri IS NULL OR sd.storage_uri = '') THEN 1 ELSE 0 END), 0) AS unavailable,
+               COALESCE(SUM(CASE
+                   WHEN sd.raw_content IS NOT NULL AND sd.raw_content != ''
+                     OR ((sd.raw_content IS NULL OR sd.raw_content = '')
+                         AND sd.storage_uri IS NOT NULL AND sd.storage_uri != '')
+                   THEN COALESCE(sd.content_length, 0) ELSE 0 END), 0) AS estimated_raw_bytes
+        FROM source_documents sd
+        {where}
+        GROUP BY sd.bsns_year, sd.source_type
+        ORDER BY sd.bsns_year, sd.source_type
+    """)
+    group_page_stmt = text(f"""
+        SELECT sd.bsns_year, sd.source_type, sd.corp_code, MAX(c.corp_name) AS corp_name,
+               COUNT(*) AS documents,
+               COALESCE(SUM(CASE WHEN sd.raw_content IS NOT NULL AND sd.raw_content != '' THEN 1 ELSE 0 END), 0) AS inline_readable,
+               COALESCE(SUM(CASE
+                   WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                    AND sd.storage_uri IS NOT NULL AND sd.storage_uri != '' THEN 1 ELSE 0 END), 0) AS external_uri_unverified,
+               COALESCE(SUM(CASE
+                   WHEN (sd.raw_content IS NULL OR sd.raw_content = '')
+                    AND (sd.storage_uri IS NULL OR sd.storage_uri = '') THEN 1 ELSE 0 END), 0) AS unavailable,
+               COALESCE(SUM(CASE
+                   WHEN sd.raw_content IS NOT NULL AND sd.raw_content != ''
+                     OR ((sd.raw_content IS NULL OR sd.raw_content = '')
+                         AND sd.storage_uri IS NOT NULL AND sd.storage_uri != '')
+                   THEN COALESCE(sd.content_length, 0) ELSE 0 END), 0) AS estimated_raw_bytes
+        FROM source_documents sd
+        LEFT JOIN companies c ON c.corp_code = sd.corp_code
+        {where}
+        GROUP BY sd.bsns_year, sd.source_type, sd.corp_code
+        ORDER BY sd.bsns_year, sd.source_type, sd.corp_code
+        LIMIT :company_limit OFFSET :company_offset
+    """)
+    inline_stmt = text(f"""
+        SELECT sd.id, sd.rcept_no, sd.dcm_no, sd.corp_code, sd.bsns_year, sd.source_type,
+               sd.content_type, sd.raw_content, sd.doc_hash, sd.storage_uri,
+               sd.content_length, sd.compressed_length, sd.storage_status
+        FROM source_documents sd
+        {where}
+          AND sd.raw_content IS NOT NULL AND sd.raw_content != ''
+        ORDER BY sd.bsns_year, sd.source_type, sd.corp_code, sd.rcept_no, sd.id
+    """)
+    page_params = {**params, "company_limit": company_limit, "company_offset": company_offset}
+    with active_engine.connect() as connection:
+        summary = dict(connection.execute(summary_stmt, params).mappings().one())
+        total_groups = int(connection.execute(group_count_stmt, params).scalar_one())
+        year_source_rows = [
+            dict(row) for row in connection.execute(year_source_stmt, params).mappings().all()
+        ]
+        page_rows = [dict(row) for row in connection.execute(group_page_stmt, page_params).mappings().all()]
+        inline_rows = [dict(row) for row in connection.execute(inline_stmt, params).mappings().all()]
+
+    inline_topics = Counter()
+    inline_candidate_documents = 0
+    inline_candidate_rows = 0
+    for row in inline_rows:
+        parsed = parse_note_source_document(row, row["raw_content"])
+        if parsed["status"] == "available":
+            inline_candidate_documents += 1
+        for chapter in parsed["chapters"]:
+            inline_candidate_rows += 1
+            inline_topics.update(chapter["topics"])
+
+    external_documents = int(summary["external_uri_unverified"])
+    total_estimate = inline_candidate_rows + external_documents * len(NOTE_TOPICS)
+    free_kb = _free_space_kb() if _free_kb is None else int(_free_kb)
+    minimum_free_kb = int(os.environ.get("KREPORTS_MIN_FREE_KB", "10485760"))
+    estimated_write_bytes = total_estimate * 2_000
+    return {
+        "mode": "dry_run_read_only_inventory",
+        "parser_version": PARSER_VERSION,
+        "documents": int(summary["documents"]),
+        "raw_availability": {
+            "inline_readable": int(summary["inline_readable"]),
+            "external_uri_unverified": external_documents,
+            "unavailable": int(summary["unavailable"]),
+        },
+        "parser_eligibility": {
+            "inline_parse_attempted": int(summary["inline_readable"]),
+            "inline_candidate_documents": inline_candidate_documents,
+            "external_read_preflight_required": external_documents,
+            "unavailable": int(summary["unavailable"]),
+        },
+        "topic_coverage_candidates": {
+            "inline_parsed": dict(sorted(inline_topics.items())),
+            "external_unverified_documents": external_documents,
+            "not_inferred_from_metadata": True,
+        },
+        "estimated_note_rows": {
+            "inline_parsed_candidates": inline_candidate_rows,
+            "external_topic_heuristic": external_documents * len(NOTE_TOPICS),
+            "total_planning_estimate": total_estimate,
+            "external_estimate_method": "eight supported topics per external document; verify raw before write",
+        },
+        "estimated_raw_bytes": {
+            "inline": int(summary["inline_bytes"]),
+            "external": int(summary["external_bytes"]),
+            "total": int(summary["inline_bytes"] + summary["external_bytes"]),
+        },
+        "year_source_counts": year_source_rows,
+        "company_year_source_page": {
+            "offset": company_offset,
+            "limit": company_limit,
+            "total_groups": total_groups,
+            "has_more": company_offset + len(page_rows) < total_groups,
+            "rows": page_rows,
+        },
+        "write_preflight": {
+            "writes_performed": False,
+            "free_kb": free_kb,
+            "minimum_free_kb": minimum_free_kb,
+            "estimated_db_write_bytes": estimated_write_bytes,
+            "safe_to_write": free_kb >= minimum_free_kb,
+            "status": "blocked_disk_preflight" if free_kb < minimum_free_kb else "requires_scope_approval",
+        },
+        "idempotent_batch_plan": {
+            "source_key": ["rcept_no", "source_type", "doc_hash"],
+            "target_key": ["corp_code", "bsns_year", "fs_div", "note_no", "section_type"],
+            "batch_cursor": ["bsns_year", "source_type", "corp_code", "rcept_no", "id"],
+            "write_rule": "upsert only after raw read/hash verification and an approved bounded batch",
+        },
+        "peer_query_behavior": {
+            "index_scope": "all_available_note_chapters_global",
+            "cohort_resolution": "query_time_customizable",
+            "criteria_input": "peer_criteria",
+            "persistence": "no_precomputed_peer_membership",
+        },
     }
