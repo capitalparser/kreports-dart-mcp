@@ -9,6 +9,11 @@ The MCP endpoint reads `kreports.db` on every tool call, so newly backfilled row
 are visible without redeploying the endpoint. Keep the endpoint read-only and run
 collection elsewhere.
 
+The endpoint exposes **34 public tools**. Its database and the matching
+`kreports.db.release.json` are an inseparable deployment pair: mount both
+read-only at `/data/` from the same verified release. `/readyz` remains the
+release health gate and cannot report ready without matching artifact proof.
+
 For public pilot deployment, prefer a compact runtime DB artifact over the full
 maintainer DB. The maintainer DB can retain full warehouse tables and extraction
 logs, while the runtime artifact excludes heavy tables such as `financial_facts`,
@@ -16,7 +21,15 @@ logs, while the runtime artifact excludes heavy tables such as `financial_facts`
 
 ## Required Runtime Contract
 
-Endpoint environment:
+Use the role-separated examples in [`deploy/`](../deploy/):
+
+- [`public-mcp.env.example`](../deploy/public-mcp.env.example) contains only
+  the public bearer token, read-only DB URL, and readonly runtime mode.
+- [`private-collector.env.example`](../deploy/private-collector.env.example)
+  is private; it contains collector-only DART and external raw-storage
+  placeholders, with raw backfill disabled by default.
+
+Public endpoint environment:
 
 ```env
 KREPORTS_RUNTIME_MODE=readonly
@@ -24,7 +37,7 @@ DB_URL=sqlite:////data/kreports.db
 KREPORTS_MCP_TOKEN=<long-random-token>
 ```
 
-Collector environment:
+Private collector environment:
 
 ```env
 KREPORTS_RUNTIME_MODE=collector
@@ -70,21 +83,47 @@ filing absence; an uncached local result does not prove that DART has no filing.
 
 ## On-Demand Disclosure Fetch Contract
 
-The hosted endpoint is cache-first by default. If a public MCP user requests an
-uncached ad-hoc disclosure, the endpoint may support on-demand DART fetch only
-under this contract:
+The hosted endpoint is cache-first for release data. If a public MCP user
+requests an uncached ad-hoc disclosure, the endpoint may support on-demand DART
+fetch only under this contract:
 
 - the user supplies their own OpenDART API key for that request,
 - the server-side collector `DART_API_KEY` is never used by the public endpoint,
 - the user key is not persisted, logged, or echoed,
-- fetched documents are cached and subsequent reads use the cache,
+- the public user-keyed fetch is ephemeral and does not persist or cache the
+  response or source document,
 - responses disclose whether the answer came from cache or a user-keyed fetch.
 
-## Local Production-Like Run
+Persisting a fetched document is collector work and requires an explicit
+collector and external raw-storage policy; it is not an endpoint capability.
+
+## Local build, configuration render, and smoke
+
+These commands validate local configuration only. They do not prove release
+readiness or live-data coverage; verify the DB artifact before starting the
+service.
 
 ```bash
 export KREPORTS_MCP_TOKEN="$(openssl rand -hex 32)"
-docker compose -f docker-compose.deploy.yml up --build
+docker compose -f docker-compose.deploy.yml build
+docker compose -f docker-compose.deploy.yml config
+docker compose -f docker-compose.deploy.yml config > /tmp/kreports-mcp-compose.rendered.yml
+```
+
+After a verified DB and matching release JSON are mounted, start the service and
+perform the authenticated HTTP smoke:
+
+```bash
+docker compose -f docker-compose.deploy.yml up -d
+curl -fsS http://127.0.0.1:8765/healthz
+curl -fsS -H "Authorization: Bearer ${KREPORTS_MCP_TOKEN}" http://127.0.0.1:8765/readyz
+```
+
+Verify the artifact from the mounted pair before interpreting an HTTP result as
+deployment readiness:
+
+```bash
+kreports verify-release-artifact --db /data/kreports.db
 ```
 
 Health:
@@ -248,15 +287,25 @@ SQLite is acceptable for a first hosted endpoint if:
 Move to Postgres once public traffic and continuous backfill run at the same
 time for more than a small pilot.
 
-## Deployment Checklist
+## Deployment evidence checklist
+
+Keep these four evidence streams separate:
+
+| Evidence stream | What it establishes | What it does not establish |
+| --- | --- | --- |
+| Code-test success | Local code and deployment-contract tests pass. | Artifact validity or live coverage. |
+| HTTP liveness | The started service answers `/healthz`. | Release readiness or data completeness. |
+| Release readiness | `verify-release-artifact` accepts the mounted DB and matching JSON, and `/readyz` is 200. | Current market/year coverage beyond the artifact report. |
+| Live-data coverage | Dataset audit and completeness/readiness commands report the selected release's coverage. | That a code change or HTTP probe is correct. |
 
 - `uv run pytest -q`
 - `kreports mcp-doctor`
 - `kreports mcp-smoke --company 005930`
+- `kreports verify-release-artifact --db /data/kreports.db`
+- `curl /healthz` returns `ok: true`
+- `curl /readyz` returns HTTP 200 with `ok: true` and no required failures
 - `kreports dataset-audit --top 20`
 - `kreports dataset-completeness --year 2025 --years-back 5 --sample-size 100`
-- `curl /healthz` returns `ok: true`
-- `kreports verify-release-artifact --db <runtime.db>` exits zero
-- `curl /readyz` returns HTTP 200 with `ok: true` and no required failures
+- `kreports dataset-auditor-readiness --year 2025 --years-back 5`
 - Endpoint has `KREPORTS_MCP_TOKEN`
 - Endpoint does not have `DART_API_KEY`

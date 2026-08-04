@@ -12,6 +12,7 @@ services:
       - "8765:8765"
     volumes:
       - ./kreports.db:/data/kreports.db:ro
+      - ./kreports.db.release.json:/data/kreports.db.release.json:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/readyz"]
       interval: 30s
