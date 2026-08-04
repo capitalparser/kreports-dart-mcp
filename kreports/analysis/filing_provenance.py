@@ -103,7 +103,11 @@ def canonical_annual_filing_source_receipt(
     Public rows may retain cache metadata for inspection, but their serialized
     provenance flags are never authority to emit a DART source or link.
     """
-    if source_document_id is None or not str(source_type or ""):
+    if (
+        type(source_document_id) is not int
+        or source_document_id <= 0
+        or not str(source_type or "")
+    ):
         return None
     return _canonical_annual_filing_source_receipt(
         corp_code=corp_code,

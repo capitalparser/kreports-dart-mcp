@@ -53,6 +53,42 @@ def test_canonical_source_requery_rejects_nonannual_source_document_name(temp_en
     ) is None
 
 
+@pytest.mark.parametrize(
+    "source_document_id",
+    [True, 1.0, "1", 0, -1],
+    ids=("bool", "float", "numeric_string", "zero", "negative"),
+)
+def test_canonical_source_requery_requires_strict_positive_builtin_integer_id(
+    temp_engine,
+    source_document_id,
+):
+    from kreports.analysis.filing_provenance import canonical_annual_filing_source_receipt
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="A",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+        ])
+
+    assert canonical_annual_filing_source_receipt(
+        corp_code="00000001", bsns_year=2024, rcept_no="20250301000001",
+        source_document_id=source_document_id, source_type="business_report",
+        read_engine=temp_engine,
+    ) is None
+    assert canonical_annual_filing_source_receipt(
+        corp_code="00000001", bsns_year=2024, rcept_no="20250301000001",
+        source_document_id=1, source_type="business_report", read_engine=temp_engine,
+    ) == "20250301000001"
+
+
 def _add_compact_fact(session, corp_code: str, year: int, fs_div: str = "CFS") -> None:
     session.add(FinancialFactCompact(
         corp_code=corp_code,
