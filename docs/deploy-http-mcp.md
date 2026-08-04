@@ -1,13 +1,17 @@
 # Deploy KReports Remote MCP
 
-KReports runs best as two separate processes:
+KReports runs as two role-separated processes and databases:
 
-1. **Remote MCP endpoint**: read-only, no DART API key, serves `/mcp`.
-2. **Collector/backfill worker**: private, has `DART_API_KEY`, writes the same dataset.
+1. **Remote MCP endpoint**: read-only, no DART API key, serves `/mcp` from an
+   immutable compact runtime DB.
+2. **Collector/backfill worker**: private, has `DART_API_KEY`, and writes a
+   separate writable maintainer DB.
 
-The MCP endpoint reads `kreports.db` on every tool call, so newly backfilled rows
-are visible without redeploying the endpoint. Keep the endpoint read-only and run
-collection elsewhere.
+The collector never writes the mounted public runtime DB. Publishing collector
+changes requires a compact export from the maintainer DB, release-manifest build
+and verification, atomic deployment of the DB and matching release JSON pair,
+and an MCP service restart or reload. Until that promotion completes, the
+running endpoint continues to serve its previously verified release.
 
 The endpoint exposes **34 public tools**. Its database and the matching
 `kreports.db.release.json` are an inseparable deployment pair: mount both
@@ -47,11 +51,14 @@ RAW_STORAGE_BACKEND=gcs
 RAW_STORAGE_BUCKET=<gcs-bucket-name>
 RAW_STORAGE_PREFIX=dart/raw
 RAW_STORAGE_KEEP_INLINE=false
+KREPORTS_ENABLE_RAW_BACKFILL=0
 ```
 
 Do not put `DART_API_KEY` in the MCP endpoint environment.
 Do not put `RAW_STORAGE_BACKEND=inline` on the collector unless the intent is to
 grow the SQLite DB with full raw XML/HTML bodies.
+Raw backfill is disabled by default. Only the exact value `1` opts in through
+`KREPORTS_ENABLE_RAW_BACKFILL=1`; unset, `0`, and every other value remain off.
 
 ## User-Facing Response Contract
 
@@ -104,17 +111,20 @@ readiness or live-data coverage; verify the DB artifact before starting the
 service.
 
 ```bash
-export KREPORTS_MCP_TOKEN="$(openssl rand -hex 32)"
-docker compose -f docker-compose.deploy.yml build
-docker compose -f docker-compose.deploy.yml config
-docker compose -f docker-compose.deploy.yml config > /tmp/kreports-mcp-compose.rendered.yml
+docker compose --env-file deploy/public-mcp.env.example -f docker-compose.deploy.yml build
+docker compose --env-file deploy/public-mcp.env.example -f docker-compose.deploy.yml config
 ```
+
+The example env file contains only a placeholder token. Inspect the config in
+the terminal; do not render or persist Compose config after exporting a live
+token.
 
 After a verified DB and matching release JSON are mounted, start the service and
 perform the authenticated HTTP smoke:
 
 ```bash
-docker compose -f docker-compose.deploy.yml up -d
+export KREPORTS_MCP_TOKEN="$(openssl rand -hex 32)"
+docker compose -f docker-compose.deploy.yml up -d --force-recreate
 curl -fsS http://127.0.0.1:8765/healthz
 curl -fsS -H "Authorization: Bearer ${KREPORTS_MCP_TOKEN}" http://127.0.0.1:8765/readyz
 ```
@@ -123,7 +133,7 @@ Verify the artifact from the mounted pair before interpreting an HTTP result as
 deployment readiness:
 
 ```bash
-kreports verify-release-artifact --db /data/kreports.db
+kreports verify-release-artifact --db ./kreports.db
 ```
 
 Health:
@@ -161,13 +171,15 @@ For a short-lived tunnel test only:
 kreports serve-http --host 127.0.0.1 --port 8765 --allow-unauthenticated
 ```
 
-## Backfill While Serving
+## Collector and immutable release promotion
 
-Use a separate shell or worker:
+Run collection only against a separate writable maintainer DB. This process must
+never point `DB_URL` at `./kreports.db` or the mounted public runtime artifact:
 
 ```bash
 export DART_API_KEY=<opendart-key>
 export KREPORTS_RUNTIME_MODE=collector
+export DB_URL=sqlite:////absolute/path/to/kreports-maintainer.db
 scripts/run_derived_dataset_backfill.sh
 ```
 
@@ -204,7 +216,7 @@ Use `scripts/run_source_documents_backfill.sh` only for explicitly selected raw
 archive expansion. On capacity-constrained machines, prefer rebuilding
 `evidence_documents` and structured facts over collecting more full XML bodies.
 
-Compact runtime artifact flow:
+Compact runtime artifact flow from that maintainer DB:
 
 ```bash
 kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
@@ -221,6 +233,10 @@ kreports export-runtime-db \
   --year-from 2021 \
   --year-to 2025 \
   --profile compact
+kreports build-release-manifest \
+  --db artifacts/kreports-runtime-2021-2025.db
+kreports verify-release-artifact \
+  --db artifacts/kreports-runtime-2021-2025.db
 kreports upload-runtime-db-artifact \
   --db artifacts/kreports-runtime-2021-2025.db \
   --bucket <gcs-bucket-name> \
@@ -228,11 +244,26 @@ kreports upload-runtime-db-artifact \
   --profile compact \
   --year-from 2021 \
   --year-to 2025
-kreports build-release-manifest \
-  --db artifacts/kreports-runtime-2021-2025.db
-kreports verify-release-artifact \
-  --db artifacts/kreports-runtime-2021-2025.db
 ```
+
+For the local Compose layout, stage the already verified pair, stop the public
+service so it cannot observe a partially replaced pair, promote both files, and
+verify the final host paths before restarting. This is an operationally atomic
+deployment at the service boundary:
+
+```bash
+install -m 0444 artifacts/kreports-runtime-2021-2025.db ./kreports.db.next
+install -m 0444 artifacts/kreports-runtime-2021-2025.db.release.json ./kreports.db.release.json.next
+docker compose -f docker-compose.deploy.yml stop kreports-mcp
+mv -f ./kreports.db.next ./kreports.db
+mv -f ./kreports.db.release.json.next ./kreports.db.release.json
+kreports verify-release-artifact --db ./kreports.db
+docker compose -f docker-compose.deploy.yml up -d --force-recreate
+```
+
+Do not resume serving if final-path verification fails. The old pair should be
+retained separately until the replacement has passed `/readyz`, so rollback is
+another stopped-service pair promotion rather than an in-place DB mutation.
 
 The build command is evidence-producing: it writes atomically and may record
 `release_gate.passed=false` with named blockers. The verify command is
@@ -281,11 +312,12 @@ image. Mount it as a volume.
 SQLite is acceptable for a first hosted endpoint if:
 
 - the MCP container mounts the DB read-only,
-- only one collector writes at a time,
+- only one collector writes the separate maintainer DB at a time,
 - `dataset-audit` shows no duplicate unique-key groups.
 
-Move to Postgres once public traffic and continuous backfill run at the same
-time for more than a small pilot.
+Move the maintainer workflow to Postgres when collector write concurrency
+requires it; continue deploying immutable, verified runtime releases to the
+public endpoint.
 
 ## Deployment evidence checklist
 
@@ -295,13 +327,13 @@ Keep these four evidence streams separate:
 | --- | --- | --- |
 | Code-test success | Local code and deployment-contract tests pass. | Artifact validity or live coverage. |
 | HTTP liveness | The started service answers `/healthz`. | Release readiness or data completeness. |
-| Release readiness | `verify-release-artifact` accepts the mounted DB and matching JSON, and `/readyz` is 200. | Current market/year coverage beyond the artifact report. |
+| Release readiness | `verify-release-artifact` accepts the host DB and matching JSON, and `/readyz` is 200 after service recreation. | Current market/year coverage beyond the artifact report. |
 | Live-data coverage | Dataset audit and completeness/readiness commands report the selected release's coverage. | That a code change or HTTP probe is correct. |
 
 - `uv run pytest -q`
 - `kreports mcp-doctor`
 - `kreports mcp-smoke --company 005930`
-- `kreports verify-release-artifact --db /data/kreports.db`
+- `kreports verify-release-artifact --db ./kreports.db`
 - `curl /healthz` returns `ok: true`
 - `curl /readyz` returns HTTP 200 with `ok: true` and no required failures
 - `kreports dataset-audit --top 20`
