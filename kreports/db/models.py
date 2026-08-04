@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger, Boolean, Column, Date, DateTime, Float, Integer,
-    ForeignKey, SmallInteger, String, Text, UniqueConstraint, Index, text,
+    ForeignKey, SmallInteger, String, Text, UniqueConstraint, Index, desc, text,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -154,6 +154,12 @@ class Disclosure(Base):
 
     __table_args__ = (
         Index("idx_disc_corp_date", "corp_code", "disc_date"),
+        Index(
+            "idx_disclosure_corp_date_receipt",
+            "corp_code",
+            desc("disc_date"),
+            desc("rcept_no"),
+        ),
     )
 
 

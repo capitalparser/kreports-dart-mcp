@@ -59,8 +59,97 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260731_12_accounting_note_chapter_contract",
         "20260731_13_accounting_note_chapter_storage_contract",
         "20260731_14_schema_contract_repair",
+        "20260805_15_disclosure_lookup_index",
     ]
     assert second == []
+
+
+def test_disclosure_lookup_index_migrates_legacy_db_and_serves_corp_scoped_annual_lookup(
+    tmp_path,
+):
+    """A migrated legacy disclosure cache avoids scans and sort temp tables."""
+    from kreports.db.migrations import MIGRATIONS, _checksum, apply_schema_migrations
+
+    legacy = create_engine(f"sqlite:///{tmp_path / 'legacy-disclosures.db'}")
+    with legacy.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision TEXT PRIMARY KEY, checksum TEXT NOT NULL,
+              description TEXT NOT NULL, applied_at TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE disclosures (
+              rcept_no TEXT PRIMARY KEY, corp_code TEXT NOT NULL,
+              corp_name TEXT NOT NULL, disc_date TEXT NOT NULL,
+              disc_type TEXT NOT NULL, report_nm TEXT NOT NULL,
+              flr_nm TEXT, fetched_at TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO disclosures VALUES
+              ('20260301000001', '00126380', '삼성전자', '2026-03-01', 'A',
+               '사업보고서 (2025.12)', NULL, '2026-03-01'),
+              ('20260301000002', '00126380', '삼성전자', '2026-03-01', 'A',
+               '사업보고서 (2025.12) 정정', NULL, '2026-03-01'),
+              ('20260301000003', '00126380', '삼성전자', '2026-03-02', 'B',
+               '감사보고서 (2025.12)', NULL, '2026-03-02'),
+              ('20260301000004', '00999999', '비교회사', '2026-03-03', 'A',
+               '사업보고서 (2025.12)', NULL, '2026-03-03')
+        """))
+        for migration in MIGRATIONS[:-1]:
+            conn.execute(
+                text(
+                    "INSERT INTO schema_migrations "
+                    "(revision, checksum, description, applied_at) "
+                    "VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "revision": migration.revision,
+                    "checksum": _checksum(migration),
+                    "description": migration.description,
+                },
+            )
+
+    with legacy.begin() as conn:
+        assert apply_schema_migrations(conn) == [MIGRATIONS[-1].revision]
+        assert apply_schema_migrations(conn) == []
+        indexes = {
+            item[1]: item
+            for item in conn.exec_driver_sql("PRAGMA index_list(disclosures)")
+        }
+        index_columns = tuple(
+            item[2]
+            for item in conn.exec_driver_sql(
+                "PRAGMA index_xinfo(idx_disclosure_corp_date_receipt)"
+            )
+            if item[2] is not None
+        )
+        plan = conn.execute(
+            text("""
+                EXPLAIN QUERY PLAN
+                SELECT rcept_no
+                FROM disclosures
+                WHERE corp_code=:corp_code
+                  AND report_nm LIKE :annual_report
+                ORDER BY disc_date DESC, rcept_no DESC
+                LIMIT 1
+            """),
+            {
+                "corp_code": "00126380",
+                "annual_report": "%사업보고서 (2025.%",
+            },
+        ).all()
+
+    assert indexes["idx_disclosure_corp_date_receipt"][2] == 0
+    assert index_columns == ("corp_code", "disc_date", "rcept_no")
+    details = [str(row[3]) for row in plan]
+    assert any(
+        "USING INDEX idx_disclosure_corp_date_receipt" in detail
+        for detail in details
+    )
+    assert not any("SCAN disclosures" in detail for detail in details)
+    assert not any("USE TEMP B-TREE" in detail for detail in details)
 
 
 def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
@@ -227,6 +316,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         "20260731_12_accounting_note_chapter_contract",
         "20260731_13_accounting_note_chapter_storage_contract",
         "20260731_14_schema_contract_repair",
+        "20260805_15_disclosure_lookup_index",
     ]
     assert second_applied == []
     assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)

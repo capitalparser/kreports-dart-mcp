@@ -596,6 +596,16 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_policy_item_key ON accounting_policy_items (item_key)",
         ),
     ),
+    Migration(
+        revision="20260805_15_disclosure_lookup_index",
+        description="Index corp-scoped disclosure lookups by latest receipt",
+        statements=(
+            """
+            CREATE INDEX IF NOT EXISTS idx_disclosure_corp_date_receipt
+            ON disclosures (corp_code, disc_date DESC, rcept_no DESC)
+            """,
+        ),
+    ),
 )
 
 
@@ -692,7 +702,10 @@ def apply_schema_migrations(connection: Connection) -> list[str]:
                     connection,
                     statement,
                     tolerate_missing_index_table=(
-                        migration.revision == "20260731_14_schema_contract_repair"
+                        migration.revision in {
+                            "20260731_14_schema_contract_repair",
+                            "20260805_15_disclosure_lookup_index",
+                        }
                     ),
                 )
             connection.execute(

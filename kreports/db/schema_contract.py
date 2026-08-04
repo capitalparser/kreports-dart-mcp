@@ -71,6 +71,9 @@ REQUIRED_COLUMN_SPECS = {
 
 # (table, ordered columns, unique, normalized partial predicate)
 REQUIRED_INDEX_SPECS = {
+    "idx_disclosure_corp_date_receipt": (
+        "disclosures", ("corp_code", "disc_date", "rcept_no"), False, None
+    ),
     "idx_company_year_quality_year_market": (
         "company_year_quality", ("bsns_year", "market"), False, None
     ),

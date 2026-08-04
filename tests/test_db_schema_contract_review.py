@@ -312,7 +312,13 @@ def test_policy_item_repair_migration_matches_orm_schema_and_indexes(tmp_path):
                 "CREATE TABLE schema_migrations (revision TEXT PRIMARY KEY, "
                 "checksum TEXT NOT NULL, description TEXT NOT NULL, applied_at TEXT NOT NULL)"
             )
-            for migration in MIGRATIONS[:-1]:
+            connection.exec_driver_sql(
+                "CREATE TABLE disclosures (rcept_no TEXT PRIMARY KEY, "
+                "corp_code TEXT NOT NULL, corp_name TEXT NOT NULL, "
+                "disc_date TEXT NOT NULL, disc_type TEXT NOT NULL, "
+                "report_nm TEXT NOT NULL, flr_nm TEXT, fetched_at TEXT NOT NULL)"
+            )
+            for migration in MIGRATIONS[:13]:
                 connection.execute(
                     text(
                         "INSERT INTO schema_migrations "
@@ -326,7 +332,9 @@ def test_policy_item_repair_migration_matches_orm_schema_and_indexes(tmp_path):
                     },
                 )
         with engine.begin() as connection:
-            assert apply_schema_migrations(connection) == [MIGRATIONS[-1].revision]
+            assert apply_schema_migrations(connection) == [
+                migration.revision for migration in MIGRATIONS[13:]
+            ]
             columns = {
                 row[1]
                 for row in connection.exec_driver_sql(
