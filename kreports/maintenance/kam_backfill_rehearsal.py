@@ -99,7 +99,7 @@ _WORKER_TIMEOUT_SECONDS = {
     "financial-compact-rebuild": 1800,
     "company-year-quality-rebuild": 1800,
     "semantic-snapshot": 600,
-    "mcp-validate": 3600,
+    "mcp-validate": 900,
 }
 
 
