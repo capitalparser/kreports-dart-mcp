@@ -127,6 +127,70 @@ def test_policy_presentation_answer_pack_does_not_link_status_only_receipt():
     assert pack["sources"] == []
 
 
+def test_policy_presentation_answer_pack_rechecks_exact_source_document_binding(
+    temp_engine,
+):
+    """A forged source-document id must not borrow a receipt-level DART link."""
+    from kreports.db.engine import get_session
+    from kreports.db.models import Disclosure, SourceDocument
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    with get_session() as session:
+        source = SourceDocument(
+            rcept_no="20250301000001",
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서 (2024.12)",
+            raw_content="<xml/>",
+            doc_hash="a" * 40,
+        )
+        session.add(source)
+        session.flush()
+        source_document_id = source.id
+        session.add(
+            Disclosure(
+                rcept_no="20250301000001",
+                corp_code="00000001",
+                corp_name="A",
+                disc_date=date(2025, 3, 1),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12)",
+            )
+        )
+
+    base_row = {
+        "corp_code": "00000001",
+        "corp_name": "A",
+        "data_year": 2024,
+        "rcept_no": "20250301000001",
+        "source_type": "business_report",
+        "provenance_status": "proven_annual_filing",
+        "canonical_source_binding": True,
+    }
+    forged = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_name": "A"},
+        "year": 2024,
+        "note_presentations": [{
+            **base_row,
+            "source_document_id": source_document_id + 100,
+        }],
+    })
+    valid = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_name": "A"},
+        "year": 2024,
+        "note_presentations": [{
+            **base_row,
+            "source_document_id": source_document_id,
+        }],
+    })
+
+    assert forged["sources"] == []
+    assert [source["rcept_no"] for source in valid["sources"]] == [
+        "20250301000001",
+    ]
+
+
 @pytest.mark.parametrize("missing_field", ["source_document_id", "source_type"])
 def test_note_comparison_answer_pack_requires_explicit_source_identity(
     temp_engine, missing_field,

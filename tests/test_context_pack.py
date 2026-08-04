@@ -180,6 +180,26 @@ def test_context_pack_does_not_trust_caller_supplied_canonical_binding_flags():
         )
 
 
+def test_context_pack_rechecks_forged_document_identity_and_keeps_valid_binding(
+    temp_engine,
+):
+    from kreports.analysis.context_pack import build_context_pack
+
+    _seed_local_context_sources()
+    context = _local_context()
+    context["business_report"][0]["source_document_id"] = 1
+    context["business_report"][0]["provenance_status"] = "proven_annual_filing"
+    context["business_report"][0]["canonical_source_binding"] = True
+    context["business_report"][1]["provenance_status"] = "unproven_source_binding"
+    context["business_report"][1]["canonical_source_binding"] = False
+
+    pack = build_context_pack(context)
+
+    assert [item.source_id for item in pack.dart_filing] == [
+        "report_sections:1",
+    ]
+
+
 @pytest.mark.parametrize("missing_field", ["source_document_id", "source_type"])
 def test_context_pack_requires_explicit_source_identity(temp_engine, missing_field):
     from kreports.analysis.context_pack import build_context_pack

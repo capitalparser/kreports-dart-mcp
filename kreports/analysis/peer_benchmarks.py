@@ -42,7 +42,7 @@ from kreports.analysis.audit_reporting import (
 )
 from kreports.analysis.evidence import dart_filing_url
 from kreports.analysis.filing_provenance import (
-    canonical_business_report_source_receipt,
+    canonical_annual_filing_source_receipt,
     valid_annual_filing_receipt,
 )
 
@@ -2058,12 +2058,15 @@ def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float 
     return values, metrics
 
 
-def _policy_annual_sources(corp_codes: list[str], *, year: int) -> dict[str, str]:
-    """Return annual receipts backed by a same-company/year source document."""
+def _policy_annual_sources(
+    corp_codes: list[str], *, year: int,
+) -> dict[str, dict[str, object]]:
+    """Return re-verified exact source-document bindings for policy rows."""
     if not corp_codes:
         return {}
     stmt = text("""
-        SELECT sd.corp_code, sd.rcept_no, d.disc_date, d.report_nm
+        SELECT sd.id AS source_document_id, sd.corp_code, sd.rcept_no,
+               sd.source_type, d.disc_date, d.report_nm
         FROM source_documents sd
         JOIN disclosures d ON d.rcept_no=sd.rcept_no AND d.corp_code=sd.corp_code
         WHERE sd.corp_code IN :ccs
@@ -2076,33 +2079,44 @@ def _policy_annual_sources(corp_codes: list[str], *, year: int) -> dict[str, str
         rows = conn.execute(
             stmt, {"ccs": corp_codes, "year": year, "annual": f"%사업보고서 ({year}.%"},
         ).mappings().all()
-    latest: dict[str, str] = {}
+    latest: dict[str, dict[str, object]] = {}
     for row in rows:
         corp_code = str(row["corp_code"])
         if corp_code in latest:
             continue
-        latest[corp_code] = canonical_business_report_source_receipt(
+        receipt = canonical_annual_filing_source_receipt(
             corp_code=corp_code,
             bsns_year=year,
             rcept_no=row.get("rcept_no"),
-        ) or ""
+            source_document_id=row.get("source_document_id"),
+            source_type=row.get("source_type"),
+        )
+        if receipt:
+            latest[corp_code] = {
+                "rcept_no": receipt,
+                "source_document_id": row["source_document_id"],
+                "source_type": row["source_type"],
+            }
     return latest
 
 
 def _policy_row_provenance(
-    row: dict, annual_sources: dict[str, str], *, year: int,
-) -> tuple[str | None, str]:
+    row: dict, annual_sources: dict[str, dict[str, object]], *, year: int,
+) -> tuple[str | None, str, dict[str, object] | None]:
     raw_receipt = row.get("rcept_no")
     receipt = valid_annual_filing_receipt(raw_receipt, year)
+    source_binding = annual_sources.get(str(row.get("corp_code") or ""))
     proven = (
         isinstance(raw_receipt, str) and raw_receipt == receipt
-        and bool(receipt) and annual_sources.get(row["corp_code"]) == receipt
+        and bool(receipt)
+        and source_binding is not None
+        and source_binding.get("rcept_no") == receipt
     )
     if proven:
-        return receipt, "proven_annual_filing"
+        return receipt, "proven_annual_filing", source_binding
     if not isinstance(raw_receipt, str) or raw_receipt != receipt:
-        return None, "invalid_receipt"
-    return None, "unproven_annual_filing"
+        return None, "invalid_receipt", None
+    return None, "unproven_annual_filing", None
 
 
 def compare_peer_accounting_policies(
@@ -2361,13 +2375,17 @@ def compare_peer_accounting_policies(
     annual_sources = _policy_annual_sources(all_codes, year=year)
     matched_provenance_by_company = {code: [] for code in all_codes}
     for row in matching_rows:
-        _receipt, status = _policy_row_provenance(row, annual_sources, year=year)
+        _receipt, status, _source_binding = _policy_row_provenance(
+            row,
+            annual_sources,
+            year=year,
+        )
         matched_provenance_by_company.setdefault(row["corp_code"], []).append(status)
     note_presentations: list[dict] = []
     rows_by_company = {code: [] for code in all_codes}
     for row in selected_rows:
         rows_by_company.setdefault(row["corp_code"], []).append(row)
-        receipt, provenance_status = _policy_row_provenance(
+        receipt, provenance_status, source_binding = _policy_row_provenance(
             row, annual_sources, year=year,
         )
         body = str(row.get("body") or "")
@@ -2379,6 +2397,19 @@ def compare_peer_accounting_policies(
             "provenance_status": provenance_status,
             "rcept_no": receipt if provenance_status == "proven_annual_filing" else None,
             "source_url": dart_filing_url(receipt) if provenance_status == "proven_annual_filing" else None,
+            "source_document_id": (
+                source_binding.get("source_document_id")
+                if source_binding is not None
+                else None
+            ),
+            "source_type": (
+                source_binding.get("source_type")
+                if source_binding is not None
+                else None
+            ),
+            "canonical_source_binding": (
+                provenance_status == "proven_annual_filing"
+            ),
         }))
     if item_key is not None:
         presentation_codes = {row["corp_code"] for row in note_presentations}

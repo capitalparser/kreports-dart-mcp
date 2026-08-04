@@ -66,6 +66,8 @@ def test_peer_note_comparison_returns_presentations_selection_and_only_proven_li
     assert len(subject["body_excerpt"]) <= 400
     assert subject["provenance_status"] == "proven_annual_filing"
     assert subject["source_url"].endswith("20250301000001")
+    assert subject["source_document_id"] == 1
+    assert subject["source_type"] == "business_report"
     direct = next(row for row in out["peer_selection"] if row["corp_code"] == "00000003")
     assert direct["selection_status"] == "included"
     assert direct["selection_reason"] == "direct_include_override"
