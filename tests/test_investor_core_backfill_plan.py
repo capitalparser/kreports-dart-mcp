@@ -26,6 +26,7 @@ def _create_plan_database(path: Path) -> None:
                 bsns_year INTEGER NOT NULL,
                 financial_core_status TEXT NOT NULL,
                 investor_grade TEXT NOT NULL,
+                quality_version TEXT NOT NULL,
                 evidence_summary_json TEXT NOT NULL,
                 PRIMARY KEY (corp_code, bsns_year)
             );
@@ -58,11 +59,27 @@ def _proof(years: tuple[int, ...], *, corp_code: str, corrected: bool = False) -
         )
     return json.dumps(
         {
+            "statuses": {
+                "financial_core": "available",
+                "auditor": "available",
+                "audit_fee": "available",
+                "policy": "full_body",
+                "kam": "full_body",
+                "audit_procedure": "available",
+                "group_audit": "missing",
+            },
+            "grades": {
+                "investor_core": "D",
+                "auditor_full": "A",
+                "group_audit": "D",
+            },
+            "blockers": [],
+            "quality_version": "v2",
             "financial_core_proof": {
                 "window_start_year": 2021,
                 "window_end_year": 2025,
                 "proven_years": proven_years,
-            }
+            },
         },
         ensure_ascii=False,
     )
@@ -82,7 +99,7 @@ def _add_company(
             (corp_code, corp_code[-6:], f"회사-{corp_code}"),
         )
         connection.execute(
-            "INSERT INTO company_year_quality VALUES (?, 2025, ?, ?, ?)",
+            "INSERT INTO company_year_quality VALUES (?, 2025, ?, ?, 'v2', ?)",
             (corp_code, status, grade, _proof(proven_years, corp_code=corp_code)),
         )
 
@@ -95,9 +112,10 @@ def _add_annual(
     corrected: bool = False,
     receipt: str | None = None,
     disc_date: date | None = None,
+    report_nm: str | None = None,
 ) -> None:
-    report_nm = f"사업보고서 ({year}.12)"
-    if corrected:
+    report_nm = report_nm or f"사업보고서 ({year}.12)"
+    if corrected and report_nm == f"사업보고서 ({year}.12)":
         report_nm = f"[기재정정]{report_nm}"
     receipt = receipt or f"{year + 1}0331{int(corp_code):06d}"
     disc_date = disc_date or date(year + 1, 3, 31)
@@ -260,8 +278,127 @@ def test_plan_accepts_corrected_annual_names_and_rejects_bad_proof_rows(tmp_path
     assert plan["rejected_proof_row_count"] == 2
     assert {item["reason"] for item in plan["rejected_proof_diagnostics"]} == {
         "missing_or_invalid_annual_anchor",
-        "malformed_financial_core_proof",
+        "invalid_quality_evidence_summary",
     }
+
+
+@pytest.mark.parametrize("mutation", ["v1", "duplicate", "unsorted", "extra_key"])
+def test_plan_fails_closed_when_any_quality_summary_contract_rule_is_broken(
+    tmp_path,
+    mutation,
+):
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(
+        database,
+        corp_code="000001",
+        grade="D",
+        status="available",
+        proven_years=(2023, 2024),
+    )
+    for year in (2023, 2024, 2025):
+        _add_annual(database, corp_code="000001", year=year)
+    with sqlite3.connect(database) as connection:
+        raw_summary = json.loads(_proof((2023, 2024), corp_code="000001"))
+        if mutation == "v1":
+            connection.execute(
+                "UPDATE company_year_quality SET quality_version='v1' WHERE corp_code='000001'"
+            )
+        elif mutation == "duplicate":
+            raw_summary["financial_core_proof"]["proven_years"].append(
+                dict(raw_summary["financial_core_proof"]["proven_years"][1])
+            )
+        elif mutation == "unsorted":
+            raw_summary["financial_core_proof"]["proven_years"].reverse()
+        else:
+            raw_summary["unexpected"] = True
+        if mutation != "v1":
+            connection.execute(
+                "UPDATE company_year_quality SET evidence_summary_json=? WHERE corp_code='000001'",
+                (json.dumps(raw_summary, ensure_ascii=False),),
+            )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    selected = plan["selected_companies"][0]
+    assert selected["proven_years"] == []
+    assert selected["required_successful_year_count"] == 3
+    assert plan["rejected_proof_diagnostics"] == [
+        {
+            "corp_code": "000001",
+            "proof_index": None,
+            "reason": "invalid_quality_evidence_summary",
+        }
+    ]
+
+
+def test_plan_uses_shared_annual_identity_boundary_for_proof_and_anchor(tmp_path):
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(
+        database,
+        corp_code="000001",
+        grade="D",
+        status="available",
+        proven_years=(2024,),
+    )
+    shared_valid_name = "[기재정정] 사업보고서 (2024.1) 추가설명"
+    _add_annual(
+        database,
+        corp_code="000001",
+        year=2024,
+        report_nm=shared_valid_name,
+    )
+    _add_annual(database, corp_code="000001", year=2025)
+    with sqlite3.connect(database) as connection:
+        summary = json.loads(_proof((2024,), corp_code="000001"))
+        summary["financial_core_proof"]["proven_years"][0]["report_nm"] = shared_valid_name
+        connection.execute(
+            "UPDATE company_year_quality SET evidence_summary_json=? WHERE corp_code='000001'",
+            (json.dumps(summary, ensure_ascii=False),),
+        )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    assert plan["selected_companies"][0]["proven_years"] == [2024]
+
+
+def test_plan_prioritizes_lower_effort_before_source_readiness(tmp_path):
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(database, corp_code="000000", grade="A", status="available")
+    _add_company(database, corp_code="000001", grade="D", status="available")
+    _add_company(
+        database,
+        corp_code="000002",
+        grade="D",
+        status="available",
+        proven_years=(2023, 2024),
+    )
+    for year in (2023, 2024, 2025):
+        _add_annual(database, corp_code="000001", year=year)
+    for year in (2023, 2024):
+        _add_annual(database, corp_code="000002", year=year)
+
+    plan = plan_investor_core_backfill(database, threshold_pct=50)
+
+    assert plan["shortfall"] == 1
+    assert [row["corp_code"] for row in plan["selected_companies"]] == ["000002"]
+    assert plan["selected_successful_company_year_request_count"] == 1
+    assert plan["selected_source_ready_count"] == 0
+    assert plan["selected_needing_disclosure_metadata_count"] == 1
 
 
 def test_plan_reports_insufficient_candidates_and_keeps_database_immutable(tmp_path):
@@ -314,3 +451,23 @@ def test_cli_emits_stable_json_for_an_explicit_database(tmp_path):
         "target_numerator": 1,
         "threshold_pct": 95.0,
     }.items() <= payload.items()
+
+
+def test_cli_reports_missing_schema_without_a_traceback_even_for_json(tmp_path):
+    from kreports.cli.main import app
+
+    database = tmp_path / "empty.db"
+    with sqlite3.connect(database):
+        pass
+
+    result = CliRunner().invoke(
+        app,
+        ["plan-investor-core-backfill", "--db", str(database), "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    assert json.loads(result.output) == {
+        "error": "investor_core_backfill_plan_unavailable"
+    }
+    assert "Traceback" not in result.output

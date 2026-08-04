@@ -9,13 +9,17 @@ import re
 import sqlite3
 from typing import Any
 
+from kreports.annual_filing_identity import (
+    annual_report_name_matches_business_year,
+)
+from kreports.db.quality_snapshot import QUALITY_VERSION
+from kreports.quality.company_year_fingerprint import (
+    validate_quality_evidence_summary,
+)
 
-CORE_MARKETS = ("KOSPI", "KOSDAQ")
 WINDOW_YEARS = 5
 MAX_REJECTED_PROOF_DIAGNOSTICS = 20
-_ANNUAL_REPORT_RE = re.compile(r"사업보고서 \((\d{4})\.\d{2}\)")
 _RECEIPT_RE = re.compile(r"\d{14}\Z")
-_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _open_readonly_database(db_path: str | Path) -> sqlite3.Connection:
@@ -70,12 +74,15 @@ def _annual_anchor(
 ) -> dict[str, str] | None:
     rows = connection.execute(
         "SELECT rcept_no, disc_date, report_nm FROM disclosures "
-        "WHERE corp_code=? AND report_nm LIKE ? "
+        "WHERE corp_code=? "
         "ORDER BY disc_date DESC, rcept_no DESC",
-        (corp_code, f"%사업보고서 ({year}.%"),
+        (corp_code,),
     ).fetchall()
     for row in rows:
-        if _is_valid_receipt_date(row["rcept_no"], row["disc_date"]):
+        if (
+            annual_report_name_matches_business_year(row["report_nm"], year)
+            and _is_valid_receipt_date(row["rcept_no"], row["disc_date"])
+        ):
             return {
                 "rcept_no": str(row["rcept_no"]),
                 "disc_date": str(row["disc_date"]),
@@ -103,22 +110,29 @@ def _valid_proven_years(
     connection: sqlite3.Connection,
     *,
     corp_code: str,
+    quality_version: object,
     evidence_summary_json: object,
     window_start: int,
     coverage_year: int,
     diagnostics: list[dict[str, Any]],
-) -> tuple[list[int], dict[int, dict[str, str]]]:
+) -> list[int]:
     try:
         summary = json.loads(str(evidence_summary_json))
-        proof = summary["financial_core_proof"]
+        if str(quality_version) != QUALITY_VERSION:
+            raise ValueError("persisted quality version is unsupported")
+        canonical_summary = validate_quality_evidence_summary(
+            summary,
+            expected_quality_version=QUALITY_VERSION,
+        )
+        proof = canonical_summary["financial_core_proof"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         _diagnostic(
             diagnostics,
             corp_code=corp_code,
             index=None,
-            reason="malformed_financial_core_proof",
+            reason="invalid_quality_evidence_summary",
         )
-        return [], {}
+        return []
     if not isinstance(proof, dict) or (
         proof.get("window_start_year") != window_start
         or proof.get("window_end_year") != coverage_year
@@ -130,42 +144,25 @@ def _valid_proven_years(
             index=None,
             reason="invalid_financial_core_proof_window",
         )
-        return [], {}
+        return []
 
     valid: dict[int, dict[str, str]] = {}
     for index, row in enumerate(proof["proven_years"]):
-        if not isinstance(row, dict):
-            _diagnostic(diagnostics, corp_code=corp_code, index=index, reason="proof_row_not_object")
-            continue
-        year = row.get("bsns_year")
-        if isinstance(year, bool) or not isinstance(year, int) or not window_start <= year <= coverage_year:
-            _diagnostic(diagnostics, corp_code=corp_code, index=index, reason="invalid_proof_year")
-            continue
-        if year in valid:
-            _diagnostic(diagnostics, corp_code=corp_code, index=index, reason="duplicate_proof_year")
-            continue
-        report_nm = row.get("report_nm")
-        if (
-            row.get("fs_div") not in {"CFS", "OFS"}
-            or not isinstance(report_nm, str)
-            or _ANNUAL_REPORT_RE.search(report_nm) is None
-            or _ANNUAL_REPORT_RE.search(report_nm).group(1) != str(year)
-            or not isinstance(row.get("rcept_no"), str)
-            or _RECEIPT_RE.fullmatch(row["rcept_no"]) is None
-            or not isinstance(row.get("metric_digest"), str)
-            or _DIGEST_RE.fullmatch(row["metric_digest"]) is None
-        ):
-            _diagnostic(diagnostics, corp_code=corp_code, index=index, reason="malformed_proof_row")
-            continue
+        year = int(row["bsns_year"])
+        report_nm = str(row["report_nm"])
         anchor = _annual_anchor(connection, corp_code=corp_code, year=year)
         if anchor is None:
             _diagnostic(diagnostics, corp_code=corp_code, index=index, reason="missing_or_invalid_annual_anchor")
             continue
-        if row["rcept_no"] != anchor["rcept_no"] or report_nm != anchor["report_nm"]:
+        if (
+            not annual_report_name_matches_business_year(report_nm, year)
+            or row["rcept_no"] != anchor["rcept_no"]
+            or report_nm != anchor["report_nm"]
+        ):
             _diagnostic(diagnostics, corp_code=corp_code, index=index, reason="proof_anchor_mismatch")
             continue
         valid[year] = anchor
-    return sorted(valid), valid
+    return sorted(valid)
 
 
 def _candidate_selection(
@@ -228,7 +225,7 @@ def plan_investor_core_backfill(
         candidates: list[dict[str, Any]] = []
         rows = connection.execute(
             "SELECT c.corp_code, c.stock_code, c.corp_name, q.investor_grade, "
-            "q.financial_core_status, q.evidence_summary_json "
+            "q.financial_core_status, q.quality_version, q.evidence_summary_json "
             "FROM companies c JOIN company_year_quality q "
             "ON q.corp_code=c.corp_code AND q.bsns_year=? "
             "WHERE c.stock_code IS NOT NULL AND c.market IN ('KOSPI', 'KOSDAQ') "
@@ -239,9 +236,10 @@ def plan_investor_core_backfill(
         ).fetchall()
         for row in rows:
             corp_code = str(row["corp_code"])
-            proven_years, proof_anchors = _valid_proven_years(
+            proven_years = _valid_proven_years(
                 connection,
                 corp_code=corp_code,
+                quality_version=row["quality_version"],
                 evidence_summary_json=row["evidence_summary_json"],
                 window_start=window_start,
                 coverage_year=coverage_year,
@@ -283,7 +281,6 @@ def plan_investor_core_backfill(
                 ],
                 "source_ready": source_ready,
                 "fillable": len(selected_years) == required,
-                "proof_anchors": proof_anchors,
             })
     target_numerator = _target_numerator(denominator, threshold_pct)
     shortfall = max(target_numerator - numerator, 0)
@@ -291,15 +288,14 @@ def plan_investor_core_backfill(
     prioritized = sorted(
         fillable,
         key=lambda candidate: (
-            not candidate["source_ready"],
             candidate["required_successful_year_count"],
+            not candidate["source_ready"],
             candidate["corp_code"],
         ),
     )
     selected_companies = sorted(prioritized[:shortfall], key=lambda candidate: candidate["corp_code"])
     for candidate in selected_companies:
         candidate.pop("fillable")
-        candidate.pop("proof_anchors")
     unfillable_shortfall = max(shortfall - len(fillable), 0)
     return {
         "coverage_year": coverage_year,

@@ -3,6 +3,7 @@ import os
 import json
 import platform
 import shutil
+import sqlite3
 import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -2450,8 +2451,18 @@ def plan_investor_core_backfill_cmd(
             coverage_year=coverage_year,
             threshold_pct=threshold_pct,
         )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    except (ValueError, sqlite3.Error) as exc:
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"error": "investor_core_backfill_plan_unavailable"},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            typer.echo("investor-core backfill plan unavailable", err=True)
+        raise typer.Exit(2) from exc
     if json_output:
         typer.echo(
             json.dumps(
