@@ -448,6 +448,25 @@ print(json.dumps({"ok": True, "argv": sys.argv[1:]}))
     assert unscoped["argv"] == ["migrate"]
 
 
+def test_worker_timeouts_keep_mcp_validation_bounded_at_thirty_minutes() -> None:
+    """The full professional-tool matrix needs its own bounded window."""
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        _WORKER_TIMEOUT_SECONDS,
+    )
+
+    assert _WORKER_TIMEOUT_SECONDS == {
+        "migrate": 600,
+        "kam-dry-run": 900,
+        "kam-rebuild": 3600,
+        "procedure-index": 3600,
+        "audit-fee-observation-backfill": 900,
+        "financial-compact-rebuild": 1800,
+        "company-year-quality-rebuild": 1800,
+        "semantic-snapshot": 600,
+        "mcp-validate": 1800,
+    }
+
+
 def _install_phase_harness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1468,7 +1487,7 @@ def test_preflight_rejection_writes_nothing_and_cli_prints_empty_paths(
         "markdown_report=",
         "clone=",
         "clone_retained=false",
-        "live_sha256_unchanged=false",
+        "live_sha256_unchanged=not_verified",
     ]
 
 
@@ -1543,6 +1562,19 @@ def test_markdown_names_terminal_status_and_live_digest_result(
     assert "kreports-rehearsal.db" in markdown
     assert "Source allocated bytes: `128`" in markdown
     assert "Clone allocated bytes: `128`" in markdown
+
+
+def test_markdown_marks_unchecked_live_digest_as_not_verified() -> None:
+    from kreports.maintenance.kam_backfill_rehearsal import (
+        render_rehearsal_markdown,
+    )
+
+    report = _terminal_report_fixture("backfill_failed")
+    report["live_sha256_unchanged"] = None
+
+    markdown = render_rehearsal_markdown(report)
+
+    assert "Live SHA-256 unchanged: `not_verified`" in markdown
 
 
 def test_markdown_redacts_paths_secrets_raw_errors_and_receipt_arrays() -> None:
@@ -1776,6 +1808,50 @@ def test_cli_prints_retained_artifacts_for_successful_outcomes(
     ]
 
 
+def test_cli_prints_not_verified_when_live_digest_was_not_checked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
+
+    source = tmp_path / "live.db"
+    source.write_bytes(b"source")
+    rehearsal_dir = tmp_path / "rehearsal"
+    rehearsal_dir.mkdir()
+    monkeypatch.setattr(
+        rehearsal,
+        "run_kam_schema_backfill_rehearsal",
+        lambda **_: {
+            "status": "backfill_failed",
+            "report_path": "",
+            "markdown_report_path": "",
+            "clone_path": "",
+            "live_sha256_unchanged": None,
+        },
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "rehearse-kam-schema-backfill",
+            "--source-db",
+            str(source),
+            "--rehearsal-dir",
+            str(rehearsal_dir),
+            "--python-executable",
+            sys.executable,
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout.splitlines()[-1] == (
+        "live_sha256_unchanged=not_verified"
+    )
+
+
 def test_db_evidence_cli_resolves_paths_and_opts_into_evidence_phases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1967,7 +2043,7 @@ def test_cli_reports_exact_retained_clone_when_marker_creation_fails(
     assert output[3:] == [
         f"clone={clone}",
         "clone_retained=true",
-        "live_sha256_unchanged=false",
+        "live_sha256_unchanged=not_verified",
     ]
 
 

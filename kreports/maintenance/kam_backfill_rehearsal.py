@@ -99,7 +99,7 @@ _WORKER_TIMEOUT_SECONDS = {
     "financial-compact-rebuild": 1800,
     "company-year-quality-rebuild": 1800,
     "semantic-snapshot": 600,
-    "mcp-validate": 900,
+    "mcp-validate": 1800,
 }
 
 
@@ -420,6 +420,15 @@ def _create_rehearsal_marker(
     return marker_path.resolve()
 
 
+def format_live_sha256_unchanged(value: object) -> str:
+    """Return the explicit tri-state source-immutability result."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "not_verified"
+
+
 def render_rehearsal_markdown(
     report: dict[str, object],
     *,
@@ -441,7 +450,7 @@ def render_rehearsal_markdown(
         f"Last phase: `{report.get('last_phase') or '-'}`",
         (
             "Live SHA-256 unchanged: "
-            f"`{str(bool(report.get('live_sha256_unchanged'))).lower()}`"
+            f"`{format_live_sha256_unchanged(report.get('live_sha256_unchanged'))}`"
         ),
         f"Retained clone: `{clone_label}`",
         "",
@@ -797,6 +806,7 @@ def run_kam_schema_backfill_rehearsal(
         "report_path": "",
         "markdown_report_path": "",
         "marker_path": None,
+        "live_sha256_unchanged": None,
         "phases": [],
     }
     safety = None

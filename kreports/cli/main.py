@@ -123,6 +123,7 @@ def _run_clone_rehearsal_cli(
     # safety module, runtime database, or APFS-specific implementation.
     from kreports.maintenance.kam_backfill_rehearsal import (
         RehearsalRunError,
+        format_live_sha256_unchanged,
         run_kam_schema_backfill_rehearsal,
     )
 
@@ -144,7 +145,7 @@ def _run_clone_rehearsal_cli(
             "report_path": str(exc.report_path or ""),
             "markdown_report_path": "",
             "clone_path": "",
-            "live_sha256_unchanged": False,
+            "live_sha256_unchanged": None,
         }
 
     status = str(report.get("status") or "preflight_blocked")
@@ -158,7 +159,7 @@ def _run_clone_rehearsal_cli(
     typer.echo(f"clone_retained={str(bool(clone_path)).lower()}")
     typer.echo(
         "live_sha256_unchanged="
-        f"{str(bool(report.get('live_sha256_unchanged'))).lower()}",
+        f"{format_live_sha256_unchanged(report.get('live_sha256_unchanged'))}",
     )
     if status not in {
         "complete",
