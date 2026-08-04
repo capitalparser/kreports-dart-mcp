@@ -105,6 +105,27 @@ def test_policy_note_presentation_requires_a_bound_source_document(temp_engine):
     assert subject.get("source_url") is None
 
 
+def test_policy_note_presentation_rejects_nonannual_source_document_name(temp_engine):
+    _seed_peer_note_comparison(temp_engine)
+    session = sessionmaker(bind=temp_engine)()
+    source = session.query(SourceDocument).filter_by(
+        rcept_no="20250301000001", source_type="business_report",
+    ).one()
+    source.report_nm = "분기보고서 (2024.12)"
+    session.commit()
+    session.close()
+
+    out = compare_peer_accounting_policies(
+        "00000001", year=2024, item_key="revenue_recognition", peer_limit=1,
+    )
+
+    subject = out["note_presentations"][0]
+    assert subject["provenance_status"] == "unproven_annual_filing"
+    assert subject.get("rcept_no") is None
+    assert subject.get("source_url") is None
+    assert out["data_quality"]["status"] == "limited"
+
+
 def test_peer_note_comparison_dispatch_and_answer_pack_show_dedicated_tables(temp_engine):
     """The typed MCP boundary must carry the real comparison to the visual answer pack."""
     _seed_peer_note_comparison(temp_engine)

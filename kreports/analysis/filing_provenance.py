@@ -20,6 +20,10 @@ _SOURCE_FACT_TABLES = {
 
 CompactCitationScope: TypeAlias = tuple[str, int, str]
 
+
+def _is_exact_annual_report_name(value: object, bsns_year: int) -> bool:
+    return str(value or "").strip().startswith(f"사업보고서 ({bsns_year}.")
+
 def valid_annual_filing_receipt(
     receipt: object,
     bsns_year: object,
@@ -68,9 +72,14 @@ def canonical_annual_filing_source_binding(
         or str(row.get("source_document_rcept_no") or "") != receipt
         or str(row.get("source_document_corp_code") or "") != str(corp_code)
         or row.get("source_document_bsns_year") != normalized_year
+        or not _is_exact_annual_report_name(
+            row.get("source_document_report_nm"), normalized_year,
+        )
         or str(row.get("disclosure_rcept_no") or "") != receipt
         or str(row.get("disclosure_corp_code") or "") != str(corp_code)
-        or f"사업보고서 ({normalized_year}." not in str(row.get("disclosure_report_nm") or "")
+        or not _is_exact_annual_report_name(
+            row.get("disclosure_report_nm"), normalized_year,
+        )
     ):
         return None
     return _exact_receipt_matches_disclosure_date(
@@ -85,8 +94,8 @@ def canonical_annual_filing_source_receipt(
     corp_code: object,
     bsns_year: object,
     rcept_no: object,
-    source_document_id: object | None = None,
-    source_type: object | None = None,
+    source_document_id: object,
+    source_type: object,
     read_engine=None,
 ) -> str | None:
     """Re-query one canonical annual filing source at a public boundary.
@@ -94,13 +103,53 @@ def canonical_annual_filing_source_receipt(
     Public rows may retain cache metadata for inspection, but their serialized
     provenance flags are never authority to emit a DART source or link.
     """
+    if source_document_id is None or not str(source_type or ""):
+        return None
+    return _canonical_annual_filing_source_receipt(
+        corp_code=corp_code,
+        bsns_year=bsns_year,
+        rcept_no=rcept_no,
+        source_document_id=source_document_id,
+        source_type=source_type,
+        read_engine=read_engine,
+    )
+
+
+def canonical_business_report_source_receipt(
+    *,
+    corp_code: object,
+    bsns_year: object,
+    rcept_no: object,
+    read_engine=None,
+) -> str | None:
+    """Verify a policy row through an explicit fixed business-report path."""
+    return _canonical_annual_filing_source_receipt(
+        corp_code=corp_code,
+        bsns_year=bsns_year,
+        rcept_no=rcept_no,
+        source_document_id=None,
+        source_type="business_report",
+        read_engine=read_engine,
+    )
+
+
+def _canonical_annual_filing_source_receipt(
+    *,
+    corp_code: object,
+    bsns_year: object,
+    rcept_no: object,
+    source_document_id: object | None,
+    source_type: object,
+    read_engine=None,
+) -> str | None:
     receipt = valid_annual_filing_receipt(rcept_no, bsns_year)
     try:
         normalized_year = int(bsns_year)
     except (TypeError, ValueError):
         return None
     normalized_corp_code = str(corp_code or "")
-    if not receipt or not normalized_corp_code:
+    normalized_source_type = str(source_type or "")
+    if not receipt or not normalized_corp_code or not normalized_source_type:
         return None
     conditions = [
         "sd.rcept_no=:rcept_no",
@@ -120,17 +169,14 @@ def canonical_annual_filing_source_receipt(
         except (TypeError, ValueError):
             return None
         conditions.append("sd.id=:source_document_id")
-    if source_type is not None:
-        normalized_source_type = str(source_type or "")
-        if not normalized_source_type:
-            return None
-        params["source_type"] = normalized_source_type
-        conditions.append("sd.source_type=:source_type")
+    params["source_type"] = normalized_source_type
+    conditions.append("sd.source_type=:source_type")
     stmt = text(f"""
         SELECT sd.id AS source_document_id,
                sd.rcept_no AS source_document_rcept_no,
                sd.corp_code AS source_document_corp_code,
                sd.bsns_year AS source_document_bsns_year,
+               sd.report_nm AS source_document_report_nm,
                d.rcept_no AS disclosure_rcept_no,
                d.corp_code AS disclosure_corp_code,
                d.disc_date AS disclosure_disc_date,

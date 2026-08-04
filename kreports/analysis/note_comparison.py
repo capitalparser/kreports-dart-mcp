@@ -416,6 +416,7 @@ def compare_peer_accounting_notes(
                sd.rcept_no AS source_document_rcept_no,
                sd.corp_code AS source_document_corp_code,
                sd.bsns_year AS source_document_bsns_year,
+               sd.report_nm AS source_document_report_nm,
                d.rcept_no AS disclosure_rcept_no, d.corp_code AS disclosure_corp_code,
                d.disc_date AS disclosure_disc_date, d.report_nm AS disclosure_report_nm
         FROM accounting_note_chapters anc

@@ -20,11 +20,37 @@ def test_canonical_source_requery_rejects_wrong_company_year_and_report(temp_eng
             Disclosure(rcept_no="20250303000001", corp_code="00000001", corp_name="A", disc_date=date(2025, 3, 3), disc_type="A", report_nm="사업보고서 (2024.12)"),
         ])
 
-    for receipt in ("20250301000001", "20250302000001", "20250303000001"):
+    for source_document_id, receipt in enumerate(
+        ("20250301000001", "20250302000001", "20250303000001"), start=1,
+    ):
         assert canonical_annual_filing_source_receipt(
             corp_code="00000001", bsns_year=2024, rcept_no=receipt,
+            source_document_id=source_document_id,
             source_type="business_report", read_engine=temp_engine,
         ) is None
+
+
+def test_canonical_source_requery_rejects_nonannual_source_document_name(temp_engine):
+    from kreports.analysis.filing_provenance import canonical_annual_filing_source_receipt
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="분기보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="A",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+        ])
+
+    assert canonical_annual_filing_source_receipt(
+        corp_code="00000001", bsns_year=2024, rcept_no="20250301000001",
+        source_document_id=1, source_type="business_report", read_engine=temp_engine,
+    ) is None
 
 
 def _add_compact_fact(session, corp_code: str, year: int, fs_div: str = "CFS") -> None:

@@ -190,3 +190,60 @@ tests/test_answer_contracts.py
 
 Ruff on every changed Python file and `git diff --check` passed. No DB,
 artifact, sidecar, network, or remote mutation was performed.
+
+## Fix round 3/5 — require exact annual source identity at public boundaries
+
+### RED evidence
+
+Seven adversarial cases failed before the correction:
+
+1. A quarterly `source_documents.report_nm` bound to an annual disclosure was
+   accepted by the canonical re-query.
+2. Context-pack promotion accepted otherwise canonical caller rows after
+   either `source_document_id` or `source_type` was omitted.
+3. Note-comparison answer-pack promotion accepted otherwise canonical caller
+   rows after either identity field was omitted.
+4. Policy-note presentation and raw note comparison both treated a quarterly
+   source document bound to an annual disclosure as proven.
+
+```text
+7 failed in 0.93s
+```
+
+The existing inverse mismatch case (annual source document with a non-annual
+disclosure) was retained with explicit source identity so that both report
+name directions remain covered.
+
+### Fix
+
+- Canonical source binding now selects and requires an exact
+  `source_documents.report_nm` annual/business-report name as well as the
+  matching annual `disclosures.report_nm`, company, year, receipt, and filing
+  date.
+- The general context/note-comparison verifier now fails closed unless the
+  caller supplies both an explicit `source_document_id` and a nonempty
+  `source_type`.
+- Policy-note rows use a separate fixed `business_report` verifier path. It
+  still re-queries and binds the exact policy company/year/receipt to both the
+  canonical source document and disclosure, without trusting caller status.
+- Semantic and note-comparison source queries carry the source-document report
+  name into the shared binding check. Unproven rows remain linkless and
+  limited/summary-only as appropriate.
+
+### GREEN evidence
+
+Focused adversarial cases:
+
+```text
+7 passed in 0.82s
+```
+
+Required provenance, context, answer-pack, policy/note, semantic, catalog, and
+contract regression suites:
+
+```text
+163 passed in 1.77s
+```
+
+Ruff on every changed Python file and `git diff --check` passed. No persistent
+DB, artifact, sidecar, network, or remote mutation was performed.

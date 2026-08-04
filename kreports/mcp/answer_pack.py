@@ -15,6 +15,7 @@ from typing import Any
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
 from kreports.analysis.filing_provenance import (
     canonical_annual_filing_source_receipt,
+    canonical_business_report_source_receipt,
     valid_annual_filing_receipt,
 )
 from kreports.mcp.auditor_public import public_kam_lifecycle_events
@@ -409,11 +410,10 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
     for row in result.get("note_presentations") or []:
         if not isinstance(row, dict):
             continue
-        receipt = canonical_annual_filing_source_receipt(
+        receipt = canonical_business_report_source_receipt(
             corp_code=row.get("corp_code"),
             bsns_year=row.get("data_year") or result.get("year"),
             rcept_no=row.get("rcept_no"),
-            source_type="business_report",
         )
         if receipt:
             add(_source_from_rcept_no(

@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 import re
 
@@ -121,6 +122,46 @@ def test_policy_presentation_answer_pack_does_not_link_status_only_receipt():
             "provenance_status": "proven_annual_filing",
             "canonical_source_binding": True,
         }],
+    })
+
+    assert pack["sources"] == []
+
+
+@pytest.mark.parametrize("missing_field", ["source_document_id", "source_type"])
+def test_note_comparison_answer_pack_requires_explicit_source_identity(
+    temp_engine, missing_field,
+):
+    from kreports.db.engine import get_session
+    from kreports.db.models import Disclosure, SourceDocument
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="A",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+        ])
+    row = {
+        "company": {"corp_code": "00000001", "corp_name": "A"},
+        "rcept_no": "20250301000001",
+        "source_document_id": 1,
+        "source_type": "business_report",
+        "provenance_status": "proven_annual_filing",
+    }
+    row.pop(missing_field)
+
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_name": "A"},
+        "note_comparison": {
+            "year": 2024,
+            "topics": [{"topic": "leases", "rows": [row]}],
+        },
     })
 
     assert pack["sources"] == []

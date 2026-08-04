@@ -41,7 +41,7 @@ from kreports.analysis.audit_reporting import (
 )
 from kreports.analysis.evidence import dart_filing_url
 from kreports.analysis.filing_provenance import (
-    canonical_annual_filing_source_receipt,
+    canonical_business_report_source_receipt,
     valid_annual_filing_receipt,
 )
 
@@ -2056,11 +2056,10 @@ def _policy_annual_sources(corp_codes: list[str], *, year: int) -> dict[str, str
         corp_code = str(row["corp_code"])
         if corp_code in latest:
             continue
-        latest[corp_code] = canonical_annual_filing_source_receipt(
+        latest[corp_code] = canonical_business_report_source_receipt(
             corp_code=corp_code,
             bsns_year=year,
             rcept_no=row.get("rcept_no"),
-            source_type="business_report",
         ) or ""
     return latest
 

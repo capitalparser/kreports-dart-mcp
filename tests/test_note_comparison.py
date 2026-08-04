@@ -74,6 +74,47 @@ def test_note_comparison_marks_unbound_cached_note_summary_only_without_receipt(
     assert row["cached_rcept_no"] == "20250301000001"
 
 
+def test_note_comparison_rejects_nonannual_source_document_name(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="분기보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="Subject",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS",
+                rcept_no="20250301000001", source_type="business_report",
+                note_no="10", note_title="리스", section_type="policy",
+                body="분기보고서 원천에 잘못 결합된 캐시 주석",
+            ),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [],
+            "selection_policy": {"selection_mode": "adaptive"},
+        },
+        _read_engine=temp_engine,
+    )
+
+    row = result["topics"][0]["rows"][0]
+    assert row["availability"] == "summary_only"
+    assert row["rcept_no"] is None
+    assert row["provenance_status"] == "unproven_source_binding"
+
+
 def test_note_comparison_preserves_raw_text_and_returns_table_safe_peer_matrix(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session
