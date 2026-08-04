@@ -117,7 +117,7 @@ def _run_clone_rehearsal_cli(
             )
     source_db = source_db.resolve(strict=True)
     rehearsal_dir = rehearsal_dir.resolve(strict=True)
-    python_executable = python_executable.resolve(strict=True)
+    python_executable = python_executable.absolute()
 
     # Deliberately lazy: normal CLI startup must not bind the rehearsal
     # safety module, runtime database, or APFS-specific implementation.

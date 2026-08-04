@@ -1824,9 +1824,59 @@ def test_db_evidence_cli_resolves_paths_and_opts_into_evidence_phases(
         "source_db": source.resolve(),
         "rehearsal_dir": rehearsal_dir.resolve(),
         "repository_root": Path(cli_main.__file__).resolve().parents[2],
-        "python_executable": Path(sys.executable).resolve(),
+        "python_executable": Path(sys.executable).absolute(),
         "include_db_evidence": True,
     }
+
+
+def test_cli_preserves_virtualenv_python_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from kreports.cli import main as cli_main
+    from kreports.maintenance import kam_backfill_rehearsal as rehearsal
+
+    source = tmp_path / "source.db"
+    source.write_bytes(b"source")
+    rehearsal_dir = tmp_path / "rehearsal"
+    rehearsal_dir.mkdir()
+    virtualenv_python = tmp_path / "venv-python"
+    virtualenv_python.symlink_to(Path(sys.executable))
+    captured: dict[str, object] = {}
+
+    def fake_rehearsal(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "status": "complete",
+            "report_path": "",
+            "markdown_report_path": "",
+            "clone_path": "",
+            "live_sha256_unchanged": True,
+        }
+
+    monkeypatch.setattr(
+        rehearsal,
+        "run_kam_schema_backfill_rehearsal",
+        fake_rehearsal,
+    )
+
+    result = CliRunner().invoke(
+        cli_main.app,
+        [
+            "rehearse-kam-schema-backfill",
+            "--source-db",
+            str(source),
+            "--rehearsal-dir",
+            str(rehearsal_dir),
+            "--python-executable",
+            str(virtualenv_python),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["python_executable"] == virtualenv_python.absolute()
 
 
 def test_cli_safety_failure_exits_two_and_prints_existing_report(
