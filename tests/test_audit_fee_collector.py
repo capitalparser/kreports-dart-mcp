@@ -85,7 +85,7 @@ def test_ds002_parses_korean_thousands_dot_hours_without_decimal_guessing():
         rows=[{
             "bsns_year": "제26기(당기)",
             "adt_cntrct_dtls_mendng": "100백만원",
-            "adt_cntrct_dtls_time": "1.302",
+            "adt_cntrct_dtls_time": "1.302시간",
             "real_exc_dtls_mendng": "100백만원",
             "real_exc_dtls_time": "1.302",
         }],

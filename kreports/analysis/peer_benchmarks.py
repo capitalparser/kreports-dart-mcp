@@ -1435,7 +1435,7 @@ def _bound_audit_fee_receipts(rows: list[dict], *, year: int) -> set[tuple[str, 
     try:
         with _engine_module.engine.connect() as conn:
             disclosures = conn.execute(text("""
-                SELECT rcept_no, corp_code, report_nm
+                SELECT rcept_no, corp_code, report_nm, disc_date
                 FROM disclosures
                 WHERE rcept_no IN :receipts
             """).bindparams(bindparam("receipts", expanding=True)), {
@@ -1448,6 +1448,7 @@ def _bound_audit_fee_receipts(rows: list[dict], *, year: int) -> set[tuple[str, 
         (str(row["corp_code"]), str(row["rcept_no"]))
         for row in disclosures
         if str(row.get("report_nm") or "").startswith(annual_prefix)
+        and str(row["rcept_no"])[:8] == str(row.get("disc_date") or "").replace("-", "")[:8]
         and (str(row["corp_code"]), str(row["rcept_no"])) in candidates
     }
 

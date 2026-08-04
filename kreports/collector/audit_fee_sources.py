@@ -298,10 +298,12 @@ def renormalize_ds002_observation(
 
 
 def normalize_hours(value: object) -> int | None:
-    raw = str(value or "").strip()
+    raw = str(value or "").strip().replace(" ", "")
     # Korean source tables use dots as thousands separators (for example
     # ``1.302``). Only the unambiguous repeated 3-digit grouping is accepted;
     # other dotted values are left to the ordinary numeric parser.
+    if raw.endswith("시간"):
+        raw = raw[:-2]
     if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", raw):
         raw = raw.replace(".", "")
     number = _parse_number(raw)
