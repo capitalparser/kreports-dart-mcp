@@ -62,13 +62,14 @@ _ACTIONS = {
     "semantic-snapshot",
     "mcp-validate",
 }
-_FORBIDDEN_SCHEMA_LITERALS = (
+_FORBIDDEN_SCHEMA_ERROR_LITERALS = (
     "no such table",
     "no such column",
     "operationalerror",
-    "kam_items",
-    "kam_item_id",
-    "audit_procedure_items",
+)
+_FORBIDDEN_SCHEMA_IDENTIFIER = re.compile(
+    r"(?<![a-z0-9_])(?:kam_items|kam_item_id|audit_procedure_items)"
+    r"(?![a-z0-9_])",
 )
 _PATH_TEXT = re.compile(r"(?:[A-Za-z]:)?/(?:[^\s:'\"]+/)+[^\s:'\"]*")
 _MARKER_SCHEMA = "kam-schema-backfill-rehearsal-marker.v1"
@@ -883,7 +884,9 @@ def semantic_snapshot() -> dict[str, object]:
 
 def _public_schema_leak(value: object) -> bool:
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).lower()
-    return any(token in rendered for token in _FORBIDDEN_SCHEMA_LITERALS)
+    return any(
+        token in rendered for token in _FORBIDDEN_SCHEMA_ERROR_LITERALS
+    ) or bool(_FORBIDDEN_SCHEMA_IDENTIFIER.search(rendered))
 
 
 def validate_professional_result(result: dict[str, object]) -> dict[str, object]:

@@ -124,10 +124,15 @@ def public_auditor_result(result: object) -> object:
             }
         transformed = {}
         for field, item in value.items():
+            if field == "kam_item_id":
+                continue
+            public_field = (
+                "key_audit_matters" if field == "kam_items" else field
+            )
             if field == "rcept_no":
-                transformed[field] = parent_rcept_no(str(item or ""))
+                transformed[public_field] = parent_rcept_no(str(item or ""))
             else:
-                transformed[field] = transform(
+                transformed[public_field] = transform(
                     item,
                     field,
                     in_kam_analysis=(

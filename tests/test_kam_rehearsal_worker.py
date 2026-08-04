@@ -1337,6 +1337,15 @@ def test_mcp_validator_rejects_schema_text_at_every_layer() -> None:
     assert caught.value.code == "mcp_schema_not_closed"
 
 
+def test_schema_leak_detector_allows_namespaced_public_table_ids() -> None:
+    from kreports.maintenance.kam_rehearsal_worker import _public_schema_leak
+
+    assert not _public_schema_leak(
+        {"answer_pack": {"tables": [{"id": "audit_report_kam_items"}]}},
+    )
+    assert _public_schema_leak({"source_table": "kam_items"})
+
+
 def test_mcp_validation_rejects_envelope_only_schema_leak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

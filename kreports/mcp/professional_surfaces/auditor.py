@@ -320,7 +320,9 @@ def _kam_rows(
         if not isinstance(section, dict) or section.get("section_key") != "kam":
             continue
         analysis = section.get("kam_analysis") if isinstance(section.get("kam_analysis"), dict) else {}
-        items = section.get("kam_items")
+        items = section.get("key_audit_matters")
+        if not isinstance(items, list):
+            items = section.get("kam_items")
         if not isinstance(items, list) or not items:
             items = [{
                 "topic": topic,

@@ -247,7 +247,13 @@ def test_direct_auditor_handlers_sanitize_uppercase_without_mutating_inputs(
             "rcept_no": "20250101000001_001_xml",
             "topic_hints": ["SUSTAINABILITY"],
             "kam_analysis": {"topics": ["SUSTAINABILITY"]},
-            "kam_items": [{"topic": "SUSTAINABILITY", "lifecycle": "PENDING"}],
+            "kam_items": [
+                {
+                    "kam_item_id": 42,
+                    "topic": "SUSTAINABILITY",
+                    "lifecycle": "PENDING",
+                }
+            ],
         }],
         "topics": ["Board discussion"],
         "data_quality": {"status": "limited"},
@@ -257,7 +263,13 @@ def test_direct_auditor_handlers_sanitize_uppercase_without_mutating_inputs(
             "rcept_no": "20250101000001_001_xml",
             "topic_hints": ["SUSTAINABILITY"],
             "kam_analysis": {"topics": ["SUSTAINABILITY"]},
-            "kam_items": [{"topic": "SUSTAINABILITY", "lifecycle": "PENDING"}],
+            "kam_items": [
+                {
+                    "kam_item_id": 42,
+                    "topic": "SUSTAINABILITY",
+                    "lifecycle": "PENDING",
+                }
+            ],
         }],
         "topics": ["Board discussion"],
         "data_quality": {"status": "limited"},
@@ -288,6 +300,18 @@ def test_direct_auditor_handlers_sanitize_uppercase_without_mutating_inputs(
     assert enriched["subject_sections"][0]["kam_analysis"]["topics"] == [
         "기타 핵심감사사항",
     ]
+    for section in (
+        peer["subject_sections"][0],
+        sections["sections"][0],
+        enriched["subject_sections"][0],
+    ):
+        assert "kam_items" not in section
+        assert section["key_audit_matters"] == [
+            {
+                "topic": "기타 핵심감사사항",
+                "lifecycle": "상태 미분류",
+            }
+        ]
     assert peer["topics"] == sections["topics"] == enriched["topics"] == [
         "Board discussion",
     ]
