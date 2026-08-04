@@ -5,6 +5,7 @@ from kreports.quality.release_gate import describe_release_blockers
 
 
 _BLOCKER_LABELS = {
+    "investor_core_3y_coverage": "3년 핵심 투자 데이터 커버리지 부족",
     "investor_core_coverage": "핵심 투자 데이터 커버리지 부족",
     "release_manifest_unavailable": "배포 매니페스트 미확인",
     "schema_migration_contract_mismatch": "데이터베이스 스키마 계약 불일치",
@@ -12,6 +13,9 @@ _BLOCKER_LABELS = {
     "runtime_not_readonly": "읽기 전용 실행 환경 미확인",
 }
 _BLOCKER_ACTIONS_KO = {
+    "backfill and validate three-year investor-core coverage before release": (
+        "배포 전에 3년 핵심 투자 분석용 기업·연도 데이터의 수집과 검증이 필요합니다."
+    ),
     "backfill and validate investor-core company-year coverage before release": (
         "배포 전에 핵심 투자 분석용 기업·연도 데이터의 수집과 검증이 필요합니다."
     ),
@@ -32,6 +36,7 @@ _BLOCKER_ACTIONS_KO = {
     ),
 }
 _DEGRADED_FEATURE_LABELS = {
+    "investor_timeseries_5y": "5년 투자자 재무 시계열 제공 범위가 제한됩니다.",
     "accounting_policy": "회계정책 분석 범위가 제한됩니다.",
     "audit_procedure": "감사절차 분석 범위가 제한됩니다.",
     "materiality_benchmark": "중요성 기준 분석 범위가 제한됩니다.",

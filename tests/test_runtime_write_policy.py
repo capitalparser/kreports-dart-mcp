@@ -243,7 +243,7 @@ def test_release_gate_makes_investor_core_gap_required(temp_engine, monkeypatch)
 
     report = release_gate.evaluate_release_gate("public_runtime")
 
-    assert "investor_core_coverage" in report["required_failures"]
+    assert "investor_core_3y_coverage" in report["required_failures"]
 
 
 def test_empty_manifest_tables_do_not_make_release_manifest_available(temp_engine, monkeypatch):

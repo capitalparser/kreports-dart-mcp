@@ -30,6 +30,9 @@ SUPPORTED_PROFILES = (PROFILE_PUBLIC_RUNTIME, PROFILE_AUDITOR_FULL)
 EXPECTED_TOOL_COUNT = 34
 FEATURE_COVERAGE_THRESHOLD_PCT = 95.0
 FEATURE_COVERAGE_THRESHOLD_BASIS_POINTS = 9500
+INVESTOR_CORE_3Y = "investor_core_3y"
+INVESTOR_TIMESERIES_5Y = "investor_timeseries_5y"
+INVESTOR_CORE_COMPATIBILITY_ALIAS = "investor_core"
 MATERIALITY_BENCHMARK_WINDOW_YEARS = 3
 MATERIALITY_BENCHMARK_METRICS = (
     "profit_before_tax",
@@ -49,6 +52,25 @@ _MATERIALITY_COVERAGE_METADATA = {
     "duplicate_policy": "value_and_provenance_identical_only",
     "amount_policy": "finite_sqlite_integer_or_real",
     "pbt_policy": "direct_or_profit_loss_plus_tax_expense",
+}
+_INVESTOR_CORE_3Y_COVERAGE_METADATA = {
+    "window_years": 5,
+    "minimum_available_years": 3,
+    "current_year_financial_core_required": True,
+    "current_year_disclosure_list_required": False,
+    "annual_core_source": "exact_company_year_annual_filing",
+    "grade_policy": "A_or_B",
+}
+_INVESTOR_TIMESERIES_5Y_COVERAGE_METADATA = {
+    "window_years": 5,
+    "minimum_available_years": 5,
+    "current_year_financial_core_required": True,
+    "current_year_disclosure_list_required": False,
+    "annual_core_source": "exact_company_year_annual_filing",
+    "grade_policy": "A_only",
+}
+_INVESTOR_CORE_COMPATIBILITY_ALIAS_METADATA = {
+    "compatibility_alias_for": INVESTOR_CORE_3Y,
 }
 STALE_BACKFILL_AGE = timedelta(hours=1)
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
@@ -94,6 +116,10 @@ class ReleaseGateReport(TypedDict):
 
 
 _EXACT_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
+    "investor_core_3y_coverage": (
+        "dataset_backfill_maintainer",
+        "backfill and validate three-year investor-core coverage before release",
+    ),
     "investor_core_coverage": (
         "dataset_backfill_maintainer",
         "backfill and validate investor-core company-year coverage before release",
@@ -728,7 +754,7 @@ def _quality_coverage(
             ).scalar()
             or 0
         )
-        investor_numerator = int(
+        investor_core_3y_numerator = int(
             session.execute(
                 text(
                     "SELECT COUNT(*) FROM companies c "
@@ -737,7 +763,23 @@ def _quality_coverage(
                     "AND q.bsns_year=:year "
                     "WHERE c.stock_code IS NOT NULL "
                     "AND c.market IN ('KOSPI', 'KOSDAQ') "
-                    "AND q.investor_grade IN ('A', 'B')"
+                    "AND q.investor_grade IN ('A', 'B') "
+                    "AND q.financial_core_status='available'"
+                ),
+                {"year": coverage_year},
+            ).scalar()
+            or 0
+        )
+        investor_timeseries_5y_numerator = int(
+            session.execute(
+                text(
+                    "SELECT COUNT(*) FROM companies c "
+                    "JOIN company_year_quality q "
+                    "ON q.corp_code=c.corp_code "
+                    "AND q.bsns_year=:year "
+                    "WHERE c.stock_code IS NOT NULL "
+                    "AND c.market IN ('KOSPI', 'KOSDAQ') "
+                    "AND q.investor_grade='A'"
                 ),
                 {"year": coverage_year},
             ).scalar()
@@ -806,8 +848,18 @@ def _quality_coverage(
         "outside_core_markets": outside_core_markets,
     }
     coverage = {
-        "investor_core": _coverage_result(
-            investor_numerator,
+        INVESTOR_CORE_3Y: _coverage_result(
+            investor_core_3y_numerator,
+            core_denominator,
+        ),
+        INVESTOR_TIMESERIES_5Y: _coverage_result(
+            investor_timeseries_5y_numerator,
+            core_denominator,
+        ),
+        # The historical key is an explicit alias rather than a five-year
+        # claim. New consumers must use the named windows above.
+        INVESTOR_CORE_COMPATIBILITY_ALIAS: _coverage_result(
+            investor_core_3y_numerator,
             core_denominator,
         ),
         "accounting_policy": _coverage_result(
@@ -825,7 +877,9 @@ def _quality_coverage(
         for feature, result in coverage.items()
     }
     excluded_populations = {
-        "investor_core": dict(common_exclusions),
+        INVESTOR_CORE_3Y: dict(common_exclusions),
+        INVESTOR_TIMESERIES_5Y: dict(common_exclusions),
+        INVESTOR_CORE_COMPATIBILITY_ALIAS: dict(common_exclusions),
         "accounting_policy": dict(common_exclusions),
         "audit_procedure": {
             **common_exclusions,
@@ -844,7 +898,14 @@ def _quality_coverage(
         coverage_year,
         coverage,
         {
-            "investor_core": {"listing_eligibility": listing_metadata},
+            INVESTOR_CORE_3Y: dict(_INVESTOR_CORE_3Y_COVERAGE_METADATA),
+            INVESTOR_TIMESERIES_5Y: dict(
+                _INVESTOR_TIMESERIES_5Y_COVERAGE_METADATA
+            ),
+            INVESTOR_CORE_COMPATIBILITY_ALIAS: dict(
+                _INVESTOR_CORE_COMPATIBILITY_ALIAS_METADATA
+            ),
+            "listing_eligibility": listing_metadata,
             "materiality_benchmark": dict(_MATERIALITY_COVERAGE_METADATA),
         },
         denominators,
@@ -941,12 +1002,13 @@ def evaluate_release_gate(
     if any(started_at <= cutoff for started_at in running_started_at):
         required_failures.append("stale_backfill_run")
 
-    investor_coverage = coverage.get("investor_core")
+    investor_coverage = coverage.get(INVESTOR_CORE_3Y)
     if _below_threshold(investor_coverage):
-        required_failures.append("investor_core_coverage")
+        required_failures.append("investor_core_3y_coverage")
 
     degraded_features: list[str] = []
     for coverage_key, public_key in (
+        (INVESTOR_TIMESERIES_5Y, INVESTOR_TIMESERIES_5Y),
         ("accounting_policy", "accounting_policy"),
         ("audit_procedure", "audit_procedure"),
         ("materiality_benchmark", "materiality_benchmark"),
@@ -961,7 +1023,7 @@ def evaluate_release_gate(
         try:
             snapshot = investor_dataset_readiness_snapshot()
             if snapshot.get("required_gaps"):
-                required_failures.append("investor_core_coverage")
+                required_failures.append("investor_core_3y_coverage")
         except Exception:
             required_failures.append(
                 "investor_dataset_readiness_unavailable"

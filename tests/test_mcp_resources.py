@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,66 @@ def test_required_resources_and_templates_are_enumerated():
         "kreports://company/{corp_code}/{year}",
         "kreports://evidence/{rcept_no}",
         "kreports://visualization/{digest}",
+    }
+
+
+def test_dataset_readiness_exposes_named_investor_coverage_windows(monkeypatch):
+    """Catch a resource that hides the 3-year versus 5-year release meaning."""
+    from kreports.mcp import resources
+
+    class ReadySession:
+        def connection(self):
+            return object()
+
+    monkeypatch.setattr(
+        resources,
+        "_resource_session",
+        lambda: nullcontext(ReadySession()),
+    )
+    monkeypatch.setattr(
+        resources,
+        "evaluate_release_gate",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "profile": "public_runtime",
+            "schema_version": "schema-v1",
+            "dataset_version": "dataset-v1",
+            "coverage_year": 2025,
+            "coverage": {
+                "investor_core_3y": {"coverage_pct": 95.0},
+                "investor_timeseries_5y": {"coverage_pct": 50.0},
+                "investor_core": {"coverage_pct": 95.0},
+            },
+            "coverage_metadata": {
+                "investor_core_3y": {
+                    "window_years": 5,
+                    "minimum_available_years": 3,
+                },
+                "investor_timeseries_5y": {
+                    "window_years": 5,
+                    "minimum_available_years": 5,
+                },
+                "investor_core": {
+                    "compatibility_alias_for": "investor_core_3y"
+                },
+            },
+            "denominators": {
+                "investor_core_3y": 20,
+                "investor_timeseries_5y": 20,
+                "investor_core": 20,
+            },
+            "excluded_populations": {},
+            "required_failures": [],
+            "degraded_features": ["investor_timeseries_5y"],
+        },
+    )
+
+    result = read_resource("kreports://dataset/readiness")
+
+    assert result["feature_gates"]["investor_core_3y"]["coverage_pct"] == 95.0
+    assert result["feature_gates"]["investor_timeseries_5y"]["coverage_pct"] == 50.0
+    assert result["coverage_metadata"]["investor_core"] == {
+        "compatibility_alias_for": "investor_core_3y"
     }
 
 

@@ -395,7 +395,7 @@ def test_release_coverage_metadata_keeps_listing_history_diagnostic_only(temp_en
     _, coverage, metadata, denominators, _ = _quality_coverage(2025)
     assert denominators["investor_core"] == 3
     assert coverage["investor_core"]["denominator"] == 3
-    assert metadata["investor_core"]["listing_eligibility"]["verified_full_year"] == 1
+    assert metadata["listing_eligibility"]["verified_full_year"] == 1
 
 
 def test_absent_listing_contract_reports_every_current_company_as_uncovered(temp_engine):

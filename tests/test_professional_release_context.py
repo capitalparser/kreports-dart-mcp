@@ -103,6 +103,20 @@ def test_known_release_context_uses_korean_labels_without_changing_structured_pa
         assert "audit_report_sections" not in public_text
 
 
+def test_named_investor_windows_have_public_release_labels():
+    """Catch a new readiness key falling back to opaque public text."""
+    from kreports.mcp.release_context_public import (
+        public_degraded_feature_text,
+        public_release_blocker_text,
+    )
+
+    blocker = public_release_blocker_text("investor_core_3y_coverage")
+    degraded = public_degraded_feature_text("investor_timeseries_5y")
+
+    assert "3년" in blocker
+    assert "5년" in degraded
+
+
 def test_unknown_release_context_codes_fail_closed_without_echoing_tokens(monkeypatch):
     from kreports.mcp import dispatch
     from kreports.mcp.contracts import build_answer_envelope

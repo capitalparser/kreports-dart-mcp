@@ -93,13 +93,14 @@ def _financial_core_proof() -> dict:
 def _quality_freshness_fields(
     *,
     investor_grade: str = "A",
+    financial_core_status: str = "available",
     policy_status: str = "full_body",
     procedure_status: str = "available",
     kam_status: str = "full_body",
 ) -> dict[str, str]:
     summary = build_quality_evidence_summary(
         statuses={
-            "financial_core": "available",
+            "financial_core": financial_core_status,
             "auditor": "available",
             "audit_fee": "available",
             "policy": policy_status,
@@ -133,6 +134,7 @@ def _seed_quality_row(
     grade: str,
     market: str = "KOSPI",
     stock_code: str | None = "000001",
+    financial_core_status: str = "available",
     policy_status: str = "full_body",
     procedure_status: str = "available",
     kam_status: str = "full_body",
@@ -151,7 +153,7 @@ def _seed_quality_row(
                 corp_code=corp_code,
                 bsns_year=2025,
                 market=market,
-                financial_core_status="available",
+                financial_core_status=financial_core_status,
                 auditor_status="available",
                 audit_fee_status="available",
                 policy_status=policy_status,
@@ -165,6 +167,7 @@ def _seed_quality_row(
                 quality_version=QUALITY_VERSION,
                 **_quality_freshness_fields(
                     investor_grade=grade,
+                    financial_core_status=financial_core_status,
                     policy_status=policy_status,
                     procedure_status=procedure_status,
                     kam_status=kam_status,
@@ -373,6 +376,87 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     mismatch = release_gate.evaluate_release_gate("public_runtime")
     assert mismatch["ok"] is False
     assert "unexpected_tool_count" in mismatch["required_failures"]
+
+
+def test_public_runtime_separates_three_year_release_from_five_year_timeseries(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a release gate that calls three-year readiness five-year coverage."""
+    from kreports.quality import release_gate
+
+    for index in range(20):
+        _seed_quality_row(
+            corp_code=f"{index + 1:08d}",
+            grade="B" if index < 19 else "D",
+            stock_code=f"{index + 1:06d}",
+        )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = release_gate.evaluate_release_gate("public_runtime")
+
+    assert report["ok"] is True
+    assert report["coverage"]["investor_core_3y"]["coverage_pct"] == 95.0
+    assert report["coverage"]["investor_timeseries_5y"]["coverage_pct"] == 0.0
+    assert report["coverage"]["investor_core"] == report["coverage"][
+        "investor_core_3y"
+    ]
+    assert report["coverage_metadata"]["investor_core"] == {
+        "compatibility_alias_for": "investor_core_3y"
+    }
+    assert report["coverage_metadata"]["investor_core_3y"] == {
+        "window_years": 5,
+        "minimum_available_years": 3,
+        "current_year_financial_core_required": True,
+        "current_year_disclosure_list_required": False,
+        "annual_core_source": "exact_company_year_annual_filing",
+        "grade_policy": "A_or_B",
+    }
+    assert report["coverage_metadata"]["investor_timeseries_5y"] == {
+        "window_years": 5,
+        "minimum_available_years": 5,
+        "current_year_financial_core_required": True,
+        "current_year_disclosure_list_required": False,
+        "annual_core_source": "exact_company_year_annual_filing",
+        "grade_policy": "A_only",
+    }
+    assert "investor_timeseries_5y" in report["degraded_features"]
+    assert "investor_core_3y_coverage" not in report["required_failures"]
+
+
+@pytest.mark.parametrize("financial_core_status", ("missing", "partial"))
+def test_current_investor_core_excludes_b_without_current_year_financials(
+    temp_engine,
+    monkeypatch,
+    financial_core_status,
+):
+    """Catch a current investor gate that accepts a stale three-year B row."""
+    from kreports.quality import release_gate
+
+    _seed_quality_row(corp_code="00000001", grade="B", stock_code="000001")
+    _seed_quality_row(corp_code="00000002", grade="B", stock_code="000002")
+    _seed_quality_row(
+        corp_code="00000003",
+        grade="B",
+        stock_code="000003",
+        financial_core_status=financial_core_status,
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = release_gate.evaluate_release_gate("public_runtime")
+
+    assert report["coverage"]["investor_core_3y"] == {
+        "numerator": 2,
+        "denominator": 3,
+        "coverage_pct": 66.67,
+        "threshold_pct": 95.0,
+    }
+    assert report["coverage_metadata"]["investor_core_3y"][
+        "current_year_financial_core_required"
+    ] is True
+    assert "investor_core_3y_coverage" in report["required_failures"]
 
 
 def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
@@ -903,7 +987,7 @@ def test_empty_manifest_and_quality_ledger_fail_closed_with_actionable_guidance(
 
     assert report["ok"] is False
     assert report["required_failures"] == [
-        "investor_core_coverage",
+        "investor_core_3y_coverage",
         "release_manifest_unavailable",
     ]
     guidance = {
@@ -914,10 +998,10 @@ def test_empty_manifest_and_quality_ledger_fail_closed_with_actionable_guidance(
         "owner": "dataset_release_maintainer",
         "action": "write a validated dataset manifest from the prepared runtime DB",
     }
-    assert guidance["investor_core_coverage"] == {
-        "blocker": "investor_core_coverage",
+    assert guidance["investor_core_3y_coverage"] == {
+        "blocker": "investor_core_3y_coverage",
         "owner": "dataset_backfill_maintainer",
-        "action": "backfill and validate investor-core company-year coverage before release",
+        "action": "backfill and validate three-year investor-core coverage before release",
     }
 
 
@@ -1499,4 +1583,4 @@ def test_public_runtime_does_not_round_1899_of_1999_up_to_threshold(
     report = evaluate_release_gate("public_runtime")
 
     assert report["coverage"]["investor_core"]["coverage_pct"] == 95.0
-    assert "investor_core_coverage" in report["required_failures"]
+    assert "investor_core_3y_coverage" in report["required_failures"]

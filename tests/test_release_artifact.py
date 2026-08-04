@@ -126,6 +126,38 @@ def test_release_manifest_preserves_materiality_coverage_metadata():
     }
 
 
+def test_release_manifest_binds_legacy_investor_key_to_named_three_year_window():
+    """Catch a release proof that keeps an ambiguous investor_core alias."""
+    from kreports.release_artifact import ReleaseManifest
+
+    payload = _minimal_manifest_payload()
+    coverage = {
+        "numerator": 19,
+        "denominator": 20,
+        "coverage_pct": 95.0,
+        "threshold_pct": 95.0,
+    }
+    payload["release_gate"]["feature_coverage"] = {
+        "investor_core_3y": coverage,
+        "investor_timeseries_5y": {**coverage, "numerator": 10, "coverage_pct": 50.0},
+        "investor_core": coverage,
+    }
+    payload["release_gate"]["coverage_metadata"] = {
+        "investor_core_3y": {"window_years": 5, "minimum_available_years": 3},
+        "investor_timeseries_5y": {"window_years": 5, "minimum_available_years": 5},
+    }
+
+    with pytest.raises(ValidationError, match="compatibility alias"):
+        ReleaseManifest.model_validate(payload)
+
+    payload["release_gate"]["coverage_metadata"]["investor_core"] = {
+        "compatibility_alias_for": "investor_core_3y"
+    }
+    parsed = ReleaseManifest.model_validate(payload)
+
+    assert parsed.release_gate.feature_coverage["investor_core"] == coverage
+
+
 def _create_contract_db(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:

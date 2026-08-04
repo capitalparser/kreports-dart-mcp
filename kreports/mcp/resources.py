@@ -294,6 +294,7 @@ def _dataset_readiness() -> dict[str, Any]:
         "dataset_version": dataset_version,
         "coverage_year": gate.get("coverage_year"),
         "feature_gates": gate.get("coverage") or {},
+        "coverage_metadata": gate.get("coverage_metadata") or {},
         "denominators": gate.get("denominators") or {},
         "excluded_populations": gate.get("excluded_populations") or {},
         "required_failures": required_failures,

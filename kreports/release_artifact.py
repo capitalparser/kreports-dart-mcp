@@ -115,6 +115,29 @@ class ReleaseGateEvidence(_StrictModel):
             raise ValueError("a passing release gate cannot contain blockers")
         if not self.passed and not self.blockers:
             raise ValueError("a failed release gate must contain named blockers")
+        named_investor_features = {
+            "investor_core_3y",
+            "investor_timeseries_5y",
+        }
+        present_named_features = (
+            named_investor_features & set(self.feature_coverage)
+        )
+        if present_named_features:
+            if present_named_features != named_investor_features:
+                raise ValueError(
+                    "named investor coverage must include both three-year "
+                    "and five-year windows"
+                )
+            if (
+                self.feature_coverage.get("investor_core")
+                != self.feature_coverage["investor_core_3y"]
+                or self.coverage_metadata.get("investor_core")
+                != {"compatibility_alias_for": "investor_core_3y"}
+            ):
+                raise ValueError(
+                    "investor_core must be an explicit compatibility alias "
+                    "for investor_core_3y"
+                )
         return self
 
 
