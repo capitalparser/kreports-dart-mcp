@@ -911,6 +911,17 @@ def _apply_peer_profile(
         subject_sector=subject_sector,
         fs_div=fs_div,
     )
+    candidate_industry_rows = conn.execute(
+        text(
+            "SELECT corp_code, induty_code FROM companies "
+            "WHERE corp_code IN :corp_codes"
+        ).bindparams(bindparam("corp_codes", expanding=True)),
+        {"corp_codes": candidates},
+    ).mappings().all() if candidates else []
+    candidate_industry_codes = {
+        str(row["corp_code"]): row["induty_code"]
+        for row in candidate_industry_rows
+    }
     selected: list[tuple[str, float]] = []
     excluded: dict[str, list[str]] = {}
     coverage: dict[str, float] = {}
@@ -919,14 +930,11 @@ def _apply_peer_profile(
     automatic_candidates = set(resolution.peer_corp_codes)
     for code in candidates:
         reasons: list[str] = []
-        row = conn.execute(
-            text("SELECT induty_code FROM companies WHERE corp_code=:corp_code"),
-            {"corp_code": code},
-        ).first()
-        if row is None:
+        induty_code = candidate_industry_codes.get(code)
+        if induty_code is None:
             excluded[code] = ["company_not_found"]
             continue
-        sector = classify_sector(row[0]).value
+        sector = classify_sector(induty_code).value
         if code in profile.excluded_corp_codes:
             reasons.append("excluded_by_user")
         if sector in profile.excluded_sector_groups:

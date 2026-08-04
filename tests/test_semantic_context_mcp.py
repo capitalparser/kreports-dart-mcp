@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
+
 
 def test_business_overview_exposes_typed_read_only_semantic_context(temp_engine):
     from kreports.db.engine import get_session
     from kreports.db.models import (
         AccountingNoteChapter,
         Company,
+        Disclosure,
         ReportSection,
         SourceDocument,
     )
@@ -16,7 +19,11 @@ def test_business_overview_exposes_typed_read_only_semantic_context(temp_engine)
             Company(corp_code="00000001", stock_code="000001", corp_name="Semantic Corp", induty_code="26410"),
             SourceDocument(
                 rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
-                source_type="business_report", report_nm="사업보고서", raw_content="<xml/>", doc_hash="a" * 40,
+                source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="Semantic Corp",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
             ),
             ReportSection(
                 rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,

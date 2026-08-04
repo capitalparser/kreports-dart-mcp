@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import json
 
 from kreports.mcp.contracts import build_answer_envelope
@@ -14,6 +15,32 @@ from kreports.mcp.workflows import (
     investor_first_pass,
     semantic_peer_context_review,
 )
+
+
+def _seed_canonical_business_report_source() -> int:
+    """Return a source-document id that passes the public annual-source gate."""
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Disclosure, SourceDocument
+
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00000001", stock_code="000001",
+            corp_name="Context Corp", induty_code="26410",
+        ))
+        session.add(Disclosure(
+            rcept_no="20250301000001", corp_code="00000001",
+            corp_name="Context Corp", disc_date=date(2025, 3, 1),
+            disc_type="A", report_nm="사업보고서 (2024.12)",
+        ))
+        source_document = SourceDocument(
+            rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+            source_type="business_report", report_nm="사업보고서 (2024.12)",
+            raw_content="<xml/>", doc_hash="a" * 40,
+        )
+        session.add(source_document)
+        session.flush()
+        assert isinstance(source_document.id, int)
+        return source_document.id
 
 
 def _envelope(name: str, *, status: str = "usable"):
@@ -62,8 +89,9 @@ def test_workflow_specialists_run_once_in_declared_order():
     assert [child["tool_name"] for child in result["children"]] == expected
 
 
-def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_separation():
+def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_separation(temp_engine):
     calls = []
+    source_document_id = _seed_canonical_business_report_source()
     shared_cohort = {
         "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
         "peers": [{"corp_code": "00000002", "corp_name": "Peer Corp"}],
@@ -95,6 +123,8 @@ def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_s
                     "excerpt": "DART risk disclosure",
                     "full_text_hash": "a" * 40,
                     "rcept_no": "20250301000001",
+                    "source_document_id": source_document_id,
+                    "source_type": "business_report",
                 }
             ],
             "notes": [
@@ -104,6 +134,9 @@ def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_s
                     "topic": "leases",
                     "excerpt": "CFS lease note",
                     "full_text_hash": "b" * 40,
+                    "rcept_no": "20250301000001",
+                    "source_document_id": source_document_id,
+                    "source_type": "business_report",
                 },
                 {
                     "source_locator": "accounting_note_chapters:11",
@@ -111,6 +144,9 @@ def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_s
                     "topic": "leases",
                     "excerpt": "OFS lease note",
                     "full_text_hash": "c" * 40,
+                    "rcept_no": "20250301000001",
+                    "source_document_id": source_document_id,
+                    "source_type": "business_report",
                 },
             ],
         }
@@ -194,8 +230,10 @@ def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_s
     assert {item["evidence_type"] for item in pack["missing_evidence"]} >= {"audit_report"}
 
 
-def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenance():
+def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenance(temp_engine):
     from kreports.mcp.workflows import semantic_peer_context_review
+
+    source_document_id = _seed_canonical_business_report_source()
 
     def context_builder(_company, _year, topics=None):
         assert topics == ["risks", "leases"]
@@ -213,6 +251,9 @@ def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenan
                     "section_key": "risks",
                     "excerpt": "DART risk disclosure",
                     "full_text_hash": "a" * 40,
+                    "rcept_no": "20250301000001",
+                    "source_document_id": source_document_id,
+                    "source_type": "business_report",
                 }
             ],
             "notes": [
@@ -222,6 +263,9 @@ def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenan
                     "topic": "leases",
                     "excerpt": "CFS fallback lease note",
                     "full_text_hash": "b" * 40,
+                    "rcept_no": "20250301000001",
+                    "source_document_id": source_document_id,
+                    "source_type": "business_report",
                 }
             ],
             "financials": [
@@ -289,7 +333,7 @@ def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenan
     ]
     assert pack_notes[0]["metadata"]["fs_div"] == "CFS"
     assert pack_notes[0]["metadata"]["fs_div_selection"]["status"] == "fallback_requested_fs_div_unavailable"
-    assert [item["source_id"] for item in result["context_pack"]["dart_filing"] if item["metadata"]["bucket"] == "financials"] == ["financials:00000001:2024:OFS:Q4"]
+    assert [item["source_id"] for item in result["context_pack"]["dart_filing"] if item["metadata"]["bucket"] == "financials"] == []
 
 
 def test_semantic_workflow_surfaces_note_comparison_summary_with_peer_evidence():
@@ -661,15 +705,10 @@ def test_semantic_workflow_budget_preserves_an_already_bounded_context_pack():
 
     assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES
     assert result["truncation"]["applied"] is True
-    dart = result["context_pack"]["dart_filing"][0]
-    assert dart["source_id"] == "report_sections:1"
-    assert dart["metadata"]["availability"] == "summary_only"
-    assert dart["metadata"]["rcept_no"] == "20250301000001"
-    assert dart["metadata"]["fs_div_selection"] == {
-        "requested": "OFS",
-        "used": "CFS",
-        "status": "fallback_requested_fs_div_unavailable",
-    }
+    # Injected receipt/availability metadata is not DART evidence.  The
+    # public adapter must re-check a canonical annual disclosure/source binding.
+    assert result["status"] == "missing"
+    assert result["context_pack"]["dart_filing"] == []
     assert [item["source_id"] for item in result["context_pack"]["company_ir"]] == ["ir-1"]
     assert [item["source_id"] for item in result["context_pack"]["web_news"]] == ["news-1"]
 

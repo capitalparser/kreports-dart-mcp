@@ -40,7 +40,10 @@ def handle_compare_to_industry(args: CompareToIndustryInput) -> dict:
 
 def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
     return compare_to_industry_multi_with_evidence(
-        company=resolve_company(args.company),
+        # The evidence adapter resolves this once through select_peer_group().
+        # Resolving here as well made the public matrix add a redundant query
+        # without changing the selected subject.
+        company=args.company,
         metrics=args.metrics,
         years_back=args.years_back,
         fs_div=args.fs_div,
