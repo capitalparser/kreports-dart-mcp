@@ -78,6 +78,24 @@ def test_ds002_rejects_unitless_fee_instead_of_assuming_millions():
     assert "fee_unit_unproven" in observation.limitations
 
 
+def test_ds002_parses_korean_thousands_dot_hours_without_decimal_guessing():
+    observation = normalize_endpoint_result(
+        year=2025,
+        status="000",
+        rows=[{
+            "bsns_year": "제26기(당기)",
+            "adt_cntrct_dtls_mendng": "100백만원",
+            "adt_cntrct_dtls_time": "1.302",
+            "real_exc_dtls_mendng": "100백만원",
+            "real_exc_dtls_time": "1.302",
+        }],
+        corp_code=CORP_CODE,
+    )
+
+    assert observation.contract_hours == 1302
+    assert observation.actual_hours == 1302
+
+
 def test_unsupported_historical_period_is_not_transport_error():
     observation = normalize_endpoint_result(
         year=2014,

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -22,6 +22,7 @@ from kreports.db.models import (
     AuditFee,
     AuditProcedureItem,
     Company,
+    Disclosure,
     EvidenceDocument,
     Financial,
     KamItem,
@@ -291,6 +292,7 @@ def test_compare_peer_audit_fees_excludes_uncorroborated_unit_anomalies_and_expl
         session.add_all([
             Company(corp_code="subject", corp_name="대상회사", market="KOSPI"),
             Company(corp_code="peer", corp_name="단위의심회사", market="KOSPI"),
+            Company(corp_code="wrong", corp_name="다른회사", market="KOSPI"),
         ])
         session.add_all([
             Financial(
@@ -300,7 +302,7 @@ def test_compare_peer_audit_fees_excludes_uncorroborated_unit_anomalies_and_expl
                 fs_div="CFS",
                 total_assets=1_000_000_000,
             )
-            for code in ("subject", "peer")
+            for code in ("subject", "peer", "wrong")
         ])
         session.add_all([
             AuditFee(
@@ -329,6 +331,25 @@ def test_compare_peer_audit_fees_excludes_uncorroborated_unit_anomalies_and_expl
                 # either an inferred unit conversion or a confirmed fact.
                 source_rcept_no=None,
             ),
+            AuditFee(
+                corp_code="wrong",
+                bsns_year=2024,
+                audit_fee_m=80,
+                audit_hours=800,
+                actual_fee_m=80,
+                actual_hours=800,
+                compatibility_basis="actual",
+                availability_status="available",
+                source_rcept_no="20250318000123",
+            ),
+            Disclosure(
+                rcept_no="20250318000123",
+                corp_code="subject",
+                corp_name="대상회사",
+                disc_date=date(2025, 3, 18),
+                disc_type="A",
+                report_nm="사업보고서 (2024.12)",
+            ),
         ])
 
     out = compare_peer_audit_fees(
@@ -337,7 +358,7 @@ def test_compare_peer_audit_fees_excludes_uncorroborated_unit_anomalies_and_expl
         _peer_group={
             "subject": {"corp_code": "subject", "corp_name": "대상회사"},
             "selection_policy": {"fs_div_used": "CFS"},
-            "peers": [{"corp_code": "peer"}],
+            "peers": [{"corp_code": "peer"}, {"corp_code": "wrong"}],
         },
     )
 

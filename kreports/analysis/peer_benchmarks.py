@@ -1420,14 +1420,47 @@ def _sanitize_audit_fee_row(row: dict) -> dict:
     return sanitized
 
 
+def _bound_audit_fee_receipts(rows: list[dict], *, year: int) -> set[tuple[str, str]]:
+    """Return receipts bound to the same company and exact annual disclosure."""
+    candidates = {
+        (str(row.get("corp_code") or ""), receipt)
+        for row in rows
+        if (receipt := valid_annual_filing_receipt(
+            row.get("audit_source_rcept_no"), year,
+        ))
+    }
+    if not candidates:
+        return set()
+    receipts = sorted({receipt for _, receipt in candidates})
+    try:
+        with _engine_module.engine.connect() as conn:
+            disclosures = conn.execute(text("""
+                SELECT rcept_no, corp_code, report_nm
+                FROM disclosures
+                WHERE rcept_no IN :receipts
+            """).bindparams(bindparam("receipts", expanding=True)), {
+                "receipts": receipts,
+            }).mappings().all()
+    except Exception:
+        return set()
+    annual_prefix = f"사업보고서 ({year}."
+    return {
+        (str(row["corp_code"]), str(row["rcept_no"]))
+        for row in disclosures
+        if str(row.get("report_nm") or "").startswith(annual_prefix)
+        and (str(row["corp_code"]), str(row["rcept_no"])) in candidates
+    }
+
+
 def _audit_fee_confirmed_facts(rows: list[dict], *, year: int) -> list[dict]:
-    """Emit a fact only where this comparison row carries a filing receipt."""
+    """Emit a fact only when its receipt is bound to the company-year filing."""
     facts: list[dict] = []
+    bound_receipts = _bound_audit_fee_receipts(rows, year=year)
     for row in rows:
         receipt = valid_annual_filing_receipt(
             row.get("audit_source_rcept_no"), year,
         )
-        if receipt is None:
+        if receipt is None or (str(row.get("corp_code") or ""), receipt) not in bound_receipts:
             continue
         fee = row.get("audit_fee_m")
         hours = row.get("audit_hours")
@@ -1835,9 +1868,13 @@ def compare_peer_audit_fees(
         row for row in all_rows
         if row.get("unit_integrity_status") == "excluded_suspect_unit"
     ]
+    bound_receipts = _bound_audit_fee_receipts(all_rows, year=year)
     citable_rows = [
         row for row in all_rows
-        if valid_annual_filing_receipt(row.get("audit_source_rcept_no"), year)
+        if (
+            str(row.get("corp_code") or ""),
+            valid_annual_filing_receipt(row.get("audit_source_rcept_no"), year),
+        ) in bound_receipts
         and (row.get("audit_fee_m") is not None or row.get("audit_hours") is not None)
     ]
     uncitable_value_rows = [
