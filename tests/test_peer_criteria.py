@@ -100,6 +100,58 @@ def test_typed_custom_codes_profile_is_applied_and_explained(temp_engine):
     }
 
 
+def test_batched_candidate_lookup_keeps_null_industry_but_rejects_missing_company(temp_engine):
+    from kreports.analysis.peer_benchmarks import select_peer_group
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00000001", stock_code="000001",
+                corp_name="Subject", induty_code="26410",
+            ),
+            Company(
+                corp_code="00000002", stock_code="000002",
+                corp_name="Known peer", induty_code="26420",
+            ),
+            Company(
+                corp_code="00000003", stock_code="000003",
+                corp_name="Unknown-sector peer", induty_code=None,
+            ),
+            Financial(
+                corp_code="00000001", year=2024, quarter=4,
+                fs_div="CFS", total_assets=100,
+            ),
+            Financial(
+                corp_code="00000002", year=2024, quarter=4,
+                fs_div="CFS", total_assets=100,
+            ),
+            Financial(
+                corp_code="00000003", year=2024, quarter=4,
+                fs_div="CFS", total_assets=100,
+            ),
+        ])
+
+    out = select_peer_group(
+        "00000001",
+        criteria={
+            "included_corp_codes": ["00000003", "99999999"],
+        },
+        year=2024,
+        _read_engine=temp_engine,
+    )
+
+    peers = {peer["corp_code"]: peer for peer in out["peers"]}
+    assert peers["00000003"]["reason_components"]["sector_match"] == {
+        "matched": False,
+        "basis": "not_required",
+    }
+    assert out["selection_policy"]["exclusion_reasons"]["99999999"] == [
+        "company_not_found"
+    ]
+
+
 def test_mcp_input_accepts_profile_alias_and_rejects_duplicate_profile():
     from kreports.mcp.input_models import SelectPeerGroupInput
 

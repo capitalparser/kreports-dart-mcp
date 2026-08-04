@@ -48,9 +48,16 @@ def _cohort_digest(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def select_peer_group_with_evidence(**kwargs: Any) -> dict[str, Any]:
+def select_peer_group_with_evidence(
+    *,
+    _resolved_subject: peer_benchmarks.ResolvedPeerSubject | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Enrich the legacy selector without changing its stable computation path."""
-    result = deepcopy(peer_benchmarks.select_peer_group(**kwargs))
+    result = deepcopy(peer_benchmarks.select_peer_group(
+        _resolved_subject=_resolved_subject,
+        **kwargs,
+    ))
     if result.get("error"):
         return result
     policy = result.get("selection_policy") or {}
@@ -181,7 +188,11 @@ def _batch_subject_annual_sources(
     return sources
 
 
-def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
+def compare_to_industry_multi_with_evidence(
+    *,
+    _resolved_subject: peer_benchmarks.ResolvedPeerSubject | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Build a constant-query peer matrix from one legacy cohort selection."""
     metrics = list(kwargs.get("metrics") or peer_benchmarks._ALL_METRICS)
     invalid = [metric for metric in metrics if metric not in peer_benchmarks._METRIC_SQL]
@@ -199,6 +210,7 @@ def compare_to_industry_multi_with_evidence(**kwargs: Any) -> dict[str, Any]:
         prefix_len_start=kwargs.get("prefix_len_start", 3),
         size_bucket_decade=kwargs.get("size_bucket_decade"),
         exclude_other_sectors=kwargs.get("exclude_other_sectors", True),
+        _resolved_subject=_resolved_subject,
     )
     if selected.get("error"):
         return selected

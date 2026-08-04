@@ -237,6 +237,33 @@ def test_public_peer_handler_query_count_is_constant_as_matrix_grows(temp_engine
     assert wide_count == narrow_count == 9
 
 
+def test_public_peer_handler_rejects_ambiguous_name_and_keeps_exact_name(temp_engine):
+    from kreports.mcp.dispatch import legacy_result
+    from kreports.mcp.handlers.search import handle_compare_to_industry_multi
+    from kreports.mcp.input_models import CompareToIndustryMultiInput
+
+    _seed_public_peer_matrix(years=range(2024, 2025), peer_count=5)
+
+    ambiguous = legacy_result(
+        "compare_to_industry_multi",
+        {
+            "company": "비교",
+            "metrics": ["ROE"],
+            "years_back": 1,
+            "fs_div": "CFS",
+            "fs_strategy": "CFS",
+        },
+    )
+    exact = handle_compare_to_industry_multi(CompareToIndustryMultiInput(
+        company="비교 1", metrics=["ROE"], years_back=1,
+        fs_div="CFS", fs_strategy="CFS",
+    ))
+
+    assert ambiguous["data_quality"]["status"] == "error"
+    assert "results" not in ambiguous
+    assert exact["subject"]["corp_code"] == "00000002"
+
+
 def test_public_peer_handler_binds_digest_to_full_selected_cohort_and_fs_basis(temp_engine):
     from kreports.mcp.contracts import build_answer_envelope
     from kreports.mcp.handlers.search import handle_compare_to_industry_multi

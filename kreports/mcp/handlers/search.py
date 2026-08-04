@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from kreports.analysis.peer_benchmarks import (
+    ResolvedPeerSubject,
     compare_to_industry,
     get_industry_audit_landscape,
 )
@@ -39,11 +40,9 @@ def handle_compare_to_industry(args: CompareToIndustryInput) -> dict:
 
 
 def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
+    resolved_subject = ResolvedPeerSubject(resolve_company(args.company))
     return compare_to_industry_multi_with_evidence(
-        # The evidence adapter resolves this once through select_peer_group().
-        # Resolving here as well made the public matrix add a redundant query
-        # without changing the selected subject.
-        company=args.company,
+        company=resolved_subject.corp_code,
         metrics=args.metrics,
         years_back=args.years_back,
         fs_div=args.fs_div,
@@ -51,6 +50,7 @@ def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
         prefix_len_start=args.prefix_len_start,
         exclude_other_sectors=args.exclude_other_sectors,
         size_bucket_decade=args.size_bucket_decade,
+        _resolved_subject=resolved_subject,
     )
 
 

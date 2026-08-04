@@ -1,6 +1,7 @@
 """Industry and peer selection, comparisons, and engagement benchmarks."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import statistics
 from typing import Optional
@@ -72,6 +73,17 @@ _METRIC_UNIT = {
 
 
 _MIN_PEERS_FOR_STATS = 3
+
+
+@dataclass(frozen=True)
+class ResolvedPeerSubject:
+    """Canonical corp identity resolved by a stricter public boundary."""
+
+    corp_code: str
+
+    def __post_init__(self) -> None:
+        if len(self.corp_code) != 8 or not self.corp_code.isdigit():
+            raise ValueError("resolved peer subject must contain an 8-digit corp_code")
 
 
 def _quantile(values: list[float], q: float) -> Optional[float]:
@@ -930,10 +942,10 @@ def _apply_peer_profile(
     automatic_candidates = set(resolution.peer_corp_codes)
     for code in candidates:
         reasons: list[str] = []
-        induty_code = candidate_industry_codes.get(code)
-        if induty_code is None:
+        if code not in candidate_industry_codes:
             excluded[code] = ["company_not_found"]
             continue
+        induty_code = candidate_industry_codes[code]
         sector = classify_sector(induty_code).value
         if code in profile.excluded_corp_codes:
             reasons.append("excluded_by_user")
@@ -1036,6 +1048,7 @@ def select_peer_group(
     year: int | None = None,
     _read_engine=None,
     _cohort: PeerCohort | None = None,
+    _resolved_subject: ResolvedPeerSubject | None = None,
 ) -> dict:
     if _cohort is not None:
         return cohort_to_peer_group(_cohort)
@@ -1046,7 +1059,11 @@ def select_peer_group(
         exclude_other_sectors=exclude_other_sectors,
     )
     active_engine = _read_engine or _engine_module.engine
-    if _read_engine is None:
+    if _resolved_subject is not None:
+        if company != _resolved_subject.corp_code:
+            raise ValueError("resolved peer subject does not match company")
+        corp_code = _resolved_subject.corp_code
+    elif _read_engine is None:
         corp_code = resolve_corp_code(company)
     else:
         with active_engine.connect() as conn:
