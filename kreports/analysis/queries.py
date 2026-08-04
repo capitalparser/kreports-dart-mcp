@@ -6,6 +6,7 @@ MCP 서버, CLI, 배치 작업에서 직접 사용 가능.
 dashboard/db.py는 이 모듈을 import하여 @st.cache_data 래핑만 추가한다.
 """
 import pandas as pd
+from sqlalchemy import inspect
 from kreports.db.engine import get_session
 from kreports.db.models import (
     AccountingPolicyItem,
@@ -18,6 +19,12 @@ from kreports.db.models import (
 )
 
 _UNIT = 1e8  # 억원
+
+
+def _has_table(table_name: str) -> bool:
+    """Inspect an internal table name without issuing a failing ORM query."""
+    with get_session() as session:
+        return inspect(session.get_bind()).has_table(table_name)
 
 
 def search_companies(query: str, limit: int = 30) -> list[dict]:
@@ -216,6 +223,9 @@ def get_financials_extended(corp_code: str, fs_div: str = "CFS") -> pd.DataFrame
     ]
     for c in ext_cols:
         df[c] = pd.NA
+
+    if not _has_table("financial_facts"):
+        return df
 
     # 연간 Q4 행의 (연도) 목록
     annual_years = sorted(df[df["분기"] == 4]["연도"].dropna().astype(int).unique().tolist())
@@ -682,6 +692,9 @@ def get_restatement_delta(corp_code: str, threshold_pct: float = 1.0, top_n: int
       DataFrame 컬럼: 기준연도, 재무표, 계정명, 원본값(억원), 재작성값(억원), 차이(억원), 변동률(%)
       값이 없으면 빈 DataFrame.
     """
+    if not _has_table("financial_facts"):
+        return pd.DataFrame()
+
     with get_session() as session:
         # 연간 보고서(11011) CFS 우선 조회.
         # SCE(자본변동표)는 동일 계정명이 여러 맥락에서 반복되어 비교가 부정확하므로 제외.

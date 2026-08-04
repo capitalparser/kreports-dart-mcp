@@ -79,6 +79,14 @@ def _annual_financial_source(
     fs_div: str | None,
 ) -> dict:
     """Return a proven annual source or an explicit, uncitable provenance gap."""
+    if not _has_db_table(source_table):
+        return _uncitable_annual_source(
+            corp_code,
+            subject,
+            year,
+            "재무제표",
+            source_table,
+        )
     source = (
         annual_filing_source(corp_code, int(year), source_table=source_table, fs_div=fs_div)
         if year
@@ -378,6 +386,19 @@ def _investor_signal_evidence(
     latest = rows[-1] if rows else {}
     latest_year = latest.get("연도")
     if latest:
+        latest_source = (
+            latest.get("source")
+            if isinstance(latest.get("source"), dict)
+            else {}
+        )
+        source_table = (
+            "financial_facts"
+            if _has_db_table("financial_facts")
+            else str(
+                latest_source.get("source_table")
+                or "financial_facts_compact"
+            )
+        )
         facts.append({
             "statement": (
                 f"{latest_year}년 연간 재무 스냅샷 기준 ROE={latest.get('ROE')}, "
@@ -387,7 +408,7 @@ def _investor_signal_evidence(
                 corp_code,
                 subject,
                 int(latest_year) if latest_year else None,
-                source_table="financial_facts",
+                source_table=source_table,
                 fs_div=latest.get("구분"),
             ),
             "excerpt": f"latest_snapshot={latest}",

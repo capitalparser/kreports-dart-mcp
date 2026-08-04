@@ -8,6 +8,7 @@ from kreports.db.models import (
     Company,
     Disclosure,
     Financial,
+    FinancialFactCompact,
     SourceDocument,
 )
 
@@ -135,6 +136,119 @@ def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path
     assert "financial_facts" in result["excluded_tables"]
     assert "extraction_runs" in result["excluded_tables"]
     assert "fetch_log" in result["excluded_tables"]
+
+
+def test_exported_compact_runtime_preserves_all_tool_public_contract(
+    temp_engine,
+    tmp_path,
+):
+    """Excluded warehouse tables must not become public schema errors."""
+    from kreports.db.engine import get_session
+    from kreports.maintenance.runtime_export import export_runtime_db
+    from kreports.mcp.dispatch import dispatch_tool
+    from kreports.release_artifact import (
+        _bound_explicit_runtime,
+        run_all_tool_contract,
+    )
+
+    metric_values = {
+        "revenue": 300_000_000_000,
+        "operating_profit": 30_000_000_000,
+        "profit_loss": 20_000_000_000,
+        "assets": 500_000_000_000,
+        "liabilities": 200_000_000_000,
+        "equity": 300_000_000_000,
+        "operating_cash_flow": 25_000_000_000,
+    }
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00126380",
+            stock_code="005930",
+            corp_name="삼성전자",
+            market="KOSPI",
+            induty_code="264",
+        ))
+        for year in (2023, 2024):
+            receipt = f"{year + 1}0318000001"
+            session.add(Financial(
+                corp_code="00126380",
+                year=year,
+                quarter=4,
+                fs_div="CFS",
+                revenue=metric_values["revenue"],
+                operating_profit=metric_values["operating_profit"],
+                net_income=metric_values["profit_loss"],
+                total_assets=metric_values["assets"],
+                total_debt=metric_values["liabilities"],
+                total_equity=metric_values["equity"],
+                operating_cf=metric_values["operating_cash_flow"],
+                source="summary_fallback",
+            ))
+            session.add(Disclosure(
+                rcept_no=receipt,
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(year + 1, 3, 18),
+                disc_type="A",
+                report_nm=f"사업보고서 ({year}.12)",
+                flr_nm="삼성전자",
+            ))
+            session.add_all([
+                FinancialFactCompact(
+                    corp_code="00126380",
+                    bsns_year=year,
+                    fs_div="CFS",
+                    metric_key=metric_key,
+                    metric_name=metric_key,
+                    amount=amount,
+                    source_table="financials",
+                    unit="KRW",
+                    period_type="instant" if metric_key in {
+                        "assets",
+                        "liabilities",
+                        "equity",
+                    } else "duration",
+                    citation_rcept_no=receipt,
+                    citation_report_nm=f"사업보고서 ({year}.12)",
+                    citation_basis="company_year_annual_filing_match",
+                    quality_status="usable",
+                )
+                for metric_key, amount in metric_values.items()
+            ])
+
+    runtime_db = tmp_path / "compact-runtime.db"
+    export_runtime_db(
+        output_path=runtime_db,
+        year_from=2023,
+        year_to=2024,
+    )
+
+    with sqlite3.connect(runtime_db) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "financial_facts_compact" in tables
+    assert {"financial_facts", "extraction_runs", "fetch_log"}.isdisjoint(
+        tables
+    )
+    with _bound_explicit_runtime(runtime_db):
+        statuses = {
+            name: dispatch_tool(name, arguments).data_quality.status
+            for name, arguments in (
+                ("score_going_concern", {"company": "005930"}),
+                ("detect_restatement", {"company": "005930"}),
+                ("get_investor_signals", {"company": "005930"}),
+            )
+        }
+    assert statuses == {
+        "score_going_concern": "limited",
+        "detect_restatement": "missing",
+        "get_investor_signals": "limited",
+    }
+    assert run_all_tool_contract(runtime_db) == {"passed": True, "checks": 34}
 
 
 def test_export_runtime_db_retains_all_audit_observation_history(temp_engine, tmp_path):
