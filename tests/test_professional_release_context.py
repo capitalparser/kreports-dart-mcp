@@ -11,6 +11,20 @@ def _release_context(*, ready: bool = False) -> dict:
     }
 
 
+def _render_release_context(pack: dict) -> tuple[str, str]:
+    from kreports.mcp.visual_contracts import (
+        VisualizationPackV1,
+        render_visualization_html,
+        render_visualization_markdown,
+    )
+
+    visualization = VisualizationPackV1.model_validate(pack)
+    return (
+        render_visualization_markdown(visualization, mermaid=False),
+        render_visualization_html(visualization),
+    )
+
+
 def _usable_business_result() -> dict:
     source = {
         "rcept_no": "20260310002820",
@@ -57,12 +71,11 @@ def test_release_context_fails_closed_and_bounds_readiness_payload(monkeypatch):
     }
 
 
-def test_release_context_is_identical_in_answer_pack_and_resource_without_downgrading_question(
+def test_known_release_context_uses_korean_labels_without_changing_structured_payload(
     monkeypatch,
 ):
     from kreports.mcp import dispatch
     from kreports.mcp.contracts import build_answer_envelope
-    from kreports.mcp.resources import read_resource
 
     expected = _release_context(ready=False)
     monkeypatch.setattr(dispatch, "release_context", lambda: expected)
@@ -70,7 +83,7 @@ def test_release_context_is_identical_in_answer_pack_and_resource_without_downgr
     enriched = dispatch._attach_meta("get_business_overview", _usable_business_result())
     envelope = build_answer_envelope("get_business_overview", enriched)
     pack = enriched["answer_pack"]
-    resource = read_resource(pack["resource_uri"])
+    markdown, html = _render_release_context(pack)
 
     assert enriched["data_quality"]["status"] == "usable"
     assert envelope.verdict == "usable"
@@ -78,11 +91,43 @@ def test_release_context_is_identical_in_answer_pack_and_resource_without_downgr
     assert all("release_context" not in fact for fact in envelope.confirmed_facts)
     assert all("release_context" not in ref.model_dump() for ref in envelope.evidence)
     assert pack["release_context"] == expected
-    assert "배포 준비 상태" in enriched["answer"]
-    assert "snapshot-2026-07-29" in enriched["answer"]
-    assert "release_manifest_unavailable" in enriched["answer"]
-    assert "snapshot-2026-07-29" in resource["text"]
-    assert "release_manifest_unavailable" in resource["text"]
+    for public_text in (enriched["answer"], markdown, html):
+        assert "배포 준비 상태" in public_text
+        assert "스냅샷 버전: snapshot-2026-07-29" in public_text
+        assert "배포 매니페스트" in public_text
+        assert "release_ready" not in public_text
+        assert "manifest_available" not in public_text
+        assert "required_failure" not in public_text
+        assert "degraded_feature" not in public_text
+        assert "release_manifest_unavailable" not in public_text
+        assert "audit_report_sections" not in public_text
+
+
+def test_unknown_release_context_codes_fail_closed_without_echoing_tokens(monkeypatch):
+    from kreports.mcp import dispatch
+    from kreports.mcp.contracts import build_answer_envelope
+
+    expected = {
+        "release_ready": False,
+        "manifest_available": False,
+        "required_failures": ["opaque_internal_blocker"],
+        "degraded_features": ["opaque_internal_feature"],
+        "snapshot_version": "snapshot-2026-07-29",
+    }
+    monkeypatch.setattr(dispatch, "release_context", lambda: expected)
+
+    enriched = dispatch._attach_meta("get_business_overview", _usable_business_result())
+    envelope = build_answer_envelope("get_business_overview", enriched)
+    pack = enriched["answer_pack"]
+    markdown, html = _render_release_context(pack)
+
+    assert envelope.release_context.model_dump() == expected
+    assert pack["release_context"] == expected
+    for public_text in (enriched["answer"], markdown, html):
+        assert "배포 준비를 확인할 수 없는 항목" in public_text
+        assert "기능 제공 범위를 확인할 수 없는 항목" in public_text
+        assert "opaque_internal_blocker" not in public_text
+        assert "opaque_internal_feature" not in public_text
 
 
 def test_release_context_reaches_custom_professional_surface_pack(monkeypatch):

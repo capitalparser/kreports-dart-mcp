@@ -15,6 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from kreports.analysis.evidence import evidence_reference_fields
 from kreports.mcp.auditor_public import public_kam_lifecycle_events
 from kreports.mcp.contracts import ReleaseContextV1
+from kreports.mcp.release_context_public import (
+    public_degraded_feature_text,
+    public_manifest_available_label,
+    public_release_blocker_text,
+    public_release_ready_label,
+)
 
 
 PACK_VERSION = "visualization_pack.v1"
@@ -1729,15 +1735,19 @@ def render_visualization_markdown(
     if validated.release_context is not None:
         lines.extend([
             "배포 준비 상태:",
-            f"- release_ready: {validated.release_context.release_ready}",
-            f"- manifest_available: {validated.release_context.manifest_available}",
-            f"- snapshot_version: {validated.release_context.snapshot_version or '-'}",
+            "- 배포 준비 여부: "
+            f"{public_release_ready_label(validated.release_context.release_ready)}",
+            "- 매니페스트 확인: "
+            f"{public_manifest_available_label(validated.release_context.manifest_available)}",
+            f"- 스냅샷 버전: {validated.release_context.snapshot_version or '-'}",
             *[
-                f"- required_failure: {_markdown_cell(value)}"
+                "- 배포 제한: "
+                f"{_markdown_cell(public_release_blocker_text(value))}"
                 for value in validated.release_context.required_failures
             ],
             *[
-                f"- degraded_feature: {_markdown_cell(value)}"
+                "- 기능 범위: "
+                f"{_markdown_cell(public_degraded_feature_text(value))}"
                 for value in validated.release_context.degraded_features
             ],
             "",
@@ -1819,15 +1829,25 @@ def render_visualization_html(pack: VisualizationPackV1) -> str:
     if validated.release_context is not None:
         context = validated.release_context
         pieces.append("<section class=\"note\"><h2>배포 준비 상태</h2><ul>")
-        pieces.append(f"<li>release_ready: {html.escape(str(context.release_ready))}</li>")
-        pieces.append(f"<li>manifest_available: {html.escape(str(context.manifest_available))}</li>")
-        pieces.append(f"<li>snapshot_version: {html.escape(context.snapshot_version or '-')}</li>")
+        pieces.append(
+            "<li>배포 준비 여부: "
+            f"{html.escape(public_release_ready_label(context.release_ready))}</li>"
+        )
+        pieces.append(
+            "<li>매니페스트 확인: "
+            f"{html.escape(public_manifest_available_label(context.manifest_available))}</li>"
+        )
+        pieces.append(
+            f"<li>스냅샷 버전: {html.escape(context.snapshot_version or '-')}</li>"
+        )
         pieces.extend(
-            f"<li>required_failure: {html.escape(value)}</li>"
+            "<li>배포 제한: "
+            f"{html.escape(public_release_blocker_text(value))}</li>"
             for value in context.required_failures
         )
         pieces.extend(
-            f"<li>degraded_feature: {html.escape(value)}</li>"
+            "<li>기능 범위: "
+            f"{html.escape(public_degraded_feature_text(value))}</li>"
             for value in context.degraded_features
         )
         pieces.append("</ul></section>")

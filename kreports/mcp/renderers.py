@@ -16,6 +16,12 @@ from kreports.mcp.contracts import (
     normalize_answer_result,
     public_domain_verdict_label,
 )
+from kreports.mcp.release_context_public import (
+    public_degraded_feature_text,
+    public_manifest_available_label,
+    public_release_blocker_text,
+    public_release_ready_label,
+)
 from kreports.mcp.professional_surfaces import DETAIL_RENDERERS as PROFESSIONAL_DETAIL_RENDERERS
 from kreports.mcp.professional_surfaces import (
     CONCLUSION_OVERRIDES as PROFESSIONAL_CONCLUSION_OVERRIDES,
@@ -1092,16 +1098,16 @@ def _render_professional_envelope(envelope: AnswerEnvelopeV1, *, detail: str | N
     context = envelope.release_context
     lines.extend([
         "배포 준비 상태:",
-        f"- release_ready: {context.release_ready}",
-        f"- manifest_available: {context.manifest_available}",
-        f"- snapshot_version: {context.snapshot_version or '-'}",
+        f"- 배포 준비 여부: {public_release_ready_label(context.release_ready)}",
+        f"- 매니페스트 확인: {public_manifest_available_label(context.manifest_available)}",
+        f"- 스냅샷 버전: {context.snapshot_version or '-'}",
     ])
     lines.extend(
-        f"- required_failure: {value}"
+        f"- 배포 제한: {public_release_blocker_text(value)}"
         for value in context.required_failures
     )
     lines.extend(
-        f"- degraded_feature: {value}"
+        f"- 기능 범위: {public_degraded_feature_text(value)}"
         for value in context.degraded_features
     )
     lines.append("")
