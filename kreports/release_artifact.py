@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from contextlib import contextmanager, nullcontext
+from collections.abc import Iterable
 import hashlib
 import json
 import math
@@ -41,7 +42,7 @@ ARTIFACT_VERSION = "1.0"
 TOOL_CONTRACT_VERSION = "1.0"
 FROZEN_TOOL_COUNT = 34
 FROZEN_TOOL_WIRE_SHA256 = (
-    "6134e8ab5c372b1ecda6eadc3ca0f25480bfed30b510cdd371e708138943dc78"
+    "b723c76295f1ea66cce904ff64bd0e2eaf4f6e063b5477158718782290df0cdc"
 )
 APPROVED_GOLDEN_CONTRACT_SHA256 = (
     "c6552ed45c0fb5032d45e337e2e75fae92b0bda6854b4b0aa97ebff11b0dd617"
@@ -184,9 +185,61 @@ class ReleaseManifest(_StrictModel):
         return self
 
 
+class VerificationDiagnostic(_StrictModel):
+    failure: StrictStr
+    owner: StrictStr
+    action: StrictStr
+
+
 class VerificationResult(_StrictModel):
     ok: StrictBool
     failures: list[StrictStr]
+    diagnostics: list[VerificationDiagnostic] = Field(default_factory=list)
+
+
+_VERIFICATION_DIAGNOSTIC_OVERRIDES: dict[str, tuple[str, str]] = {
+    "tool_contract_evidence_mismatch": (
+        "dataset_release_maintainer",
+        "rebuild the release manifest from the current approved 34-tool catalog",
+    ),
+    "tool_contract_drift": (
+        "dataset_release_maintainer",
+        "rebuild the release manifest from the current approved 34-tool catalog",
+    ),
+    "contracts_evidence_mismatch": (
+        "dataset_release_maintainer",
+        "rerun the all-tool contract and rebuild the release manifest after it passes",
+    ),
+    "all_tool_contract_failed": (
+        "mcp_contract_maintainer",
+        "repair the failing catalog tool contract before rebuilding release proof",
+    ),
+}
+
+
+def _verification_diagnostics(
+    failures: Iterable[str],
+) -> list[VerificationDiagnostic]:
+    """Attach owner/action context while preserving each fail-closed code."""
+    from kreports.quality.release_gate import describe_release_blockers
+
+    diagnostics: list[VerificationDiagnostic] = []
+    for failure in sorted(set(str(item) for item in failures)):
+        owner, action = _VERIFICATION_DIAGNOSTIC_OVERRIDES.get(
+            failure,
+            ("", ""),
+        )
+        if not owner:
+            blocker = failure.removeprefix("release_gate_blocked:")
+            guidance = describe_release_blockers([blocker])[0]
+            owner = guidance["owner"]
+            action = guidance["action"]
+        diagnostics.append({
+            "failure": failure,
+            "owner": owner,
+            "action": action,
+        })
+    return diagnostics
 
 
 def _sha256_file(path: Path) -> str:
@@ -1677,4 +1730,5 @@ def verify_release_artifact(
     return VerificationResult(
         ok=not failures,
         failures=sorted(set(failures)),
+        diagnostics=_verification_diagnostics(failures),
     )

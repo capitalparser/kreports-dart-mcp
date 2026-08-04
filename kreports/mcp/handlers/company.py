@@ -5,6 +5,7 @@ from kreports.analysis.company_profile import (
     get_business_overview,
     search_company,
 )
+from kreports.analysis.semantic_index import build_company_context
 from kreports.analysis.financial_analysis import (
     _annual_report_source,
     get_financial_snapshot,
@@ -100,7 +101,24 @@ def handle_get_financial_snapshot(args: GetFinancialSnapshotInput) -> dict:
 
 
 def handle_get_business_overview(args: GetBusinessOverviewInput) -> dict:
-    return get_business_overview(
+    result = get_business_overview(
         resolve_company(args.company),
         bsns_year=args.bsns_year,
     )
+    if not args.include_semantic_context or not isinstance(result, dict):
+        return result
+    year = result.get("bsns_year")
+    if not isinstance(year, int):
+        result["semantic_context"] = {
+            "read_only": True,
+            "availability": "unavailable",
+            "limitations": ["business_overview_year_unavailable"],
+        }
+        return result
+    result["semantic_context"] = build_company_context(
+        resolve_company(args.company),
+        year,
+        topics=args.semantic_topics,
+        note_topics=args.note_topics,
+    )
+    return result

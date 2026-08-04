@@ -69,7 +69,7 @@ def _model_result():
     return out
 
 
-def test_build_dcf_model_pack_is_the_only_additive_33rd_tool():
+def test_build_dcf_model_pack_keeps_the_consolidated_34_tool_catalog():
     from kreports.mcp.catalog import TOOL_CATALOG
     from kreports.mcp.handlers import HANDLERS
     from kreports.mcp.tools import ALL_TOOLS

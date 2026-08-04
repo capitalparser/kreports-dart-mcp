@@ -18,6 +18,7 @@ from kreports.analysis.auditor_decisions import (
     compare_peer_kam_topics,
     compare_peer_risk_profile,
 )
+from kreports.analysis.note_comparison import compare_peer_accounting_notes
 from kreports.analysis.audit_effort_inputs import prepare_standard_audit_hours_inputs
 from kreports.analysis.group_audit import get_subsidiary_auditors
 from kreports.analysis.peer_benchmarks import (
@@ -32,6 +33,7 @@ from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
     BuildAuditAcceptancePackInput,
     ComparePeerAccountingPoliciesInput,
+    ComparePeerAccountingNotesInput,
     ComparePeerAuditFeesInput,
     ComparePeerAuditProceduresInput,
     ComparePeerAuditReportMattersInput,
@@ -99,8 +101,9 @@ def handle_compare_peer_risk_profile(args: ComparePeerRiskProfileInput) -> dict:
 def handle_compare_peer_accounting_policies(
     args: ComparePeerAccountingPoliciesInput,
 ) -> dict:
-    return compare_peer_accounting_policies(
-        company=resolve_company(args.company),
+    company = resolve_company(args.company)
+    result = compare_peer_accounting_policies(
+        company=company,
         year=args.year,
         peer_limit=args.peer_limit,
         fs_div=args.fs_div,
@@ -112,6 +115,33 @@ def handle_compare_peer_accounting_policies(
         size_bucket_decade=args.size_bucket_decade,
         include_peers=args.include_peers,
         exclude_peers=args.exclude_peers,
+    )
+    if args.include_note_comparison or args.note_topics:
+        result["note_comparison"] = compare_peer_accounting_notes(
+            company=company,
+            year=args.year,
+            topics=args.note_topics,
+            peer_limit=args.peer_limit,
+            peer_offset=args.peer_offset,
+            page_size=args.page_size,
+            fs_strategy=args.fs_strategy,
+            peer_criteria=args.peer_criteria,
+        )
+    return result
+
+
+def handle_compare_peer_accounting_notes(
+    args: ComparePeerAccountingNotesInput,
+) -> dict:
+    return compare_peer_accounting_notes(
+        company=resolve_company(args.company),
+        year=args.year,
+        topics=args.topics,
+        peer_limit=args.peer_limit,
+        peer_offset=args.peer_offset,
+        page_size=args.page_size,
+        fs_strategy=args.fs_strategy,
+        peer_criteria=args.peer_criteria,
     )
 
 

@@ -1,10 +1,14 @@
 """Deterministic workflow packs composed solely from public MCP specialists."""
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import json
 from typing import Any
 
+from kreports.analysis.context_pack import build_mcp_context_pack
+from kreports.analysis.note_comparison import NOTE_TOPICS, compare_peer_accounting_notes
+from kreports.analysis.peer_benchmarks import select_peer_group
+from kreports.analysis.semantic_index import build_company_context
 from kreports.mcp.contracts import AnswerEnvelopeV1, build_answer_envelope
 from kreports.mcp.dispatch import dispatch_tool
 
@@ -30,6 +34,7 @@ WORKFLOW_SPECS: dict[str, tuple[str, ...]] = {
         "get_subsidiary_auditors",
     ),
     "accounting_policy_peer_review": (
+        "get_business_overview",
         "get_accounting_policy",
         "get_accounting_policy_changes",
         "compare_peer_accounting_policies",
@@ -50,6 +55,7 @@ WORKFLOW_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "group_audit_scope": ("group_scope_and_component_evidence",),
     "accounting_policy_peer_review": (
+        "semantic_filing_context",
         "policy_text",
         "policy_change_history",
         "peer_differences",
@@ -59,6 +65,7 @@ WORKFLOW_CATEGORIES: dict[str, tuple[str, ...]] = {
 
 MAX_WORKFLOW_OUTPUT_BYTES = 100_000
 MAX_WORKFLOW_OUTPUT_CHARACTERS = MAX_WORKFLOW_OUTPUT_BYTES
+MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES = 100_000
 _MAX_ANSWER_CHARACTERS = 8_000
 _MAX_ITEMS = 20
 _MAX_NESTED_TEXT = 1_000
@@ -303,6 +310,11 @@ def _arguments(workflow: str, tool: str, company: str, year: int) -> dict[str, A
             "bsns_year": year,
             "fs_div": "CFS",
         },
+        "get_business_overview": {
+            **common,
+            "bsns_year": year,
+            "include_semantic_context": True,
+        },
         "get_accounting_policy_changes": {
             **common,
             "start_year": start_year,
@@ -315,6 +327,7 @@ def _arguments(workflow: str, tool: str, company: str, year: int) -> dict[str, A
             "peer_limit": 30,
             "fs_div": "CFS",
             "fs_strategy": "auto",
+            "include_note_comparison": True,
         },
         "get_kam_lifecycle": {
             **common,
@@ -460,3 +473,505 @@ def accounting_policy_peer_review(
         year,
         dispatch=dispatch,
     )
+
+
+def _filter_semantic_context_fs_div(
+    context: dict[str, Any],
+    fs_div_used: str | None,
+    *,
+    peer_note_comparison: dict[str, Any] | None = None,
+    subject_code: str | None = None,
+) -> dict[str, Any]:
+    """Keep financials and notes aligned with cohort or explicit note fallback."""
+    filtered = dict(context)
+    if fs_div_used not in {"CFS", "OFS"}:
+        filtered["fs_div_used"] = fs_div_used
+        return filtered
+    note_selections: dict[str, dict[str, Any]] = {}
+    for topic_result in (peer_note_comparison or {}).get("topics") or []:
+        if not isinstance(topic_result, dict):
+            continue
+        topic = topic_result.get("topic")
+        if not isinstance(topic, str):
+            continue
+        for row in topic_result.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            row_company = row.get("company")
+            if not isinstance(row_company, dict) or row_company.get("corp_code") != subject_code:
+                continue
+            selection = row.get("fs_div_selection")
+            if isinstance(selection, dict) and selection.get("used") in {"CFS", "OFS"}:
+                note_selections[topic] = dict(selection)
+            break
+    original_notes = list(context.get("notes") or [])
+    filtered_notes = []
+    for raw_note in original_notes:
+        if not isinstance(raw_note, dict):
+            continue
+        note = dict(raw_note)
+        selection = note_selections.get(note.get("topic"))
+        note_fs_div = selection.get("used") if selection else fs_div_used
+        if note.get("fs_div") == note_fs_div:
+            if selection:
+                note["fs_div_selection"] = selection
+            filtered_notes.append(note)
+    filtered["notes"] = filtered_notes
+    original_financials = list(context.get("financials") or [])
+    filtered_financials = [
+        dict(financial)
+        for financial in original_financials
+        if isinstance(financial, dict) and financial.get("fs_div") == fs_div_used
+    ]
+    filtered["financials"] = filtered_financials
+    availability = dict(context.get("availability") or {})
+    if original_notes and not filtered_notes:
+        availability["notes"] = "unavailable"
+    if original_financials and not filtered_financials:
+        availability["financials"] = "unavailable"
+    filtered["availability"] = availability
+    filtered["fs_div_used"] = fs_div_used
+    return filtered
+
+
+def _semantic_workflow_status(context_pack: dict[str, Any]) -> str:
+    dart_evidence = context_pack.get("dart_filing") or []
+    if not dart_evidence:
+        return "missing"
+    if context_pack.get("missing_evidence"):
+        return "limited"
+    if any(item.get("metadata", {}).get("availability") == "summary_only" for item in dart_evidence):
+        return "limited"
+    return "usable"
+
+
+def _semantic_workflow_truncation(*, applied: bool, reason: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "applied": applied,
+        "max_output_bytes": MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES,
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return result
+
+
+def _compact_semantic_workflow_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return None
+    if isinstance(value, str):
+        return value[:400]
+    if isinstance(value, list):
+        return [
+            _compact_semantic_workflow_value(item, depth=depth + 1)
+            for item in value[:10]
+        ]
+    if isinstance(value, dict):
+        return {
+            str(key)[:120]: _compact_semantic_workflow_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:20]
+        }
+    return value
+
+
+def _note_comparison_summary(
+    comparison: dict[str, Any] | None,
+    *,
+    subject_code: str | None,
+    requested_topics: list[str],
+    subject_failure: str | None = None,
+    cohort_failure: str | None = None,
+) -> dict[str, Any]:
+    """Promote peer-note evidence into a small, non-inferential workflow view."""
+
+    def aggregate_availability(statuses: Iterable[object]) -> str:
+        normalized = {
+            "summary_only" if status in {"summary_only", "truncated"}
+            else str(status or "unavailable")
+            for status in statuses
+        }
+        if not normalized or normalized == {"unavailable"}:
+            return "unavailable"
+        if normalized == {"available"}:
+            return "available"
+        if normalized == {"summary_only"}:
+            return "summary_only"
+        return "partial"
+
+    topic_results = {
+        str(item.get("topic")): item
+        for item in (comparison or {}).get("topics") or []
+        if isinstance(item, dict) and item.get("topic")
+    }
+    topic_coverage: list[dict[str, Any]] = []
+    differences: list[dict[str, Any]] = []
+    selections: list[dict[str, Any]] = []
+    source_locators: list[str] = []
+    missing_evidence: list[dict[str, Any]] = []
+    subject_topic_statuses: list[str] = []
+    peer_topic_statuses: list[str] = []
+    for topic in requested_topics:
+        rows = list((topic_results.get(topic) or {}).get("rows") or [])
+        if not rows:
+            missing = {
+                "topic": topic,
+                "reason": "no_comparison_rows",
+            }
+            if subject_failure:
+                missing["subject_failure"] = subject_failure
+            if cohort_failure:
+                missing["cohort_failure"] = cohort_failure
+            missing_evidence.append(missing)
+        subject_row = next(
+            (
+                row for row in rows
+                if isinstance(row, dict)
+                and str((row.get("company") or {}).get("corp_code") or "")
+                == str(subject_code or "")
+            ),
+            None,
+        )
+        peer_rows = [
+            row for row in rows
+            if isinstance(row, dict) and row is not subject_row
+        ]
+        subject_status = str(
+            (subject_row or {}).get("availability") or "unavailable"
+        )
+        subject_topic_statuses.append(subject_status)
+        peer_available = sum(
+            str(row.get("availability") or "unavailable") != "unavailable"
+            for row in peer_rows
+        )
+        peer_total = len(peer_rows)
+        peer_status = aggregate_availability(
+            row.get("availability") for row in peer_rows
+        )
+        peer_topic_statuses.append(peer_status)
+        topic_coverage.append({
+            "topic": topic,
+            "subject_availability": subject_status,
+            "peer_available": peer_available,
+            "peer_total": peer_total,
+            "peer_availability": peer_status,
+        })
+        for row in rows:
+            company = row.get("company") or {}
+            corp_code = str(company.get("corp_code") or "")
+            locator = row.get("source_locator")
+            if locator:
+                source_locators.append(str(locator))
+            selection = row.get("fs_div_selection")
+            if isinstance(selection, dict):
+                selections.append({
+                    "topic": topic,
+                    "corp_code": corp_code,
+                    "requested": selection.get("requested"),
+                    "used": selection.get("used"),
+                    "status": selection.get("status"),
+                })
+            if str(row.get("availability") or "unavailable") == "unavailable":
+                missing_evidence.append({
+                    "topic": topic,
+                    "corp_code": corp_code,
+                    "reason": str(
+                        row.get("comparison_note")
+                        or "no_cached_note_for_exact_business_year"
+                    ),
+                })
+        if subject_row and subject_status != "unavailable":
+            subject_text = subject_row.get("value_or_excerpt")
+            subject_locator = subject_row.get("source_locator")
+            for peer in peer_rows:
+                if (
+                    str(peer.get("availability") or "unavailable") != "unavailable"
+                    and isinstance(subject_text, str)
+                    and isinstance(peer.get("value_or_excerpt"), str)
+                    and peer["value_or_excerpt"] != subject_text
+                ):
+                    differences.append({
+                        "topic": topic,
+                        "peer_corp_code": str(
+                            (peer.get("company") or {}).get("corp_code") or ""
+                        ),
+                        "status": "different_cached_excerpt",
+                        "subject_source_locator": subject_locator,
+                        "peer_source_locator": peer.get("source_locator"),
+                    })
+    if not requested_topics:
+        missing_evidence.append({"reason": "no_note_topics_requested"})
+    peer_availability = (
+        "not_requested"
+        if not requested_topics
+        else aggregate_availability(peer_topic_statuses)
+    )
+    return {
+        "topic_coverage": topic_coverage,
+        "subject_availability": aggregate_availability(subject_topic_statuses),
+        "peer_availability": peer_availability,
+        "differences": differences,
+        "fs_div_selection": selections,
+        "source_locators": sorted(set(source_locators)),
+        "missing_evidence": missing_evidence,
+    }
+
+
+def _bounded_semantic_peer_context_result(result: dict[str, Any]) -> dict[str, Any]:
+    candidate = {
+        **result,
+        "truncation": _semantic_workflow_truncation(applied=False),
+    }
+    if _serialized_bytes(candidate) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return candidate
+    bounded = {
+        "workflow_version": result.get("workflow_version"),
+        "workflow_name": result.get("workflow_name"),
+        "subject": _compact_semantic_workflow_value(result.get("subject") or {}),
+        "year": result.get("year"),
+        "fs_div_used": result.get("fs_div_used"),
+        "read_only": result.get("read_only"),
+        "status": "limited" if result.get("status") != "missing" else "missing",
+        "peer_selection": _compact_semantic_workflow_value(result.get("peer_selection")),
+        "peer_confidence": result.get("peer_confidence"),
+        "semantic_context": _compact_semantic_workflow_value(result.get("semantic_context")),
+        "peer_note_comparison": _compact_semantic_workflow_value(result.get("peer_note_comparison")),
+        "note_comparison_summary": _compact_semantic_workflow_value(result.get("note_comparison_summary")),
+        "context_pack": result.get("context_pack"),
+        "source_precedence": result.get("source_precedence") or [],
+        "limitations": _compact_semantic_workflow_value(result.get("limitations") or []),
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(bounded) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return bounded
+    context_pack = result.get("context_pack")
+    if not isinstance(context_pack, dict) or _serialized_bytes(context_pack) > 60_000:
+        context_pack = {
+            "truncation": {
+                "applied": True,
+                "max_output_bytes": 60_000,
+                "reason": "context_pack_output_budget",
+            }
+        }
+    emergency = {
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
+        "year": result.get("year"),
+        "read_only": True,
+        "status": "limited" if result.get("status") != "missing" else "missing",
+        "context_pack": context_pack,
+        "note_comparison_summary": _compact_semantic_workflow_value(
+            result.get("note_comparison_summary")
+        ),
+        "source_precedence": [
+            str(item)[:40]
+            for item in (result.get("source_precedence") or [])[:4]
+        ],
+        "limitations": ["semantic_peer_context_output_budget"],
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(emergency) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return emergency
+    hard_final = {
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
+        "year": _compact_semantic_workflow_value(result.get("year")),
+        "read_only": True,
+        "status": "limited",
+        "context_pack": {"truncated": True},
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(hard_final) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return hard_final
+    final = {
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
+        "read_only": True,
+        "status": "limited",
+        "context_pack": {"truncated": True},
+        "truncation": _semantic_workflow_truncation(
+            applied=True,
+            reason="semantic_peer_context_output_budget",
+        ),
+    }
+    if _serialized_bytes(final) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES:
+        return final
+    return {"truncation": {"applied": True}}
+
+
+def semantic_peer_context_review(
+    company: str,
+    year: int,
+    *,
+    topics: list[str] | None = None,
+    note_topics: list[str] | None = None,
+    peer_criteria: list[str] | dict[str, Any] | None = None,
+    peer_limit: int = 30,
+    fs_strategy: str = "auto",
+    company_ir: list[dict[str, Any]] | None = None,
+    web_news: list[dict[str, Any]] | None = None,
+    missing_evidence: list[dict[str, Any]] | None = None,
+    context_builder: Callable[..., dict[str, Any]] = build_company_context,
+    cohort_selector: Callable[..., dict[str, Any]] = select_peer_group,
+    note_builder: Callable[..., dict[str, Any]] = compare_peer_accounting_notes,
+) -> dict[str, Any]:
+    """Build one read-only, source-separated semantic peer workflow.
+
+    The cohort is resolved once, then supplied directly to note comparison so
+    peer identity and its selected CFS/OFS basis cannot drift between steps.
+    IR and web/news are caller-supplied context only; this workflow does not
+    fetch them, collect DART data, or persist an artifact.
+    """
+    normalized_company = str(company or "").strip()
+    if not normalized_company or len(normalized_company) > 120:
+        raise ValueError("invalid_company")
+    normalized_year = int(year)
+    if not 2000 <= normalized_year <= 2100:
+        raise ValueError("invalid_year")
+    if fs_strategy not in {"CFS", "OFS", "auto"}:
+        raise ValueError("invalid_fs_strategy")
+    if not 1 <= peer_limit <= 200:
+        raise ValueError("invalid_peer_limit")
+
+    if note_topics is not None:
+        requested_note_topics = list(dict.fromkeys(note_topics))
+        unknown_note_topics = set(requested_note_topics) - set(NOTE_TOPICS)
+        if unknown_note_topics:
+            raise ValueError(f"unsupported_note_topics:{sorted(unknown_note_topics)}")
+    else:
+        requested_note_topics = list(dict.fromkeys(
+            NOTE_TOPICS if topics is None else [
+                topic for topic in topics if topic in NOTE_TOPICS
+            ]
+        ))
+    context_kwargs: dict[str, Any] = {"topics": topics}
+    if note_topics is not None:
+        context_kwargs["note_topics"] = requested_note_topics
+    semantic_context = context_builder(
+        normalized_company,
+        normalized_year,
+        **context_kwargs,
+    )
+    subject = dict(semantic_context.get("subject") or {})
+    subject_code = subject.get("corp_code")
+    if not subject_code:
+        context_pack = build_mcp_context_pack(
+            semantic_context,
+            company_ir=company_ir,
+            web_news=web_news,
+            missing_evidence=[
+                *(missing_evidence or []),
+                {
+                    "evidence_type": "peer_cohort",
+                    "reason": "semantic_subject_unavailable",
+                    "source_class": "dart_filing",
+                },
+            ],
+        )
+        return _bounded_semantic_peer_context_result({
+            "workflow_version": "semantic_peer_context.v1",
+            "workflow_name": "semantic_peer_context_review",
+            "year": normalized_year,
+            "read_only": True,
+            "status": "missing",
+            "semantic_context": semantic_context,
+            "peer_selection": None,
+            "peer_note_comparison": None,
+            "note_comparison_summary": _note_comparison_summary(
+                None,
+                subject_code=None,
+                requested_topics=requested_note_topics,
+                subject_failure="semantic_subject_unavailable",
+            ),
+            "context_pack": context_pack,
+            "source_precedence": context_pack["source_precedence"],
+            "limitations": ["semantic_subject_unavailable"],
+        })
+
+    peer_group = cohort_selector(
+        subject_code,
+        criteria=peer_criteria,
+        peer_limit=peer_limit,
+        fs_strategy=fs_strategy,
+        year=normalized_year,
+    )
+    peer_selection = dict(peer_group.get("selection_policy") or {})
+    fs_div_used = peer_selection.get("fs_div_used")
+    if "error" in peer_group:
+        peer_note_comparison: dict[str, Any] = {
+            "error": peer_group["error"],
+            "year": normalized_year,
+            "read_only": True,
+            "limitations": ["peer_cohort_unavailable"],
+        }
+    elif requested_note_topics:
+        peer_note_comparison = note_builder(
+            subject_code,
+            normalized_year,
+            topics=requested_note_topics,
+            peer_limit=peer_limit,
+            fs_strategy=fs_strategy,
+            peer_criteria=peer_criteria,
+            _peer_group=peer_group,
+        )
+    else:
+        peer_note_comparison = {
+            "subject": subject,
+            "year": normalized_year,
+            "peer_selection": peer_selection,
+            "topics": [],
+            "read_only": True,
+            "limitations": ["no_note_topics_requested"],
+        }
+    filtered_context = _filter_semantic_context_fs_div(
+        semantic_context,
+        fs_div_used,
+        peer_note_comparison=peer_note_comparison,
+        subject_code=str(subject_code),
+    )
+    context_pack = build_mcp_context_pack(
+        filtered_context,
+        peer_note_comparison=peer_note_comparison,
+        company_ir=company_ir,
+        web_news=web_news,
+        missing_evidence=missing_evidence,
+    )
+    status = _semantic_workflow_status(context_pack)
+    if "error" in peer_group and status != "missing":
+        status = "limited"
+    return _bounded_semantic_peer_context_result({
+        "workflow_version": "semantic_peer_context.v1",
+        "workflow_name": "semantic_peer_context_review",
+        "subject": subject,
+        "year": normalized_year,
+        "fs_div_used": fs_div_used,
+        "read_only": True,
+        "status": status,
+        "peer_selection": peer_selection,
+        "peer_confidence": peer_group.get("confidence"),
+        "semantic_context": filtered_context,
+        "peer_note_comparison": peer_note_comparison,
+        "note_comparison_summary": _note_comparison_summary(
+            peer_note_comparison,
+            subject_code=str(subject_code),
+            requested_topics=requested_note_topics,
+            cohort_failure=(
+                str(peer_group["error"])
+                if "error" in peer_group
+                else None
+            ),
+        ),
+        "context_pack": context_pack,
+        "source_precedence": context_pack["source_precedence"],
+        "limitations": [
+            *list(filtered_context.get("limitations") or []),
+            *list(peer_note_comparison.get("limitations") or []),
+        ],
+    })

@@ -6,11 +6,13 @@ from kreports.mcp.contracts import build_answer_envelope
 from kreports.mcp.workflows import (
     MAX_WORKFLOW_OUTPUT_BYTES,
     MAX_WORKFLOW_OUTPUT_CHARACTERS,
+    MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES,
     WORKFLOW_SPECS,
     accounting_policy_peer_review,
     audit_acceptance_review,
     group_audit_scope,
     investor_first_pass,
+    semantic_peer_context_review,
 )
 
 
@@ -58,6 +60,618 @@ def test_workflow_specialists_run_once_in_declared_order():
     assert [name for name, _ in calls] == expected
     assert len(calls) == len({name for name, _ in calls})
     assert [child["tool_name"] for child in result["children"]] == expected
+
+
+def test_semantic_peer_context_workflow_reuses_one_cohort_and_preserves_source_separation():
+    calls = []
+    shared_cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+        "peers": [{"corp_code": "00000002", "corp_name": "Peer Corp"}],
+        "selection_policy": {
+            "selection_mode": "strict",
+            "fs_div_used": "OFS",
+            "requested_year": 2024,
+        },
+        "confidence": "medium",
+    }
+
+    def context_builder(company, year, topics=None):
+        calls.append(("context", company, year, topics))
+        return {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "availability": {
+                "business_report": "available",
+                "audit_report": "unavailable",
+                "notes": "available",
+                "evidence_documents": "unavailable",
+                "disclosures": "unavailable",
+                "financials": "unavailable",
+            },
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART risk disclosure",
+                    "full_text_hash": "a" * 40,
+                    "rcept_no": "20250301000001",
+                }
+            ],
+            "notes": [
+                {
+                    "source_locator": "accounting_note_chapters:10",
+                    "fs_div": "CFS",
+                    "topic": "leases",
+                    "excerpt": "CFS lease note",
+                    "full_text_hash": "b" * 40,
+                },
+                {
+                    "source_locator": "accounting_note_chapters:11",
+                    "fs_div": "OFS",
+                    "topic": "leases",
+                    "excerpt": "OFS lease note",
+                    "full_text_hash": "c" * 40,
+                },
+            ],
+        }
+
+    def cohort_selector(company, **kwargs):
+        calls.append(("cohort", company, kwargs))
+        return shared_cohort
+
+    def note_builder(company, year, **kwargs):
+        calls.append(("notes", company, year, kwargs))
+        assert kwargs["_peer_group"] is shared_cohort
+        assert kwargs["topics"] == ["leases"]
+        return {
+            "subject": shared_cohort["subject"],
+            "year": year,
+            "peer_selection": shared_cohort["selection_policy"],
+            "topics": [
+                {
+                    "topic": "leases",
+                    "rows": [
+                        {
+                            "company": {"corp_code": "00000001"},
+                            "availability": "available",
+                            "source_locator": "accounting_note_chapters:11",
+                            "fs_div": "OFS",
+                        },
+                        {
+                            "company": {"corp_code": "00000002"},
+                            "availability": "summary_only",
+                            "source_locator": "accounting_note_chapters:12",
+                            "fs_div": "OFS",
+                        },
+                    ],
+                }
+            ],
+            "read_only": True,
+        }
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks", "leases"],
+        peer_criteria={"mode": "strict", "prefix_len": 3},
+        fs_strategy="auto",
+        company_ir=[
+            {
+                "source_class": "company_ir",
+                "source_id": "ir-1",
+                "excerpt": "Management target",
+            }
+        ],
+        web_news=[
+            {
+                "source_class": "web_news",
+                "source_id": "news-1",
+                "excerpt": "External coverage",
+            }
+        ],
+        context_builder=context_builder,
+        cohort_selector=cohort_selector,
+        note_builder=note_builder,
+    )
+
+    assert [call[0] for call in calls] == ["context", "cohort", "notes"]
+    assert calls[0][2] == calls[1][2]["year"] == calls[2][2] == 2024
+    assert calls[1][2]["criteria"] == {"mode": "strict", "prefix_len": 3}
+    assert result["read_only"] is True
+    assert result["fs_div_used"] == "OFS"
+    assert result["peer_selection"] == shared_cohort["selection_policy"]
+    assert [item["fs_div"] for item in result["semantic_context"]["notes"]] == ["OFS"]
+    pack = result["context_pack"]
+    assert pack["source_precedence"] == ["dart_filing", "company_ir", "web_news", "llm_analysis"]
+    assert [item["source_id"] for item in pack["dart_filing"]] == [
+        "report_sections:1",
+        "accounting_note_chapters:11",
+    ]
+    assert [item["source_id"] for item in pack["company_ir"]] == ["ir-1"]
+    assert [item["source_id"] for item in pack["web_news"]] == ["news-1"]
+    assert pack["peer_note_comparison"]["data"]["topics"][0]["rows"][1]["availability"] == "summary_only"
+    assert pack["peer_note_comparison"]["data"]["topics"][0]["rows"][1]["source_locator"] == "accounting_note_chapters:12"
+    assert {item["evidence_type"] for item in pack["missing_evidence"]} >= {"audit_report"}
+
+
+def test_semantic_peer_context_workflow_keeps_explicit_note_fs_fallback_provenance():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    def context_builder(_company, _year, topics=None):
+        assert topics == ["risks", "leases"]
+        return {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "availability": {
+                "business_report": "available",
+                "notes": "available",
+                "financials": "available",
+            },
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART risk disclosure",
+                    "full_text_hash": "a" * 40,
+                }
+            ],
+            "notes": [
+                {
+                    "source_locator": "accounting_note_chapters:10",
+                    "fs_div": "CFS",
+                    "topic": "leases",
+                    "excerpt": "CFS fallback lease note",
+                    "full_text_hash": "b" * 40,
+                }
+            ],
+            "financials": [
+                {
+                    "source_locator": "financials:00000001:2024:CFS:Q4",
+                    "fs_div": "CFS",
+                    "excerpt": "CFS financials",
+                },
+                {
+                    "source_locator": "financials:00000001:2024:OFS:Q4",
+                    "fs_div": "OFS",
+                    "excerpt": "OFS financials",
+                },
+            ],
+        }
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+        "peers": [],
+        "selection_policy": {"fs_div_used": "OFS", "requested_year": 2024},
+    }
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks", "leases"],
+        context_builder=context_builder,
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda _company, _year, **kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "peer_selection": cohort["selection_policy"],
+            "topics": [
+                {
+                    "topic": "leases",
+                    "rows": [
+                        {
+                            "company": {"corp_code": "00000001"},
+                            "availability": "available",
+                            "source_locator": "accounting_note_chapters:10",
+                            "fs_div": "CFS",
+                            "fs_div_selection": {
+                                "requested": "OFS",
+                                "used": "CFS",
+                                "status": "fallback_requested_fs_div_unavailable",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "read_only": True,
+        },
+    )
+
+    assert [item["fs_div"] for item in result["semantic_context"]["financials"]] == ["OFS"]
+    assert [item["fs_div"] for item in result["semantic_context"]["notes"]] == ["CFS"]
+    assert result["semantic_context"]["notes"][0]["fs_div_selection"] == {
+        "requested": "OFS",
+        "used": "CFS",
+        "status": "fallback_requested_fs_div_unavailable",
+    }
+    pack_notes = [
+        item for item in result["context_pack"]["dart_filing"]
+        if item["metadata"]["bucket"] == "notes"
+    ]
+    assert pack_notes[0]["metadata"]["fs_div"] == "CFS"
+    assert pack_notes[0]["metadata"]["fs_div_selection"]["status"] == "fallback_requested_fs_div_unavailable"
+    assert [item["source_id"] for item in result["context_pack"]["dart_filing"] if item["metadata"]["bucket"] == "financials"] == ["financials:00000001:2024:OFS:Q4"]
+
+
+def test_semantic_workflow_surfaces_note_comparison_summary_with_peer_evidence():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "peers": [
+            {"corp_code": "00000002", "corp_name": "Peer A"},
+            {"corp_code": "00000003", "corp_name": "Peer B"},
+        ],
+        "selection_policy": {"fs_div_used": "CFS"},
+    }
+
+    def context_builder(_company, _year, *, topics=None, note_topics=None):
+        assert topics == ["risks"]
+        assert note_topics == ["leases"]
+        return {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "business_report": [],
+            "notes": [],
+        }
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks"],
+        note_topics=["leases"],
+        context_builder=context_builder,
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda _company, _year, **kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "peer_selection": cohort["selection_policy"],
+            "topics": [{
+                "topic": "leases",
+                "rows": [
+                    {
+                        "company": {"corp_code": "00000001"},
+                        "availability": "available",
+                        "value_or_excerpt": "subject lease policy",
+                        "source_locator": "accounting_note_chapters:10",
+                        "fs_div_selection": {
+                            "requested": "CFS", "used": "CFS", "status": "exact",
+                        },
+                    },
+                    {
+                        "company": {"corp_code": "00000002"},
+                        "availability": "available",
+                        "value_or_excerpt": "peer lease policy differs",
+                        "source_locator": "accounting_note_chapters:11",
+                        "fs_div_selection": {
+                            "requested": "CFS", "used": "CFS", "status": "exact",
+                        },
+                    },
+                    {
+                        "company": {"corp_code": "00000003"},
+                        "availability": "unavailable",
+                        "value_or_excerpt": None,
+                        "source_locator": None,
+                        "fs_div_selection": {
+                            "requested": "CFS", "used": None,
+                            "status": "unavailable_no_cached_note",
+                        },
+                    },
+                ],
+            }],
+            "read_only": True,
+        },
+    )
+
+    summary = result["note_comparison_summary"]
+    assert summary["topic_coverage"] == [{
+        "topic": "leases",
+        "subject_availability": "available",
+        "peer_available": 1,
+        "peer_total": 2,
+        "peer_availability": "partial",
+    }]
+    assert summary["subject_availability"] == "available"
+    assert summary["peer_availability"] == "partial"
+    assert summary["differences"] == [{
+        "topic": "leases",
+        "peer_corp_code": "00000002",
+        "status": "different_cached_excerpt",
+        "subject_source_locator": "accounting_note_chapters:10",
+        "peer_source_locator": "accounting_note_chapters:11",
+    }]
+    assert summary["fs_div_selection"] == [{
+        "topic": "leases",
+        "corp_code": "00000001",
+        "requested": "CFS",
+        "used": "CFS",
+        "status": "exact",
+    }, {
+        "topic": "leases",
+        "corp_code": "00000002",
+        "requested": "CFS",
+        "used": "CFS",
+        "status": "exact",
+    }, {
+        "topic": "leases",
+        "corp_code": "00000003",
+        "requested": "CFS",
+        "used": None,
+        "status": "unavailable_no_cached_note",
+    }]
+    assert summary["source_locators"] == [
+        "accounting_note_chapters:10",
+        "accounting_note_chapters:11",
+    ]
+    assert summary["missing_evidence"] == [{
+        "topic": "leases",
+        "corp_code": "00000003",
+        "reason": "no_cached_note_for_exact_business_year",
+    }]
+
+
+def test_semantic_workflow_marks_requested_note_missing_when_cohort_fails():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        topics=["risks"],
+        note_topics=["leases"],
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "year": 2024,
+            "business_report": [],
+            "notes": [],
+        },
+        cohort_selector=lambda *_args, **_kwargs: {
+            "error": "no_eligible_peers",
+            "selection_policy": {},
+        },
+    )
+
+    assert result["note_comparison_summary"]["topic_coverage"] == [{
+        "topic": "leases",
+        "subject_availability": "unavailable",
+        "peer_available": 0,
+        "peer_total": 0,
+        "peer_availability": "unavailable",
+    }]
+    assert result["note_comparison_summary"]["missing_evidence"] == [{
+        "topic": "leases",
+        "reason": "no_comparison_rows",
+        "cohort_failure": "no_eligible_peers",
+    }]
+
+
+def test_semantic_workflow_marks_requested_note_missing_when_subject_fails():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    result = semantic_peer_context_review(
+        "missing-company",
+        2024,
+        note_topics=["leases"],
+        context_builder=lambda *_args, **_kwargs: {
+            "error": "company_not_found",
+            "company": "missing-company",
+            "year": 2024,
+            "read_only": True,
+        },
+    )
+
+    assert result["status"] == "missing"
+    assert result["note_comparison_summary"]["missing_evidence"] == [{
+        "topic": "leases",
+        "reason": "no_comparison_rows",
+        "subject_failure": "semantic_subject_unavailable",
+    }]
+
+
+def test_semantic_workflow_note_summary_keeps_externalized_only_as_summary_only():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+        "selection_policy": {"fs_div_used": "CFS"},
+    }
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        note_topics=["leases"],
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"], "year": 2024, "notes": [],
+        },
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "topics": [{
+                "topic": "leases",
+                "rows": [
+                    {
+                        "company": {"corp_code": "00000001"},
+                        "availability": "summary_only",
+                        "source_locator": "accounting_note_chapters:10",
+                    },
+                    {
+                        "company": {"corp_code": "00000002"},
+                        "availability": "summary_only",
+                        "source_locator": "accounting_note_chapters:11",
+                    },
+                ],
+            }],
+            "read_only": True,
+        },
+    )
+
+    summary = result["note_comparison_summary"]
+    assert summary["subject_availability"] == "summary_only"
+    assert summary["peer_availability"] == "summary_only"
+
+
+def test_semantic_workflow_note_summary_marks_mixed_subject_and_peer_rows_partial():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    cohort = {
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "peers": [
+            {"corp_code": "00000002", "corp_name": "Peer A"},
+            {"corp_code": "00000003", "corp_name": "Peer B"},
+        ],
+        "selection_policy": {"fs_div_used": "CFS"},
+    }
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        note_topics=["leases", "revenue"],
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"], "year": 2024, "notes": [],
+        },
+        cohort_selector=lambda *_args, **_kwargs: cohort,
+        note_builder=lambda *_args, **_kwargs: {
+            "subject": cohort["subject"],
+            "year": 2024,
+            "topics": [
+                {
+                    "topic": "leases",
+                    "rows": [
+                        {"company": {"corp_code": "00000001"}, "availability": "available"},
+                        {"company": {"corp_code": "00000002"}, "availability": "available"},
+                        {"company": {"corp_code": "00000003"}, "availability": "summary_only"},
+                    ],
+                },
+                {
+                    "topic": "revenue",
+                    "rows": [
+                        {"company": {"corp_code": "00000001"}, "availability": "summary_only"},
+                        {"company": {"corp_code": "00000002"}, "availability": "summary_only"},
+                        {"company": {"corp_code": "00000003"}, "availability": "summary_only"},
+                    ],
+                },
+            ],
+            "read_only": True,
+        },
+    )
+
+    summary = result["note_comparison_summary"]
+    assert summary["subject_availability"] == "partial"
+    assert summary["peer_availability"] == "partial"
+    assert summary["topic_coverage"] == [
+        {
+            "topic": "leases",
+            "subject_availability": "available",
+            "peer_available": 2,
+            "peer_total": 2,
+            "peer_availability": "partial",
+        },
+        {
+            "topic": "revenue",
+            "subject_availability": "summary_only",
+            "peer_available": 2,
+            "peer_total": 2,
+            "peer_availability": "summary_only",
+        },
+    ]
+
+
+def test_semantic_peer_context_workflow_applies_total_output_budget():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    huge = "x" * 4_000
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "business_report": [
+                {
+                    "source_locator": f"report_sections:{index}",
+                    "section_key": "risks",
+                    "excerpt": huge,
+                    "full_text_hash": f"{index:040d}",
+                }
+                for index in range(80)
+            ],
+        },
+        cohort_selector=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "peers": [],
+            "selection_policy": {"fs_div_used": "CFS"},
+        },
+        note_builder=lambda *_args, **_kwargs: {
+            "year": 2024,
+            "topics": [{"topic": "leases", "rows": [{"excerpt": huge}] * 80}],
+            "read_only": True,
+        },
+    )
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES
+    assert result["truncation"] == {
+        "applied": True,
+        "max_output_bytes": MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES,
+        "reason": "semantic_peer_context_output_budget",
+    }
+    assert result["context_pack"]["truncation"]["max_output_bytes"]
+
+
+def test_semantic_workflow_budget_preserves_an_already_bounded_context_pack():
+    from kreports.mcp.workflows import semantic_peer_context_review
+
+    huge_selection = [[["x" * 4_000 for _ in range(20)] for _ in range(20)] for _ in range(20)]
+    result = semantic_peer_context_review(
+        "00000001",
+        2024,
+        context_builder=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "year": 2024,
+            "business_report": [
+                {
+                    "source_locator": "report_sections:1",
+                    "section_key": "risks",
+                    "excerpt": "DART excerpt",
+                    "full_text_hash": "a" * 40,
+                    "availability": "summary_only",
+                    "rcept_no": "20250301000001",
+                    "fs_div_selection": {
+                        "requested": "OFS",
+                        "used": "CFS",
+                        "status": "fallback_requested_fs_div_unavailable",
+                        "huge_nested_metadata": huge_selection,
+                    },
+                }
+            ],
+        },
+        cohort_selector=lambda *_args, **_kwargs: {
+            "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
+            "peers": [],
+            "selection_policy": {
+                "fs_div_used": "CFS",
+                "large_selection_metadata": huge_selection,
+            },
+        },
+        note_builder=lambda *_args, **_kwargs: {"year": 2024, "topics": [], "read_only": True},
+        company_ir=[
+            {"source_class": "company_ir", "source_id": "ir-1", "excerpt": "IR"}
+        ],
+        web_news=[
+            {"source_class": "web_news", "source_id": "news-1", "excerpt": "News"}
+        ],
+    )
+
+    assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= MAX_SEMANTIC_PEER_CONTEXT_WORKFLOW_BYTES
+    assert result["truncation"]["applied"] is True
+    dart = result["context_pack"]["dart_filing"][0]
+    assert dart["source_id"] == "report_sections:1"
+    assert dart["metadata"]["availability"] == "summary_only"
+    assert dart["metadata"]["rcept_no"] == "20250301000001"
+    assert dart["metadata"]["fs_div_selection"] == {
+        "requested": "OFS",
+        "used": "CFS",
+        "status": "fallback_requested_fs_div_unavailable",
+    }
+    assert [item["source_id"] for item in result["context_pack"]["company_ir"]] == ["ir-1"]
+    assert [item["source_id"] for item in result["context_pack"]["web_news"]] == ["news-1"]
 
 
 def test_investor_workflow_uses_non_overlapping_specialists():
@@ -287,7 +901,7 @@ def test_workflow_budget_never_raises_for_reviewer_nested_shape():
 
 
 def test_workflow_budget_is_deterministic_for_adversarial_unicode_children():
-    statuses = ["error", "missing", "limited", "usable"]
+    statuses = ["error", "missing", "limited", "usable", "usable"]
     call_index = 0
 
     def dispatch(name, _arguments):

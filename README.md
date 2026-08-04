@@ -158,9 +158,9 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Beneish M-Score for this company — earnings manipulation risk"
 ```
 
-### MCP Tools (33)
+### MCP Tools (34)
 
-KReports exposes 33 catalog-bound MCP tools. The tools are grouped around the
+KReports exposes 34 catalog-bound MCP tools. The tools are grouped around the
 maintenance questions that usually force analysts and auditors back into DART:
 
 | Area | Representative tools | What it returns |
@@ -173,6 +173,7 @@ maintenance questions that usually force analysts and auditors back into DART:
 | Auditor and group audit | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | Auditor tenure, opinion history, group auditor matrix, audit fee/NAS peer view |
 | Audit report evidence | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | Audit report sections, KAM matters, audit procedures, year-to-year KAM lifecycle |
 | Accounting policies | `get_accounting_policy`, `compare_peer_accounting_policies`, `get_accounting_policy_changes` | K-IFRS policy notes, peer policy comparison, policy change candidates |
+| Semantic filing and peer context | `get_business_overview`, `compare_peer_accounting_policies`, `select_peer_group` | Optional local DART evidence buckets, explainable cohort selection, side-by-side note excerpts and provenance |
 
 All tools accept company name, 6-digit stock code, or 8-digit DART corp_code interchangeably.
 
@@ -275,7 +276,7 @@ kreports verify-release-artifact --db artifacts/kreports-runtime.db
 
 Build exits successfully after writing a valid proof whose
 `release_gate.passed` value may be false. Verify returns non-zero for DB drift,
-contract drift, or any current named release blocker. The 33-tool smoke executes
+contract drift, or any current named release blocker. The 34-tool smoke executes
 legacy handlers in an isolated process and forces the request-scoped DART fetch
 through its no-key `refresh` fail-closed state. `/readyz` reads the pre-verified
 artifact and performs cheap WAL/file/static-contract drift checks; it does not
@@ -294,7 +295,7 @@ turn missing inputs into inferred actuals.
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP servers (33 tools)
+├── mcp/         MCP stdio + HTTP servers (34 tools)
 ├── analysis/    Public Python API and evidence-grounded answer layer
 ├── collector/   DART API collectors and document-first backfill runners
 ├── processor/   XBRL/XML parsers
@@ -475,9 +476,9 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
 ```
 
-### MCP 도구 (33개)
+### MCP 도구 (34개)
 
-KReports는 catalog에 고정된 MCP 도구 33개를 제공합니다. 투자자와 감사인이
+KReports는 catalog에 고정된 MCP 도구 34개를 제공합니다. 투자자와 감사인이
 DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
 
 | 영역 | 대표 도구 | 반환 |
@@ -490,6 +491,7 @@ DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
 | 감사인·그룹감사 | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | 감사인 연속연수, 의견 이력, 그룹 감사인 매트릭스, 보수/NAS 피어 비교 |
 | 감사보고서 근거 | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | 감사보고서 본문, KAM, 감사절차, KAM 연도별 변화 |
 | 회계정책 | `get_accounting_policy`, `compare_peer_accounting_policies`, `get_accounting_policy_changes` | K-IFRS 주석, 피어 정책 비교, 정책 변경 후보 |
+| 의미 공시·피어 맥락 | `get_business_overview`, `compare_peer_accounting_policies`, `select_peer_group` | 선택형 로컬 DART 증빙 버킷, 설명 가능한 피어 선정, 주석 원문·출처 비교 |
 
 회사명, 종목코드(6자리), corp_code(8자리) 중 아무거나 입력 가능합니다.
 
@@ -557,12 +559,12 @@ kreports verify-release-artifact --db artifacts/kreports-runtime.db
 build는 blocker가 있어도 `release_gate.passed=false`와 정확한 blocker를
 기록하고 0으로 종료합니다. verify는 현재 DB의 해시·스키마·인덱스·raw
 count·catalog·golden contract·release gate를 다시 계산하며 drift나
-blocker가 있으면 non-zero로 종료합니다. 33개 도구 smoke는 격리 프로세스에서
+blocker가 있으면 non-zero로 종료합니다. 34개 도구 smoke는 격리 프로세스에서
 실제 handler를 실행하고, 사용자 키 기반 DART 조회는 cache hit를 허용하지
 않는 `refresh` 모드에서 키가 없는 fail-closed 상태를 검증합니다.
 `/readyz`는 사전 검증된 artifact와 WAL·파일·정적 계약 drift를 빠르게
 확인합니다. 전체 DB 해시는 파일 identity가 바뀔 때만 다시 계산하고,
-33개 도구는 health probe에서 다시 실행하지 않습니다.
+34개 도구는 health probe에서 다시 실행하지 않습니다.
 
 투자자 기능은 `investor_core` gate가 통과한 데이터에서만 ready입니다.
 회계정책·감사절차·그룹감사 등 감사인 기능은 artifact의 개별 등급에 따라
@@ -573,7 +575,7 @@ conditional일 수 있습니다. DCF는 공시 실제값, 명시적 가정, 모�
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP 서버 (33개 도구)
+├── mcp/         MCP stdio + HTTP 서버 (34개 도구)
 ├── analysis/    Python 공개 API와 근거 기반 응답 레이어
 ├── collector/   DART API 수집기와 문서 우선 백필 러너
 ├── processor/   XBRL/XML 파서

@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 34  # approved catalog including audit materiality preparation
+EXPECTED_TOOL_COUNT = 34  # approved catalog with consolidated semantic peer context
 
 
 class TestToolRegistryConsistency:

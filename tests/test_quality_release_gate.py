@@ -314,7 +314,7 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     temp_engine,
     monkeypatch,
 ):
-    from kreports.quality.release_gate import evaluate_release_gate
+    from kreports.quality import release_gate
 
     for index in range(20):
         _seed_quality_row(
@@ -336,9 +336,10 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
-    report = evaluate_release_gate("public_runtime")
+    report = release_gate.evaluate_release_gate("public_runtime")
 
     assert report["ok"] is True
+    assert report["tool_count"] == 34
     assert report["denominators"]["investor_core"] == 20
     assert report["coverage"]["investor_core"] == {
         "numerator": 19,
@@ -351,6 +352,11 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
         "outside_core_markets": 1,
     }
     assert "investor_core_coverage" not in report["required_failures"]
+
+    monkeypatch.setattr(release_gate, "_tool_count", lambda: 32)
+    mismatch = release_gate.evaluate_release_gate("public_runtime")
+    assert mismatch["ok"] is False
+    assert "unexpected_tool_count" in mismatch["required_failures"]
 
 
 def test_auditor_full_promotes_optional_policy_and_procedure_gaps(
@@ -865,6 +871,38 @@ def test_invalid_manifest_fails_closed(temp_engine, monkeypatch):
     assert report["schema_version"] == "unknown"
     assert report["dataset_version"] == "unknown"
     assert "release_manifest_unavailable" in report["required_failures"]
+
+
+def test_empty_manifest_and_quality_ledger_fail_closed_with_actionable_guidance(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    with temp_engine.begin() as connection:
+        apply_schema_migrations(connection)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert report["ok"] is False
+    assert report["required_failures"] == [
+        "investor_core_coverage",
+        "release_manifest_unavailable",
+    ]
+    guidance = {
+        item["blocker"]: item for item in report["blocker_guidance"]
+    }
+    assert guidance["release_manifest_unavailable"] == {
+        "blocker": "release_manifest_unavailable",
+        "owner": "dataset_release_maintainer",
+        "action": "write a validated dataset manifest from the prepared runtime DB",
+    }
+    assert guidance["investor_core_coverage"] == {
+        "blocker": "investor_core_coverage",
+        "owner": "dataset_backfill_maintainer",
+        "action": "backfill and validate investor-core company-year coverage before release",
+    }
 
 
 def test_release_gate_is_read_only_and_does_not_require_dart_key(

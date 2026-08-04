@@ -2027,6 +2027,59 @@ def run_document_extractors_cmd(
             typer.echo(f"  {row.get('rcept_no')}: {row.get('error')}")
 
 
+@app.command("index-note-sources")
+def index_note_sources_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="최대 검사 문서 수"),
+):
+    """기존 원문 캐시를 읽기 전용으로 주석 후보/커버리지만 점검한다."""
+    from kreports.processor.note_source_index import build_note_source_index
+
+    _json_print(build_note_source_index(
+        year=year,
+        source_type=source_type,
+        limit=limit,
+        include_chapters=False,
+    ))
+
+
+@app.command("inventory-note-sources")
+def inventory_note_sources_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    company_offset: int = typer.Option(0, "--company-offset", min=0, help="회사-연도-출처 그룹 offset"),
+    company_limit: int = typer.Option(500, "--company-limit", min=1, max=1000, help="반환할 회사-연도-출처 그룹 수"),
+):
+    """모든 회사 원문 메타데이터의 read-only 주석 backfill 계획을 생성한다."""
+    from kreports.processor.note_source_index import build_note_source_inventory
+
+    _json_print(build_note_source_inventory(
+        year=year,
+        source_type=source_type,
+        company_offset=company_offset,
+        company_limit=company_limit,
+    ))
+
+
+@app.command("audit-extraction-gaps")
+def audit_extraction_gaps_cmd(
+    year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),
+    source_type: Optional[str] = typer.Option(None, "--source-type", help="business_report/audit_report"),
+    company_offset: int = typer.Option(0, "--company-offset", min=0, help="영수증 단위 표본 offset"),
+    company_limit: int = typer.Option(200, "--company-limit", min=1, max=1000, help="반환할 영수증 단위 표본 수"),
+):
+    """원문/파생 테이블 간 추출 공백을 읽기 전용으로 감사한다."""
+    from kreports.analysis.extraction_gap_audit import build_extraction_gap_audit
+
+    _json_print(build_extraction_gap_audit(
+        year=year,
+        source_type=source_type,
+        company_offset=company_offset,
+        company_limit=company_limit,
+    ))
+
+
 @app.command("index-audit-procedures")
 def index_audit_procedures_cmd(
     year: Optional[int] = typer.Option(None, "--year", help="대상 사업연도"),

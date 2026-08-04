@@ -334,3 +334,23 @@ def extract_report_sections(xml_content: str) -> dict[str, dict]:
         }
 
     return result
+
+
+def extract_report_semantic_profile(
+    xml_content: str,
+    *,
+    corp_code: str,
+    bsns_year: int,
+    source_document_id: int | None,
+    rcept_no: str | None,
+):
+    """Additive semantic view over :func:`extract_report_sections` output."""
+    from kreports.processor.semantic_contracts import build_business_semantic_profile
+
+    return build_business_semantic_profile(
+        extract_report_sections(xml_content),
+        corp_code=corp_code,
+        bsns_year=bsns_year,
+        source_document_id=source_document_id,
+        rcept_no=rcept_no,
+    )

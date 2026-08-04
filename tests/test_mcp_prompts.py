@@ -41,3 +41,14 @@ def test_prompt_arguments_are_bounded_and_unknown_prompt_fails_closed():
             "investor_first_pass",
             {"company": "x" * 300, "year": "2025"},
         )
+
+
+def test_host_only_semantic_peer_adapter_is_not_advertised_as_a_public_prompt():
+    assert "semantic_peer_context_review" not in {
+        prompt.name for prompt in list_prompts()
+    }
+    with pytest.raises(PromptRequestError, match="unknown_prompt"):
+        get_prompt(
+            "semantic_peer_context_review",
+            {"company": "00126380", "year": "2025"},
+        )

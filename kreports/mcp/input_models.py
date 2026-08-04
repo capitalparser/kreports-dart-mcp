@@ -1,4 +1,4 @@
-"""Strict typed arguments for the 33 public MCP tools."""
+"""Strict typed arguments for the 34 public MCP tools."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
@@ -9,6 +9,7 @@ from kreports.analysis.dcf_model import (
     MIN_DECIMAL_ADJUSTED,
     dcf_decimal_fits_serialization,
 )
+from kreports.analysis.peer_criteria import PeerCriteriaProfile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -33,6 +34,29 @@ Metric = Literal[
 ]
 Year = Annotated[int, Field(ge=2000, le=2100)]
 PeerSelector = Annotated[str, Field(min_length=1, max_length=100)]
+SemanticContextTopic = Literal[
+    "business_overview",
+    "major_shareholders_board",
+    "risks",
+    "raw_materials",
+    "facilities",
+    "contracts",
+    "accounting_policies",
+    "kam",
+    "audit_opinion",
+    "subsequent_events",
+]
+NoteTopic = Literal[
+    "revenue",
+    "leases",
+    "financial_instruments",
+    "related_parties",
+    "provisions_contingencies",
+    "impairment",
+    "subsidiaries",
+    "subsequent_events",
+    "accounting_policies",
+]
 
 
 class ToolInput(BaseModel):
@@ -142,6 +166,47 @@ class CompareToIndustryInput(ToolInput):
 class GetBusinessOverviewInput(ToolInput):
     company: str = Field(description="corp_code / 종목코드 / 회사명")
     bsns_year: Year | None = Field(None, description="사업연도. 생략 시 최신 사업보고서.")
+    include_semantic_context: bool = Field(
+        False,
+        description="선택. 기존 사업개요에 읽기 전용 회사·연도 증빙 버킷을 추가한다.",
+    )
+    semantic_topics: list[SemanticContextTopic] | None = Field(None, max_length=10)
+    note_topics: list[NoteTopic] | None = Field(None, max_length=9)
+
+
+class GetSemanticCompanyContextInput(ToolInput):
+    company: str = Field(description="corp_code / 종목코드 / 회사명")
+    year: Year = Field(description="대상 사업연도")
+    topics: list[SemanticContextTopic] | None = Field(
+        None,
+        max_length=10,
+        description=(
+            "선택한 의미 증빙 주제만 반환. 생략하면 사업·감사·주석·공시·재무의 "
+            "로컬 캐시 버킷을 모두 반환한다."
+        ),
+    )
+    note_topics: list[NoteTopic] | None = Field(
+        None,
+        max_length=9,
+        description=(
+            "회계주석 비교용 주제. topics의 사업·감사 증빙 필터와 독립적으로 "
+            "적용되며, 둘을 함께 지정해도 각 버킷은 별도로 필터링한다."
+        ),
+    )
+
+    @field_validator("topics")
+    @classmethod
+    def unique_topics(cls, value: list[SemanticContextTopic] | None):
+        if value is None:
+            return value
+        return list(dict.fromkeys(value))
+
+    @field_validator("note_topics")
+    @classmethod
+    def unique_note_topics(cls, value: list[NoteTopic] | None):
+        if value is None:
+            return value
+        return list(dict.fromkeys(value))
 
 
 class GetInvestorSignalsInput(ToolInput):
@@ -153,12 +218,28 @@ class GetInvestorSignalsInput(ToolInput):
 
 class SelectPeerGroupInput(ToolInput):
     company: str
-    criteria: list[str] | None = None
+    criteria: list[str] | PeerCriteriaProfile | None = Field(
+        None,
+        description=(
+            "기존 문자열 기준 목록 또는 strict/adaptive/ranked 동종업종 프로필. "
+            "프로필은 KSIC·sector·규모·포함/제외 기업·증빙 충족률을 명시한다."
+        ),
+    )
+    peer_criteria: PeerCriteriaProfile | None = Field(
+        None,
+        description="criteria의 명시적 별칭. criteria와 동시에 지정할 수 없다.",
+    )
     peer_limit: int = Field(30, ge=1, le=200)
     fs_strategy: FsStrategy = "auto"
     prefix_len_start: int = Field(3, ge=2, le=5)
     size_bucket_decade: float | None = Field(None, ge=0.5, le=3.0)
     exclude_other_sectors: bool = True
+
+    @model_validator(mode="after")
+    def reject_duplicate_peer_criteria(self):
+        if self.criteria is not None and self.peer_criteria is not None:
+            raise ValueError("criteria와 peer_criteria는 동시에 지정할 수 없습니다.")
+        return self
 
 
 class CompareToIndustryMultiInput(ToolInput):
@@ -225,6 +306,17 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
     size_bucket_decade: float | None = Field(None, ge=0.1, le=3.0)
     include_peers: list[PeerSelector] = Field(default_factory=list, max_length=50)
     exclude_peers: list[PeerSelector] = Field(default_factory=list, max_length=50)
+    include_note_comparison: bool = Field(
+        False,
+        description="선택. 같은 사업연도 peer별 회계주석 원문 발췌·출처를 추가한다.",
+    )
+    note_topics: list[NoteTopic] | None = Field(None, max_length=9)
+    peer_offset: int = Field(0, ge=0)
+    page_size: int | None = Field(None, ge=1, le=200)
+    peer_criteria: PeerCriteriaProfile | list[str] | None = Field(
+        None,
+        description="선택. 주석 side-by-side 비교에 적용할 동종기업 기준.",
+    )
 
     @field_validator("peer_weights")
     @classmethod
@@ -267,6 +359,30 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
         if self.company in included or self.company in set(self.exclude_peers):
             raise ValueError("대상회사는 include_peers 또는 exclude_peers에 넣을 수 없습니다.")
         return self
+
+    @field_validator("note_topics")
+    @classmethod
+    def unique_note_topics(cls, value):
+        return list(dict.fromkeys(value)) if value is not None else value
+
+
+class ComparePeerAccountingNotesInput(ToolInput):
+    company: str
+    year: Year = 2025
+    topics: list[NoteTopic] | None = Field(None, max_length=9)
+    peer_limit: int = Field(30, ge=1, le=200)
+    peer_offset: int = Field(0, ge=0, description="동종기업 비교 페이지의 0-기반 offset")
+    page_size: int | None = Field(None, ge=1, le=200, description="선택. 생략하면 peer_limit을 페이지 크기로 사용한다.")
+    fs_strategy: FsStrategy = "auto"
+    peer_criteria: PeerCriteriaProfile | list[str] | None = Field(
+        None,
+        description="선택한 동종업종 기준. 생략하면 기존 adaptive peer 정책을 사용한다.",
+    )
+
+    @field_validator("topics")
+    @classmethod
+    def unique_note_topics(cls, value):
+        return list(dict.fromkeys(value)) if value is not None else value
 
 
 class ComparePeerKamTopicsInput(ComparePeerRiskProfileInput):

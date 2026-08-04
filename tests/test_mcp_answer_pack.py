@@ -1155,3 +1155,38 @@ def test_missing_input_only_dcf_pack_emits_material_readiness_blocker(
         "fs_div": "CFS",
         "basis": basis,
     }]
+
+
+def test_policy_pack_renders_consolidated_side_by_side_note_comparison():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_code": "001", "corp_name": "대상회사"},
+        "data_quality": {"status": "limited"},
+        "note_comparison": {
+            "topics": [{
+                "topic": "leases",
+                "rows": [{
+                    "company": {"corp_code": "001", "corp_name": "대상회사"},
+                    "value_or_excerpt": "리스부채 측정",
+                    "availability": "available",
+                    "rcept_no": "20250301000001",
+                    "source_locator": "accounting_note_chapters:1",
+                }],
+            }],
+        },
+    })
+
+    assert pack is not None
+    table = next(
+        table for table in pack["tables"]
+        if table["id"] == "peer_topic_note_comparison"
+    )
+    assert table["rows"] == [{
+        "topic": "leases",
+        "company": "대상회사",
+        "excerpt": "리스부채 측정",
+        "availability": "available",
+        "receipt": "20250301000001",
+        "source_locator": "accounting_note_chapters:1",
+    }]

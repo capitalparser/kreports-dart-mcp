@@ -366,7 +366,7 @@ def get_business_overview(
             "body_text": body,
             "length": sec.get("length", len(body)),
         }
-        total_chars += sec.get("length", 0)
+        total_chars += sec.get("length") or len(body)
 
     # 인사이트
     from kreports.analysis.business_insights import generate_business_insights

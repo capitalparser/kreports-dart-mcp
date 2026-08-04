@@ -409,6 +409,18 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
                 row.get("rcept_no"),
                 label=f"{row.get('corp_name') or row.get('corp_code') or ''} 사업보고서".strip(),
             ))
+    note_comparison = result.get("note_comparison")
+    if isinstance(note_comparison, dict):
+        for topic in note_comparison.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            for row in topic.get("rows") or []:
+                if isinstance(row, dict):
+                    company = row.get("company") if isinstance(row.get("company"), dict) else {}
+                    add(_source_from_rcept_no(
+                        row.get("rcept_no"),
+                        label=f"{company.get('corp_name') or company.get('corp_code') or ''} 사업보고서".strip(),
+                    ))
     return sources
 
 
@@ -1831,7 +1843,11 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
         methodology_rows,
         note="가중치는 내부 스크리닝 휴리스틱이며 감사·회계 기준 또는 외부 표준이 아닙니다.",
     ))
-    extended = bool(result.get("peer_selection") or result.get("selected_topic"))
+    extended = bool(
+        result.get("peer_selection")
+        or result.get("selected_topic")
+        or result.get("note_comparison")
+    )
     if not extended:
         _append_legacy_peer_policy_tables(pack, result, selection_policy)
         return pack
@@ -1884,6 +1900,33 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
              ("receipt", "검증된 접수번호"), ("provenance", "출처 검증")],
             presentation_rows,
             note="텍스트/표시 차이는 스크리닝 신호일 뿐 회계처리 결론이 아닙니다.",
+        ))
+    note_comparison_rows = []
+    note_comparison = result.get("note_comparison")
+    if isinstance(note_comparison, dict):
+        for topic in note_comparison.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            for row in topic.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                company = row.get("company") if isinstance(row.get("company"), dict) else {}
+                note_comparison_rows.append({
+                    "topic": topic.get("topic"),
+                    "company": company.get("corp_name") or company.get("corp_code"),
+                    "excerpt": row.get("value_or_excerpt"),
+                    "availability": row.get("availability"),
+                    "receipt": row.get("rcept_no"),
+                    "source_locator": row.get("source_locator"),
+                })
+    if note_comparison_rows:
+        pack["tables"].append(_table(
+            "peer_topic_note_comparison", "동일 사업연도 회계주석 비교",
+            [("topic", "주제"), ("company", "회사"), ("excerpt", "본문 발췌"),
+             ("availability", "캐시 상태"), ("receipt", "접수번호"),
+             ("source_locator", "출처 위치")],
+            note_comparison_rows,
+            note="원문 발췌와 출처를 비교하며, 캐시 미확보는 공시 부재를 뜻하지 않습니다.",
         ))
     coverage_rows = [row for row in result.get("topic_coverage") or [] if isinstance(row, dict)]
     if coverage_rows:

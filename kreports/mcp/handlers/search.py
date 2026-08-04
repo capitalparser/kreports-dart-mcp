@@ -54,7 +54,7 @@ def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
 def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
     result = select_peer_group_with_evidence(
         company=resolve_company(args.company),
-        criteria=args.criteria,
+        criteria=args.peer_criteria or args.criteria,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
         prefix_len_start=args.prefix_len_start,

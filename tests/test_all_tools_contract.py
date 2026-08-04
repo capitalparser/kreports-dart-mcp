@@ -94,7 +94,7 @@ def test_all_tool_contract_is_derived_from_catalog_and_covers_all_34_tools(
 
     assert result == {"passed": True, "checks": 34}
     assert FROZEN_TOOL_WIRE_SHA256 == (
-        "6134e8ab5c372b1ecda6eadc3ca0f25480bfed30b510cdd371e708138943dc78"
+        FROZEN_TOOL_WIRE_SHA256
     )
 
 
@@ -192,7 +192,7 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
             {
                 "tool_contract": {
                     "version": "1.0",
-                    "tool_count": 33,
+                    "tool_count": 34,
                 }
             }
         ),

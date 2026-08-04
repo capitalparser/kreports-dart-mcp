@@ -198,7 +198,7 @@ kreports verify-release-artifact \
 The build command is evidence-producing: it writes atomically and may record
 `release_gate.passed=false` with named blockers. The verify command is
 deployment-gating: it recomputes the DB size/hash, schema and required indexes,
-dataset manifest, inline raw count, current release gate, 32-tool wire contract,
+dataset manifest, inline raw count, current release gate, 34-tool wire contract,
 isolated real-dispatch catalog smoke, and the approved packaged golden contract
 hash. The user-keyed network fetch is forced to `refresh` and checked in its
 no-key fail-closed state, so an existing cache row cannot satisfy that check.

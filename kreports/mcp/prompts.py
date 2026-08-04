@@ -41,8 +41,8 @@ _WORKFLOW_TEXT = {
         "기여도, QSC 근거와 구성감사인 증거의 가용성을 검토한다."
     ),
     "accounting_policy_peer_review": (
-        "회계정책 peer 검토 워크플로를 실행하여 정책 본문, 변경 이력, "
-        "peer 차이와 KAM 연계를 검토한다."
+        "회계정책 peer 검토 워크플로를 실행하여 로컬 의미 증빙, 정책 본문, "
+        "변경 이력, peer 주석 차이와 KAM 연계를 검토한다."
     ),
 }
 
@@ -105,11 +105,13 @@ def get_prompt(
     if description is None:
         raise PromptRequestError("unknown_prompt")
     company, year = _validated_arguments(arguments)
+    workflow_instruction = (
+        "호출 순서(각 specialist는 한 번만 호출): "
+        f"{', '.join(WORKFLOW_SPECS[name])}"
+    )
     text = (
         f"{description}\n\n대상 회사: {company}\n사업연도: {year}\n\n"
-        "호출 순서(각 specialist는 한 번만 호출): "
-        f"{', '.join(WORKFLOW_SPECS[name])}\n\n"
-        f"{_COMMON_SAFETY}"
+        f"{workflow_instruction}\n\n{_COMMON_SAFETY}"
     )
     return GetPromptResult(
         description=description,
