@@ -2424,6 +2424,64 @@ def quality_release_gate_cmd(
         raise typer.Exit(1)
 
 
+@app.command("plan-investor-core-backfill")
+def plan_investor_core_backfill_cmd(
+    db_path: Path = typer.Option(..., "--db", help="읽기 전용으로 검사할 SQLite DB 경로"),
+    coverage_year: Optional[int] = typer.Option(
+        None,
+        "--coverage-year",
+        help="기준 사업연도 (기본: quality 원장의 최신 연도)",
+    ),
+    threshold_pct: float = typer.Option(
+        95.0,
+        "--threshold-pct",
+        help="목표 커버리지 비율 (0 초과, 100 이하)",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+) -> None:
+    """투자자 core 3년 게이트 부족분을 네트워크 없이 계획한다."""
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    try:
+        plan = plan_investor_core_backfill(
+            db_path,
+            coverage_year=coverage_year,
+            threshold_pct=threshold_pct,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_output:
+        typer.echo(
+            json.dumps(
+                plan,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return
+    typer.echo(
+        "Investor-core backfill preflight: "
+        f"{plan['numerator']}/{plan['denominator']} "
+        f"(target {plan['target_numerator']}, shortfall {plan['shortfall']})"
+    )
+    typer.echo(
+        "Selected: "
+        f"{plan['selected_candidate_count']} companies, "
+        f"{plan['selected_successful_company_year_request_count']} "
+        "successful company-year requests"
+    )
+    typer.echo(
+        "Source readiness: "
+        f"{plan['selected_source_ready_count']} ready, "
+        f"{plan['selected_needing_disclosure_metadata_count']} need disclosure metadata"
+    )
+    if plan["unfillable_shortfall"]:
+        typer.echo(f"Unfillable shortfall: {plan['unfillable_shortfall']}")
+
+
 @app.command("build-release-manifest")
 def build_release_manifest_cmd(
     db_path: Optional[Path] = typer.Option(
