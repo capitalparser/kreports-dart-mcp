@@ -1,3 +1,6 @@
+import os
+import re
+import subprocess
 from pathlib import Path
 
 
@@ -17,6 +20,94 @@ def _environment_entries(compose_text: str) -> set[str]:
         if in_environment and line.startswith("      ") and ":" in line:
             entries.add(line.strip().split(":", 1)[0])
     return entries
+
+
+def _documented_promotion_script() -> str:
+    guide = (REPO_ROOT / "docs" / "deploy-http-mcp.md").read_text()
+    section = guide.split("Compact runtime artifact flow", 1)[1].split(
+        "The build command", 1
+    )[0]
+    blocks = re.findall(r"```bash\n(.*?)\n```", section, flags=re.DOTALL)
+    promotion_blocks = [block for block in blocks if "export-runtime-db" in block]
+    assert len(promotion_blocks) == 1
+    return promotion_blocks[0]
+
+
+def _write_promotion_fakes(fake_bin: Path) -> None:
+    fake_bin.mkdir()
+    kreports = fake_bin / "kreports"
+    kreports.write_text(
+        """#!/bin/sh
+set -eu
+command_name="$1"
+shift
+db_path=""
+output_path=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --db) db_path="$2"; shift 2 ;;
+    --output) output_path="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$command_name" in
+  export-runtime-db)
+    mkdir -p "$(dirname "$output_path")"
+    printf 'synthetic-db' > "$output_path"
+    ;;
+  build-release-manifest)
+    [ "$(basename "$db_path")" = "kreports.db" ] || exit 41
+    printf 'synthetic-manifest' > "${db_path}.release.json"
+    ;;
+  verify-release-artifact)
+    [ "$(basename "$db_path")" = "kreports.db" ] || exit 42
+    [ -f "${db_path}.release.json" ] || exit 43
+    if [ "${FAIL_FINAL_VERIFY:-0}" = "1" ] && [ "$db_path" = "./kreports.db" ]; then
+      exit 44
+    fi
+    ;;
+esac
+"""
+    )
+    kreports.chmod(0o755)
+
+    docker = fake_bin / "docker"
+    docker.write_text(
+        """#!/bin/sh
+set -eu
+case " $* " in
+  *" stop kreports-mcp "*) printf 'stopped' > "$TEST_STATE/service.stopped" ;;
+  *" up -d --force-recreate "*) printf 'running' > "$TEST_STATE/service.running" ;;
+esac
+"""
+    )
+    docker.chmod(0o755)
+
+
+def _run_documented_promotion(tmp_path: Path, *, fail_final_verify: bool = False):
+    fake_bin = tmp_path / "fake-bin"
+    state = tmp_path / "state"
+    state.mkdir()
+    _write_promotion_fakes(fake_bin)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "TEST_STATE": str(state),
+        "TMPDIR": str(tmp_path),
+        "FAIL_FINAL_VERIFY": "1" if fail_final_verify else "0",
+    }
+    result = subprocess.run(
+        ["bash"],
+        input=_documented_promotion_script().replace(
+            "<gcs-bucket-name>", "synthetic-bucket"
+        ),
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, state
 
 
 def test_public_compose_fails_closed_with_a_readonly_verified_artifact_pair():
@@ -83,15 +174,6 @@ def test_deployment_guide_never_treats_the_public_runtime_db_as_collector_state(
     assert "never writes the mounted public runtime DB" in guide
     assert "atomic deployment" in guide
     assert "docker compose -f docker-compose.deploy.yml up -d --force-recreate" in guide
-    compact_flow = guide.split("Compact runtime artifact flow", 1)[1].split(
-        "The build command", 1
-    )[0]
-    assert compact_flow.index("kreports export-runtime-db") < compact_flow.index(
-        "kreports build-release-manifest"
-    ) < compact_flow.index("kreports verify-release-artifact")
-    assert compact_flow.index("kreports verify-release-artifact") < compact_flow.index(
-        "kreports upload-runtime-db-artifact"
-    )
 
 
 def test_private_collector_guide_documents_exact_raw_backfill_opt_in():
@@ -122,3 +204,28 @@ def test_compose_render_uses_only_the_placeholder_template_and_is_not_persisted(
     assert safe_config in guide
     assert "config >" not in guide
     assert guide.index(safe_config) < guide.index("export KREPORTS_MCP_TOKEN")
+
+
+def test_documented_promotion_keeps_manifest_bound_to_final_database_basename(
+    tmp_path,
+):
+    """Catches export or promotion under a basename other than kreports.db."""
+    result, state = _run_documented_promotion(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "kreports.db").read_text() == "synthetic-db"
+    assert (
+        tmp_path / "kreports.db.release.json"
+    ).read_text() == "synthetic-manifest"
+    assert (state / "service.running").read_text() == "running"
+
+
+def test_documented_promotion_leaves_service_stopped_when_final_verification_fails(
+    tmp_path,
+):
+    """Catches a restart that is not gated by final-path artifact verification."""
+    result, state = _run_documented_promotion(tmp_path, fail_final_verify=True)
+
+    assert result.returncode == 44
+    assert (state / "service.stopped").read_text() == "stopped"
+    assert not (state / "service.running").exists()

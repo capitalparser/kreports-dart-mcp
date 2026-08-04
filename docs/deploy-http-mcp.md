@@ -216,7 +216,8 @@ Use `scripts/run_source_documents_backfill.sh` only for explicitly selected raw
 archive expansion. On capacity-constrained machines, prefer rebuilding
 `evidence_documents` and structured facts over collecting more full XML bodies.
 
-Compact runtime artifact flow from that maintainer DB:
+Complete any maintainer-DB compaction and externalization before exporting a
+public release:
 
 ```bash
 kreports rebuild-financial-facts-compact --year-from 2021 --year-to 2025
@@ -228,42 +229,43 @@ kreports externalize-long-evidence-text \
   --backend gcs \
   --bucket <gcs-bucket-name> \
   --prefix evidence/full-text
+```
+
+Compact runtime artifact flow from that maintainer DB. The staging DB is created
+under its final basename, `kreports.db`, so the adjacent
+`kreports.db.release.json` remains filename-bound through promotion. The
+fail-fast block stops before service shutdown if staged verification fails and
+leaves the service stopped if final-path verification fails:
+
+```bash
+set -euo pipefail
+
+release_stage="$(mktemp -d "${TMPDIR:-/tmp}/kreports-release.XXXXXX")"
+trap 'rm -rf "$release_stage"' EXIT
+
 kreports export-runtime-db \
-  --output artifacts/kreports-runtime-2021-2025.db \
+  --output "$release_stage/kreports.db" \
   --year-from 2021 \
   --year-to 2025 \
   --profile compact
 kreports build-release-manifest \
-  --db artifacts/kreports-runtime-2021-2025.db
+  --db "$release_stage/kreports.db"
 kreports verify-release-artifact \
-  --db artifacts/kreports-runtime-2021-2025.db
-kreports upload-runtime-db-artifact \
-  --db artifacts/kreports-runtime-2021-2025.db \
-  --bucket <gcs-bucket-name> \
-  --prefix runtime-db \
-  --profile compact \
-  --year-from 2021 \
-  --year-to 2025
-```
+  --db "$release_stage/kreports.db"
 
-For the local Compose layout, stage the already verified pair, stop the public
-service so it cannot observe a partially replaced pair, promote both files, and
-verify the final host paths before restarting. This is an operationally atomic
-deployment at the service boundary:
-
-```bash
-install -m 0444 artifacts/kreports-runtime-2021-2025.db ./kreports.db.next
-install -m 0444 artifacts/kreports-runtime-2021-2025.db.release.json ./kreports.db.release.json.next
 docker compose -f docker-compose.deploy.yml stop kreports-mcp
-mv -f ./kreports.db.next ./kreports.db
-mv -f ./kreports.db.release.json.next ./kreports.db.release.json
+install -m 0444 "$release_stage/kreports.db" ./kreports.db
+install -m 0444 "$release_stage/kreports.db.release.json" ./kreports.db.release.json
 kreports verify-release-artifact --db ./kreports.db
 docker compose -f docker-compose.deploy.yml up -d --force-recreate
 ```
 
-Do not resume serving if final-path verification fails. The old pair should be
-retained separately until the replacement has passed `/readyz`, so rollback is
-another stopped-service pair promotion rather than an in-place DB mutation.
+The service is stopped before the verified pair is copied under the same two
+basenames, so it cannot observe a partial replacement. `set -e` gates the
+restart on successful final-path verification: do not manually resume serving
+if that verification fails. Retain the old pair separately until the replacement
+has passed `/readyz`, so rollback is another stopped-service pair promotion
+rather than an in-place DB mutation.
 
 The build command is evidence-producing: it writes atomically and may record
 `release_gate.passed=false` with named blockers. The verify command is
