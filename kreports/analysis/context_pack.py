@@ -270,6 +270,12 @@ def _local_evidence(bucket: str, rows: Iterable[object]) -> list[ContextEvidence
         if not isinstance(raw_row, dict):
             continue
         row = dict(raw_row)
+        if not (
+            row.get("provenance_status") == "proven_annual_filing"
+            and row.get("canonical_source_binding") is True
+            and row.get("source_document_id") is not None
+        ):
+            continue
         source_id = _bounded_text(row.get("source_locator"), limit=300)
         if not source_id:
             source_id = f"dart:{bucket}:{ordinal}"

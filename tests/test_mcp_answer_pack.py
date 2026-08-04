@@ -87,6 +87,27 @@ def test_policy_change_pack_keeps_proven_receipt_in_table_and_sources_only():
     ]
 
 
+def test_note_comparison_answer_pack_does_not_link_an_unbound_cached_receipt():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_name": "A"},
+        "note_comparison": {
+            "year": 2024,
+            "topics": [{
+                "topic": "leases",
+                "rows": [{
+                    "company": {"corp_name": "A"},
+                    "rcept_no": "20250301000001",
+                    "provenance_status": "unproven_source_binding",
+                }],
+            }],
+        },
+    })
+
+    assert pack["sources"] == []
+
+
 def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():
     result = {
         "subject": {"corp_name": "A"},

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import json
 
 
@@ -40,10 +41,48 @@ def test_note_comparison_returns_side_by_side_rows_and_explicit_absence(temp_eng
     assert result["peer_selection"]["selection_mode"] == "adaptive"
 
 
-def test_note_comparison_preserves_raw_text_and_returns_table_safe_peer_matrix(temp_engine):
+def test_note_comparison_marks_unbound_cached_note_summary_only_without_receipt(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session
     from kreports.db.models import AccountingNoteChapter, Company
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS",
+                rcept_no="20250301000001", source_type="business_report",
+                note_no="10", note_title="리스", section_type="policy",
+                body="원천 결합이 입증되지 않은 캐시 주석",
+            ),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [],
+            "selection_policy": {"selection_mode": "adaptive"},
+        },
+        _read_engine=temp_engine,
+    )
+
+    row = result["topics"][0]["rows"][0]
+    assert row["availability"] == "summary_only"
+    assert row["rcept_no"] is None
+    assert row["provenance_status"] == "unproven_source_binding"
+    assert row["cached_rcept_no"] == "20250301000001"
+
+
+def test_note_comparison_preserves_raw_text_and_returns_table_safe_peer_matrix(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        AccountingNoteChapter,
+        Company,
+        Disclosure,
+        SourceDocument,
+    )
 
     subject_raw = "리스 정책\n| 구분 | 금액 |\n<note>가나다</note>\t\x01"
     with get_session() as session:
@@ -52,6 +91,12 @@ def test_note_comparison_preserves_raw_text_and_returns_table_safe_peer_matrix(t
             Company(corp_code="00000002", corp_name="동종 A", induty_code="26410"),
             Company(corp_code="00000003", corp_name="동종 B", induty_code="26410"),
             Company(corp_code="00000004", corp_name="동종 C", induty_code="26410"),
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            SourceDocument(rcept_no="20250301000002", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="b" * 40),
+            SourceDocument(rcept_no="20250301000003", corp_code="00000003", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="c" * 40),
+            Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="주식회사 기준", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            Disclosure(rcept_no="20250301000002", corp_code="00000002", corp_name="동종 A", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            Disclosure(rcept_no="20250301000003", corp_code="00000003", corp_name="동종 B", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
             AccountingNoteChapter(
                 corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
                 source_type="business_report", note_no="10", note_title="리스", section_type="policy",

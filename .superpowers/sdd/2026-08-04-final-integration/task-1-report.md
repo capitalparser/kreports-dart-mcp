@@ -88,3 +88,56 @@ against a Python 3.11 environment and failed to import `mcp`. An offline-only
 rebuild from the already present lock/cache followed by `uv run python -m
 pytest` resolved the test environment mismatch; no package download or network
 access occurred.
+
+## Fix round 1/5 — semantic evidence, schema references, and shared cohort
+
+### RED evidence
+
+The focused pre-fix run produced six expected failures in the provenance and
+schema cases: an unbound context excerpt was promoted to `dart_filing`; a
+wrong-company `source_documents` row made a semantic section `available`; an
+unbound peer note remained `available` and retained its receipt; the answer
+pack built a DART link from that row; and both public peer-criteria schemas
+contained dangling `#/$defs/PeerCriteriaProfile` references. The separately
+run cohort RED test also showed that a `custom_codes` criteria of `00000003`
+left policy selection on `00000002`.
+
+### Fix
+
+- Added one canonical source-binding check: an exact 14-digit receipt must
+  bind a same-company, same-business-year `source_documents` row and an
+  exact-date `사업보고서 (YYYY.*)` disclosure before it is marked
+  `proven_annual_filing`.
+- Semantic sections, note chapters, and derived evidence retain unproven cache
+  text as `summary_only` with `cached_rcept_no`, while clearing public
+  `rcept_no`; context-pack DART records require the explicit canonical binding.
+- Peer note comparison uses the same binding and answer-pack source collection
+  now accepts its rows only when that proof is present.
+- Inlined local Pydantic `$defs` references before producing legacy public MCP
+  schemas; regenerated the frozen 34-tool wire hash to
+  `96b586b92a681f4641411b0ac86f190b7f152e4da5382c0d1b76a644967db72d`.
+- Applied `peer_criteria` to policy selection and passed the final selected
+  policy cohort (including explicit include/exclude outcomes) into the
+  optional note-comparison section.
+
+### GREEN evidence
+
+Focused provenance, MCP-contract, schema, answer-contract, and consolidated
+peer tests:
+
+```text
+144 passed in 1.28s
+```
+
+`git diff --check` and Ruff on every changed Python file passed.
+
+### Full-suite boundary
+
+An unscoped `uv run python -m pytest -q` does not currently provide a clean
+repository-wide signal: it first stops at the existing base-golden parity test
+(`tests/test_analysis_facade_parity.py`), whose expected base snapshot differs
+from the already integrated peer-policy/procedure output. With that test
+ignored, the next failure is `tests/test_audit_landscape.py` attempting to use
+an uninitialized default SQLite engine (`no such table: companies`). The
+focused tests above use the isolated `temp_engine` fixture and are the valid
+evidence for this no-network, no-artifact-change fix.

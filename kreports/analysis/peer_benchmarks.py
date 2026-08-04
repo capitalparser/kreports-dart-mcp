@@ -2084,7 +2084,9 @@ def compare_peer_accounting_policies(
     size_bucket_decade: float | None = None,
     include_peers: list[str] | None = None,
     exclude_peers: list[str] | None = None,
+    peer_criteria: PeerCriteriaProfile | list[str] | dict | None = None,
     _peer_group: dict | None = None,
+    _return_note_comparison_peer_group: bool = False,
 ) -> dict:
     """Compare cached accounting policy item coverage across selected peers.
 
@@ -2109,11 +2111,15 @@ def compare_peer_accounting_policies(
         raise ValueError("peer_weights는 size/leverage/profitability/growth의 0~1 가중치여야 합니다.")
     if size_bucket_decade is not None and not 0.1 <= size_bucket_decade <= 3.0:
         raise ValueError("size_bucket_decade는 0.1~3.0 범위여야 합니다.")
-    custom_selection = bool(include_peers or exclude_peers or peer_weights or size_bucket_decade is not None or selection_profile != "balanced")
+    custom_selection = bool(
+        include_peers or exclude_peers or peer_weights or size_bucket_decade is not None
+        or selection_profile != "balanced" or peer_criteria is not None
+    )
     presentation_mode = custom_selection or item_key is not None or keyword is not None
     base = _peer_group if _peer_group is not None else select_peer_group(
         company=company, peer_limit=200 if custom_selection else peer_limit,
         fs_strategy=fs_strategy, year=year, size_bucket_decade=size_bucket_decade,
+        criteria=peer_criteria,
     )
     if "error" in base:
         return base
@@ -2503,6 +2509,14 @@ def compare_peer_accounting_policies(
         })
     else:
         result["selection_policy"] = base["selection_policy"]
+    if _return_note_comparison_peer_group:
+        result["_note_comparison_peer_group"] = {
+            "subject": dict(base["subject"]),
+            "peers": [dict(candidate_by_code[code]) for code in peer_codes],
+            "peer_count": len(peer_codes),
+            "confidence": base.get("confidence"),
+            "selection_policy": dict(result["selection_policy"]),
+        }
     return _clean_dict(result)
 
 

@@ -14,6 +14,32 @@ from kreports.mcp.handlers import HANDLERS
 def _legacy_compatible_schema(model: type[BaseModel], name: str) -> dict:
     """Generate the typed schema while retaining the established MCP wire shape."""
     schema = model.model_json_schema()
+    definitions = dict(schema.get("$defs") or {})
+
+    def inline_local_refs(node: object, resolving: frozenset[str] = frozenset()) -> object:
+        if isinstance(node, list):
+            return [inline_local_refs(item, resolving) for item in node]
+        if not isinstance(node, dict):
+            return node
+        reference = node.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            definition_name = reference.removeprefix("#/$defs/")
+            if definition_name in definitions and definition_name not in resolving:
+                resolved = inline_local_refs(
+                    definitions[definition_name], resolving | {definition_name},
+                )
+                if isinstance(resolved, dict):
+                    return inline_local_refs(
+                        {**resolved, **{key: value for key, value in node.items() if key != "$ref"}},
+                        resolving,
+                    )
+        return {
+            key: inline_local_refs(value, resolving)
+            for key, value in node.items()
+        }
+
+    schema = inline_local_refs(schema)
+    assert isinstance(schema, dict)
     schema.pop("title", None)
     schema.pop("$defs", None)
     schema.pop("additionalProperties", None)

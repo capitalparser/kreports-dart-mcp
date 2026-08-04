@@ -115,8 +115,13 @@ def handle_compare_peer_accounting_policies(
         size_bucket_decade=args.size_bucket_decade,
         include_peers=args.include_peers,
         exclude_peers=args.exclude_peers,
+        peer_criteria=args.peer_criteria,
+        _return_note_comparison_peer_group=(
+            args.include_note_comparison or bool(args.note_topics)
+        ),
     )
     if args.include_note_comparison or args.note_topics:
+        peer_group = result.pop("_note_comparison_peer_group", None)
         result["note_comparison"] = compare_peer_accounting_notes(
             company=company,
             year=args.year,
@@ -126,6 +131,7 @@ def handle_compare_peer_accounting_policies(
             page_size=args.page_size,
             fs_strategy=args.fs_strategy,
             peer_criteria=args.peer_criteria,
+            _peer_group=peer_group,
         )
     return result
 

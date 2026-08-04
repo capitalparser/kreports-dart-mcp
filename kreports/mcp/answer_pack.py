@@ -415,7 +415,13 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(topic, dict):
                 continue
             for row in topic.get("rows") or []:
-                if isinstance(row, dict):
+                if (
+                    isinstance(row, dict)
+                    and row.get("provenance_status") == "proven_annual_filing"
+                    and valid_annual_filing_receipt(
+                        row.get("rcept_no"), note_comparison.get("year")
+                    ) == row.get("rcept_no")
+                ):
                     company = row.get("company") if isinstance(row.get("company"), dict) else {}
                     add(_source_from_rcept_no(
                         row.get("rcept_no"),

@@ -47,7 +47,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "b723c76295f1ea66cce904ff64bd0e2eaf4f6e063b5477158718782290df0cdc"
+EXPECTED_INTERFACE_SHA256 = "96b586b92a681f4641411b0ac86f190b7f152e4da5382c0d1b76a644967db72d"
 
 
 MINIMAL_ARGUMENTS = {
@@ -130,6 +130,28 @@ def test_generated_tool_interface_keeps_the_approved_34_tool_snapshot_hash():
         json.dumps(snapshot, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     ).encode()
     assert hashlib.sha256(payload).hexdigest() == EXPECTED_INTERFACE_SHA256
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["select_peer_group", "compare_peer_accounting_policies"],
+)
+def test_public_peer_criteria_schemas_do_not_leave_unresolvable_local_refs(tool_name):
+    from kreports.mcp.dispatch import list_mcp_tools
+
+    schema = next(tool.inputSchema for tool in list_mcp_tools() if tool.name == tool_name)
+
+    def local_refs(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "$ref":
+                    yield item
+                yield from local_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from local_refs(item)
+
+    assert list(local_refs(schema)) == []
 
 
 def test_user_api_key_is_secret_and_not_disclosed():

@@ -23,6 +23,10 @@ def _local_context() -> dict:
                 "section_key": "business_overview",
                 "excerpt": "두 번째 DART 근거",
                 "full_text_hash": "b" * 40,
+                "rcept_no": "20250302000001",
+                "source_document_id": 2,
+                "provenance_status": "proven_annual_filing",
+                "canonical_source_binding": True,
             },
             {
                 "source_locator": "report_sections:1",
@@ -31,6 +35,9 @@ def _local_context() -> dict:
                 "excerpt": "첫 번째 DART 근거",
                 "full_text_hash": "a" * 40,
                 "rcept_no": "20250301000001",
+                "source_document_id": 1,
+                "provenance_status": "proven_annual_filing",
+                "canonical_source_binding": True,
             },
         ],
         "audit_report": [],
@@ -102,6 +109,23 @@ def test_context_pack_rejects_unlabelled_or_wrongly_classed_external_claims():
             _local_context(),
             company_ir=[{"source_id": "ir-1", "excerpt": "unlabelled claim"}],
         )
+
+
+def test_context_pack_keeps_unbound_cached_excerpt_out_of_dart_filing_sources():
+    from kreports.analysis.context_pack import build_context_pack
+
+    context = _local_context()
+    context["business_report"].append({
+        "source_locator": "report_sections:unbound",
+        "section_key": "risks",
+        "excerpt": "캐시에는 있으나 연간 사업보고서 원천 결합이 입증되지 않은 텍스트",
+        "rcept_no": "20250303000001",
+        "availability": "summary_only",
+    })
+
+    pack = build_context_pack(context)
+
+    assert "report_sections:unbound" not in [item.source_id for item in pack.dart_filing]
     with pytest.raises(ValueError, match="company_ir"):
         build_context_pack(
             _local_context(),
@@ -149,6 +173,10 @@ def test_mcp_context_pack_applies_a_documented_total_output_budget():
                 "section_key": "risks",
                 "excerpt": "x" * 4_000,
                 "full_text_hash": f"{index:040d}",
+                "rcept_no": "20250301000001",
+                "source_document_id": 1,
+                "provenance_status": "proven_annual_filing",
+                "canonical_source_binding": True,
             }
             for index in range(80)
         ],
@@ -184,6 +212,9 @@ def test_mcp_context_pack_emergency_budget_retains_compact_provenance():
                     "full_text_hash": "a" * 40,
                     "availability": "summary_only",
                     "rcept_no": "20250301000001",
+                    "source_document_id": 1,
+                    "provenance_status": "proven_annual_filing",
+                    "canonical_source_binding": True,
                     "fs_div_selection": {
                         "requested": "OFS",
                         "used": "CFS",

@@ -106,6 +106,36 @@ def test_company_context_returns_explicit_unavailable_buckets(temp_engine):
     assert context["topics_requested"] == ["risks"]
 
 
+def test_company_context_does_not_promote_a_wrong_company_source_document(temp_engine):
+    from kreports.analysis.semantic_index import build_company_context
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, ReportSection, SourceDocument
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Other", induty_code="26410"),
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000002", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            ReportSection(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", section_key="business_description",
+                section_title="사업의 내용", body_text="다른 회사의 원천 문서에만 연결된 캐시 섹션", ordinal=0,
+            ),
+        ])
+
+    context = build_company_context("00000001", 2024, read_engine=temp_engine)
+
+    row = context["business_report"][0]
+    assert row["availability"] == "summary_only"
+    assert row["rcept_no"] is None
+    assert row["cached_rcept_no"] == "20250301000001"
+    assert row["provenance_status"] == "unproven_source_binding"
+
+
 def test_company_context_accounting_policy_topic_does_not_include_other_notes(temp_engine):
     from kreports.analysis.semantic_index import build_company_context
     from kreports.db.engine import get_session
@@ -137,11 +167,20 @@ def test_company_context_accounting_policy_topic_does_not_include_other_notes(te
 def test_company_context_note_summary_marks_mixed_excerpt_coverage_partial(temp_engine):
     from kreports.analysis.semantic_index import build_company_context
     from kreports.db.engine import get_session
-    from kreports.db.models import AccountingNoteChapter, Company
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
 
     with get_session() as session:
         session.add_all([
             Company(corp_code="00000001", corp_name="Partial Notes", induty_code="26410"),
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="Partial Notes",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
             AccountingNoteChapter(
                 corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
                 source_type="business_report", note_no="1", note_title="리스", section_type="other_note",

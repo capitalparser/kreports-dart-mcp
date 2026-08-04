@@ -44,6 +44,42 @@ def valid_annual_filing_receipt(
     return raw_receipt
 
 
+def canonical_annual_filing_source_binding(
+    row: dict[str, Any],
+    *,
+    corp_code: object,
+    bsns_year: object,
+) -> str | None:
+    """Return a receipt only for one exact company/year annual source binding.
+
+    Cached excerpts are not sufficient DART evidence by themselves.  The
+    receipt must bind the cached row to a same-company, same-business-year
+    source document and to the exact dated annual-report disclosure.
+    """
+    receipt = valid_annual_filing_receipt(row.get("rcept_no"), bsns_year)
+    if receipt is None:
+        return None
+    try:
+        normalized_year = int(bsns_year)
+    except (TypeError, ValueError):
+        return None
+    if (
+        row.get("source_document_id") is None
+        or str(row.get("source_document_rcept_no") or "") != receipt
+        or str(row.get("source_document_corp_code") or "") != str(corp_code)
+        or row.get("source_document_bsns_year") != normalized_year
+        or str(row.get("disclosure_rcept_no") or "") != receipt
+        or str(row.get("disclosure_corp_code") or "") != str(corp_code)
+        or f"사업보고서 ({normalized_year}." not in str(row.get("disclosure_report_nm") or "")
+    ):
+        return None
+    return _exact_receipt_matches_disclosure_date(
+        receipt,
+        normalized_year,
+        row.get("disclosure_disc_date"),
+    )
+
+
 def _exact_receipt_matches_disclosure_date(
     receipt: object,
     bsns_year: object,

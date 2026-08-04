@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis.note_comparison import NOTE_TOPICS
+from kreports.analysis.filing_provenance import canonical_annual_filing_source_binding
 from kreports.processor.semantic_contracts import normalize_note_topic
 
 
@@ -50,6 +51,25 @@ def _excerpt_availability(row: dict, *, body_key: str) -> str:
     ):
         return "summary_only"
     return "available"
+
+
+def _apply_source_binding(item: dict, *, corp_code: str, year: int, body_key: str) -> None:
+    """Keep unbound cached text inspectable without promoting it to filing evidence."""
+    cached_receipt = item.get("rcept_no")
+    receipt = canonical_annual_filing_source_binding(
+        item, corp_code=corp_code, bsns_year=year,
+    )
+    item["cached_rcept_no"] = cached_receipt
+    item["rcept_no"] = receipt
+    item["provenance_status"] = (
+        "proven_annual_filing" if receipt else "unproven_source_binding"
+    )
+    item["canonical_source_binding"] = receipt is not None
+    item["availability"] = (
+        _excerpt_availability(item, body_key=body_key)
+        if receipt
+        else "summary_only"
+    )
 
 
 def _resolve_company(conn, company: str) -> dict | None:
@@ -99,14 +119,22 @@ def _section_rows(conn, *, corp_code: str, year: int, source_type: str, topics: 
                    rs.section_title, rs.body_text, rs.body_length, rs.ordinal,
                    rs.full_text_uri, rs.full_text_hash, rs.full_text_length,
                    rs.full_text_compressed_length, rs.full_text_storage_status,
-                   sd.id AS source_document_id, sd.doc_hash AS source_doc_hash,
+                   sd.id AS source_document_id, sd.rcept_no AS source_document_rcept_no,
+                   sd.corp_code AS source_document_corp_code,
+                   sd.bsns_year AS source_document_bsns_year,
+                   sd.doc_hash AS source_doc_hash,
                    sd.storage_uri AS source_storage_uri,
                    sd.content_length AS source_content_length,
                    sd.compressed_length AS source_compressed_length,
-                   sd.storage_status AS source_storage_status
+                   sd.storage_status AS source_storage_status,
+                   d.rcept_no AS disclosure_rcept_no, d.corp_code AS disclosure_corp_code,
+                   d.disc_date AS disclosure_disc_date, d.report_nm AS disclosure_report_nm
             FROM report_sections rs
             LEFT JOIN source_documents sd
               ON sd.rcept_no=rs.rcept_no AND sd.source_type=rs.source_type
+             AND sd.corp_code=rs.corp_code AND sd.bsns_year=rs.bsns_year
+            LEFT JOIN disclosures d
+              ON d.rcept_no=rs.rcept_no AND d.corp_code=rs.corp_code
             WHERE rs.corp_code=:corp_code AND rs.bsns_year=:year
               AND rs.source_type=:source_type
             ORDER BY rs.ordinal, rs.section_key
@@ -124,11 +152,11 @@ def _section_rows(conn, *, corp_code: str, year: int, source_type: str, topics: 
                 f"report_sections:{item['id']}:{item['rcept_no']}:"
                 f"{item['section_key']}:{item['ordinal']}"
             ),
-            availability=_excerpt_availability(item, body_key="body_text"),
             parser_version="semantic-v1",
             extraction_method="normalized_report_section",
             excerpt=item.pop("body_text"),
         )
+        _apply_source_binding(item, corp_code=corp_code, year=year, body_key="excerpt")
         result.append(item)
     return result
 
@@ -141,14 +169,22 @@ def _note_rows(conn, *, corp_code: str, year: int, topics: list[str] | None) -> 
                    anc.note_title, anc.section_type, anc.body, anc.body_length,
                    anc.full_text_uri, anc.full_text_hash, anc.full_text_length,
                    anc.full_text_compressed_length, anc.full_text_storage_status,
-                   sd.id AS source_document_id, sd.doc_hash AS source_doc_hash,
+                   sd.id AS source_document_id, sd.rcept_no AS source_document_rcept_no,
+                   sd.corp_code AS source_document_corp_code,
+                   sd.bsns_year AS source_document_bsns_year,
+                   sd.doc_hash AS source_doc_hash,
                    sd.storage_uri AS source_storage_uri,
                    sd.content_length AS source_content_length,
                    sd.compressed_length AS source_compressed_length,
-                   sd.storage_status AS source_storage_status
+                   sd.storage_status AS source_storage_status,
+                   d.rcept_no AS disclosure_rcept_no, d.corp_code AS disclosure_corp_code,
+                   d.disc_date AS disclosure_disc_date, d.report_nm AS disclosure_report_nm
             FROM accounting_note_chapters anc
             LEFT JOIN source_documents sd
               ON sd.rcept_no=anc.rcept_no AND sd.source_type=anc.source_type
+             AND sd.corp_code=anc.corp_code AND sd.bsns_year=anc.bsns_year
+            LEFT JOIN disclosures d
+              ON d.rcept_no=anc.rcept_no AND d.corp_code=anc.corp_code
             WHERE anc.corp_code=:corp_code AND anc.bsns_year=:year
             ORDER BY anc.fs_div, anc.note_no, anc.section_type
             """
@@ -171,11 +207,11 @@ def _note_rows(conn, *, corp_code: str, year: int, topics: list[str] | None) -> 
             topic=topic,
             section_key=item["section_type"],
             source_locator=f"accounting_note_chapters:{item['id']}",
-            availability=_excerpt_availability(item, body_key="body"),
             parser_version="semantic-v1",
             extraction_method="normalized_note_chapter",
             excerpt=item.pop("body"),
         )
+        _apply_source_binding(item, corp_code=corp_code, year=year, body_key="excerpt")
         result.append(item)
     return result
 
@@ -189,21 +225,30 @@ def _evidence_document_rows(conn, *, corp_code: str, year: int) -> list[dict]:
                    ed.full_text_uri, ed.full_text_hash, ed.full_text_length,
                    ed.full_text_compressed_length, ed.full_text_storage_status,
                    ed.source_count, sd.id AS source_document_id,
+                   sd.rcept_no AS source_document_rcept_no,
+                   sd.corp_code AS source_document_corp_code,
+                   sd.bsns_year AS source_document_bsns_year,
                    sd.doc_hash AS source_doc_hash, sd.storage_uri AS source_storage_uri,
                    sd.content_length AS source_content_length,
                    sd.compressed_length AS source_compressed_length,
-                   sd.storage_status AS source_storage_status
+                   sd.storage_status AS source_storage_status,
+                   d.rcept_no AS disclosure_rcept_no, d.corp_code AS disclosure_corp_code,
+                   d.disc_date AS disclosure_disc_date, d.report_nm AS disclosure_report_nm
             FROM evidence_documents ed
             LEFT JOIN source_documents sd
               ON sd.rcept_no=ed.rcept_no AND sd.source_type=ed.source_type
+             AND sd.corp_code=ed.corp_code AND sd.bsns_year=ed.bsns_year
+            LEFT JOIN disclosures d
+              ON d.rcept_no=ed.rcept_no AND d.corp_code=ed.corp_code
             WHERE ed.corp_code=:corp_code AND ed.bsns_year=:year
             ORDER BY ed.source_type, ed.id
             """
         ),
         {"corp_code": corp_code, "year": year},
     ).mappings().all()
-    return [
-        {
+    result = []
+    for row in rows:
+        item = {
             **dict(row),
             "source_locator": f"evidence_documents:{row['id']}",
             "availability": "summary_only",
@@ -211,8 +256,9 @@ def _evidence_document_rows(conn, *, corp_code: str, year: int) -> list[dict]:
             "extraction_method": "derived_evidence_document",
             "excerpt": row["normalized_text"],
         }
-        for row in rows
-    ]
+        _apply_source_binding(item, corp_code=corp_code, year=year, body_key="excerpt")
+        result.append(item)
+    return result
 
 
 def _disclosure_rows(conn, *, corp_code: str, year: int) -> list[dict]:
@@ -236,7 +282,11 @@ def _disclosure_rows(conn, *, corp_code: str, year: int) -> list[dict]:
                 else row["disc_date"]
             ),
             "source_locator": f"disclosures:{row['rcept_no']}",
-            "availability": "available",
+            "availability": "summary_only",
+            "provenance_status": "unproven_source_binding",
+            "canonical_source_binding": False,
+            "cached_rcept_no": row["rcept_no"],
+            "rcept_no": None,
             "extraction_method": "disclosure_ledger",
         }
         for row in rows
@@ -261,7 +311,9 @@ def _financial_rows(conn, *, corp_code: str, year: int) -> list[dict]:
             **dict(row),
             "quarter": 4,
             "source_locator": f"financials:{corp_code}:{year}:{row['fs_div']}:Q4",
-            "availability": "available",
+            "availability": "summary_only",
+            "provenance_status": "unproven_source_binding",
+            "canonical_source_binding": False,
             "extraction_method": "financial_snapshot",
         }
         for row in rows

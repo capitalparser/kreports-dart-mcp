@@ -105,6 +105,27 @@ def test_peer_note_comparison_dispatch_and_answer_pack_show_dedicated_tables(tem
     ]
 
 
+def test_consolidated_policy_and_note_sections_reuse_one_explicit_peer_criteria_cohort(temp_engine):
+    _seed_peer_note_comparison(temp_engine)
+
+    result = raw_result("compare_peer_accounting_policies", {
+        "company": "00000001",
+        "year": 2024,
+        "peer_limit": 1,
+        "include_note_comparison": True,
+        "note_topics": ["leases"],
+        "peer_criteria": {
+            "industry_basis": "custom_codes",
+            "included_corp_codes": ["00000003"],
+        },
+    })
+
+    assert [row["corp_code"] for row in result["peer_summaries"]] == ["00000003"]
+    assert result["note_comparison"]["cohort"]["peers"] == [
+        {"corp_code": "00000003", "corp_name": "직접피어"},
+    ]
+
+
 def test_peer_policy_input_rejects_conflicting_overrides_and_unknown_weight():
     """Input validation must fail closed before any peer resolution."""
     with pytest.raises(ValidationError):

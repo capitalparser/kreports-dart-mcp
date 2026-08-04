@@ -11,6 +11,7 @@ from sqlalchemy import bindparam, text
 
 import kreports.db.engine as _engine_module
 from kreports.analysis.peer_benchmarks import select_peer_group
+from kreports.analysis.filing_provenance import canonical_annual_filing_source_binding
 from kreports.processor.semantic_contracts import normalize_note_topic
 
 
@@ -32,6 +33,8 @@ MAX_NOTE_COMPARISON_OUTPUT_BYTES = 100_000
 
 
 def _availability(row: dict) -> str:
+    if row.get("provenance_status") != "proven_annual_filing":
+        return "summary_only"
     body = str(row.get("body") or "")
     full_length = row.get("full_text_length")
     status = str(row.get("full_text_storage_status") or "").lower()
@@ -409,10 +412,18 @@ def compare_peer_accounting_notes(
                anc.note_no, anc.note_title, anc.section_type, anc.body,
                anc.full_text_uri, anc.full_text_hash, anc.full_text_length,
                anc.full_text_compressed_length, anc.full_text_storage_status,
-               sd.id AS source_document_id
+               sd.id AS source_document_id,
+               sd.rcept_no AS source_document_rcept_no,
+               sd.corp_code AS source_document_corp_code,
+               sd.bsns_year AS source_document_bsns_year,
+               d.rcept_no AS disclosure_rcept_no, d.corp_code AS disclosure_corp_code,
+               d.disc_date AS disclosure_disc_date, d.report_nm AS disclosure_report_nm
         FROM accounting_note_chapters anc
         LEFT JOIN source_documents sd
           ON sd.rcept_no=anc.rcept_no AND sd.source_type=anc.source_type
+         AND sd.corp_code=anc.corp_code AND sd.bsns_year=anc.bsns_year
+        LEFT JOIN disclosures d
+          ON d.rcept_no=anc.rcept_no AND d.corp_code=anc.corp_code
         WHERE anc.corp_code IN :corp_codes AND anc.bsns_year=:year
         ORDER BY anc.corp_code, anc.fs_div, anc.note_no, anc.id
         """
@@ -431,6 +442,16 @@ def compare_peer_accounting_notes(
         evidence_rows = [dict(row) for row in conn.execute(evidence_stmt, {"corp_codes": codes, "year": year}).mappings().all()]
     notes_by_key: dict[tuple[str, str], list[dict]] = {}
     for row in note_rows:
+        cached_receipt = row.get("rcept_no")
+        receipt = canonical_annual_filing_source_binding(
+            row, corp_code=row["corp_code"], bsns_year=year,
+        )
+        row["cached_rcept_no"] = cached_receipt
+        row["rcept_no"] = receipt
+        row["provenance_status"] = (
+            "proven_annual_filing" if receipt else "unproven_source_binding"
+        )
+        row["canonical_source_binding"] = receipt is not None
         topic = _note_topic(row)
         if topic not in requested_topics:
             continue
@@ -460,6 +481,9 @@ def compare_peer_accounting_notes(
                     "source_locator": f"accounting_note_chapters:{row['id']}",
                     "source_document_id": row.get("source_document_id"),
                     "rcept_no": row["rcept_no"],
+                    "cached_rcept_no": row.get("cached_rcept_no"),
+                    "provenance_status": row["provenance_status"],
+                    "canonical_source_binding": row["canonical_source_binding"],
                     "note_no": row["note_no"],
                     "note_title": row["note_title"],
                     "fs_div": row["fs_div"],
