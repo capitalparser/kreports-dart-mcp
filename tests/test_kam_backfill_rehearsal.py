@@ -448,7 +448,7 @@ print(json.dumps({"ok": True, "argv": sys.argv[1:]}))
     assert unscoped["argv"] == ["migrate"]
 
 
-def test_worker_timeouts_keep_mcp_validation_bounded_at_thirty_minutes() -> None:
+def test_worker_timeouts_keep_mcp_validation_bounded_at_sixty_minutes() -> None:
     """The full professional-tool matrix needs its own bounded window."""
     from kreports.maintenance.kam_backfill_rehearsal import (
         _WORKER_TIMEOUT_SECONDS,
@@ -463,7 +463,7 @@ def test_worker_timeouts_keep_mcp_validation_bounded_at_thirty_minutes() -> None
         "financial-compact-rebuild": 1800,
         "company-year-quality-rebuild": 1800,
         "semantic-snapshot": 600,
-        "mcp-validate": 1800,
+        "mcp-validate": 3600,
     }
 
 
