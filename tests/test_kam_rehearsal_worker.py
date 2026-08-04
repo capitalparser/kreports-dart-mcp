@@ -1226,7 +1226,10 @@ def test_kam_worker_records_reviewed_incomplete_parser_errors(
                     "corp_code": "00303703",
                     "quality_status": "error",
                     "limitations": [
-                        "source_documents.raw_body:no_kam_items",
+                        (
+                            "source_documents.raw_body:"
+                            "external_raw_unverified"
+                        ),
                         "evidence_documents.normalized_text:parse_error",
                         (
                             "evidence_documents.normalized_text:"

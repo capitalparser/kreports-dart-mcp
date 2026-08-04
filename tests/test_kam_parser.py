@@ -2841,6 +2841,52 @@ def test_rebuild_continues_from_failed_raw_read_to_normalized_evidence(
     )
 
 
+def test_rebuild_classifies_gcs_raw_as_external_unverified_without_fetch(
+    temp_engine,
+    monkeypatch,
+):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+    from kreports.storage.raw_documents import RawDocumentStore
+
+    def reject_network_read(*_args, **_kwargs):
+        raise AssertionError("local KAM rebuild must not fetch GCS raw data")
+
+    monkeypatch.setattr(RawDocumentStore, "read", reject_network_read)
+    with get_session() as session:
+        session.add_all(
+            [
+                Company(
+                    corp_code="00164780",
+                    stock_code="035421",
+                    corp_name="외부원문회사",
+                    market="KOSPI",
+                ),
+                SourceDocument(
+                    rcept_no="20250318000003",
+                    dcm_no="300",
+                    corp_code="00164780",
+                    bsns_year=2024,
+                    source_type="audit_report",
+                    report_nm="감사보고서",
+                    content_type="xml",
+                    raw_content="",
+                    doc_hash="3" * 40,
+                    storage_uri="gs://raw-bucket/audit/20250318000003.xml.gz",
+                    storage_status="externalized",
+                ),
+            ]
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "missing"
+    assert receipt["limitations"] == [
+        "source_documents.raw_body:external_raw_unverified"
+    ]
+
+
 def test_rebuild_falls_back_from_ambiguous_raw_to_clear_normalized_evidence(
     temp_engine,
 ):

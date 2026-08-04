@@ -76,6 +76,9 @@ _REVIEWED_KAM_PARSER_LIMITATIONS = {
     "incomplete_kam_structure",
     "invalid_collapsed_kam_title",
 }
+_REVIEWED_KAM_AVAILABILITY_LIMITATIONS = {
+    "source_documents.raw_body:external_raw_unverified",
+}
 _MARKER_FIELDS = {
     "schema_version",
     "run_id",
@@ -740,6 +743,8 @@ def _reviewed_kam_parser_errors(
             if marker in limitation:
                 parser_limitations.append(limitation.partition(marker)[2])
             elif limitation.endswith((":no_kam_items", ":parse_error")):
+                continue
+            elif limitation in _REVIEWED_KAM_AVAILABILITY_LIMITATIONS:
                 continue
             else:
                 return None

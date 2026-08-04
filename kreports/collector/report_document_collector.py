@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 import re
 from datetime import datetime
+from urllib.parse import urlparse
 
 from sqlalchemy import and_, create_engine, inspect, or_, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -2042,6 +2043,11 @@ def _recover_kam_items(
     for source in target["source_documents"]:
         try:
             if source.storage_uri:
+                if urlparse(source.storage_uri).scheme == "gs":
+                    limitations.append(
+                        "source_documents.raw_body:external_raw_unverified"
+                    )
+                    continue
                 body = RawDocumentStore().read(
                     source.storage_uri,
                     expected_hash=source.doc_hash,
