@@ -76,6 +76,20 @@ def _seed_valid_manifest(temp_engine, *, year: int = 2025) -> None:
     assert result["year_to"] in {None, year}
 
 
+def _financial_core_proof() -> dict:
+    return {
+        "window_start_year": 2021,
+        "window_end_year": 2025,
+        "proven_years": [{
+            "bsns_year": 2025,
+            "fs_div": "CFS",
+            "rcept_no": "20260318000001",
+            "report_nm": "사업보고서 (2025.12)",
+            "metric_digest": "a" * 64,
+        }],
+    }
+
+
 def _quality_freshness_fields(
     *,
     investor_grade: str = "A",
@@ -100,6 +114,7 @@ def _quality_freshness_fields(
         },
         blockers=(),
         quality_version=QUALITY_VERSION,
+        financial_core_proof=_financial_core_proof(),
     )
     return {
         "input_fingerprint": quality_input_fingerprint(summary),

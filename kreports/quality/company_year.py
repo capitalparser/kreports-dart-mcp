@@ -5,6 +5,7 @@ is derived only from already-collected rows and never performs DART collection.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -124,7 +125,7 @@ def _financial_statuses(
     corp_code: str,
     year_from: int,
     year_to: int,
-) -> tuple[dict[int, str], set[int]]:
+) -> tuple[dict[int, str], set[int], dict[int, dict[str, object]]]:
     """Return annual core status plus years rejected only for source proof.
 
     A compact fact can be populated without being usable investor evidence.
@@ -160,6 +161,10 @@ def _financial_statuses(
                 FinancialFactCompact.fs_div,
                 FinancialFactCompact.metric_key,
                 FinancialFactCompact.amount,
+                FinancialFactCompact.source_account_id,
+                FinancialFactCompact.source_table,
+                FinancialFactCompact.unit,
+                FinancialFactCompact.period_type,
                 FinancialFactCompact.quality_status,
                 FinancialFactCompact.citation_basis,
                 FinancialFactCompact.citation_rcept_no,
@@ -181,6 +186,10 @@ def _financial_statuses(
         fs_div,
         metric_key,
         amount,
+        source_account_id,
+        source_table,
+        unit,
+        period_type,
         quality_status,
         citation_basis,
         citation_rcept_no,
@@ -190,6 +199,11 @@ def _financial_statuses(
             metrics_by_year_fs[(int(bsns_year), str(fs_div))][
                 str(metric_key)
             ].append({
+                "amount": amount,
+                "source_account_id": source_account_id,
+                "source_table": source_table,
+                "unit": unit,
+                "period_type": period_type,
                 "quality_status": quality_status,
                 "citation_basis": citation_basis,
                 "citation_rcept_no": citation_rcept_no,
@@ -201,6 +215,7 @@ def _financial_statuses(
         for bsns_year, fs_div in metrics_by_year_fs
     )
     source_unproven_years: set[int] = set()
+    source_backed_proofs: dict[int, dict[str, object]] = {}
     for year in statuses:
         if year in errors:
             statuses[year] = "error"
@@ -228,6 +243,13 @@ def _financial_statuses(
                 for candidates in metrics.values()
             ):
                 source_backed = True
+                source_backed_proofs[year] = {
+                    "bsns_year": year,
+                    "fs_div": scope[1],
+                    "rcept_no": str(anchor["rcept_no"]),
+                    "report_nm": str(anchor["report_nm"]),
+                    "metric_digest": _financial_core_metric_digest(metrics),
+                }
                 break
         if best == len(required) and not source_backed:
             source_unproven_years.add(year)
@@ -240,7 +262,53 @@ def _financial_statuses(
             if year in not_available
             else "missing"
         )
-    return statuses, source_unproven_years
+    return statuses, source_unproven_years, source_backed_proofs
+
+
+def _financial_core_metric_digest(
+    metrics: dict[str, list[dict[str, Any]]],
+) -> str:
+    """Hash the exact seven compact fact identities admitted for one FS/year."""
+    facts = [
+        {
+            "metric_key": metric_key,
+            "amount": candidates[0]["amount"],
+            "source_account_id": candidates[0]["source_account_id"],
+            "source_table": candidates[0]["source_table"],
+            "unit": candidates[0]["unit"],
+            "period_type": candidates[0]["period_type"],
+            "quality_status": candidates[0]["quality_status"],
+            "citation_basis": candidates[0]["citation_basis"],
+            "citation_rcept_no": candidates[0]["citation_rcept_no"],
+            "citation_report_nm": candidates[0]["citation_report_nm"],
+        }
+        for metric_key, candidates in sorted(metrics.items())
+    ]
+    payload = json.dumps(
+        facts,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _financial_core_proof_for_window(
+    year: int,
+    source_backed_proofs: dict[int, dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "window_start_year": year - (ANNUAL_CORE_YEARS_FOR_A - 1),
+        "window_end_year": year,
+        "proven_years": [
+            source_backed_proofs[candidate]
+            for candidate in range(
+                year - (ANNUAL_CORE_YEARS_FOR_A - 1),
+                year + 1,
+            )
+            if candidate in source_backed_proofs
+        ],
+    }
 
 
 def _investor_grade(
@@ -942,7 +1010,11 @@ def rebuild_company_year_quality(
 
     rows_written = 0
     for corp_code, company_market in companies:
-        statuses, source_unproven_years = _financial_statuses(
+        (
+            statuses,
+            source_unproven_years,
+            source_backed_proofs,
+        ) = _financial_statuses(
             corp_code,
             year_from - (ANNUAL_CORE_YEARS_FOR_A - 1),
             year_to,
@@ -1000,6 +1072,10 @@ def rebuild_company_year_quality(
                 grades=grade_values,
                 blockers=blockers,
                 quality_version=QUALITY_VERSION,
+                financial_core_proof=_financial_core_proof_for_window(
+                    year,
+                    source_backed_proofs,
+                ),
             )
             with get_session() as session:
                 row = session.get(

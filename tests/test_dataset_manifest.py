@@ -63,6 +63,20 @@ def _expected_quality_digest(rows: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _financial_core_proof(bsns_year: int) -> dict:
+    return {
+        "window_start_year": bsns_year - 4,
+        "window_end_year": bsns_year,
+        "proven_years": [{
+            "bsns_year": bsns_year,
+            "fs_div": "CFS",
+            "rcept_no": "20260318000001",
+            "report_nm": f"사업보고서 ({bsns_year}.12)",
+            "metric_digest": "a" * 64,
+        }],
+    }
+
+
 def _quality_values(
     corp_code: str,
     bsns_year: int,
@@ -116,6 +130,11 @@ def _quality_values(
             },
             blockers=blockers,
             quality_version=quality_version,
+            financial_core_proof=(
+                _financial_core_proof(bsns_year)
+                if quality_version == QUALITY_VERSION
+                else None
+            ),
         )
         if input_fingerprint is None:
             input_fingerprint = quality_input_fingerprint(summary)
@@ -441,6 +460,73 @@ def test_dataset_manifest_rejects_unsupported_quality_version(temp_engine):
         write_dataset_manifest("unsupported-quality-v2")
 
 
+def test_dataset_manifest_rejects_tampered_financial_core_proof_digest(
+    temp_engine,
+):
+    """A proof-only receipt or amount digest edit cannot preserve a v2 snapshot."""
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **_quality_values("00126380", 2025),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    with get_session() as session:
+        row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert row is not None
+        summary = json.loads(row.evidence_summary_json)
+        summary["financial_core_proof"]["proven_years"][0][
+            "metric_digest"
+        ] = "b" * 64
+        row.evidence_summary_json = json.dumps(
+            summary,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    with pytest.raises(ValueError, match="input_fingerprint"):
+        write_dataset_manifest("tampered-core-proof")
+
+
+def test_dataset_manifest_rejects_v2_quality_row_without_core_proof(
+    temp_engine,
+):
+    from kreports.db.engine import get_session, write_dataset_manifest
+    from kreports.db.models import CompanyYearQuality
+
+    _apply_contract(temp_engine)
+    values = _quality_values(
+        "00126380",
+        2025,
+        quality_version="v1",
+    )
+    values["quality_version"] = QUALITY_VERSION
+    summary = json.loads(values["evidence_summary_json"])
+    summary["quality_version"] = QUALITY_VERSION
+    values["evidence_summary_json"] = json.dumps(
+        summary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with get_session() as session:
+        session.add(
+            CompanyYearQuality(
+                **values,
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    with pytest.raises(ValueError, match="financial_core_proof"):
+        write_dataset_manifest("missing-core-proof")
+
+
 def test_manifest_digest_normalizes_blocker_order_but_detects_content_change(
     temp_engine,
 ):
@@ -627,6 +713,7 @@ def test_dataset_manifest_rejects_unverified_quality_freshness(
             },
             blockers=(),
             quality_version=QUALITY_VERSION,
+            financial_core_proof=_financial_core_proof(2025),
         )
         if case == "extra_local_path":
             summary["local_path"] = "/private/tmp/quality.db"

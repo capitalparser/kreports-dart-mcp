@@ -133,6 +133,35 @@ def test_compact_citation_anchors_reject_nonpositive_batch_size(temp_engine):
         compact_citation_anchors([("00126380", 2025, "CFS")], batch_size=0)
 
 
+def test_compact_citation_anchors_accept_corrected_annual_report_name(temp_engine):
+    """Corrected annual reports retain the same business-year anchor identity."""
+    from kreports.analysis.filing_provenance import compact_citation_anchors
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add(Disclosure(
+            rcept_no="20260318000001",
+            corp_code="00126380",
+            corp_name="삼성전자",
+            disc_date=date(2026, 3, 18),
+            disc_type="A",
+            report_nm="[기재정정]사업보고서 (2025.12)",
+            flr_nm="삼성전자",
+        ))
+        session.commit()
+
+    assert compact_citation_anchors([("00126380", 2025, "CFS")]) == {
+        ("00126380", 2025, "CFS"): {
+            "corp_code": "00126380",
+            "bsns_year": 2025,
+            "fs_div": "CFS",
+            "rcept_no": "20260318000001",
+            "report_nm": "[기재정정]사업보고서 (2025.12)",
+            "citation_basis": "company_year_annual_filing_match",
+        },
+    }
+
+
 def test_compact_rebuild_persists_authoritative_and_uncitable_provenance(temp_engine):
     """A rebuilt amount without its own citation anchor must remain explicitly limited."""
     from sqlalchemy import text

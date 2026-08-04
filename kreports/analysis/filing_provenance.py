@@ -7,6 +7,7 @@ from typing import Any, TypeAlias
 
 from sqlalchemy import text
 
+from kreports.annual_filing_identity import annual_report_name_matches_business_year
 import kreports.db.engine as _engine_module
 _SOURCE_FACT_TABLES = {
     "financial_facts_compact": ("financial_facts_compact", "bsns_year", ""),
@@ -297,6 +298,11 @@ def compact_citation_anchors(
             rows = conn.execute(query, params).mappings().all()
         for row in rows:
             scope = (str(row["corp_code"]), int(row["bsns_year"]), str(row["fs_div"]))
+            if not annual_report_name_matches_business_year(
+                row["report_nm"],
+                scope[1],
+            ):
+                continue
             receipt = _exact_receipt_matches_disclosure_date(
                 row["rcept_no"],
                 scope[1],

@@ -54,6 +54,25 @@ def _quality_evidence_inputs() -> dict:
     }
 
 
+def _financial_core_proof(
+    *,
+    digest: str = "a" * 64,
+) -> dict:
+    return {
+        "window_start_year": 2021,
+        "window_end_year": 2025,
+        "proven_years": [
+            {
+                "bsns_year": 2025,
+                "fs_div": "CFS",
+                "rcept_no": "20260318000001",
+                "report_nm": "사업보고서 (2025.12)",
+                "metric_digest": digest,
+            }
+        ],
+    }
+
+
 def test_quality_fingerprint_is_stable_across_mapping_and_blocker_order():
     left = build_quality_evidence_summary(**_quality_evidence_inputs())
     right = build_quality_evidence_summary(
@@ -101,6 +120,8 @@ def test_quality_fingerprint_changes_for_each_semantic_input(
         changed_inputs[field].update(replacement)
     else:
         changed_inputs[field] = replacement
+    if changed_inputs["quality_version"] == "v2":
+        changed_inputs["financial_core_proof"] = _financial_core_proof()
 
     baseline = build_quality_evidence_summary(**baseline_inputs)
     changed = build_quality_evidence_summary(**changed_inputs)
@@ -108,6 +129,80 @@ def test_quality_fingerprint_changes_for_each_semantic_input(
     assert quality_input_fingerprint(changed) != quality_input_fingerprint(
         baseline
     )
+
+
+def test_quality_v2_requires_bounded_financial_core_proof():
+    inputs = _quality_evidence_inputs()
+    inputs["quality_version"] = "v2"
+
+    with pytest.raises(ValueError, match="financial_core_proof"):
+        build_quality_evidence_summary(**inputs)
+
+    summary = build_quality_evidence_summary(
+        **inputs,
+        financial_core_proof=_financial_core_proof(),
+    )
+
+    assert summary["financial_core_proof"] == _financial_core_proof()
+
+
+@pytest.mark.parametrize("invalid_case", ["too_many", "duplicate", "non_hex"])
+def test_quality_v2_rejects_noncanonical_financial_core_proof(invalid_case):
+    inputs = _quality_evidence_inputs()
+    inputs["quality_version"] = "v2"
+    proof = _financial_core_proof()
+    if invalid_case == "too_many":
+        proof["proven_years"] = [
+            {
+                "bsns_year": candidate,
+                "fs_div": "CFS",
+                "rcept_no": "20260318000001",
+                "report_nm": f"사업보고서 ({candidate}.12)",
+                "metric_digest": "a" * 64,
+            }
+            for candidate in range(2020, 2026)
+        ]
+    elif invalid_case == "duplicate":
+        proof["proven_years"].append(dict(proof["proven_years"][0]))
+    else:
+        proof["proven_years"][0]["metric_digest"] = "A" * 64
+
+    with pytest.raises(ValueError, match="financial_core_proof"):
+        build_quality_evidence_summary(
+            **inputs,
+            financial_core_proof=proof,
+        )
+
+
+def test_quality_v2_fingerprint_changes_when_core_proof_digest_changes():
+    inputs = _quality_evidence_inputs()
+    inputs["quality_version"] = "v2"
+    baseline = build_quality_evidence_summary(
+        **inputs,
+        financial_core_proof=_financial_core_proof(),
+    )
+    changed = build_quality_evidence_summary(
+        **inputs,
+        financial_core_proof=_financial_core_proof(digest="b" * 64),
+    )
+
+    assert quality_input_fingerprint(changed) != quality_input_fingerprint(
+        baseline
+    )
+
+
+def test_quality_v2_accepts_canonical_corrected_annual_report_name():
+    inputs = _quality_evidence_inputs()
+    inputs["quality_version"] = "v2"
+    proof = _financial_core_proof()
+    proof["proven_years"][0]["report_nm"] = "[기재정정]사업보고서 (2025.12)"
+
+    summary = build_quality_evidence_summary(
+        **inputs,
+        financial_core_proof=proof,
+    )
+
+    assert summary["financial_core_proof"] == proof
 
 
 @pytest.mark.parametrize(
@@ -458,6 +553,65 @@ def test_investor_a_needs_five_proven_years_not_a_calendar_year_disclosure(
 
     assert grade == "A"
     assert blockers == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_grade"),
+    [
+        ("amount", 101, "B"),
+        ("citation_rcept_no", "20260318009999", "D"),
+        ("source_account_id", "ifrs-full-RevenueChanged", "B"),
+    ],
+)
+def test_quality_rebuild_hashes_exact_financial_core_proof_inputs(
+    temp_engine,
+    field,
+    value,
+    expected_grade,
+):
+    """A same-grade rebuild still changes fingerprint when a core amount changes."""
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    _seed_source_backed_core_financial_years("00126380", range(2023, 2026))
+    rebuild_company_year_quality(2025, 2025)
+    before = company_year_quality("00126380", 2025)
+
+    proof = before["evidence_summary"]["financial_core_proof"]
+    assert [item["bsns_year"] for item in proof["proven_years"]] == [
+        2023,
+        2024,
+        2025,
+    ]
+    assert all(
+        len(item["metric_digest"]) == 64
+        for item in proof["proven_years"]
+    )
+
+    with get_session() as session:
+        fact = (
+            session.query(FinancialFactCompact)
+            .filter_by(
+                corp_code="00126380",
+                bsns_year=2025,
+                fs_div="CFS",
+                metric_key="revenue",
+            )
+            .one()
+        )
+        setattr(fact, field, value)
+
+    rebuild_company_year_quality(2025, 2025)
+    after = company_year_quality("00126380", 2025)
+
+    assert after["feature_grades"]["investor_core"] == expected_grade
+    assert after["input_fingerprint"] != before["input_fingerprint"]
+    assert (
+        after["evidence_summary"]["financial_core_proof"]
+        != before["evidence_summary"]["financial_core_proof"]
+    )
 
 
 def test_summary_only_kam_is_not_procedure_ready(temp_engine):
