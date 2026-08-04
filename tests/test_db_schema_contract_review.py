@@ -82,6 +82,25 @@ def test_partial_index_predicate_must_be_exact_not_a_substring():
     assert "invalid_required_index:uq_backfill_runs_active_lease" in blockers
 
 
+def test_partial_index_predicate_accepts_multiline_trailing_whitespace_ddl():
+    from kreports.db.schema_contract import index_contract_blockers
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.executescript("""
+            CREATE TABLE backfill_runs (lease_key TEXT, status TEXT);
+            CREATE UNIQUE INDEX uq_backfill_runs_active_lease
+              ON backfill_runs (lease_key)
+              WHERE status = 'running'
+        """)
+        blockers = index_contract_blockers(connection, {"backfill_runs"})
+    finally:
+        connection.close()
+
+    assert "invalid_required_index:uq_backfill_runs_active_lease" not in blockers
+
+
 def test_accounting_note_migration_creates_full_orm_schema_and_indexes(tmp_path):
     from kreports.db.migrations import MIGRATIONS, _checksum, apply_schema_migrations
 

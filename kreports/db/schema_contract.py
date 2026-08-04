@@ -130,6 +130,7 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _normalized_partial_predicate(sql: str) -> str | None:
+    sql = sql.strip()
     match = re.search(r"\bwhere\b\s*(.+)$", sql, flags=re.IGNORECASE)
     if match is None:
         return None
