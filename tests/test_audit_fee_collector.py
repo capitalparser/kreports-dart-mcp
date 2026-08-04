@@ -21,9 +21,9 @@ def test_ds002_normalizes_contract_and_actual_fields_independently():
             {
                 "bsns_year": "제56기\n(당기)",
                 "adtor": "삼정회계법인",
-                "adt_cntrct_dtls_mendng": "7,500",
+                "adt_cntrct_dtls_mendng": "7,500백만원",
                 "adt_cntrct_dtls_time": "78,000",
-                "real_exc_dtls_mendng": "7,800",
+                "real_exc_dtls_mendng": "7,800백만원",
                 "real_exc_dtls_time": "76,830",
             }
         ],
@@ -36,6 +36,46 @@ def test_ds002_normalizes_contract_and_actual_fields_independently():
     assert observation.actual_hours == 76830
     assert observation.availability_status == "available"
     assert observation.quality_status == "verified"
+
+
+def test_ds002_normalizes_only_explicit_raw_units_and_retains_receipt():
+    observation = normalize_endpoint_result(
+        year=2025,
+        status="000",
+        rows=[{
+            "bsns_year": "제26기(당기)",
+            "adt_cntrct_dtls_mendng": "240,000천원",
+            "adt_cntrct_dtls_time": "1,500",
+            "real_exc_dtls_mendng": "303,000,000원",
+            "real_exc_dtls_time": "1,600",
+            "rcept_no": "20260318000123",
+        }],
+        corp_code=CORP_CODE,
+    )
+
+    assert observation.contract_fee_m == 240
+    assert observation.actual_fee_m == 303
+    assert observation.source_rcept_no == "20260318000123"
+    assert observation.displayed_unit == "explicit_raw_unit"
+
+
+def test_ds002_rejects_unitless_fee_instead_of_assuming_millions():
+    observation = normalize_endpoint_result(
+        year=2025,
+        status="000",
+        rows=[{
+            "bsns_year": "제26기(당기)",
+            "adt_cntrct_dtls_mendng": "162,000",
+            "adt_cntrct_dtls_time": "1,543",
+            "real_exc_dtls_mendng": "162,000",
+            "real_exc_dtls_time": "1,553",
+        }],
+        corp_code=CORP_CODE,
+    )
+
+    assert observation.contract_fee_m is None
+    assert observation.actual_fee_m is None
+    assert "fee_unit_unproven" in observation.limitations
 
 
 def test_unsupported_historical_period_is_not_transport_error():
@@ -126,9 +166,9 @@ def test_collect_audit_fee_success_saves_row(fresh_audit_fee_db):
             {
                 "se": "당기",
                 "nm": "삼일회계법인",
-                "adt_fee": "1,000",
+                "adt_fee": "1,000백만원",
                 "adt_time": "12,345",
-                "nadt_fee": "250",
+                "nadt_fee": "250백만원",
                 "nadt_time": "300",
             }
         ],
@@ -155,15 +195,15 @@ def test_collect_audit_fee_parses_current_dart_shape(fresh_audit_fee_db):
             {
                 "bsns_year": "제56기\n(당기)",
                 "adtor": "삼정회계법인",
-                "adt_cntrct_dtls_mendng": "7,800",
+                "adt_cntrct_dtls_mendng": "7,800백만원",
                 "adt_cntrct_dtls_time": "78,000",
-                "real_exc_dtls_mendng": "7,800",
+                "real_exc_dtls_mendng": "7,800백만원",
                 "real_exc_dtls_time": "76,830",
             }
         ],
         "non_audit_list": [
-            {"servc_mendng": "43", "rm": "삼정회계법인"},
-            {"servc_mendng": "57", "rm": "삼정회계법인"},
+            {"servc_mendng": "43백만원", "rm": "삼정회계법인"},
+            {"servc_mendng": "57백만원", "rm": "삼정회계법인"},
         ],
     }
 
@@ -369,7 +409,7 @@ def test_ds002_legacy_official_fields_are_normalized():
             {
                 "bsns_year": "2019",
                 "adtor": "삼일회계법인",
-                "mendng": "1,200",
+                "mendng": "1,200백만원",
                 "tot_reqre_time": "10,500",
             }
         ],

@@ -94,6 +94,26 @@ def backfill_audit_fee_observations_cmd(
     )
 
 
+@app.command("renormalize-audit-fee-observations")
+def renormalize_audit_fee_observations_cmd(
+    year_from: Optional[int] = typer.Option(None, "--year-from"),
+    year_to: Optional[int] = typer.Option(None, "--year-to"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Explicit local-only repair of v1 DS002 amount-unit projections."""
+    init_db()
+    from kreports.maintenance.audit_fee_observation_backfill import (
+        renormalize_audit_fee_observations,
+    )
+
+    result = renormalize_audit_fee_observations(
+        year_from=year_from,
+        year_to=year_to,
+        dry_run=dry_run,
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 def _run_clone_rehearsal_cli(
     *,
     source_db: Path,

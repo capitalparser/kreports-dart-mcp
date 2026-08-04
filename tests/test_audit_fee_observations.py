@@ -22,6 +22,7 @@ from kreports.db.audit_fee_observation_store import (
 from kreports.db.models import AuditFee, AuditFeeObservationRecord, Base
 from kreports.maintenance.audit_fee_observation_backfill import (
     backfill_audit_fee_observations,
+    renormalize_audit_fee_observations,
 )
 
 
@@ -328,6 +329,53 @@ def test_explicit_backfill_is_dry_run_safe_and_idempotent(file_audit_fee_db):
     assert write["inserted_observations"] == 2
     assert rerun["inserted_observations"] == 0
     assert rerun["semantic_changes"] == 0
+
+
+def test_offline_renormalization_uses_raw_unit_and_clears_ambiguous_nas(file_audit_fee_db):
+    legacy = AuditFeeObservation(
+        corp_code="00126380",
+        bsns_year=2025,
+        source_class="opendart_ds002",
+        contract_fee_m=240_000,
+        contract_hours=1_543,
+        actual_fee_m=303_000_000,
+        actual_hours=1_553,
+        displayed_unit="백만원",
+        raw_values={
+            "contract_fee": "240,000천원",
+            "contract_hours": "1,543",
+            "actual_fee": "303,000,000원",
+            "actual_hours": "1,553",
+        },
+        parser_version="v1",
+    )
+    with Session(file_audit_fee_db) as session:
+        session.add(AuditFee(
+            corp_code=legacy.corp_code, bsns_year=legacy.bsns_year,
+            audit_fee_m=303_000_000, audit_hours=1_553,
+            actual_fee_m=303_000_000, actual_hours=1_553,
+            non_audit_fee_m=80_000_000, nas_ratio=0.264,
+            source_observations_json=observations_json([legacy]),
+            fetched_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+    with Session(file_audit_fee_db) as session:
+        persist_audit_fee_observations(session, [legacy])
+        session.commit()
+
+    dry_run = renormalize_audit_fee_observations(year_from=2025, year_to=2025, dry_run=True)
+    result = renormalize_audit_fee_observations(year_from=2025, year_to=2025)
+
+    with Session(file_audit_fee_db) as session:
+        row = session.query(AuditFee).one()
+        current = session.query(AuditFeeObservationRecord).filter_by(is_current=True).one()
+    assert dry_run["renormalized_company_years"] == 1
+    assert result["superseded_observations"] == 1
+    assert row.actual_fee_m == 303
+    assert row.contract_fee_m == 240
+    assert row.non_audit_fee_m is None
+    assert row.nas_ratio is None
+    assert current.parser_version == "v2"
 
 
 def test_explicit_backfill_leaves_malformed_company_year_unchanged(file_audit_fee_db):

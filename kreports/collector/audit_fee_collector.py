@@ -15,6 +15,7 @@ from kreports.collector.audit_fee_sources import (
     ds002_source_supported,
     merge_audit_fee_observations,
     normalize_endpoint_result,
+    normalize_explicit_fee_m,
     observation_from_dict,
 )
 from kreports.config import settings
@@ -58,7 +59,7 @@ def _sum_non_audit_fee(items: list[dict]) -> int | None:
     total = 0
     found = False
     for item in items:
-        fee = _parse_fee(item.get("servc_mendng") or item.get("nadt_fee"))
+        fee = normalize_explicit_fee_m(item.get("servc_mendng") or item.get("nadt_fee"))
         if fee is None:
             continue
         total += fee
@@ -155,7 +156,7 @@ def collect_audit_fees_for(
             )
             non_audit_fee_m = _sum_non_audit_fee(data.get("non_audit_list") or [])
             if non_audit_fee_m is None:
-                non_audit_fee_m = _parse_fee(item.get("nadt_fee"))
+                non_audit_fee_m = normalize_explicit_fee_m(item.get("nadt_fee"))
             non_audit_hours = _parse_fee(item.get("nadt_time"))
 
             # NAS ratio 계산

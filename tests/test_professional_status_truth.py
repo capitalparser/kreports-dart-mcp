@@ -858,6 +858,7 @@ def test_professional_surface_registries_combine_implemented_routes():
     )
     assert set(DETAIL_RENDERERS) == {
         "prepare_standard_audit_hours_inputs",
+        "compare_peer_audit_fees",
         "prepare_audit_materiality_inputs",
         "get_audit_history",
         "compare_peer_risk_profile",

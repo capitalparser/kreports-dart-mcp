@@ -280,6 +280,88 @@ def test_compare_peer_audit_fees_never_mixes_typed_actual_and_contract(
     assert out["data_quality"]["basis_populations"]["contract"]["valid_fee_n"] == 1
 
 
+def test_compare_peer_audit_fees_excludes_uncorroborated_unit_anomalies_and_explains_missing_receipts(
+    temp_engine,
+):
+    """Never repair a suspect unit by guessing a multiplier or invent a filing link."""
+    from kreports.db.engine import get_session
+    from kreports.mcp.contracts import enrich_answer_response
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="subject", corp_name="대상회사", market="KOSPI"),
+            Company(corp_code="peer", corp_name="단위의심회사", market="KOSPI"),
+        ])
+        session.add_all([
+            Financial(
+                corp_code=code,
+                year=2024,
+                quarter=4,
+                fs_div="CFS",
+                total_assets=1_000_000_000,
+            )
+            for code in ("subject", "peer")
+        ])
+        session.add_all([
+            AuditFee(
+                corp_code="subject",
+                bsns_year=2024,
+                audit_fee_m=100,
+                audit_hours=1_000,
+                actual_fee_m=100,
+                actual_hours=1_000,
+                compatibility_basis="actual",
+                availability_status="available",
+                source_rcept_no="20250318000123",
+            ),
+            AuditFee(
+                corp_code="peer",
+                bsns_year=2024,
+                audit_fee_m=162_000,
+                audit_hours=1_553,
+                actual_fee_m=162_000,
+                actual_hours=1_553,
+                non_audit_fee_m=80_000_000,
+                nas_ratio=493.8272,
+                compatibility_basis="actual",
+                availability_status="available",
+                # The backfill failure shape has no receipt that could justify
+                # either an inferred unit conversion or a confirmed fact.
+                source_rcept_no=None,
+            ),
+        ])
+
+    out = compare_peer_audit_fees(
+        "subject",
+        year=2024,
+        _peer_group={
+            "subject": {"corp_code": "subject", "corp_name": "대상회사"},
+            "selection_policy": {"fs_div_used": "CFS"},
+            "peers": [{"corp_code": "peer"}],
+        },
+    )
+
+    peer = out["peers"][0]
+    assert peer["audit_fee_m"] is None
+    assert peer["actual_fee_m"] is None
+    assert peer["non_audit_fee_m"] is None
+    assert peer["nas_ratio"] is None
+    assert peer["unit_integrity_status"] == "excluded_suspect_unit"
+    assert out["data_quality"]["unit_integrity"]["excluded_row_count"] == 1
+    assert out["confirmed_facts"] == [{
+        "statement": "2024년 대상회사 감사보수 100백만원, 감사시간 1,000시간 (actual 기준).",
+        "source": {"rcept_no": "20250318000123"},
+    }]
+
+    enriched = enrich_answer_response("compare_peer_audit_fees", out)
+
+    assert [source["rcept_no"] for source in enriched["answer_pack"]["sources"]] == [
+        "20250318000123"
+    ]
+    assert "162000" not in enriched["answer"]
+    assert "단위를 추정 변환하지 않고" in enriched["answer"]
+
+
 def test_compare_peer_risk_profile_shape():
     out = compare_peer_risk_profile("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"

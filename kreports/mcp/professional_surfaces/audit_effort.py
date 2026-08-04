@@ -337,6 +337,34 @@ def _render_prepare_inputs(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_fee_comparison(result: dict[str, Any]) -> str:
+    """Explain local comparison rows without promoting uncited values to facts."""
+    year = result.get("year") or "요청"
+    peer_count = result.get("peer_count") or 0
+    quality = result.get("data_quality") or {}
+    provenance = quality.get("source_provenance") or {}
+    integrity = quality.get("unit_integrity") or {}
+    citable = provenance.get("citable_row_count") or 0
+    uncitable = provenance.get("uncitable_value_row_count") or 0
+    excluded = integrity.get("excluded_row_count") or 0
+    lines = [
+        "감사보수·감사시간 Peer 비교:",
+        f"- {year}년 대상회사와 peer {peer_count}개사의 로컬 캐시 관찰값을 비교 표에 정리했습니다.",
+    ]
+    if citable:
+        lines.append(f"- 원 공시 접수번호가 직접 연결된 비교 행: {citable}건입니다.")
+    if uncitable:
+        lines.append(
+            f"- 접수번호가 연결되지 않은 감사보수·시간 관찰값: {uncitable}건입니다. "
+            "이 값들은 표의 로컬 캐시 관찰값일 뿐, 공시 확인 사실이나 출처로 승격하지 않았습니다."
+        )
+    if excluded:
+        lines.append(
+            f"- 단위·비율 이상 징후 {excluded}건은 단위를 추정 변환하지 않고 비교·표시에서 제외했습니다."
+        )
+    return "\n".join(lines)
+
+
 def _render_materiality_inputs(result: dict[str, Any]) -> str:
     subject = (result.get("subject") or {}).get("corp_name") or "대상 회사"
     candidates = result.get("materiality_candidates") or []
@@ -366,6 +394,7 @@ PACK_BUILDERS: dict[str, PackBuilder] = {
 }
 DETAIL_RENDERERS: dict[str, DetailRenderer] = {
     "prepare_standard_audit_hours_inputs": _render_prepare_inputs,
+    "compare_peer_audit_fees": _render_fee_comparison,
     "prepare_audit_materiality_inputs": _render_materiality_inputs,
 }
 CONCLUSION_OVERRIDES = {

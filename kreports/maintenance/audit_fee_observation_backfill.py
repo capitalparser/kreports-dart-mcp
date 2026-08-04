@@ -8,6 +8,7 @@ from kreports.collector.audit_fee_sources import (
     merge_audit_fee_observations,
     observation_from_dict,
     observation_hash,
+    renormalize_ds002_observation,
     source_slot_hash,
 )
 from kreports.db.audit_fee_observation_store import (
@@ -161,4 +162,84 @@ def backfill_audit_fee_observations(
         int(counters["inserted_observations"])
         + int(counters["superseded_observations"])
     )
+    return counters
+
+
+def _project_renormalized_claims(
+    row: AuditFee,
+    observations: list[AuditFeeObservation],
+) -> None:
+    """Replace v1 projections with raw-unit-proven claims, never a fallback."""
+    merged = merge_audit_fee_observations(observations, previous={})
+    for field, value in merged.to_record().items():
+        setattr(row, field, value)
+    # v1 never retained raw non-audit service amounts in the typed observation.
+    # Keeping those projections would leave an irrecoverably unit-ambiguous NAS.
+    row.non_audit_fee_m = None
+    row.non_audit_hours = None
+    row.nas_ratio = None
+    row.independence_risk_flag = None
+
+
+def renormalize_audit_fee_observations(
+    *,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, int | bool | None]:
+    """Offline v1 DS002 repair from persisted raw values; no network access."""
+    require_collector_mode("renormalize-audit-fee-observations")
+    if year_from is not None and year_to is not None and year_from > year_to:
+        raise ValueError("year_from must not exceed year_to")
+    with get_session() as session:
+        query = session.query(AuditFee.corp_code, AuditFee.bsns_year)
+        if year_from is not None:
+            query = query.filter(AuditFee.bsns_year >= year_from)
+        if year_to is not None:
+            query = query.filter(AuditFee.bsns_year <= year_to)
+        identities = query.order_by(AuditFee.corp_code, AuditFee.bsns_year).all()
+
+    counters: dict[str, int | bool | None] = {
+        "year_from": year_from,
+        "year_to": year_to,
+        "dry_run": dry_run,
+        "processed_company_years": 0,
+        "renormalized_company_years": 0,
+        "unit_unproven_company_years": 0,
+        "inserted_observations": 0,
+        "superseded_observations": 0,
+        "malformed_company_years": 0,
+        "failed_company_years": 0,
+    }
+    for corp_code, bsns_year in identities:
+        counters["processed_company_years"] += 1
+        try:
+            with get_session() as session:
+                row = session.query(AuditFee).filter_by(
+                    corp_code=corp_code, bsns_year=bsns_year,
+                ).one()
+                observations = _parse_legacy_observations(row)
+                normalized = [
+                    renormalize_ds002_observation(observation)
+                    for observation in observations
+                ]
+                if any("fee_unit_unproven" in item.limitations for item in normalized):
+                    counters["unit_unproven_company_years"] += 1
+                if normalized == observations:
+                    continue
+                counters["renormalized_company_years"] += 1
+                if dry_run:
+                    continue
+                result = persist_audit_fee_observations(session, normalized)
+                current = load_current_audit_fee_observations(
+                    session, corp_code=corp_code, bsns_year=bsns_year,
+                )
+                _project_renormalized_claims(row, current)
+                counters["inserted_observations"] += result.inserted
+                counters["superseded_observations"] += result.superseded
+        except ValueError:
+            counters["malformed_company_years"] += 1
+            counters["failed_company_years"] += 1
+        except Exception:
+            counters["failed_company_years"] += 1
     return counters

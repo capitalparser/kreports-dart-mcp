@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 _MISSING_TOKENS = {"", "-", "n/a", "na", "해당없음", "없음"}
 _DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
-AUDIT_FEE_OBSERVATION_PARSER_VERSION = "v1"
+AUDIT_FEE_OBSERVATION_PARSER_VERSION = "v2"
 _MAX_RAW_VALUES = 32
 _MAX_RAW_VALUE_KEY_LENGTH = 80
 _MAX_RAW_VALUE_LENGTH = 500
@@ -234,6 +234,69 @@ def normalize_fee_m(value: object, unit: str = "백만원") -> int | None:
     return int((number * multiplier).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def normalize_explicit_fee_m(value: object) -> int | None:
+    """Normalize only an amount whose raw text carries its own KRW unit.
+
+    DS002 can surface values from differently-labelled filing tables.  A bare
+    number is therefore not safe to reinterpret as KRW millions.
+    """
+    text_value = str(value or "").replace(" ", "")
+    for unit in ("백만원", "천원", "억원", "원"):
+        if text_value.endswith(unit):
+            return normalize_fee_m(text_value[:-len(unit)], unit)
+    return None
+
+
+def renormalize_ds002_observation(
+    observation: AuditFeeObservation,
+) -> AuditFeeObservation:
+    """Reproject persisted DS002 raw values without guessing missing units."""
+    if observation.source_class != "opendart_ds002":
+        return observation
+    raw = observation.raw_values
+    contract_fee = normalize_explicit_fee_m(raw.get("contract_fee"))
+    actual_fee = normalize_explicit_fee_m(raw.get("actual_fee"))
+    if contract_fee is None and actual_fee is None:
+        contract_fee = normalize_explicit_fee_m(
+            raw.get("legacy_official_fee") or raw.get("legacy_fee")
+        )
+    contract_hours = normalize_hours(raw.get("contract_hours"))
+    actual_hours = normalize_hours(raw.get("actual_hours"))
+    if contract_hours is None and actual_hours is None:
+        contract_hours = normalize_hours(
+            raw.get("legacy_official_hours") or raw.get("legacy_hours")
+        )
+    fee_present = any(raw.get(key) not in (None, "", "-") for key in (
+        "contract_fee", "actual_fee", "legacy_fee", "legacy_official_fee",
+    ))
+    limitations = set(observation.limitations)
+    if fee_present and contract_fee is None and actual_fee is None:
+        limitations.add("fee_unit_unproven")
+    available_count = sum(value is not None for value in (
+        contract_fee, contract_hours, actual_fee, actual_hours,
+    ))
+    return AuditFeeObservation(
+        corp_code=observation.corp_code,
+        bsns_year=observation.bsns_year,
+        source_class=observation.source_class,
+        contract_fee_m=contract_fee,
+        contract_hours=contract_hours,
+        actual_fee_m=actual_fee,
+        actual_hours=actual_hours,
+        auditor_nm=observation.auditor_nm,
+        source_rcept_no=observation.source_rcept_no,
+        source_period=observation.source_period,
+        source_eligibility=observation.source_eligibility,
+        availability_status=("available" if available_count == 4 else "partial"),
+        quality_status=("verified" if available_count == 4 else "partial" if available_count else "missing"),
+        displayed_unit="explicit_raw_unit" if contract_fee is not None or actual_fee is not None else None,
+        raw_values=observation.raw_values,
+        source_status=observation.source_status,
+        source_message=observation.source_message,
+        limitations=tuple(sorted(limitations)),
+    )
+
+
 def normalize_hours(value: object) -> int | None:
     number = _parse_number(value)
     if number is None:
@@ -356,20 +419,20 @@ def normalize_endpoint_result(
         "legacy_hours": row.get("adt_time"),
         "legacy_official_fee": row.get("mendng"),
         "legacy_official_hours": row.get("tot_reqre_time"),
+        "rcept_no": row.get("rcept_no"),
     }
-    contract_fee = normalize_fee_m(raw["contract_fee"], "백만원")
+    contract_fee = normalize_explicit_fee_m(raw["contract_fee"])
     contract_hours = normalize_hours(raw["contract_hours"])
-    actual_fee = normalize_fee_m(raw["actual_fee"], "백만원")
+    actual_fee = normalize_explicit_fee_m(raw["actual_fee"])
     actual_hours = normalize_hours(raw["actual_hours"])
     # The historical DS002 shape exposed only one unlabeled compatibility pair.
     if contract_fee is None and actual_fee is None:
-        contract_fee = normalize_fee_m(
+        contract_fee = normalize_explicit_fee_m(
             (
                 raw["legacy_official_fee"]
                 if raw["legacy_official_fee"] is not None
                 else raw["legacy_fee"]
-            ),
-            "백만원",
+            )
         )
     if contract_hours is None and actual_hours is None:
         contract_hours = normalize_hours(
@@ -383,8 +446,10 @@ def normalize_endpoint_result(
     populated = (contract_fee, contract_hours, actual_fee, actual_hours)
     available_count = sum(value is not None for value in populated)
     availability = "available" if available_count == 4 else "partial"
-    quality = "verified" if available_count else "missing"
-    limitations = () if available_count == 4 else ("DS002 fields are incomplete",)
+    quality = "verified" if available_count == 4 else "partial" if available_count else "missing"
+    limitations = [] if available_count == 4 else ["DS002 fields are incomplete"]
+    if (raw["contract_fee"] is not None or raw["actual_fee"] is not None) and contract_fee is None and actual_fee is None:
+        limitations.append("fee_unit_unproven")
     return AuditFeeObservation(
         corp_code=corp_code,
         bsns_year=year,
@@ -396,15 +461,16 @@ def normalize_endpoint_result(
         auditor_nm=(
             row.get("adtor") or row.get("nm") or row.get("auditor_nm") or None
         ),
+        source_rcept_no=(str(row.get("rcept_no")).strip() or None) if row.get("rcept_no") else None,
         source_period=str(row.get("bsns_year") or row.get("se") or year),
         source_eligibility="eligible",
         availability_status=availability,
         quality_status=quality,
-        displayed_unit="백만원",
+        displayed_unit="explicit_raw_unit" if contract_fee is not None or actual_fee is not None else None,
         raw_values={key: None if value is None else str(value) for key, value in raw.items()},
         source_status=status_value,
         source_message=message,
-        limitations=limitations,
+        limitations=tuple(limitations),
     )
 
 

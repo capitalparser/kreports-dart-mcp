@@ -1361,6 +1361,93 @@ _SUBJECT_SCALE_FIELD_LABELS = {
     "audit_hours": "감사시간",
 }
 
+# The public comparison is labelled in KRW millions. A value that implies more
+# than KRW 10m for one audit hour is not a safe comparable observation; it can
+# indicate an upstream unit mismatch. Exclude it rather than guessing whether
+# the raw source was KRW, KRW thousands, or KRW millions.
+_MAX_AUDIT_FEE_M_PER_HOUR = 10.0
+_MAX_NAS_RATIO = 100.0
+
+
+def _positive_finite_number(value: object) -> float | None:
+    """Return a public numeric value only when it is finite and positive."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _sanitize_audit_fee_row(row: dict) -> dict:
+    """Fail closed on fee-unit anomalies without silently rescaling values."""
+    sanitized = dict(row)
+    issues: list[str] = []
+    for fee_key, hours_key, asset_bps_key, per_hour_key in (
+        ("audit_fee_m", "audit_hours", "fee_assets_bps", "fee_per_hour_m"),
+        ("actual_fee_m", "actual_hours", "actual_fee_assets_bps", "actual_fee_per_hour_m"),
+        ("contract_fee_m", "contract_hours", "contract_fee_assets_bps", "contract_fee_per_hour_m"),
+    ):
+        fee = _positive_finite_number(sanitized.get(fee_key))
+        hours = _positive_finite_number(sanitized.get(hours_key))
+        if fee is None or hours is None or fee / hours <= _MAX_AUDIT_FEE_M_PER_HOUR:
+            continue
+        sanitized[fee_key] = None
+        sanitized[asset_bps_key] = None
+        sanitized[per_hour_key] = None
+        issues.append(f"{fee_key}:fee_per_hour_exceeds_max")
+
+    audit_fee = _positive_finite_number(sanitized.get("audit_fee_m"))
+    non_audit_fee = _positive_finite_number(sanitized.get("non_audit_fee_m"))
+    if non_audit_fee is not None:
+        if audit_fee is None:
+            sanitized["non_audit_fee_m"] = None
+            sanitized["nas_ratio"] = None
+            issues.append("non_audit_fee_m:missing_trusted_audit_fee")
+        elif non_audit_fee / audit_fee > _MAX_NAS_RATIO:
+            sanitized["non_audit_fee_m"] = None
+            sanitized["nas_ratio"] = None
+            issues.append("non_audit_fee_m:nas_ratio_exceeds_max")
+        else:
+            sanitized["nas_ratio"] = round(non_audit_fee / audit_fee, 4)
+    elif sanitized.get("nas_ratio") is not None:
+        sanitized["nas_ratio"] = None
+
+    if issues:
+        sanitized["unit_integrity_status"] = "excluded_suspect_unit"
+        sanitized["unit_integrity_issues"] = issues
+    return sanitized
+
+
+def _audit_fee_confirmed_facts(rows: list[dict], *, year: int) -> list[dict]:
+    """Emit a fact only where this comparison row carries a filing receipt."""
+    facts: list[dict] = []
+    for row in rows:
+        receipt = valid_annual_filing_receipt(
+            row.get("audit_source_rcept_no"), year,
+        )
+        if receipt is None:
+            continue
+        fee = row.get("audit_fee_m")
+        hours = row.get("audit_hours")
+        if fee is None and hours is None:
+            continue
+        parts = []
+        if fee is not None:
+            parts.append(f"감사보수 {int(fee):,}백만원")
+        if hours is not None:
+            parts.append(f"감사시간 {int(hours):,}시간")
+        company = row.get("corp_name") or row.get("corp_code") or "대상회사"
+        basis = row.get("metric_basis") or "legacy"
+        facts.append({
+            "statement": f"{year}년 {company} {', '.join(parts)} ({basis} 기준).",
+            "source": {"rcept_no": receipt},
+        })
+        if len(facts) == 8:
+            break
+    return facts
+
 
 def _per_trillion(value: float | int | None, denominator: float | int | None) -> float | None:
     if value is None or denominator is None or denominator <= 0:
@@ -1574,6 +1661,11 @@ def compare_peer_audit_fees(
             "THEN 'available' ELSE 'missing' END"
         )
     )
+    source_rcept_expr = (
+        "af.source_rcept_no"
+        if _has_db_column("audit_fees", "source_rcept_no")
+        else "NULL"
+    )
     nas_expr = (
         "CASE WHEN COALESCE(af.compatibility_basis, 'legacy_inferred') "
         "IN ('actual', 'legacy_inferred') THEN af.nas_ratio END"
@@ -1592,6 +1684,7 @@ def compare_peer_audit_fees(
                {contract_hours_expr} AS contract_hours,
                {basis_expr} AS metric_basis,
                {availability_expr} AS availability_status,
+               {source_rcept_expr} AS audit_source_rcept_no,
                CASE WHEN f.total_assets > 0 AND af.audit_fee_m IS NOT NULL
                     THEN 10000.0 * af.audit_fee_m * 1000000.0 / f.total_assets END AS fee_assets_bps,
                CASE WHEN af.audit_hours > 0 AND af.audit_fee_m IS NOT NULL
@@ -1619,7 +1712,10 @@ def compare_peer_audit_fees(
     with _engine_module.engine.connect() as conn:
         rows = conn.execute(stmt, {"ccs": all_codes, "year": year, "fs": fs_div}).mappings().all()
 
-    by_cc = {row["corp_code"]: dict(row) for row in rows}
+    by_cc = {
+        row["corp_code"]: _sanitize_audit_fee_row(dict(row))
+        for row in rows
+    }
     typed_evidence = has_typed_fee and any(
         row.get("actual_fee_m") is not None
         or row.get("actual_hours") is not None
@@ -1734,12 +1830,53 @@ def compare_peer_audit_fees(
             [float(v) for v in vals],
         )
 
+    all_rows = [subject_row, *peer_rows]
+    excluded_rows = [
+        row for row in all_rows
+        if row.get("unit_integrity_status") == "excluded_suspect_unit"
+    ]
+    citable_rows = [
+        row for row in all_rows
+        if valid_annual_filing_receipt(row.get("audit_source_rcept_no"), year)
+        and (row.get("audit_fee_m") is not None or row.get("audit_hours") is not None)
+    ]
+    uncitable_value_rows = [
+        row for row in all_rows
+        if (row.get("audit_fee_m") is not None or row.get("audit_hours") is not None)
+        and row not in citable_rows
+    ]
+    limitations = []
+    if uncitable_value_rows:
+        limitations.append(
+            "감사보수·시간 값 중 일부에 원 공시 접수번호가 연결되지 않아 "
+            "공시 확인 사실·출처로 제시하지 않았습니다."
+        )
+    if excluded_rows:
+        limitations.append(
+            "단위 또는 비감사보수 비율이 비정상적으로 보이는 행은 "
+            "단위를 추정 변환하지 않고 비교·표시에서 제외했습니다."
+        )
+    limited_metrics = [
+        key for key, info in metric_coverage.items()
+        if info["status"] != "usable"
+    ]
     data_quality = {
         "metric_coverage": metric_coverage,
-        "limited_metrics": [
-            key for key, info in metric_coverage.items()
-            if info["status"] != "usable"
-        ],
+        "limited_metrics": limited_metrics,
+        "status": "limited" if limitations or limited_metrics else "usable",
+        "limitations": limitations,
+        "source_provenance": {
+            "citable_row_count": len(citable_rows),
+            "uncitable_value_row_count": len(uncitable_value_rows),
+            "status": "usable" if not uncitable_value_rows else "limited",
+        },
+        "unit_integrity": {
+            "status": "limited" if excluded_rows else "usable",
+            "excluded_row_count": len(excluded_rows),
+            "fee_per_hour_max_m": _MAX_AUDIT_FEE_M_PER_HOUR,
+            "nas_ratio_max": _MAX_NAS_RATIO,
+            "policy": "exclude_without_unit_conversion",
+        },
     }
     if typed_evidence:
         data_quality["basis_populations"] = basis_populations
@@ -1749,6 +1886,8 @@ def compare_peer_audit_fees(
         fs_div=fs_div,
     )
     data_quality["subject_scale_history"] = subject_scale_quality
+    if subject_scale_quality["status"] != "usable":
+        data_quality["status"] = "limited"
     return _clean_dict({
         "subject": base["subject"],
         "year": year,
@@ -1758,6 +1897,9 @@ def compare_peer_audit_fees(
         "subject_scale_history": subject_scale_history,
         "benchmarks": benchmarks,
         "data_quality": data_quality,
+        "confirmed_facts": _audit_fee_confirmed_facts(
+            [subject_row, *peer_rows], year=year,
+        ),
         "peers": peer_rows[:peer_limit],
         "selection_policy": base["selection_policy"],
         "note": (
