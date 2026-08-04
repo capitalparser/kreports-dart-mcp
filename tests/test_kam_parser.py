@@ -3100,6 +3100,11 @@ def test_rebuild_reports_structured_normalized_evidence_parse_error(temp_engine)
         "evidence_documents.normalized_text:parse_error"
         in receipt["limitations"]
     )
+    assert (
+        "evidence_documents.normalized_text:parser_limitation:"
+        "incomplete_kam_structure"
+        in receipt["limitations"]
+    )
 
 
 def test_rebuild_treats_plain_empty_raw_body_as_missing(temp_engine):

@@ -2016,6 +2016,10 @@ def _parse_kam_candidate(
         limitations.append(f"{source_basis}:ambiguous_boundary")
     elif outcome.status == "error":
         limitations.append(f"{source_basis}:parse_error")
+        limitations.extend(
+            f"{source_basis}:parser_limitation:{detail}"
+            for detail in outcome.limitations[:10]
+        )
     else:
         limitations.append(f"{source_basis}:no_kam_items")
     return []
@@ -2181,6 +2185,11 @@ def _recover_kam_items(
             elif outcome.status == "error":
                 limitations.append(
                     "report_sections.full_text:parse_error"
+                )
+                limitations.extend(
+                    "report_sections.full_text:parser_limitation:"
+                    f"{detail}"
+                    for detail in outcome.limitations[:10]
                 )
     if structured_failure_at is not None:
         return [], "none", limitations, structured_failure_at

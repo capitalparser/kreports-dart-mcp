@@ -72,6 +72,10 @@ _FORBIDDEN_SCHEMA_LITERALS = (
 )
 _PATH_TEXT = re.compile(r"(?:[A-Za-z]:)?/(?:[^\s:'\"]+/)+[^\s:'\"]*")
 _MARKER_SCHEMA = "kam-schema-backfill-rehearsal-marker.v1"
+_REVIEWED_KAM_PARSER_LIMITATIONS = {
+    "incomplete_kam_structure",
+    "invalid_collapsed_kam_title",
+}
 _MARKER_FIELDS = {
     "schema_version",
     "run_id",
@@ -705,6 +709,55 @@ def _bounded_rebuild_result(result: dict[str, Any]) -> dict[str, object]:
     return bounded
 
 
+def _reviewed_kam_parser_errors(
+    result: dict[str, Any],
+) -> list[dict[str, object]] | None:
+    error_count = int(result.get("error") or 0)
+    if error_count == 0:
+        return []
+    receipts = result.get("receipts")
+    if not isinstance(receipts, list):
+        return None
+    error_receipts = [
+        receipt
+        for receipt in receipts
+        if isinstance(receipt, dict)
+        and receipt.get("quality_status") == "error"
+    ]
+    if len(error_receipts) != error_count:
+        return None
+
+    reviewed: list[dict[str, object]] = []
+    marker = ":parser_limitation:"
+    for receipt in error_receipts:
+        limitations = receipt.get("limitations")
+        if not isinstance(limitations, list) or not all(
+            isinstance(limitation, str) for limitation in limitations
+        ):
+            return None
+        parser_limitations: list[str] = []
+        for limitation in limitations:
+            if marker in limitation:
+                parser_limitations.append(limitation.partition(marker)[2])
+            elif limitation.endswith((":no_kam_items", ":parse_error")):
+                continue
+            else:
+                return None
+        unique_limitations = sorted(set(parser_limitations))
+        if not unique_limitations or any(
+            limitation not in _REVIEWED_KAM_PARSER_LIMITATIONS
+            for limitation in unique_limitations
+        ):
+            return None
+        if len(reviewed) < 20:
+            reviewed.append({
+                "rcept_no": str(receipt.get("rcept_no") or "")[:100],
+                "corp_code": str(receipt.get("corp_code") or "")[:20],
+                "parser_limitations": unique_limitations,
+            })
+    return reviewed
+
+
 def _validate_state_after_migration(state: dict[str, object]) -> None:
     if (
         state["checksum_mismatches"]
@@ -988,19 +1041,27 @@ def execute_action(action: str, *, year: int | None = None) -> dict[str, object]
             from kreports.collector.report_document_collector import (
                 rebuild_kam_items,
             )
-            result = _bounded_rebuild_result(
-                rebuild_kam_items(
-                    year=int(year),
-                    dry_run=action == "kam-dry-run",
-                )
+            raw_result = rebuild_kam_items(
+                year=int(year),
+                dry_run=action == "kam-dry-run",
             )
-            if int(result.get("error") or 0) or int(
-                result.get("failed") or 0
-            ):
+            if int(raw_result.get("failed") or 0):
                 raise WorkerActionError(
                     "backfill_failed",
                     "KAM rebuild reported receipt errors",
                 )
+            reviewed_errors = _reviewed_kam_parser_errors(raw_result)
+            if reviewed_errors is None:
+                raise WorkerActionError(
+                    "backfill_failed",
+                    "KAM rebuild reported receipt errors",
+                )
+            if reviewed_errors:
+                raw_result["reviewed_parser_error_count"] = int(
+                    raw_result.get("error") or 0
+                )
+                raw_result["reviewed_parser_errors"] = reviewed_errors
+            result = _bounded_rebuild_result(raw_result)
             return result
         if action == "procedure-index":
             from kreports.collector.report_document_collector import (

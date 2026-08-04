@@ -1204,6 +1204,100 @@ def test_kam_rebuild_fails_closed_on_failed_count(
     assert caught.value.code == "backfill_failed"
 
 
+@pytest.mark.parametrize("action", ["kam-dry-run", "kam-rebuild"])
+def test_kam_worker_records_reviewed_incomplete_parser_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.maintenance.kam_rehearsal_worker import execute_action
+
+    _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        collector_module,
+        "rebuild_kam_items",
+        lambda **_kwargs: {
+            "error": 1,
+            "failed": 0,
+            "receipts": [
+                {
+                    "rcept_no": "20220317000497_20220317000497_00761_xml",
+                    "corp_code": "00303703",
+                    "quality_status": "error",
+                    "limitations": [
+                        "source_documents.raw_body:no_kam_items",
+                        "evidence_documents.normalized_text:parse_error",
+                        (
+                            "evidence_documents.normalized_text:"
+                            "parser_limitation:incomplete_kam_structure"
+                        ),
+                        "report_sections.full_text:parse_error",
+                        (
+                            "report_sections.full_text:parser_limitation:"
+                            "invalid_collapsed_kam_title"
+                        ),
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = execute_action(action, year=2021)
+
+    assert result["reviewed_parser_error_count"] == 1
+    assert result["reviewed_parser_errors"] == [
+        {
+            "rcept_no": "20220317000497_20220317000497_00761_xml",
+            "corp_code": "00303703",
+            "parser_limitations": [
+                "incomplete_kam_structure",
+                "invalid_collapsed_kam_title",
+            ],
+        }
+    ]
+
+
+def test_kam_worker_rejects_unreviewed_parser_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.maintenance.kam_rehearsal_worker import (
+        WorkerActionError,
+        execute_action,
+    )
+
+    _bind_direct_rehearsal_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        collector_module,
+        "rebuild_kam_items",
+        lambda **_kwargs: {
+            "error": 1,
+            "failed": 0,
+            "receipts": [
+                {
+                    "rcept_no": "20260310000001",
+                    "corp_code": "00126380",
+                    "quality_status": "error",
+                    "limitations": [
+                        "evidence_documents.normalized_text:parse_error",
+                        (
+                            "evidence_documents.normalized_text:"
+                            "parser_limitation:parser_error:ValueError"
+                        ),
+                    ],
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(WorkerActionError) as caught:
+        execute_action("kam-dry-run", year=2025)
+
+    assert caught.value.code == "backfill_failed"
+
+
 def test_procedure_index_fails_closed_on_error_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
