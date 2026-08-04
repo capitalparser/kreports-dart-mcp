@@ -13,7 +13,10 @@ from kreports.quality.company_year_fingerprint import (
     validate_quality_evidence_summary,
 )
 
-QUALITY_VERSION = "v1"
+# v2 makes investor-core grades source-backed: every required compact metric
+# must be usable and receipt-bound to the exact company-year annual filing.
+# Existing v1 ledger rows are therefore intentionally stale until rebuilt.
+QUALITY_VERSION = "v2"
 QUALITY_CONTENT_FIELDS = (
     "corp_code",
     "bsns_year",

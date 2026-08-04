@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 import pytest
 from sqlalchemy import select
 
+from kreports.db.quality_snapshot import QUALITY_VERSION
 from kreports.quality.company_year_fingerprint import (
     build_quality_evidence_summary,
     quality_input_fingerprint,
@@ -67,7 +68,7 @@ def _quality_values(
     bsns_year: int,
     *,
     investor_grade: str = "A",
-    quality_version: str = "v1",
+    quality_version: str = QUALITY_VERSION,
     blockers_json: str = "[]",
     input_fingerprint: str | None = None,
     evidence_summary_json: str | None = None,
@@ -206,7 +207,7 @@ def test_dataset_manifest_records_schema_version_counts_and_year_range(temp_engi
         "content_digest": _expected_quality_digest([]),
         "coverage_year": None,
         "coverage_year_row_count": 0,
-        "quality_version": "v1",
+        "quality_version": QUALITY_VERSION,
         "row_count": 0,
     }
 
@@ -353,7 +354,7 @@ def test_manifest_uses_business_year_and_snapshots_quality_ledger(
         ),
         "coverage_year": 2025,
         "coverage_year_row_count": 1,
-        "quality_version": "v1",
+        "quality_version": QUALITY_VERSION,
         "row_count": 1,
     }
 
@@ -427,7 +428,7 @@ def test_dataset_manifest_rejects_unsupported_quality_version(temp_engine):
                 **_quality_values(
                     "00126380",
                     2025,
-                    quality_version="v2",
+                    quality_version="unsupported-v1",
                 ),
                 updated_at=datetime.now(UTC),
             )
@@ -625,7 +626,7 @@ def test_dataset_manifest_rejects_unverified_quality_freshness(
                 "group_audit": "D",
             },
             blockers=(),
-            quality_version="v1",
+            quality_version=QUALITY_VERSION,
         )
         if case == "extra_local_path":
             summary["local_path"] = "/private/tmp/quality.db"

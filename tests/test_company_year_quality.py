@@ -271,24 +271,73 @@ def _seed_core_financial_years(
                 )
 
 
+def _seed_source_backed_core_financial_years(
+    corp_code: str,
+    years: range,
+    *,
+    market: str = "KOSPI",
+    invalid_field: str | None = None,
+    split_metric: str | None = None,
+) -> None:
+    """Seed compact metrics only when every row has a literal annual citation."""
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code=corp_code,
+                stock_code=corp_code[-6:],
+                corp_name=f"회사-{corp_code}",
+                market=market,
+            )
+        )
+        for year in years:
+            receipt = f"{year + 1}0318{int(corp_code):06d}"
+            report_nm = f"사업보고서 ({year}.12)"
+            session.add(
+                Disclosure(
+                    rcept_no=receipt,
+                    corp_code=corp_code,
+                    corp_name=f"회사-{corp_code}",
+                    disc_date=date(year + 1, 3, 18),
+                    disc_type="A",
+                    report_nm=report_nm,
+                )
+            )
+            for metric_key in CORE_FINANCIAL_METRICS:
+                fs_div = "OFS" if metric_key == split_metric else "CFS"
+                values = {
+                    "corp_code": corp_code,
+                    "bsns_year": year,
+                    "fs_div": fs_div,
+                    "metric_key": metric_key,
+                    "metric_name": metric_key,
+                    "amount": 100,
+                    "source_account_id": f"ifrs-full_{metric_key}",
+                    "source_table": "financial_facts",
+                    "unit": "KRW",
+                    "period_type": "instant" if metric_key in {
+                        "assets", "liabilities", "equity",
+                    } else "duration",
+                    "citation_rcept_no": receipt,
+                    "citation_report_nm": report_nm,
+                    "citation_basis": "company_year_annual_filing_match",
+                    "quality_status": "usable",
+                }
+                if invalid_field == "quality_status":
+                    values["quality_status"] = "limited"
+                elif invalid_field == "citation_basis":
+                    values["citation_basis"] = "uncitable"
+                elif invalid_field == "citation_rcept_no":
+                    values["citation_rcept_no"] = f"{year + 1}0318009999"
+                session.add(FinancialFactCompact(**values))
+
+
 def test_investor_grade_does_not_require_five_year_audit_fee(temp_engine):
     from kreports.quality.company_year import (
         company_year_quality,
         rebuild_company_year_quality,
     )
 
-    _seed_core_financial_years("00126380", range(2021, 2026))
-    with get_session() as session:
-        session.add(
-            Disclosure(
-                rcept_no="20250318000001",
-                corp_code="00126380",
-                corp_name="회사-00126380",
-                disc_date=date(2025, 3, 18),
-                disc_type="A",
-                report_nm="사업보고서 (2024.12)",
-            )
-        )
+    _seed_source_backed_core_financial_years("00126380", range(2021, 2026))
 
     result = rebuild_company_year_quality(2021, 2025)
     latest = company_year_quality("00126380", 2025)
@@ -296,6 +345,119 @@ def test_investor_grade_does_not_require_five_year_audit_fee(temp_engine):
     assert result["rows_written"] == 5
     assert latest["feature_grades"]["investor_core"] == "A"
     assert latest["feature_grades"]["audit_fee_peer"] == "not_applicable"
+
+
+def test_investor_grade_rejects_uncited_core_metrics(temp_engine):
+    """Populated compact values cannot establish investor-core coverage alone."""
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    _seed_core_financial_years("00126380", range(2023, 2026))
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["financial_core"] == "partial"
+    assert quality["feature_grades"]["investor_core"] == "D"
+    assert "financial_core_source_unproven" in quality["blockers"]
+
+
+@pytest.mark.parametrize(
+    "invalid_field",
+    ["quality_status", "citation_basis", "citation_rcept_no"],
+)
+def test_investor_grade_rejects_each_unproven_core_metric(
+    temp_engine,
+    invalid_field,
+):
+    """Every required core metric must retain usable canonical filing proof."""
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    _seed_source_backed_core_financial_years(
+        "00126380",
+        range(2023, 2026),
+        invalid_field=invalid_field,
+    )
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["financial_core"] == "partial"
+    assert quality["feature_grades"]["investor_core"] == "D"
+    assert "financial_core_source_unproven" in quality["blockers"]
+    assert quality["quality_version"] == "v2"
+
+
+def test_investor_grade_does_not_combine_core_metrics_across_financial_statements(
+    temp_engine,
+):
+    """CFS and OFS fragments cannot be merged into a source-backed core year."""
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    _seed_source_backed_core_financial_years(
+        "00126380",
+        range(2023, 2026),
+        split_metric="equity",
+    )
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["financial_core"] == "partial"
+    assert quality["feature_grades"]["investor_core"] == "D"
+
+
+def test_investor_b_keeps_three_source_backed_years_despite_two_unproven_years(
+    temp_engine,
+):
+    """Unproven extras cannot erase three independently source-backed years."""
+    from kreports.quality.company_year import (
+        company_year_quality,
+        rebuild_company_year_quality,
+    )
+
+    _seed_source_backed_core_financial_years("00126380", range(2021, 2026))
+    with get_session() as session:
+        for row in (
+            session.query(FinancialFactCompact)
+            .filter(
+                FinancialFactCompact.corp_code == "00126380",
+                FinancialFactCompact.bsns_year.in_((2021, 2022)),
+            )
+            .all()
+        ):
+            row.quality_status = "limited"
+
+    rebuild_company_year_quality(2025, 2025)
+    quality = company_year_quality("00126380", 2025)
+
+    assert quality["statuses"]["financial_core"] == "available"
+    assert quality["feature_grades"]["investor_core"] == "B"
+
+
+def test_investor_a_needs_five_proven_years_not_a_calendar_year_disclosure(
+    temp_engine,
+):
+    """A is defined by five annual-core proofs, not an unrelated filing date."""
+    from kreports.quality.company_year import _investor_grade
+
+    grade, blockers = _investor_grade(
+        "00126380",
+        2025,
+        {year: "available" for year in range(2021, 2026)},
+        set(),
+    )
+
+    assert grade == "A"
+    assert blockers == []
 
 
 def test_summary_only_kam_is_not_procedure_ready(temp_engine):
@@ -894,8 +1056,8 @@ def test_three_core_years_are_investor_b_but_transport_error_is_d(
         rebuild_company_year_quality,
     )
 
-    _seed_core_financial_years("00126380", range(2023, 2026))
-    _seed_core_financial_years("00999999", range(2023, 2026))
+    _seed_source_backed_core_financial_years("00126380", range(2023, 2026))
+    _seed_source_backed_core_financial_years("00999999", range(2023, 2026))
     with get_session() as session:
         session.add(
             FetchLog(

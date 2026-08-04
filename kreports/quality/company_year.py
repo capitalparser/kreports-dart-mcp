@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func
@@ -17,6 +17,7 @@ from kreports.analysis.audit_reporting import (
     audit_fee_availability,
     audit_fee_availability_for_collector,
 )
+from kreports.analysis.filing_provenance import compact_citation_anchors
 from kreports.analysis.group_graph import (
     classify_qsc,
     group_entity_from_record,
@@ -31,7 +32,6 @@ from kreports.db.models import (
     BusinessAffiliateAuditor,
     Company,
     CompanyYearQuality,
-    Disclosure,
     ExtractionRun,
     FetchLog,
     FinancialFactCompact,
@@ -88,7 +88,7 @@ SUMMARY_MISMATCH_FRESHNESS_LIMITATION = (
 INVESTOR_GRADE_RULES = {
     "A": {
         "annual_core_years": ANNUAL_CORE_YEARS_FOR_A,
-        "current_disclosure_list": "available",
+        "annual_core_source": "exact_company_year_annual_filing",
         "forbidden_statuses": ("error",),
     },
     "B": {
@@ -124,7 +124,14 @@ def _financial_statuses(
     corp_code: str,
     year_from: int,
     year_to: int,
-) -> dict[int, str]:
+) -> tuple[dict[int, str], set[int]]:
+    """Return annual core status plus years rejected only for source proof.
+
+    A compact fact can be populated without being usable investor evidence.
+    Each required metric must resolve inside one financial-statement scope to
+    the exact latest company-year annual filing anchor persisted by the compact
+    provenance contract.  Values from CFS and OFS are never combined.
+    """
     statuses = {year: "missing" for year in range(year_from, year_to + 1)}
     with get_session() as session:
         fetch_outcomes = (
@@ -153,6 +160,10 @@ def _financial_statuses(
                 FinancialFactCompact.fs_div,
                 FinancialFactCompact.metric_key,
                 FinancialFactCompact.amount,
+                FinancialFactCompact.quality_status,
+                FinancialFactCompact.citation_basis,
+                FinancialFactCompact.citation_rcept_no,
+                FinancialFactCompact.citation_report_nm,
             )
             .filter(
                 FinancialFactCompact.corp_code == corp_code,
@@ -162,65 +173,96 @@ def _financial_statuses(
             .all()
         )
 
-    metrics_by_year_fs: dict[tuple[int, str], set[str]] = defaultdict(set)
-    for bsns_year, fs_div, metric_key, amount in rows:
+    metrics_by_year_fs: dict[
+        tuple[int, str], dict[str, list[dict[str, Any]]]
+    ] = defaultdict(lambda: defaultdict(list))
+    for (
+        bsns_year,
+        fs_div,
+        metric_key,
+        amount,
+        quality_status,
+        citation_basis,
+        citation_rcept_no,
+        citation_report_nm,
+    ) in rows:
         if amount is not None:
-            metrics_by_year_fs[(int(bsns_year), str(fs_div))].add(str(metric_key))
+            metrics_by_year_fs[(int(bsns_year), str(fs_div))][
+                str(metric_key)
+            ].append({
+                "quality_status": quality_status,
+                "citation_basis": citation_basis,
+                "citation_rcept_no": citation_rcept_no,
+                "citation_report_nm": citation_report_nm,
+            })
     required = set(CORE_FINANCIAL_METRICS)
+    anchors = compact_citation_anchors(
+        (corp_code, bsns_year, fs_div)
+        for bsns_year, fs_div in metrics_by_year_fs
+    )
+    source_unproven_years: set[int] = set()
     for year in statuses:
         if year in errors:
             statuses[year] = "error"
             continue
-        best = max(
-            (
-                len(metrics)
-                for (metric_year, _), metrics in metrics_by_year_fs.items()
-                if metric_year == year
-            ),
-            default=0,
-        )
+        scopes = [
+            (scope, metrics)
+            for scope, metrics in metrics_by_year_fs.items()
+            if scope[0] == year
+        ]
+        best = max((len(metrics) for _, metrics in scopes), default=0)
+        source_backed = False
+        for scope, metrics in scopes:
+            anchor = anchors.get((corp_code, *scope))
+            if anchor is None or set(metrics) != required:
+                continue
+            if all(
+                len(candidates) == 1
+                and candidates[0]["quality_status"] == "usable"
+                and (
+                    candidates[0]["citation_basis"]
+                    == "company_year_annual_filing_match"
+                )
+                and candidates[0]["citation_rcept_no"] == anchor["rcept_no"]
+                and candidates[0]["citation_report_nm"] == anchor["report_nm"]
+                for candidates in metrics.values()
+            ):
+                source_backed = True
+                break
+        if best == len(required) and not source_backed:
+            source_unproven_years.add(year)
         statuses[year] = (
             "available"
-            if best == len(required)
+            if source_backed
             else "partial"
             if best
             else "not_available"
             if year in not_available
             else "missing"
         )
-    return statuses
-
-
-def _has_disclosure_list_evidence(corp_code: str, year: int) -> bool:
-    with get_session() as session:
-        return bool(
-            session.query(Disclosure.rcept_no)
-            .filter(
-                Disclosure.corp_code == corp_code,
-                Disclosure.disc_date >= date(year, 1, 1),
-                Disclosure.disc_date <= date(year, 12, 31),
-            )
-            .first()
-        )
+    return statuses, source_unproven_years
 
 
 def _investor_grade(
     corp_code: str,
     year: int,
     statuses: dict[int, str],
+    source_unproven_years: set[int],
 ) -> tuple[str, list[str]]:
     window = [statuses.get(value, "missing") for value in range(year - 4, year + 1)]
     available_years = sum(status == "available" for status in window)
     blockers: list[str] = []
     if "error" in window:
         blockers.append("financial_core_error")
-    disclosure_available = _has_disclosure_list_evidence(corp_code, year)
-    if available_years == ANNUAL_CORE_YEARS_FOR_A and disclosure_available and not blockers:
+    if available_years == ANNUAL_CORE_YEARS_FOR_A and not blockers:
         return "A", blockers
     if available_years >= ANNUAL_CORE_YEARS_FOR_B and not blockers:
-        if not disclosure_available:
-            blockers.append("current_disclosure_list_missing")
         return "B", blockers
+    if any(
+        candidate_year in source_unproven_years
+        for candidate_year in range(year - 4, year + 1)
+    ):
+        blockers.append("financial_core_source_unproven")
     blockers.append("insufficient_annual_core_years")
     return "D", sorted(set(blockers))
 
@@ -900,7 +942,7 @@ def rebuild_company_year_quality(
 
     rows_written = 0
     for corp_code, company_market in companies:
-        statuses = _financial_statuses(
+        statuses, source_unproven_years = _financial_statuses(
             corp_code,
             year_from - (ANNUAL_CORE_YEARS_FOR_A - 1),
             year_to,
@@ -910,6 +952,7 @@ def rebuild_company_year_quality(
                 corp_code,
                 year,
                 statuses,
+                source_unproven_years,
             )
             auditor_status = _auditor_status(corp_code, year)
             audit_fee_status = _audit_fee_status(corp_code, year)

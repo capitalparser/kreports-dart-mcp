@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from kreports.db.engine import get_session
 from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
+from kreports.db.quality_snapshot import QUALITY_VERSION
 from kreports.db.models import (
     Company,
     CompanyYearQuality,
@@ -98,7 +99,7 @@ def _quality_freshness_fields(
             "group_audit": "D",
         },
         blockers=(),
-        quality_version="v1",
+        quality_version=QUALITY_VERSION,
     )
     return {
         "input_fingerprint": quality_input_fingerprint(summary),
@@ -146,7 +147,7 @@ def _seed_quality_row(
                 auditor_grade="A",
                 group_audit_grade="D",
                 blockers_json="[]",
-                quality_version="v1",
+                quality_version=QUALITY_VERSION,
                 **_quality_freshness_fields(
                     investor_grade=grade,
                     policy_status=policy_status,
@@ -1028,7 +1029,7 @@ def test_rebuild_company_year_quality_cli_supports_json_and_human(
         "market": "KOSPI",
         "companies_evaluated": 2,
         "rows_written": 4,
-        "quality_version": "v1",
+        "quality_version": QUALITY_VERSION,
     }
     monkeypatch.setattr(cli_main, "init_db", lambda: None)
     monkeypatch.setattr(
@@ -1174,7 +1175,7 @@ def test_release_gate_rejects_quality_snapshot_version_mismatch(
     with get_session() as session:
         row = session.get(CompanyYearQuality, ("00126380", 2025))
         assert row is not None
-        row.quality_version = "v2"
+        row.quality_version = "v1"
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
     report = evaluate_release_gate("public_runtime")
@@ -1236,10 +1237,10 @@ def test_release_gate_rejects_matching_snapshot_for_unsupported_version(
         manifest = session.get(DatasetManifest, "release-v1")
         assert quality_row is not None
         assert manifest is not None
-        quality_row.quality_version = "v2"
+        quality_row.quality_version = "v1"
         session.flush()
         snapshot = json.loads(manifest.quality_snapshot_json)
-        snapshot["quality_version"] = "v2"
+        snapshot["quality_version"] = "v1"
         snapshot["content_digest"] = _expected_quality_digest(
             [quality_row]
         )
@@ -1337,7 +1338,7 @@ def test_release_gate_rejects_quality_snapshot_row_count_mismatch(
                 auditor_grade="A",
                 group_audit_grade="D",
                 blockers_json="[]",
-                quality_version="v1",
+                quality_version=QUALITY_VERSION,
                 **_quality_freshness_fields(),
                 updated_at=datetime.now(UTC),
             )
@@ -1384,7 +1385,7 @@ def test_release_gate_rejects_quality_snapshot_coverage_year_mismatch(
                 auditor_grade="A",
                 group_audit_grade="D",
                 blockers_json="[]",
-                quality_version="v1",
+                quality_version=QUALITY_VERSION,
                 **_quality_freshness_fields(),
                 updated_at=datetime.now(UTC),
             )
@@ -1466,7 +1467,7 @@ def test_public_runtime_does_not_round_1899_of_1999_up_to_threshold(
                     auditor_grade="A",
                     group_audit_grade="D",
                     blockers_json="[]",
-                    quality_version="v1",
+                    quality_version=QUALITY_VERSION,
                     **_quality_freshness_fields(
                         investor_grade=(
                             "A" if index < 1899 else "D"
