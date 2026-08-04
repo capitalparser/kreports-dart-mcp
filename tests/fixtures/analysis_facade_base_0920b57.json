@@ -954,6 +954,7 @@
         "subject_percentile": 0.0
       }
     },
+    "confirmed_facts": [],
     "data_quality": {
       "limited_metrics": [
         "audit_fee_m",
@@ -961,6 +962,9 @@
         "nas_ratio",
         "audit_fee_to_assets_bps",
         "audit_fee_per_hour_m"
+      ],
+      "limitations": [
+        "감사보수·시간 값 중 일부에 원 공시 접수번호가 연결되지 않아 공시 확인 사실·출처로 제시하지 않았습니다."
       ],
       "metric_coverage": {
         "audit_fee_m": {
@@ -994,6 +998,12 @@
           "status": "limited"
         }
       },
+      "source_provenance": {
+        "citable_row_count": 0,
+        "status": "limited",
+        "uncitable_value_row_count": 3
+      },
+      "status": "limited",
       "subject_scale_history": {
         "complete_years": [
           2024
@@ -1020,6 +1030,13 @@
           2022
         ],
         "status": "limited"
+      },
+      "unit_integrity": {
+        "excluded_row_count": 0,
+        "fee_per_hour_max_m": 10.0,
+        "nas_ratio_max": 100.0,
+        "policy": "exclude_without_unit_conversion",
+        "status": "usable"
       }
     },
     "fs_div_used": "CFS",
@@ -1029,6 +1046,7 @@
       {
         "audit_fee_m": 160,
         "audit_hours": 1300,
+        "audit_source_rcept_no": null,
         "corp_code": "00000003",
         "corp_name": "패리티피어B",
         "fee_assets_bps": 6.666666666666667,
@@ -1040,6 +1058,7 @@
       {
         "audit_fee_m": 140,
         "audit_hours": 1200,
+        "audit_source_rcept_no": null,
         "corp_code": "00000002",
         "corp_name": "패리티피어A",
         "fee_assets_bps": 9.333333333333334,
@@ -1111,6 +1130,7 @@
     "subject_metrics": {
       "audit_fee_m": 120,
       "audit_hours": 1100,
+      "audit_source_rcept_no": null,
       "corp_code": "00000001",
       "corp_name": "패리티대상",
       "fee_assets_bps": 6.0,
