@@ -408,7 +408,7 @@ def compare_peer_accounting_notes(
     active_engine = _read_engine or _engine_module.engine
     note_stmt = text(
         """
-        SELECT anc.id, anc.corp_code, anc.rcept_no, anc.dcm_no, anc.fs_div,
+        SELECT anc.id, anc.corp_code, anc.rcept_no, anc.dcm_no, anc.source_type, anc.fs_div,
                anc.note_no, anc.note_title, anc.section_type, anc.body,
                anc.full_text_uri, anc.full_text_hash, anc.full_text_length,
                anc.full_text_compressed_length, anc.full_text_storage_status,
@@ -480,6 +480,7 @@ def compare_peer_accounting_notes(
                     "availability": _availability(row),
                     "source_locator": f"accounting_note_chapters:{row['id']}",
                     "source_document_id": row.get("source_document_id"),
+                    "source_type": row.get("source_type"),
                     "rcept_no": row["rcept_no"],
                     "cached_rcept_no": row.get("cached_rcept_no"),
                     "provenance_status": row["provenance_status"],

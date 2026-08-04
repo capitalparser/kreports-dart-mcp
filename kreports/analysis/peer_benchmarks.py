@@ -40,7 +40,10 @@ from kreports.analysis.audit_reporting import (
     topic_hits,
 )
 from kreports.analysis.evidence import dart_filing_url
-from kreports.analysis.filing_provenance import valid_annual_filing_receipt
+from kreports.analysis.filing_provenance import (
+    canonical_annual_filing_source_receipt,
+    valid_annual_filing_receipt,
+)
 
 
 _METRIC_SQL = {
@@ -2031,27 +2034,34 @@ def _policy_components(subject: dict, candidate: dict) -> tuple[dict[str, float 
 
 
 def _policy_annual_sources(corp_codes: list[str], *, year: int) -> dict[str, str]:
-    """Return only the latest exact annual filing receipt per company/year."""
+    """Return annual receipts backed by a same-company/year source document."""
     if not corp_codes:
         return {}
     stmt = text("""
-        SELECT corp_code, rcept_no, disc_date, report_nm
-        FROM disclosures
-        WHERE corp_code IN :ccs AND report_nm LIKE :annual
-        ORDER BY corp_code, disc_date DESC, rcept_no DESC
+        SELECT sd.corp_code, sd.rcept_no, d.disc_date, d.report_nm
+        FROM source_documents sd
+        JOIN disclosures d ON d.rcept_no=sd.rcept_no AND d.corp_code=sd.corp_code
+        WHERE sd.corp_code IN :ccs
+          AND sd.bsns_year=:year
+          AND sd.source_type='business_report'
+          AND d.report_nm LIKE :annual
+        ORDER BY sd.corp_code, d.disc_date DESC, sd.rcept_no DESC
     """).bindparams(bindparam("ccs", expanding=True))
     with _engine_module.engine.connect() as conn:
-        rows = conn.execute(stmt, {"ccs": corp_codes, "annual": f"%사업보고서 ({year}.%"}).mappings().all()
+        rows = conn.execute(
+            stmt, {"ccs": corp_codes, "year": year, "annual": f"%사업보고서 ({year}.%"},
+        ).mappings().all()
     latest: dict[str, str] = {}
     for row in rows:
         corp_code = str(row["corp_code"])
         if corp_code in latest:
             continue
-        raw = row.get("rcept_no")
-        receipt = valid_annual_filing_receipt(raw, year)
-        date = str(row.get("disc_date") or "")[:10].replace("-", "")
-        # Do not trim or extract digits from a contaminated local DB receipt.
-        latest[corp_code] = receipt if isinstance(raw, str) and raw == receipt and receipt and receipt[:8] == date else ""
+        latest[corp_code] = canonical_annual_filing_source_receipt(
+            corp_code=corp_code,
+            bsns_year=year,
+            rcept_no=row.get("rcept_no"),
+            source_type="business_report",
+        ) or ""
     return latest
 
 

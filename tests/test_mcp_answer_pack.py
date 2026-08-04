@@ -108,6 +108,24 @@ def test_note_comparison_answer_pack_does_not_link_an_unbound_cached_receipt():
     assert pack["sources"] == []
 
 
+def test_policy_presentation_answer_pack_does_not_link_status_only_receipt():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_name": "A"},
+        "year": 2024,
+        "note_presentations": [{
+            "corp_code": "00000001",
+            "corp_name": "A",
+            "rcept_no": "20250301000001",
+            "provenance_status": "proven_annual_filing",
+            "canonical_source_binding": True,
+        }],
+    })
+
+    assert pack["sources"] == []
+
+
 def test_attach_meta_adds_dcf_answer_pack_with_tables_and_charts():
     result = {
         "subject": {"corp_name": "A"},

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -25,6 +27,7 @@ def _local_context() -> dict:
                 "full_text_hash": "b" * 40,
                 "rcept_no": "20250302000001",
                 "source_document_id": 2,
+                "source_type": "business_report",
                 "provenance_status": "proven_annual_filing",
                 "canonical_source_binding": True,
             },
@@ -36,6 +39,7 @@ def _local_context() -> dict:
                 "full_text_hash": "a" * 40,
                 "rcept_no": "20250301000001",
                 "source_document_id": 1,
+                "source_type": "business_report",
                 "provenance_status": "proven_annual_filing",
                 "canonical_source_binding": True,
             },
@@ -48,8 +52,37 @@ def _local_context() -> dict:
     }
 
 
-def test_context_pack_separates_sources_orders_deterministically_and_dedupes():
+def _seed_local_context_sources():
+    from kreports.db.engine import get_session
+    from kreports.db.models import Disclosure, SourceDocument
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            SourceDocument(
+                rcept_no="20250302000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="b" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="Context Corp",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            Disclosure(
+                rcept_no="20250302000001", corp_code="00000001", corp_name="Context Corp",
+                disc_date=date(2025, 3, 2), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+        ])
+
+
+def test_context_pack_separates_sources_orders_deterministically_and_dedupes(temp_engine):
     from kreports.analysis.context_pack import build_context_pack
+
+    _seed_local_context_sources()
 
     pack = build_context_pack(
         _local_context(),
@@ -126,6 +159,14 @@ def test_context_pack_keeps_unbound_cached_excerpt_out_of_dart_filing_sources():
     pack = build_context_pack(context)
 
     assert "report_sections:unbound" not in [item.source_id for item in pack.dart_filing]
+
+
+def test_context_pack_does_not_trust_caller_supplied_canonical_binding_flags():
+    from kreports.analysis.context_pack import build_context_pack
+
+    pack = build_context_pack(_local_context())
+
+    assert pack.dart_filing == []
     with pytest.raises(ValueError, match="company_ir"):
         build_context_pack(
             _local_context(),
@@ -156,13 +197,15 @@ def test_context_pack_bounds_caller_supplied_external_evidence():
         )
 
 
-def test_mcp_context_pack_applies_a_documented_total_output_budget():
+def test_mcp_context_pack_applies_a_documented_total_output_budget(temp_engine):
     import json
 
     from kreports.analysis.context_pack import (
         MAX_MCP_CONTEXT_PACK_BYTES,
         build_mcp_context_pack,
     )
+
+    _seed_local_context_sources()
 
     result = build_mcp_context_pack({
         "subject": {"corp_code": "00000001", "corp_name": "Context Corp"},
@@ -175,6 +218,7 @@ def test_mcp_context_pack_applies_a_documented_total_output_budget():
                 "full_text_hash": f"{index:040d}",
                 "rcept_no": "20250301000001",
                 "source_document_id": 1,
+                "source_type": "business_report",
                 "provenance_status": "proven_annual_filing",
                 "canonical_source_binding": True,
             }
@@ -191,13 +235,15 @@ def test_mcp_context_pack_applies_a_documented_total_output_budget():
     assert result["dart_filing"]
 
 
-def test_mcp_context_pack_emergency_budget_retains_compact_provenance():
+def test_mcp_context_pack_emergency_budget_retains_compact_provenance(temp_engine):
     import json
 
     from kreports.analysis.context_pack import (
         MAX_MCP_CONTEXT_PACK_BYTES,
         build_mcp_context_pack,
     )
+
+    _seed_local_context_sources()
 
     huge_peer_payload = [[["x" * 4_000 for _ in range(20)] for _ in range(20)] for _ in range(20)]
     result = build_mcp_context_pack(
@@ -213,6 +259,7 @@ def test_mcp_context_pack_emergency_budget_retains_compact_provenance():
                     "availability": "summary_only",
                     "rcept_no": "20250301000001",
                     "source_document_id": 1,
+                    "source_type": "business_report",
                     "provenance_status": "proven_annual_filing",
                     "canonical_source_binding": True,
                     "fs_div_selection": {

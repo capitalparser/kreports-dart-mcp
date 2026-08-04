@@ -13,7 +13,10 @@ import re
 from typing import Any
 
 from kreports.analysis.evidence import evidence_reference_fields, parent_rcept_no
-from kreports.analysis.filing_provenance import valid_annual_filing_receipt
+from kreports.analysis.filing_provenance import (
+    canonical_annual_filing_source_receipt,
+    valid_annual_filing_receipt,
+)
 from kreports.mcp.auditor_public import public_kam_lifecycle_events
 from kreports.mcp.contracts import (
     build_answer_envelope,
@@ -404,9 +407,17 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
                 label=f"{row.get('year') or ''}년 감사보수·시간 공시".strip(),
             ))
     for row in result.get("note_presentations") or []:
-        if isinstance(row, dict) and row.get("provenance_status") == "proven_annual_filing":
+        if not isinstance(row, dict):
+            continue
+        receipt = canonical_annual_filing_source_receipt(
+            corp_code=row.get("corp_code"),
+            bsns_year=row.get("data_year") or result.get("year"),
+            rcept_no=row.get("rcept_no"),
+            source_type="business_report",
+        )
+        if receipt:
             add(_source_from_rcept_no(
-                row.get("rcept_no"),
+                receipt,
                 label=f"{row.get('corp_name') or row.get('corp_code') or ''} 사업보고서".strip(),
             ))
     note_comparison = result.get("note_comparison")
@@ -415,16 +426,19 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(topic, dict):
                 continue
             for row in topic.get("rows") or []:
-                if (
-                    isinstance(row, dict)
-                    and row.get("provenance_status") == "proven_annual_filing"
-                    and valid_annual_filing_receipt(
-                        row.get("rcept_no"), note_comparison.get("year")
-                    ) == row.get("rcept_no")
-                ):
-                    company = row.get("company") if isinstance(row.get("company"), dict) else {}
+                if not isinstance(row, dict):
+                    continue
+                company = row.get("company") if isinstance(row.get("company"), dict) else {}
+                receipt = canonical_annual_filing_source_receipt(
+                    corp_code=company.get("corp_code"),
+                    bsns_year=note_comparison.get("year"),
+                    rcept_no=row.get("rcept_no"),
+                    source_document_id=row.get("source_document_id"),
+                    source_type=row.get("source_type"),
+                )
+                if receipt:
                     add(_source_from_rcept_no(
-                        row.get("rcept_no"),
+                        receipt,
                         label=f"{company.get('corp_name') or company.get('corp_code') or ''} 사업보고서".strip(),
                     ))
     return sources

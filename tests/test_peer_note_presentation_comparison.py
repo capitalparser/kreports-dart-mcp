@@ -6,13 +6,15 @@ from pydantic import ValidationError
 from sqlalchemy.orm import sessionmaker
 
 from kreports.analysis.peer_benchmarks import compare_peer_accounting_policies
-from kreports.db.models import AccountingPolicyItem, Company, Disclosure, Financial
+from kreports.db.models import AccountingPolicyItem, Company, Disclosure, Financial, SourceDocument
 from kreports.mcp.answer_pack import build_answer_pack
 from kreports.mcp.dispatch import dispatch_tool, legacy_result, raw_result
 from kreports.mcp.input_models import ComparePeerAccountingPoliciesInput
 
 
-def _seed_peer_note_comparison(engine, *, peer_receipt="20250302000001"):
+def _seed_peer_note_comparison(
+    engine, *, peer_receipt="20250302000001", bind_source_documents=True,
+):
     session = sessionmaker(bind=engine)()
     session.add_all([
         Company(corp_code="00000001", stock_code="000001", corp_name="대상", market="KOSPI", induty_code="26111"),
@@ -32,6 +34,18 @@ def _seed_peer_note_comparison(engine, *, peer_receipt="20250302000001"):
         AccountingPolicyItem(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no=peer_receipt, item_key="revenue_recognition", heading="3. 수익", body="피어는 수행의무 이행 시점에 수익을 인식합니다.", body_hash="peer", body_length=24),
         AccountingPolicyItem(corp_code="00000003", bsns_year=2024, fs_div="CFS", rcept_no="20250303000001", item_key="inventory", heading="4. 재고", body="재고자산 정책", body_hash="direct", body_length=8),
     ])
+    if bind_source_documents:
+        source_documents = [
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            SourceDocument(rcept_no="20250303000001", corp_code="00000003", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="c" * 40),
+        ]
+        if peer_receipt != "20250301000001":
+            source_documents.append(SourceDocument(
+                rcept_no=peer_receipt, corp_code="00000002", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="b" * 40,
+            ))
+        session.add_all(source_documents)
     session.commit()
     session.close()
 
@@ -76,6 +90,19 @@ def test_peer_note_comparison_does_not_normalize_contaminated_or_missing_topic_t
     missing = next(row for row in out["topic_coverage"] if row["corp_code"] == "00000003")
     assert missing["status"] == "cache_missing_not_filing_absence"
     assert "not disclosed" not in out["coverage_note"].lower()
+
+
+def test_policy_note_presentation_requires_a_bound_source_document(temp_engine):
+    _seed_peer_note_comparison(temp_engine, bind_source_documents=False)
+
+    out = compare_peer_accounting_policies(
+        "00000001", year=2024, item_key="revenue_recognition", peer_limit=1,
+    )
+
+    subject = out["note_presentations"][0]
+    assert subject["provenance_status"] == "unproven_annual_filing"
+    assert subject.get("rcept_no") is None
+    assert subject.get("source_url") is None
 
 
 def test_peer_note_comparison_dispatch_and_answer_pack_show_dedicated_tables(temp_engine):

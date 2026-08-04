@@ -5,6 +5,7 @@ from collections.abc import Iterable
 import json
 from typing import Any
 
+from kreports.analysis.filing_provenance import canonical_annual_filing_source_receipt
 from kreports.mcp.answer_contracts import (
     ContextEvidenceV1,
     ContextPackV1,
@@ -264,17 +265,26 @@ def _local_excerpt(row: dict[str, Any]) -> str:
     return "cached DART evidence without text excerpt"
 
 
-def _local_evidence(bucket: str, rows: Iterable[object]) -> list[ContextEvidenceV1]:
+def _local_evidence(
+    bucket: str,
+    rows: Iterable[object],
+    *,
+    corp_code: object,
+    year: object,
+) -> list[ContextEvidenceV1]:
     evidence: list[ContextEvidenceV1] = []
     for ordinal, raw_row in enumerate(rows):
         if not isinstance(raw_row, dict):
             continue
         row = dict(raw_row)
-        if not (
-            row.get("provenance_status") == "proven_annual_filing"
-            and row.get("canonical_source_binding") is True
-            and row.get("source_document_id") is not None
-        ):
+        receipt = canonical_annual_filing_source_receipt(
+            corp_code=corp_code,
+            bsns_year=year,
+            rcept_no=row.get("rcept_no"),
+            source_document_id=row.get("source_document_id"),
+            source_type=row.get("source_type"),
+        )
+        if receipt is None:
             continue
         source_id = _bounded_text(row.get("source_locator"), limit=300)
         if not source_id:
@@ -303,7 +313,7 @@ def _local_evidence(bucket: str, rows: Iterable[object]) -> list[ContextEvidence
             metadata={
                 "bucket": bucket,
                 "availability": row.get("availability"),
-                "rcept_no": row.get("rcept_no"),
+                "rcept_no": receipt,
                 "source_document_id": row.get("source_document_id"),
                 "fs_div": row.get("fs_div"),
                 "fs_div_selection": row.get("fs_div_selection"),
@@ -410,10 +420,18 @@ def build_context_pack(
     """Combine caller-provided evidence only; this function performs no fetch or write."""
     if not isinstance(local_dart_context, dict):
         raise TypeError("local_dart_context must be a dict")
+    subject = dict(local_dart_context.get("subject") or {})
+    corp_code = subject.get("corp_code")
+    year = local_dart_context.get("year")
     dart_records = _dedupe(
         record
         for bucket in DART_BUCKETS
-        for record in _local_evidence(bucket, local_dart_context.get(bucket) or [])
+        for record in _local_evidence(
+            bucket,
+            local_dart_context.get(bucket) or [],
+            corp_code=corp_code,
+            year=year,
+        )
     )
     ir_records = _external_evidence(company_ir, expected_source_class="company_ir")
     web_records = _external_evidence(web_news, expected_source_class="web_news")
@@ -423,8 +441,8 @@ def build_context_pack(
     if unknown_llm_sources:
         raise ValueError(f"unknown source_ids: {', '.join(unknown_llm_sources)}")
     return ContextPackV1(
-        subject=dict(local_dart_context.get("subject") or {}),
-        year=int(local_dart_context.get("year")),
+        subject=subject,
+        year=int(year),
         source_precedence=SOURCE_PRECEDENCE,
         dart_filing=dart_records,
         company_ir=ir_records,

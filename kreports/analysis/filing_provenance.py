@@ -80,6 +80,82 @@ def canonical_annual_filing_source_binding(
     )
 
 
+def canonical_annual_filing_source_receipt(
+    *,
+    corp_code: object,
+    bsns_year: object,
+    rcept_no: object,
+    source_document_id: object | None = None,
+    source_type: object | None = None,
+    read_engine=None,
+) -> str | None:
+    """Re-query one canonical annual filing source at a public boundary.
+
+    Public rows may retain cache metadata for inspection, but their serialized
+    provenance flags are never authority to emit a DART source or link.
+    """
+    receipt = valid_annual_filing_receipt(rcept_no, bsns_year)
+    try:
+        normalized_year = int(bsns_year)
+    except (TypeError, ValueError):
+        return None
+    normalized_corp_code = str(corp_code or "")
+    if not receipt or not normalized_corp_code:
+        return None
+    conditions = [
+        "sd.rcept_no=:rcept_no",
+        "sd.corp_code=:corp_code",
+        "sd.bsns_year=:bsns_year",
+        "d.rcept_no=sd.rcept_no",
+        "d.corp_code=sd.corp_code",
+    ]
+    params: dict[str, Any] = {
+        "rcept_no": receipt,
+        "corp_code": normalized_corp_code,
+        "bsns_year": normalized_year,
+    }
+    if source_document_id is not None:
+        try:
+            params["source_document_id"] = int(source_document_id)
+        except (TypeError, ValueError):
+            return None
+        conditions.append("sd.id=:source_document_id")
+    if source_type is not None:
+        normalized_source_type = str(source_type or "")
+        if not normalized_source_type:
+            return None
+        params["source_type"] = normalized_source_type
+        conditions.append("sd.source_type=:source_type")
+    stmt = text(f"""
+        SELECT sd.id AS source_document_id,
+               sd.rcept_no AS source_document_rcept_no,
+               sd.corp_code AS source_document_corp_code,
+               sd.bsns_year AS source_document_bsns_year,
+               d.rcept_no AS disclosure_rcept_no,
+               d.corp_code AS disclosure_corp_code,
+               d.disc_date AS disclosure_disc_date,
+               d.report_nm AS disclosure_report_nm
+        FROM source_documents sd
+        JOIN disclosures d ON d.rcept_no=sd.rcept_no AND d.corp_code=sd.corp_code
+        WHERE {' AND '.join(conditions)}
+        ORDER BY sd.id
+        LIMIT 1
+    """)
+    active_engine = read_engine or _engine_module.engine
+    try:
+        with active_engine.connect() as conn:
+            row = conn.execute(stmt, params).mappings().first()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return canonical_annual_filing_source_binding(
+        {"rcept_no": receipt, **dict(row)},
+        corp_code=normalized_corp_code,
+        bsns_year=normalized_year,
+    )
+
+
 def _exact_receipt_matches_disclosure_date(
     receipt: object,
     bsns_year: object,

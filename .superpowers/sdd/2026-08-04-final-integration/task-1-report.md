@@ -141,3 +141,52 @@ ignored, the next failure is `tests/test_audit_landscape.py` attempting to use
 an uninitialized default SQLite engine (`no such table: companies`). The
 focused tests above use the isolated `temp_engine` fixture and are the valid
 evidence for this no-network, no-artifact-change fix.
+
+## Fix round 2/5 — re-query canonical source bindings at promotion boundaries
+
+### RED evidence
+
+Three focused adversarial tests failed before the correction:
+
+1. A caller-supplied context dictionary with `provenance_status`,
+   `canonical_source_binding`, and `source_document_id` fields was emitted as
+   `dart_filing` without any local source lookup.
+2. A status-only policy presentation row created a DART answer-pack link.
+3. An `accounting_policy_items` row with only a matching disclosure was marked
+   `proven_annual_filing` and linked despite no `source_documents` record.
+
+### Fix
+
+- Added `canonical_annual_filing_source_receipt`, a read-only boundary query
+  that verifies the exact source-document/disclosure company, business year,
+  receipt, source type, annual-report name, and disclosure date before
+  returning a receipt.
+- Context-pack DART promotion no longer reads serialized provenance booleans;
+  it calls that verifier for every local candidate.
+- Answer-pack source collection re-queries both policy presentations and note
+  comparison rows. The latter now carries the source type required for that
+  exact check.
+- Policy presentation proof now routes through the same verifier and therefore
+  requires a `business_report` source document as well as the annual
+  disclosure.
+- Updated positive fixtures to seed actual canonical source-document and
+  disclosure rows; added wrong-company, wrong-year, and non-annual-report
+  verifier coverage.
+
+### GREEN evidence
+
+```text
+tests/test_filing_provenance.py
+tests/test_context_pack.py
+tests/test_mcp_answer_pack.py
+tests/test_peer_note_presentation_comparison.py
+tests/test_note_comparison.py
+tests/test_semantic_index.py
+tests/test_mcp_catalog.py
+tests/test_all_tools_contract.py
+tests/test_answer_contracts.py
+156 passed in 1.66s
+```
+
+Ruff on every changed Python file and `git diff --check` passed. No DB,
+artifact, sidecar, network, or remote mutation was performed.

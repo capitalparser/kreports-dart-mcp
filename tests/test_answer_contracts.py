@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
 
-def test_source_separated_answer_contract_keeps_facts_claims_context_and_analysis_distinct():
+def test_source_separated_answer_contract_keeps_facts_claims_context_and_analysis_distinct(temp_engine):
     from kreports.analysis.context_pack import build_context_pack
+    from kreports.db.engine import get_session
+    from kreports.db.models import Disclosure, SourceDocument
     from kreports.mcp.answer_contracts import build_source_separated_answer
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(
+                rcept_no="20250301000001", corp_code="00000001", bsns_year=2024,
+                source_type="business_report", report_nm="사업보고서 (2024.12)",
+                raw_content="<xml/>", doc_hash="a" * 40,
+            ),
+            Disclosure(
+                rcept_no="20250301000001", corp_code="00000001", corp_name="Context Corp",
+                disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+        ])
 
     pack = build_context_pack(
         {
@@ -23,6 +40,7 @@ def test_source_separated_answer_contract_keeps_facts_claims_context_and_analysi
                         "claim_key": "revenue_growth",
                         "rcept_no": "20250301000001",
                         "source_document_id": 1,
+                        "source_type": "business_report",
                         "provenance_status": "proven_annual_filing",
                         "canonical_source_binding": True,
                 }

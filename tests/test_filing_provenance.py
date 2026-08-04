@@ -3,7 +3,28 @@ from datetime import date
 import pytest
 
 from kreports.analysis.evidence import evidence_reference_fields
-from kreports.db.models import Company, Disclosure, FinancialFactCompact
+from kreports.db.models import Company, Disclosure, FinancialFactCompact, SourceDocument
+
+
+def test_canonical_source_requery_rejects_wrong_company_year_and_report(temp_engine):
+    from kreports.analysis.filing_provenance import canonical_annual_filing_source_receipt
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.add_all([
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="A", disc_date=date(2025, 3, 1), disc_type="A", report_nm="분기보고서 (2024.12)"),
+            SourceDocument(rcept_no="20250302000001", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="b" * 40),
+            Disclosure(rcept_no="20250302000001", corp_code="00000002", corp_name="B", disc_date=date(2025, 3, 2), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            SourceDocument(rcept_no="20250303000001", corp_code="00000001", bsns_year=2023, source_type="business_report", report_nm="사업보고서 (2023.12)", raw_content="<xml/>", doc_hash="c" * 40),
+            Disclosure(rcept_no="20250303000001", corp_code="00000001", corp_name="A", disc_date=date(2025, 3, 3), disc_type="A", report_nm="사업보고서 (2024.12)"),
+        ])
+
+    for receipt in ("20250301000001", "20250302000001", "20250303000001"):
+        assert canonical_annual_filing_source_receipt(
+            corp_code="00000001", bsns_year=2024, rcept_no=receipt,
+            source_type="business_report", read_engine=temp_engine,
+        ) is None
 
 
 def _add_compact_fact(session, corp_code: str, year: int, fs_div: str = "CFS") -> None:
