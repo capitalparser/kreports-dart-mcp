@@ -9,9 +9,10 @@
 
 - **Filing**: A disclosure submitted to Korea's DART system and identified by
   its receipt number. It may include structured facts, attachments, and raw
-  source content.
+  source content. A filing date is not proof of a company's listing date.
 - **Company**: A DART-registered reporting entity identified by `corp_code`;
-  stock code, market, and industry metadata are optional.
+  stock code, market, and industry metadata are optional and current-state
+  metadata is not historical listing evidence.
 - **Investor signal**: A reproducible observation derived from filing or
   financial facts to support analysis. It is not investment advice.
 - **Audit signal**: Extracted audit evidence or clearly labeled interpretation
@@ -45,3 +46,17 @@ collector/backfill 실행 근거, HTTP MCP 안정화, 캐시/패키지 사용 �
 - 공개 MCP endpoint의 기본 데이터는 cache-first/read-only입니다.
 - 온디맨드 수시공시 조회는 예외적으로 허용할 수 있으나, 서버 보유 `DART_API_KEY`를 쓰지 않고 사용자별 OpenDART API key를 입력받아 1회성 fetch/cache에 사용해야 합니다.
 - 사용자 제공 API key는 저장, 로그 출력, 응답 반영을 금지합니다.
+
+## Historical Listing-Period Evidence
+
+`company_listing_periods` stores a normalized listing CSV, never mislabels it
+as a raw official KRX snapshot, and binds every row to both `corp_code` and
+`stock_code`. It retains the origin URL, raw-receipt checksum/retrieval time,
+durable receipt locator and byte length, normalized-payload checksum/locator/
+byte length, and an explicitly supported transformation version. A missing,
+altered, or unreadable raw or normalized artifact is reported as unavailable
+and cannot produce verified eligibility. Its `as_of` field makes the
+observation time explicit. `unknown` and `conflict` are retained in release
+metadata and never shrink the current KOSPI/KOSDAQ denominator. A future
+eligibility policy must be separately approved before it can use verified
+full-year periods to change that denominator.

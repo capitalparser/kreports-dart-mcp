@@ -7,6 +7,7 @@ import re
 
 REQUIRED_TABLES = (
     "companies",
+    "company_listing_periods",
     "disclosures",
     "financials",
     "financial_facts_compact",
@@ -29,6 +30,14 @@ REQUIRED_TABLES = (
 )
 
 REQUIRED_COLUMN_SPECS = {
+    "company_listing_periods": (
+        "corp_code", "stock_code", "market", "listed_from", "listed_to",
+        "status", "as_of", "raw_source_uri", "raw_source_checksum",
+        "raw_source_retrieved_at", "raw_source_storage_uri",
+        "raw_source_size_bytes", "normalized_checksum",
+        "normalized_storage_uri", "normalized_size_bytes",
+        "transformation_version", "source_type", "source_row_no",
+    ),
     "audit_fees": (
         "contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours",
         "source_class", "source_rcept_no", "source_period",
@@ -71,6 +80,12 @@ REQUIRED_COLUMN_SPECS = {
 
 # (table, ordered columns, unique, normalized partial predicate)
 REQUIRED_INDEX_SPECS = {
+    "idx_listing_period_corp_as_of": (
+        "company_listing_periods", ("corp_code", "as_of"), False, None
+    ),
+    "uq_listing_period_normalized_row": (
+        "company_listing_periods", ("normalized_checksum", "source_row_no"), True, None
+    ),
     "idx_disclosure_corp_date_receipt": (
         "disclosures", ("corp_code", "disc_date", "rcept_no"), False, None
     ),

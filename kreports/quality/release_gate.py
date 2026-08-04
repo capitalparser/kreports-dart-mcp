@@ -20,6 +20,7 @@ from kreports.db.quality_snapshot import (
     QualitySnapshotError,
     quality_content_digest,
 )
+from kreports.maintenance.listing_periods import listing_eligibility_snapshot
 from kreports.runtime import is_readonly_mode
 
 
@@ -835,10 +836,17 @@ def _quality_coverage(
             **materiality_exclusions,
         },
     }
+    listing_metadata = listing_eligibility_snapshot(
+        coverage_year,
+        session_scope=session_scope,
+    )
     return (
         coverage_year,
         coverage,
-        {"materiality_benchmark": dict(_MATERIALITY_COVERAGE_METADATA)},
+        {
+            "investor_core": {"listing_eligibility": listing_metadata},
+            "materiality_benchmark": dict(_MATERIALITY_COVERAGE_METADATA),
+        },
         denominators,
         excluded_populations,
     )

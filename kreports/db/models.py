@@ -90,6 +90,48 @@ class Company(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class CompanyListingPeriod(Base):
+    """One provenance-bound historical listing-status observation.
+
+    ``unknown`` and ``conflict`` are intentionally persisted alongside
+    verified periods.  They are evidence gaps, not permission to remove a
+    company from a release denominator.
+    """
+
+    __tablename__ = "company_listing_periods"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    corp_code = Column(String(8), nullable=False)
+    stock_code = Column(String(6), nullable=False)
+    market = Column(String(10), nullable=False)
+    listed_from = Column(Date, nullable=True)
+    listed_to = Column(Date, nullable=True)
+    status = Column(String(16), nullable=False)
+    as_of = Column(Date, nullable=False)
+    # The normalized CSV is derived evidence.  Keep its digest separate from
+    # the official raw receipt that it was transformed from.
+    raw_source_uri = Column(String(500), nullable=False)
+    raw_source_checksum = Column(String(64), nullable=False)
+    raw_source_retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    raw_source_storage_uri = Column(String(1000), nullable=False)
+    raw_source_size_bytes = Column(BigInteger, nullable=False)
+    normalized_checksum = Column(String(64), nullable=False)
+    normalized_storage_uri = Column(String(1000), nullable=False)
+    normalized_size_bytes = Column(BigInteger, nullable=False)
+    transformation_version = Column(String(80), nullable=False)
+    source_type = Column(String(40), nullable=False)
+    source_row_no = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_checksum",
+            "source_row_no",
+            name="uq_listing_period_normalized_row",
+        ),
+        Index("idx_listing_period_corp_as_of", "corp_code", "as_of"),
+    )
+
+
 class Financial(Base):
     __tablename__ = "financials"
 

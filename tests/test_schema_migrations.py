@@ -60,6 +60,7 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260731_13_accounting_note_chapter_storage_contract",
         "20260731_14_schema_contract_repair",
         "20260805_15_disclosure_lookup_index",
+        "20260805_16_company_listing_period_contract",
     ]
     assert second == []
 
@@ -97,7 +98,7 @@ def test_disclosure_lookup_index_migrates_legacy_db_and_serves_corp_scoped_annua
               ('20260301000004', '00999999', '비교회사', '2026-03-03', 'A',
                '사업보고서 (2025.12)', NULL, '2026-03-03')
         """))
-        for migration in MIGRATIONS[:-1]:
+        for migration in MIGRATIONS[:14]:
             conn.execute(
                 text(
                     "INSERT INTO schema_migrations "
@@ -112,7 +113,10 @@ def test_disclosure_lookup_index_migrates_legacy_db_and_serves_corp_scoped_annua
             )
 
     with legacy.begin() as conn:
-        assert apply_schema_migrations(conn) == [MIGRATIONS[-1].revision]
+        assert apply_schema_migrations(conn) == [
+            "20260805_15_disclosure_lookup_index",
+            "20260805_16_company_listing_period_contract",
+        ]
         assert apply_schema_migrations(conn) == []
         indexes = {
             item[1]: item
@@ -317,6 +321,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         "20260731_13_accounting_note_chapter_storage_contract",
         "20260731_14_schema_contract_repair",
         "20260805_15_disclosure_lookup_index",
+        "20260805_16_company_listing_period_contract",
     ]
     assert second_applied == []
     assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)

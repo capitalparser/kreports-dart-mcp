@@ -606,6 +606,41 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260805_16_company_listing_period_contract",
+        description="Add provenance-bound historical listing-period evidence",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS company_listing_periods (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              stock_code VARCHAR(6) NOT NULL,
+              market VARCHAR(10) NOT NULL,
+              listed_from DATE,
+              listed_to DATE,
+              status VARCHAR(16) NOT NULL,
+              as_of DATE NOT NULL,
+              raw_source_uri VARCHAR(500) NOT NULL,
+              raw_source_checksum VARCHAR(64) NOT NULL,
+              raw_source_retrieved_at DATETIME NOT NULL,
+              raw_source_storage_uri VARCHAR(1000) NOT NULL,
+              raw_source_size_bytes BIGINT NOT NULL,
+              normalized_checksum VARCHAR(64) NOT NULL,
+              normalized_storage_uri VARCHAR(1000) NOT NULL,
+              normalized_size_bytes BIGINT NOT NULL,
+              transformation_version VARCHAR(80) NOT NULL,
+              source_type VARCHAR(40) NOT NULL,
+              source_row_no INTEGER NOT NULL,
+              CONSTRAINT uq_listing_period_normalized_row
+                UNIQUE (normalized_checksum, source_row_no)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_listing_period_corp_as_of
+            ON company_listing_periods (corp_code, as_of)
+            """,
+        ),
+    ),
 )
 
 
