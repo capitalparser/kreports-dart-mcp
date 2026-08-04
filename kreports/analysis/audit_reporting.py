@@ -33,6 +33,7 @@ from kreports.collector.audit_fee_sources import (
     latest_audit_fee_observations_by_source,
     observation_from_dict,
 )
+from kreports.runtime import require_runtime_write
 
 
 _AUDIT_FEE_TYPED_COLUMNS = (
@@ -518,6 +519,21 @@ def audit_fee_availability(corp_code: str, year: int) -> dict:
             "conflicts": [],
             "limitations": [str(exc)],
         }
+
+
+def audit_fee_availability_for_collector(corp_code: str, year: int) -> dict:
+    """Read audit-fee coverage from the collector's current writable engine.
+
+    This is intentionally separate from :func:`audit_fee_availability`: public
+    readers require a checkpointed immutable SQLite snapshot, while collector
+    rebuilds may need to read rows written earlier in the same WAL-backed run.
+    """
+    require_runtime_write("read audit fee availability from current collector engine")
+    return _audit_fee_availability_from_engine(
+        corp_code,
+        year,
+        _engine_module.engine,
+    )
 
 
 def audit_fee_availability_trend(

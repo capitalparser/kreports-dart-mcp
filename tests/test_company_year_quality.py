@@ -4,7 +4,9 @@ import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, inspect
+from sqlalchemy import create_engine, func, inspect, text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from kreports.db.engine import get_session
 from kreports.db.models import (
@@ -20,6 +22,7 @@ from kreports.db.models import (
     FinancialFactCompact,
     ReportSection,
     SourceDocument,
+    Base,
 )
 from kreports.quality.company_year_fingerprint import (
     QUALITY_GRADE_KEYS,
@@ -568,6 +571,89 @@ def test_rebuild_is_idempotent_and_scoped_by_year_and_market(temp_engine):
     assert second["rows_written"] == 2
     assert count == 2
     assert rows == [("00126380", 2024), ("00126380", 2025)]
+
+
+def test_rebuild_reads_audit_fee_from_current_collector_engine_after_wal_write(
+    tmp_path,
+    monkeypatch,
+):
+    """Regression: quality-ledger writes must not make later rows unavailable.
+
+    `procedure_read_engine` must still reject this same uncheckpointed WAL for
+    public immutable readers.  The collector-only ledger rebuild, however,
+    must read its own current SQLite engine after the first quality-row write.
+    """
+    import kreports.db.engine as engine_module
+    from kreports.analysis.audit_reporting import audit_fee_availability
+    from kreports.quality.company_year import rebuild_company_year_quality
+
+    db_path = tmp_path / "quality-wal.db"
+    file_engine = create_engine(f"sqlite:///{db_path}", poolclass=NullPool)
+    Base.metadata.create_all(file_engine)
+    file_session = sessionmaker(
+        bind=file_engine,
+        autocommit=False,
+        autoflush=False,
+    )
+    monkeypatch.setattr(engine_module, "engine", file_engine)
+    monkeypatch.setattr(engine_module, "SessionLocal", file_session)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+
+    with file_engine.connect() as keeper:
+        keeper.execute(text("PRAGMA journal_mode=WAL"))
+        keeper.execute(text("PRAGMA wal_autocheckpoint=0"))
+        keeper.commit()
+        with file_session() as session:
+            for corp_code in ("00000001", "00000002"):
+                session.add(
+                    Company(
+                        corp_code=corp_code,
+                        stock_code=corp_code[-6:],
+                        corp_name=f"WAL회사-{corp_code}",
+                        market="KOSPI",
+                    )
+                )
+                session.add(
+                    AuditFee(
+                        corp_code=corp_code,
+                        bsns_year=2025,
+                        audit_fee_m=100,
+                        audit_hours=1_000,
+                        actual_fee_m=100,
+                        actual_hours=1_000,
+                        source_class="cached_business_report",
+                        source_rcept_no=f"receipt-{corp_code}",
+                        source_period="2025",
+                        availability_status="available",
+                        quality_status="verified",
+                        compatibility_basis="actual",
+                        conflict_status="none",
+                        source_observations_json="[]",
+                    )
+                )
+            session.commit()
+        keeper.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        keeper.commit()
+
+        result = rebuild_company_year_quality(2025, 2025)
+
+        wal_path = db_path.with_name(f"{db_path.name}-wal")
+        assert wal_path.exists() and wal_path.stat().st_size > 0
+        with file_session() as session:
+            statuses = dict(
+                session.query(
+                    CompanyYearQuality.corp_code,
+                    CompanyYearQuality.audit_fee_status,
+                ).all()
+            )
+        public_status = audit_fee_availability(
+            "00000002",
+            2025,
+        )["availability_status"]
+
+    assert result["rows_written"] == 2
+    assert statuses == {"00000001": "available", "00000002": "available"}
+    assert public_status == "schema_unavailable"
 
 
 def test_rebuild_persists_stable_freshness_and_tracks_evidence_change(

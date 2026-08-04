@@ -13,7 +13,10 @@ from typing import Any
 
 from sqlalchemy import func
 
-from kreports.analysis.audit_reporting import audit_fee_availability
+from kreports.analysis.audit_reporting import (
+    audit_fee_availability,
+    audit_fee_availability_for_collector,
+)
 from kreports.analysis.group_graph import (
     classify_qsc,
     group_entity_from_record,
@@ -327,7 +330,7 @@ def _auditor_status(corp_code: str, year: int) -> str:
 
 
 def _audit_fee_status(corp_code: str, year: int) -> str:
-    availability = audit_fee_availability(corp_code, year)
+    availability = audit_fee_availability_for_collector(corp_code, year)
     status = availability.get("availability_status")
     if status in {"transport_error", "parse_error", "conflict", "schema_unavailable"}:
         return "error"

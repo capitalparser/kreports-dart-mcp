@@ -956,3 +956,14 @@ def test_read_only_availability_does_not_create_missing_sqlite_or_sidecars(
     assert not missing.exists()
     assert not (tmp_path / "missing.db-wal").exists()
     assert not (tmp_path / "missing.db-shm").exists()
+
+
+def test_collector_availability_rejects_readonly_runtime(temp_engine, monkeypatch):
+    from kreports.analysis.audit_reporting import (
+        audit_fee_availability_for_collector,
+    )
+
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    with pytest.raises(RuntimeError, match="requires collector mode"):
+        audit_fee_availability_for_collector("001", 2024)
