@@ -274,7 +274,15 @@ def test_compare_peer_audit_fees_never_mixes_typed_actual_and_contract(
         },
     )
 
-    assert "audit_fee_m" not in out["benchmarks"]
+    # Compatibility keys remain stable for existing clients; typed actual and
+    # contract populations stay separate for basis-sensitive review.
+    assert {
+        "audit_fee_m",
+        "audit_hours",
+        "audit_fee_to_assets_bps",
+        "audit_fee_per_hour_m",
+        "nas_ratio",
+    } <= set(out["benchmarks"])
     assert out["benchmarks"]["actual_fee_m"]["p50"] == 100
     assert out["benchmarks"]["contract_fee_m"]["p50"] == 1000
     assert out["data_quality"]["basis_populations"]["actual"]["valid_fee_n"] == 1

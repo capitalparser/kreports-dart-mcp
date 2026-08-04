@@ -1777,6 +1777,28 @@ def compare_peer_audit_fees(
     peer_rows = [by_cc[cc] for cc in peer_codes if cc in by_cc]
     if typed_evidence:
         metrics = {
+            "audit_fee_m": [
+                row["audit_fee_m"]
+                for row in peer_rows
+                if row.get("audit_fee_m") is not None
+            ],
+            "audit_hours": [
+                row["audit_hours"]
+                for row in peer_rows
+                if row.get("audit_hours") is not None
+            ],
+            "audit_fee_to_assets_bps": [
+                row["fee_assets_bps"]
+                for row in peer_rows
+                if row.get("fee_assets_bps") is not None
+            ],
+            "audit_fee_per_hour_m": [
+                row["fee_per_hour_m"]
+                for row in peer_rows
+                if row.get("fee_per_hour_m") is not None
+            ],
+        }
+        metrics.update({
             key: [row[key] for row in peer_rows if row.get(key) is not None]
             for key in (
                 "actual_fee_m",
@@ -1789,7 +1811,7 @@ def compare_peer_audit_fees(
                 "contract_fee_per_hour_m",
                 "nas_ratio",
             )
-        }
+        })
     else:
         metrics = {
             "audit_fee_m": [
