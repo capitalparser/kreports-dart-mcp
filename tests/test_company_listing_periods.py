@@ -263,7 +263,8 @@ def test_migration_only_listing_contract_accepts_orm_import(tmp_path, monkeypatc
             })
     with engine.connect() as connection:
         assert apply_schema_migrations(connection) == [
-            "20260805_16_company_listing_period_contract"
+            "20260805_16_company_listing_period_contract",
+            "20260805_17_listing_period_named_unique_index",
         ]
         columns = {
             column["name"]
@@ -272,6 +273,14 @@ def test_migration_only_listing_contract_accepts_orm_import(tmp_path, monkeypatc
         connection.commit()
     assert {"raw_source_uri", "raw_source_checksum", "raw_source_retrieved_at", "raw_source_storage_uri", "raw_source_size_bytes", "normalized_checksum", "normalized_storage_uri", "normalized_size_bytes", "transformation_version"} <= columns
     assert not {"source_uri", "source_checksum", "retrieved_at"} & columns
+    with engine.connect() as connection:
+        index_names = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA index_list(company_listing_periods)"
+            )
+        }
+    assert "uq_listing_period_normalized_row" in index_names
 
     monkeypatch.setattr(engine_module, "engine", engine)
     monkeypatch.setattr(engine_module, "SessionLocal", sessionmaker(bind=engine))

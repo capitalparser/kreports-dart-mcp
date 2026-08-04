@@ -299,6 +299,7 @@ def test_company_year_quality_schema_is_versioned_append_only(temp_engine):
         "20260731_14_schema_contract_repair",
         "20260805_15_disclosure_lookup_index",
         "20260805_16_company_listing_period_contract",
+        "20260805_17_listing_period_named_unique_index",
     ]
     revisions = [migration.revision for migration in MIGRATIONS]
     assert revisions[:len(expected_prefix)] == expected_prefix

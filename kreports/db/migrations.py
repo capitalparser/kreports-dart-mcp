@@ -641,6 +641,16 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260805_17_listing_period_named_unique_index",
+        description="Materialize the listing normalized-row uniqueness contract",
+        statements=(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_listing_period_normalized_row
+            ON company_listing_periods (normalized_checksum, source_row_no)
+            """,
+        ),
+    ),
 )
 
 
