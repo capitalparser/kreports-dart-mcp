@@ -471,3 +471,211 @@ def test_cli_reports_missing_schema_without_a_traceback_even_for_json(tmp_path):
         "error": "investor_core_backfill_plan_unavailable"
     }
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("blocked_sidecar", ["-wal", "-journal"])
+def test_cli_rejects_noncheckpointed_snapshot_without_touching_any_sidecar(
+    tmp_path,
+    blocked_sidecar,
+):
+    from kreports.cli.main import app
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(database, corp_code="000001", grade="B", status="available")
+    blocked = Path(f"{database}{blocked_sidecar}")
+    blocked.write_bytes(b"pending snapshot state")
+    shm = Path(f"{database}-shm")
+    shm.write_bytes(b"existing shared-memory bytes")
+    before = {
+        suffix: path.read_bytes() if path.exists() else None
+        for suffix, path in {
+            "db": database,
+            "wal": Path(f"{database}-wal"),
+            "shm": shm,
+            "journal": Path(f"{database}-journal"),
+        }.items()
+    }
+
+    result = CliRunner().invoke(
+        app,
+        ["plan-investor-core-backfill", "--db", str(database), "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert json.loads(result.output) == {
+        "error": "investor_core_backfill_plan_unavailable"
+    }
+    assert {
+        suffix: path.read_bytes() if path.exists() else None
+        for suffix, path in {
+            "db": database,
+            "wal": Path(f"{database}-wal"),
+            "shm": shm,
+            "journal": Path(f"{database}-journal"),
+        }.items()
+    } == before
+
+
+def test_plan_allows_inert_shm_without_touching_it(tmp_path):
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(database, corp_code="000001", grade="B", status="available")
+    shm = Path(f"{database}-shm")
+    shm.write_bytes(b"inert shared-memory bytes")
+    before = {
+        "db": database.read_bytes(),
+        "shm": shm.read_bytes(),
+        "wal": None,
+        "journal": None,
+    }
+
+    plan = plan_investor_core_backfill(database)
+
+    assert plan["numerator"] == 1
+    assert {
+        "db": database.read_bytes(),
+        "shm": shm.read_bytes(),
+        "wal": Path(f"{database}-wal").read_bytes()
+        if Path(f"{database}-wal").exists()
+        else None,
+        "journal": Path(f"{database}-journal").read_bytes()
+        if Path(f"{database}-journal").exists()
+        else None,
+    } == before
+
+
+@pytest.mark.parametrize("invalid_receipt, invalid_date", [
+    ("20250330000001", date(2025, 4, 1)),
+    ("20350331000001", date(2035, 3, 31)),
+])
+def test_latest_invalid_annual_anchor_never_falls_back_to_older_valid_disclosure(
+    tmp_path,
+    invalid_receipt,
+    invalid_date,
+):
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(
+        database,
+        corp_code="000001",
+        grade="D",
+        status="available",
+        proven_years=(2024,),
+    )
+    _add_annual(database, corp_code="000001", year=2024)
+    _add_annual(
+        database,
+        corp_code="000001",
+        year=2024,
+        receipt=invalid_receipt,
+        disc_date=invalid_date,
+        report_nm="[기재정정]사업보고서 (2024.12)",
+    )
+    with sqlite3.connect(database) as connection:
+        summary = json.loads(_proof((2024,), corp_code="000001"))
+        summary["financial_core_proof"]["proven_years"][0]["report_nm"] = "사업보고서 (2024.12)"
+        connection.execute(
+            "UPDATE company_year_quality SET evidence_summary_json=? WHERE corp_code='000001'",
+            (json.dumps(summary, ensure_ascii=False),),
+        )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    assert plan["selected_companies"][0]["proven_years"] == []
+    assert plan["selected_companies"][0]["missing_disclosure_metadata_years"] == [
+        2025,
+        2024,
+        2023,
+    ]
+
+
+def test_plan_counts_all_rejections_but_samples_only_twenty_diagnostics(tmp_path):
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    for number in range(21):
+        corp_code = f"{number + 1:06d}"
+        _add_company(database, corp_code=corp_code, grade="D", status="available")
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE company_year_quality SET evidence_summary_json='bad' WHERE corp_code=?",
+                (corp_code,),
+            )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    assert plan["rejected_proof_row_count"] == 21
+    assert len(plan["rejected_proof_diagnostics"]) == 20
+    assert plan["rejected_proof_diagnostics_omitted_count"] == 1
+
+
+def test_plan_denominator_and_numerator_match_the_release_gate_fixture(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Base, Company, CompanyYearQuality
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+    from kreports.quality.release_gate import _quality_coverage
+
+    database = tmp_path / "release-gate-parity.db"
+    engine = create_engine(f"sqlite:///{database}")
+    Base.metadata.create_all(engine)
+    summary = _proof((), corp_code="000001")
+    with Session(engine) as session:
+        session.add_all([
+            Company(corp_code="000001", stock_code="000001", corp_name="A", market="KOSPI"),
+            Company(corp_code="000002", stock_code="000002", corp_name="B", market="KOSDAQ"),
+            Company(corp_code="000003", stock_code="000003", corp_name="C", market="KOSPI"),
+            Company(corp_code="000004", stock_code=None, corp_name="D", market="KOSPI"),
+        ])
+        for corp_code, grade, status in (
+            ("000001", "A", "available"),
+            ("000002", "B", "missing"),
+            ("000003", "D", "available"),
+        ):
+            session.add(CompanyYearQuality(
+                corp_code=corp_code,
+                bsns_year=2025,
+                market="KOSPI",
+                financial_core_status=status,
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="full_body",
+                kam_status="full_body",
+                audit_procedure_status="available",
+                group_audit_status="missing",
+                investor_grade=grade,
+                auditor_grade="A",
+                group_audit_grade="D",
+                blockers_json="[]",
+                quality_version="v2",
+                input_fingerprint="",
+                evidence_summary_json=summary,
+            ))
+        session.commit()
+
+    def session_scope():
+        return Session(engine)
+
+    _, coverage, _, _, _ = _quality_coverage(2025, session_scope=session_scope)
+    gate = coverage["investor_core_3y"]
+    plan = plan_investor_core_backfill(database)
+
+    assert (plan["denominator"], plan["numerator"]) == (
+        gate["denominator"],
+        gate["numerator"],
+    )

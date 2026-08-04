@@ -15,6 +15,9 @@ from sqlalchemy.sql.dml import Delete, Insert, Update
 from sqlalchemy.sql.elements import TextClause
 
 from kreports.config import settings
+from kreports.db.readonly_snapshot import (
+    open_checkpointed_readonly_sqlite,
+)
 from kreports.db.models import (
     Base,
     Company,
@@ -36,10 +39,6 @@ _sqlite_connect_args = {
     "check_same_thread": False,
     "timeout": 60,
 }
-
-
-class ReadonlySQLiteSnapshotUnavailable(RuntimeError):
-    """A readonly runtime cannot safely serve an uncheckpointed WAL snapshot."""
 
 
 class ReadonlySQLiteConfigurationError(RuntimeError):
@@ -87,23 +86,7 @@ def _readonly_sqlite_database_path(database_url: str) -> Path | None:
 
 def _open_checkpointed_readonly_sqlite(database_path: Path) -> sqlite3.Connection:
     """Open a non-writing reader only when its immutable snapshot is complete."""
-    journal_path = Path(f"{database_path}-journal")
-    if journal_path.exists() and journal_path.stat().st_size > 0:
-        raise ReadonlySQLiteSnapshotUnavailable(
-            "runtime_db_unavailable:hot_rollback_journal"
-        )
-
-    wal_path = Path(f"{database_path}-wal")
-    if wal_path.exists() and wal_path.stat().st_size > 0:
-        raise ReadonlySQLiteSnapshotUnavailable(
-            "runtime_db_unavailable:uncheckpointed_wal"
-        )
-    return sqlite3.connect(
-        f"{database_path.as_uri()}?mode=ro&immutable=1",
-        uri=True,
-        check_same_thread=False,
-        timeout=60,
-    )
+    return open_checkpointed_readonly_sqlite(database_path)
 
 
 _readonly_sqlite_path = _readonly_sqlite_database_path(settings.db_url)

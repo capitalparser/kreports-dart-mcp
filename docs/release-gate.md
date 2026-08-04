@@ -58,10 +58,13 @@ non-mutating request plan before any DART work:
 kreports plan-investor-core-backfill --db artifacts/kreports-runtime.db --json
 ```
 
-The command opens only the explicit SQLite file with `mode=ro&immutable=1` and
-reports the exact 95% target (or `--threshold-pct`), deterministic company-year
-requests, annual filing anchors, proof-row rejections, and missing disclosure
-metadata. It is a no-network preflight: it does not prove DART availability,
+The command opens only an explicit, checkpointed SQLite snapshot with
+`mode=ro&immutable=1`: a non-empty `-wal` or rollback `-journal` sidecar is
+rejected because immutable reads could otherwise be stale. A standalone `-shm`
+sidecar is allowed and never modified. The command reports the exact 95% target
+(or `--threshold-pct`), deterministic company-year requests, annual filing
+anchors, proof-row rejections, and missing disclosure metadata. It is a
+no-network preflight: it does not prove DART availability,
 API quota or request success, historical listing eligibility, or release
 readiness. Run the actual authorized backfill and then the full release gate
 separately; this command never weakens the gate or writes the DB.

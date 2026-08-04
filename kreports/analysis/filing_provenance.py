@@ -1,7 +1,8 @@
 """Resolve structured annual facts to proven DART filing sources."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any, TypeAlias
 
@@ -225,6 +226,57 @@ def _exact_receipt_matches_disclosure_date(
     return resolved_receipt
 
 
+def latest_annual_filing_anchor_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    corp_code: object,
+    bsns_year: object,
+) -> dict[str, Any] | None:
+    """Resolve one latest annual anchor, validating only after it is ranked.
+
+    The annual identity predicate chooses candidate disclosures. Once the
+    newest candidate by disclosure date and receipt is selected, an invalid
+    receipt/date binding fails the entire anchor rather than borrowing an older
+    filing. Callers may inject DB-API, SQLAlchemy, or fixture mapping rows.
+    """
+    try:
+        normalized_year = int(bsns_year)
+    except (TypeError, ValueError):
+        return None
+    normalized_corp_code = str(corp_code or "")
+    candidates = [
+        row
+        for row in rows
+        if str(row.get("corp_code") or "") == normalized_corp_code
+        and annual_report_name_matches_business_year(
+            row.get("report_nm"), normalized_year
+        )
+    ]
+    if not candidates:
+        return None
+    latest = max(
+        candidates,
+        key=lambda row: (
+            str(row.get("disc_date") or ""),
+            str(row.get("rcept_no") or ""),
+        ),
+    )
+    receipt = _exact_receipt_matches_disclosure_date(
+        latest.get("rcept_no"),
+        normalized_year,
+        latest.get("disc_date"),
+    )
+    if receipt is None:
+        return None
+    return {
+        "corp_code": normalized_corp_code,
+        "bsns_year": normalized_year,
+        "rcept_no": receipt,
+        "disc_date": str(latest.get("disc_date")),
+        "report_nm": str(latest.get("report_nm")),
+    }
+
+
 def compact_citation_anchors(
     scopes: Iterable[CompactCitationScope], *, batch_size: int = 100
 ) -> dict[CompactCitationScope, dict[str, Any]]:
@@ -269,53 +321,45 @@ def compact_citation_anchors(
         query = text(f"""
             WITH requested(corp_code, bsns_year, fs_div) AS (
                 VALUES {", ".join(requested_values)}
-            ),
-            ranked AS (
-                SELECT
-                    requested.corp_code,
-                    requested.bsns_year,
-                    requested.fs_div,
-                    d.rcept_no,
-                    d.disc_date,
-                    d.report_nm,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY
-                            requested.corp_code,
-                            requested.bsns_year,
-                            requested.fs_div
-                        ORDER BY d.disc_date DESC, d.rcept_no DESC
-                    ) AS source_rank
-                FROM requested
-                JOIN disclosures AS d ON d.corp_code = requested.corp_code
-                WHERE d.report_nm LIKE
-                      ('%사업보고서 (' || requested.bsns_year || '.%')
             )
-            SELECT corp_code, bsns_year, fs_div, rcept_no, disc_date, report_nm
-            FROM ranked
-            WHERE source_rank = 1
+            SELECT
+                requested.corp_code,
+                requested.bsns_year,
+                requested.fs_div,
+                d.rcept_no,
+                d.disc_date,
+                d.report_nm
+            FROM requested
+            JOIN disclosures AS d ON d.corp_code = requested.corp_code
+            WHERE d.report_nm LIKE
+                  ('%사업보고서 (' || requested.bsns_year || '.%')
         """)
         with _engine_module.engine.connect() as conn:
             rows = conn.execute(query, params).mappings().all()
+        rows_by_scope: dict[CompactCitationScope, list[Mapping[str, Any]]] = (
+            defaultdict(list)
+        )
         for row in rows:
-            scope = (str(row["corp_code"]), int(row["bsns_year"]), str(row["fs_div"]))
-            if not annual_report_name_matches_business_year(
-                row["report_nm"],
-                scope[1],
-            ):
-                continue
-            receipt = _exact_receipt_matches_disclosure_date(
-                row["rcept_no"],
-                scope[1],
-                row["disc_date"],
+            scope = (
+                str(row["corp_code"]),
+                int(row["bsns_year"]),
+                str(row["fs_div"]),
             )
-            if receipt is None:
+            rows_by_scope[scope].append(row)
+        for scope, scope_rows in rows_by_scope.items():
+            anchor = latest_annual_filing_anchor_from_rows(
+                scope_rows,
+                corp_code=scope[0],
+                bsns_year=scope[1],
+            )
+            if anchor is None:
                 continue
             anchors[scope] = {
                 "corp_code": scope[0],
                 "bsns_year": scope[1],
                 "fs_div": scope[2],
-                "rcept_no": receipt,
-                "report_nm": row["report_nm"],
+                "rcept_no": anchor["rcept_no"],
+                "report_nm": anchor["report_nm"],
                 "citation_basis": "company_year_annual_filing_match",
             }
     return anchors

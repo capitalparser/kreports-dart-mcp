@@ -1,25 +1,38 @@
 """Read-only preflight planning for investor-core three-year coverage."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_CEILING
-from datetime import date
 import json
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any
 
 from kreports.annual_filing_identity import (
     annual_report_name_matches_business_year,
 )
+from kreports.analysis.filing_provenance import (
+    latest_annual_filing_anchor_from_rows,
+)
 from kreports.db.quality_snapshot import QUALITY_VERSION
+from kreports.db.readonly_snapshot import (
+    ReadonlySQLiteSnapshotUnavailable,
+    open_checkpointed_readonly_sqlite,
+)
 from kreports.quality.company_year_fingerprint import (
     validate_quality_evidence_summary,
 )
 
 WINDOW_YEARS = 5
 MAX_REJECTED_PROOF_DIAGNOSTICS = 20
-_RECEIPT_RE = re.compile(r"\d{14}\Z")
+
+
+@dataclass
+class _RejectedProofDiagnostics:
+    """Keep complete rejection accounting while bounding rendered details."""
+
+    total_count: int = 0
+    samples: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _open_readonly_database(db_path: str | Path) -> sqlite3.Connection:
@@ -30,10 +43,9 @@ def _open_readonly_database(db_path: str | Path) -> sqlite3.Connection:
     if not path.is_file():
         raise ValueError("db path must be an existing file")
     try:
-        connection = sqlite3.connect(
-            f"{path.as_uri()}?mode=ro&immutable=1",
-            uri=True,
-        )
+        connection = open_checkpointed_readonly_sqlite(path)
+    except ReadonlySQLiteSnapshotUnavailable as exc:
+        raise ValueError("db snapshot must be checkpointed") from exc
     except sqlite3.Error as exc:
         raise ValueError("db path must be a readable SQLite database") from exc
     connection.row_factory = sqlite3.Row
@@ -55,17 +67,6 @@ def _target_numerator(denominator: int, threshold_pct: float) -> int:
     )
 
 
-def _is_valid_receipt_date(receipt: object, disc_date: object) -> bool:
-    if not isinstance(receipt, str) or not _RECEIPT_RE.fullmatch(receipt):
-        return False
-    if not isinstance(disc_date, str):
-        return False
-    try:
-        return receipt[:8] == date.fromisoformat(disc_date).strftime("%Y%m%d")
-    except ValueError:
-        return False
-
-
 def _annual_anchor(
     connection: sqlite3.Connection,
     *,
@@ -73,33 +74,28 @@ def _annual_anchor(
     year: int,
 ) -> dict[str, str] | None:
     rows = connection.execute(
-        "SELECT rcept_no, disc_date, report_nm FROM disclosures "
+        "SELECT corp_code, rcept_no, disc_date, report_nm FROM disclosures "
         "WHERE corp_code=? "
         "ORDER BY disc_date DESC, rcept_no DESC",
         (corp_code,),
     ).fetchall()
-    for row in rows:
-        if (
-            annual_report_name_matches_business_year(row["report_nm"], year)
-            and _is_valid_receipt_date(row["rcept_no"], row["disc_date"])
-        ):
-            return {
-                "rcept_no": str(row["rcept_no"]),
-                "disc_date": str(row["disc_date"]),
-                "report_nm": str(row["report_nm"]),
-            }
-    return None
+    return latest_annual_filing_anchor_from_rows(
+        (dict(row) for row in rows),
+        corp_code=corp_code,
+        bsns_year=year,
+    )
 
 
 def _diagnostic(
-    diagnostics: list[dict[str, Any]],
+    diagnostics: _RejectedProofDiagnostics,
     *,
     corp_code: str,
     index: int | None,
     reason: str,
 ) -> None:
-    if len(diagnostics) < MAX_REJECTED_PROOF_DIAGNOSTICS:
-        diagnostics.append({
+    diagnostics.total_count += 1
+    if len(diagnostics.samples) < MAX_REJECTED_PROOF_DIAGNOSTICS:
+        diagnostics.samples.append({
             "corp_code": corp_code,
             "proof_index": index,
             "reason": reason,
@@ -114,7 +110,7 @@ def _valid_proven_years(
     evidence_summary_json: object,
     window_start: int,
     coverage_year: int,
-    diagnostics: list[dict[str, Any]],
+    diagnostics: _RejectedProofDiagnostics,
 ) -> list[int]:
     try:
         summary = json.loads(str(evidence_summary_json))
@@ -221,7 +217,7 @@ def plan_investor_core_backfill(
             (coverage_year,),
         ).fetchone()[0])
         window_start = coverage_year - WINDOW_YEARS + 1
-        diagnostics: list[dict[str, Any]] = []
+        diagnostics = _RejectedProofDiagnostics()
         candidates: list[dict[str, Any]] = []
         rows = connection.execute(
             "SELECT c.corp_code, c.stock_code, c.corp_name, q.investor_grade, "
@@ -318,8 +314,11 @@ def plan_investor_core_backfill(
         ),
         "unfillable_shortfall": unfillable_shortfall,
         "selected_companies": selected_companies,
-        "rejected_proof_row_count": len(diagnostics),
-        "rejected_proof_diagnostics": diagnostics,
+        "rejected_proof_row_count": diagnostics.total_count,
+        "rejected_proof_diagnostics": diagnostics.samples,
+        "rejected_proof_diagnostics_omitted_count": (
+            diagnostics.total_count - len(diagnostics.samples)
+        ),
         "limitations": [
             "No-network preflight only; it does not prove DART availability.",
             "This plan does not prove DART API quota or request success.",
