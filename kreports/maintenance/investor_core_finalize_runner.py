@@ -299,6 +299,25 @@ def run_investor_core_finalize(
                 )
         free_before = _safe_probe(database, disk_probe)
         before_rows = _scoped_row_counts(database, scope)
+        # A dataset version is immutable evidence. Reusing it must fail before
+        # any derived rows are touched, including in dry-run planning.
+        if before_rows.get("dataset_manifest", 0):
+            phases["manifest"] = _phase("blocked")
+            return _report(
+                database,
+                scope,
+                execute=execute,
+                before_sha256=before_sha256,
+                after_sha256=before_sha256,
+                free_before=free_before,
+                free_after=free_before,
+                before_rows=before_rows,
+                after_rows=before_rows,
+                phases=phases,
+                stop_reason="dataset_version_exists",
+                stop_message="dataset version already exists; choose a new immutable version",
+                wal_checkpointed=None,
+            )
         if not execute:
             return _report(
                 database,
