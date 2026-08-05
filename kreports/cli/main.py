@@ -68,6 +68,33 @@ def get_session():
     return configured_session()
 
 
+@app.command("normalize-krx-listing")
+def normalize_krx_listing_cmd(
+    raw_path: Path = typer.Option(..., "--raw-path", help="Local KIND HTML-XLS receipt"),
+    db_path: Path = typer.Option(..., "--db-path", help="Explicit read-only SQLite snapshot"),
+    output_path: Path = typer.Option(..., "--output-path", help="New UTF-8 CSV output path"),
+    as_of: str = typer.Option(..., "--as-of", help="Snapshot date, YYYY-MM-DD"),
+) -> None:
+    """Normalize a local KIND receipt without network access or database writes."""
+    from kreports.maintenance.krx_listing_normalizer import (
+        KrxListingNormalizationError,
+        normalize_krx_listing_path,
+        read_current_core_companies,
+        write_normalized_listing_csv,
+    )
+
+    try:
+        as_of_date = date.fromisoformat(as_of)
+        companies = read_current_core_companies(db_path)
+        result = normalize_krx_listing_path(raw_path, companies, as_of=as_of_date)
+        write_normalized_listing_csv(output_path, result.csv_bytes)
+    except (KrxListingNormalizationError, OSError, ValueError) as exc:
+        typer.echo(json.dumps({"error": str(exc)}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        raise typer.Exit(code=2) from exc
+    summary = {**result.summary, "output_path": str(output_path)}
+    typer.echo(json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 @app.command("backfill-audit-fee-observations")
 def backfill_audit_fee_observations_cmd(
     year_from: Optional[int] = typer.Option(None, "--year-from"),
