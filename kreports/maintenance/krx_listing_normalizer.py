@@ -35,6 +35,7 @@ CSV_COLUMNS = (
 CORE_MARKETS = frozenset({"KOSPI", "KOSDAQ"})
 _KRX_MARKETS = {"유가": "KOSPI", "코스닥": "KOSDAQ", "코넥스": "KONEX"}
 _HEADER_ALIASES = {
+    "company_name": frozenset({"회사명"}),
     "stock_code": frozenset({"종목코드"}),
     "market": frozenset({"시장구분", "시장"}),
     "listed_from": frozenset({"상장일", "상장일자"}),
@@ -92,13 +93,38 @@ class _HtmlTableParser(HTMLParser):
             self._table = None
 
 
-def _normalize_code(value: object, *, width: int, field: str, allow_blank: bool = False) -> str:
+def _normalize_corp_code(value: object) -> str:
     normalized = str(value or "").strip()
-    if not normalized and allow_blank:
-        return ""
-    if not normalized.isascii() or not normalized.isdigit() or len(normalized) > width:
-        raise KrxListingNormalizationError(f"{field} must be a {width}-digit numeric code")
-    return normalized.zfill(width)
+    if not normalized.isascii() or not normalized.isdigit() or len(normalized) > 8:
+        raise KrxListingNormalizationError("corp_code must be an 8-digit numeric code")
+    return normalized.zfill(8)
+
+
+def _normalize_stock_code(value: object) -> str:
+    """Canonicalize ASCII stock codes while preserving six-character alphanumerics.
+
+    KIND and the company master currently use upper-case identifiers. Lowercase
+    ASCII is explicitly canonicalized; non-ASCII and punctuation are rejected.
+    """
+    raw = str(value or "").strip()
+    if not raw or not raw.isascii():
+        raise KrxListingNormalizationError(
+            "stock_code must be a 6-character uppercase alphanumeric code"
+        )
+    canonical = raw.upper()
+    if canonical.isdigit():
+        if len(canonical) > 6:
+            raise KrxListingNormalizationError(
+                "stock_code must be a 6-character uppercase alphanumeric code"
+            )
+        return canonical.zfill(6)
+    if len(canonical) != 6 or any(
+        not ("0" <= char <= "9" or "A" <= char <= "Z") for char in canonical
+    ):
+        raise KrxListingNormalizationError(
+            "stock_code must be a 6-character uppercase alphanumeric code"
+        )
+    return canonical
 
 
 def _company_value(company: object, field: str) -> object:
@@ -110,22 +136,22 @@ def _company_value(company: object, field: str) -> object:
 def _normalize_companies(companies: Iterable[object]) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     seen_corp_codes: set[str] = set()
+    seen_stock_codes: set[str] = set()
     for company in companies:
         market = str(_company_value(company, "market") or "").strip().upper()
         if market not in CORE_MARKETS:
             continue
-        corp_code = _normalize_code(_company_value(company, "corp_code"), width=8, field="corp_code")
+        corp_code = _normalize_corp_code(_company_value(company, "corp_code"))
         if corp_code in seen_corp_codes:
             raise KrxListingNormalizationError("duplicate corp_code in company records")
         seen_corp_codes.add(corp_code)
+        stock_code = _normalize_stock_code(_company_value(company, "stock_code"))
+        if stock_code in seen_stock_codes:
+            raise KrxListingNormalizationError("duplicate stock_code in company records")
+        seen_stock_codes.add(stock_code)
         normalized.append({
             "corp_code": corp_code,
-            "stock_code": _normalize_code(
-                _company_value(company, "stock_code"),
-                width=6,
-                field="stock_code",
-                allow_blank=True,
-            ),
+            "stock_code": stock_code,
             "market": market,
         })
     return sorted(normalized, key=lambda row: row["corp_code"])
@@ -145,7 +171,7 @@ def _header_indexes(table: Sequence[Sequence[str]]) -> dict[str, int] | None:
     return found if set(found) == set(_HEADER_ALIASES) else None
 
 
-def _parse_kind_rows(raw_bytes: bytes, *, as_of: date) -> list[tuple[str, str, str]]:
+def _parse_kind_rows(raw_bytes: bytes, *, as_of: date) -> list[tuple[str, str, str, str]]:
     try:
         document = raw_bytes.decode("euc-kr")
     except UnicodeDecodeError as exc:
@@ -162,13 +188,16 @@ def _parse_kind_rows(raw_bytes: bytes, *, as_of: date) -> list[tuple[str, str, s
         raise KrxListingNormalizationError("required KIND columns are missing or ambiguous")
     table, indexes = matching[0]
     assert indexes is not None
-    rows: list[tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for row_no, source_row in enumerate(table[1:], start=2):
         if not any(cell.strip() for cell in source_row):
             continue
         if len(source_row) <= max(indexes.values()):
             raise KrxListingNormalizationError(f"KIND row {row_no} is shorter than its header")
-        stock_code = _normalize_code(source_row[indexes["stock_code"]], width=6, field="stock_code")
+        company_name = source_row[indexes["company_name"]].strip()
+        if not company_name:
+            raise KrxListingNormalizationError(f"company_name is blank at row {row_no}")
+        stock_code = _normalize_stock_code(source_row[indexes["stock_code"]])
         raw_market = "".join(source_row[indexes["market"]].split())
         try:
             market = _KRX_MARKETS[raw_market]
@@ -181,7 +210,7 @@ def _parse_kind_rows(raw_bytes: bytes, *, as_of: date) -> list[tuple[str, str, s
             raise KrxListingNormalizationError(f"invalid listed_from at row {row_no}") from exc
         if listed_from > as_of:
             raise KrxListingNormalizationError(f"listed_from is after as_of at row {row_no}")
-        rows.append((stock_code, market, listed_from.isoformat()))
+        rows.append((company_name, stock_code, market, listed_from.isoformat()))
     return rows
 
 
@@ -208,14 +237,14 @@ def normalize_krx_listing_bytes(
         raise KrxListingNormalizationError("as_of must be a date")
     current_companies = _normalize_companies(companies)
     source_rows = _parse_kind_rows(raw_bytes, as_of=as_of)
-    source_by_stock: dict[str, set[tuple[str, str]]] = {}
-    for stock_code, market, listed_from in source_rows:
-        source_by_stock.setdefault(stock_code, set()).add((market, listed_from))
+    source_by_stock: dict[str, set[tuple[str, str, str]]] = {}
+    for company_name, stock_code, market, listed_from in source_rows:
+        source_by_stock.setdefault(stock_code, set()).add((company_name, market, listed_from))
 
-    known_stock_codes = {row["stock_code"] for row in current_companies if row["stock_code"]}
+    known_stock_codes = {row["stock_code"] for row in current_companies}
     output_rows: list[dict[str, str]] = []
     for company in current_companies:
-        source_options = source_by_stock.get(company["stock_code"], set()) if company["stock_code"] else set()
+        source_options = source_by_stock.get(company["stock_code"], set())
         row = {
             "corp_code": company["corp_code"],
             "stock_code": company["stock_code"],
@@ -227,7 +256,7 @@ def normalize_krx_listing_bytes(
         if len(source_options) > 1:
             row["status"] = "conflict"
         elif len(source_options) == 1:
-            source_market, listed_from = next(iter(source_options))
+            _company_name, source_market, listed_from = next(iter(source_options))
             if source_market == company["market"]:
                 row["listed_from"] = listed_from
                 row["status"] = "verified"
@@ -279,7 +308,8 @@ def read_current_core_companies(db_path: str | Path) -> list[dict[str, str]]:
         connection.execute("PRAGMA query_only=ON")
         records = connection.execute(
             "SELECT corp_code, stock_code, market FROM companies "
-            "WHERE market IN ('KOSPI', 'KOSDAQ') ORDER BY corp_code"
+            "WHERE market IN ('KOSPI', 'KOSDAQ') AND stock_code IS NOT NULL "
+            "ORDER BY corp_code"
         ).fetchall()
     except ReadonlySQLiteSnapshotUnavailable as exc:
         raise KrxListingNormalizationError("db snapshot must be checkpointed") from exc

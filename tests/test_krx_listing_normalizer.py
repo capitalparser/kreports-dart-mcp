@@ -66,7 +66,7 @@ def test_exact_duplicates_dedupe_but_conflicting_duplicates_and_market_mismatch_
         ("가나다", "000001", "유가", "2001-01-02"),
         ("가나다", "000001", "유가", "2001-01-02"),
         ("라마바", "000002", "코스닥", "2002-02-03"),
-        ("라마바", "000002", "코스닥", "2002-02-04"),
+        ("다른법인", "000002", "코스닥", "2002-02-03"),
         ("사아자", "000003", "코스닥", "2003-03-04"),
     ])
     rows = normalize_krx_listing_bytes(raw, _companies(), as_of=date(2026, 8, 5)).rows
@@ -76,6 +76,59 @@ def test_exact_duplicates_dedupe_but_conflicting_duplicates_and_market_mismatch_
         {"corp_code": "00000002", "stock_code": "000002", "market": "KOSDAQ", "listed_from": "", "listed_to": "", "status": "conflict"},
         {"corp_code": "00000003", "stock_code": "000003", "market": "KOSPI", "listed_from": "", "listed_to": "", "status": "conflict"},
     ]
+
+
+def test_alphanumeric_six_character_stock_codes_are_canonicalized_and_preserved():
+    from kreports.maintenance.krx_listing_normalizer import normalize_krx_listing_bytes
+
+    result = normalize_krx_listing_bytes(
+        _kind_xls([("알파", "0010v0", "유가", "2024-01-02")]),
+        [{"corp_code": "00000010", "stock_code": "0010V0", "market": "KOSPI"}],
+        as_of=date(2026, 8, 5),
+    )
+
+    assert result.rows == [{
+        "corp_code": "00000010", "stock_code": "0010V0", "market": "KOSPI",
+        "listed_from": "2024-01-02", "listed_to": "", "status": "verified",
+    }]
+
+
+def test_company_name_is_required_and_blank_or_name_conflicting_source_rows_fail_closed():
+    from kreports.maintenance.krx_listing_normalizer import (
+        KrxListingNormalizationError,
+        normalize_krx_listing_bytes,
+    )
+
+    with pytest.raises(KrxListingNormalizationError, match="company_name is blank"):
+        normalize_krx_listing_bytes(
+            _kind_xls([("", "000001", "유가", "2001-01-02")]),
+            _companies(),
+            as_of=date(2026, 8, 5),
+        )
+    with pytest.raises(KrxListingNormalizationError, match="required KIND columns"):
+        normalize_krx_listing_bytes(
+            "<table><tr><th>종목코드</th><th>시장구분</th><th>상장일</th></tr>"
+            "<tr><td>000001</td><td>유가</td><td>2001-01-02</td></tr></table>".encode("euc-kr"),
+            _companies(),
+            as_of=date(2026, 8, 5),
+        )
+
+
+def test_duplicate_nonblank_company_master_stock_code_is_rejected_before_output():
+    from kreports.maintenance.krx_listing_normalizer import (
+        KrxListingNormalizationError,
+        normalize_krx_listing_bytes,
+    )
+
+    with pytest.raises(KrxListingNormalizationError, match="duplicate stock_code in company records"):
+        normalize_krx_listing_bytes(
+            _kind_xls([("가나다", "0010V0", "유가", "2024-01-02")]),
+            [
+                {"corp_code": "00000010", "stock_code": "0010V0", "market": "KOSPI"},
+                {"corp_code": "00000011", "stock_code": "0010V0", "market": "KOSPI"},
+            ],
+            as_of=date(2026, 8, 5),
+        )
 
 
 def test_rejects_unreadable_or_malformed_kind_input_and_future_listing_date():
@@ -114,15 +167,23 @@ def test_normalization_bytes_are_deterministic_for_input_and_company_order():
     assert first.summary == second.summary
 
 
-def test_reads_explicit_sqlite_snapshot_without_mutating_it(tmp_path: Path):
-    from kreports.maintenance.krx_listing_normalizer import read_current_core_companies
+def test_reads_explicit_sqlite_snapshot_without_mutating_it_and_fails_closed_for_bad_stock_codes(tmp_path: Path):
+    from kreports.maintenance.krx_listing_normalizer import (
+        KrxListingNormalizationError,
+        read_current_core_companies,
+    )
 
     database = tmp_path / "companies.sqlite"
     connection = sqlite3.connect(database)
     connection.execute("CREATE TABLE companies (corp_code TEXT, stock_code TEXT, market TEXT)")
     connection.executemany(
         "INSERT INTO companies VALUES (?, ?, ?)",
-        [("00000002", "2", "KOSDAQ"), ("00000001", "1", "KOSPI"), ("00000009", "9", "KONEX")],
+        [
+            ("00000002", "2", "KOSDAQ"),
+            ("00000001", "1", "KOSPI"),
+            ("00000003", None, "KOSPI"),
+            ("00000009", "9", "KONEX"),
+        ],
     )
     connection.commit()
     connection.close()
@@ -133,6 +194,15 @@ def test_reads_explicit_sqlite_snapshot_without_mutating_it(tmp_path: Path):
         {"corp_code": "00000002", "stock_code": "000002", "market": "KOSDAQ"},
     ]
     assert database.read_bytes() == before
+
+    invalid_database = tmp_path / "invalid-companies.sqlite"
+    invalid_connection = sqlite3.connect(invalid_database)
+    invalid_connection.execute("CREATE TABLE companies (corp_code TEXT, stock_code TEXT, market TEXT)")
+    invalid_connection.execute("INSERT INTO companies VALUES ('00000004', '', 'KOSPI')")
+    invalid_connection.commit()
+    invalid_connection.close()
+    with pytest.raises(KrxListingNormalizationError, match="stock_code must be a 6-character uppercase alphanumeric code"):
+        read_current_core_companies(invalid_database)
 
 
 def test_safe_output_writer_rejects_preexisting_file_and_leaves_no_partial_output(tmp_path: Path, monkeypatch):
@@ -158,11 +228,11 @@ def test_cli_normalizes_from_explicit_raw_and_db_paths_and_prints_json(tmp_path:
     database = tmp_path / "companies.sqlite"
     connection = sqlite3.connect(database)
     connection.execute("CREATE TABLE companies (corp_code TEXT, stock_code TEXT, market TEXT)")
-    connection.execute("INSERT INTO companies VALUES ('00000001', '000001', 'KOSPI')")
+    connection.execute("INSERT INTO companies VALUES ('00000001', '0010V0', 'KOSPI')")
     connection.commit()
     connection.close()
     raw_path = tmp_path / "kind.xls"
-    raw_path.write_bytes(_kind_xls([("가나다", "000001", "유가", "2001-01-02")]))
+    raw_path.write_bytes(_kind_xls([("가나다", "0010V0", "유가", "2001-01-02")]))
     output = tmp_path / "normalized.csv"
 
     result = CliRunner().invoke(app, [
@@ -174,4 +244,4 @@ def test_cli_normalizes_from_explicit_raw_and_db_paths_and_prints_json(tmp_path:
     summary = json.loads(result.output)
     assert summary["row_count"] == 1
     assert summary["output_path"] == str(output)
-    assert output.read_text(encoding="utf-8").endswith("00000001,000001,KOSPI,2001-01-02,,verified\n")
+    assert output.read_text(encoding="utf-8").endswith("00000001,0010V0,KOSPI,2001-01-02,,verified\n")
