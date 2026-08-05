@@ -232,6 +232,101 @@ def test_note_disclosure_matrix_exposes_budget_omissions_and_returned_row_rate_s
     assert "returned topic rows" in result["limitations"][0]
 
 
+def test_note_disclosure_matrix_marks_peer_pagination_incomplete_without_row_omission():
+    """A next page means the matrix cannot claim its peer cohort is complete."""
+    from kreports.analysis.note_comparison import build_note_disclosure_matrix
+
+    result = build_note_disclosure_matrix(
+        "00000001", 2024,
+        _comparison={
+            "year": 2024,
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "selection_policy": {},
+            "pagination": {
+                "offset": 0, "page_size": 1, "returned_peer_count": 0,
+                "total_peer_count": 2, "available_peer_count": 2, "has_more": True,
+            },
+            "truncation": {"applied": True, "output_budget_applied": False},
+            "topics": [{"topic": "leases", "rows": [{
+                "company": {"corp_code": "00000001", "corp_name": "Subject"},
+                "availability": "available",
+            }]}],
+        },
+    )
+
+    assert result["is_complete"] is False
+    assert any("pagination" in limitation for limitation in result["limitations"])
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "note_disclosure_matrix": result,
+        "data_quality": {"status": "limited"},
+    })
+    table = next(table for table in pack["tables"] if table["id"] == "topic_company_disclosure_matrix")
+    assert "다음 peer 페이지" in table["note"]
+
+
+def test_note_disclosure_matrix_bounds_hostile_subject_and_selection_metadata():
+    """Subject-only matrices must remain bounded even when selector metadata is hostile."""
+    from kreports.analysis.note_comparison import (
+        MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES,
+        build_note_disclosure_matrix,
+    )
+
+    oversized = "가" * 40_000
+    topics = [{
+        "topic": f"{oversized}{index}",
+        "rows": [{
+            "company": {"corp_code": "00000001", "corp_name": oversized},
+            "availability": "available",
+            "note_title": oversized,
+            "match_keyword": oversized,
+            "source_locator": oversized,
+        }],
+    } for index in range(100)]
+    result = build_note_disclosure_matrix(
+        "00000001", 2024,
+        _comparison={
+            "year": 2024,
+            "subject": {"corp_code": "00000001", "corp_name": oversized},
+            "selection_policy": {
+                "criteria_requested": [oversized],
+                "criteria_applied": {"hostile": oversized},
+                "selection_mode": oversized,
+                "nested": {"metadata": oversized},
+            },
+            "pagination": {
+                "offset": 0, "page_size": 0, "returned_peer_count": 0,
+                "total_peer_count": 0, "available_peer_count": 0, "has_more": False,
+            },
+            "truncation": {"applied": False, "output_budget_applied": False},
+            "topics": topics,
+        },
+    )
+
+    truncation = result["source_truncation"]
+    assert truncation["matrix_output_budget_applied"] is True
+    assert truncation["cohort_metadata_truncated"] is True
+    assert truncation["emergency_minimal_result"] is True
+    assert result["topics"][0]["companies"][0]["status"] == "disclosed"
+    assert truncation["matrix_output_bytes"] == len(json.dumps(
+        result, ensure_ascii=False, separators=(",", ":"),
+    ).encode())
+    assert truncation["matrix_output_bytes"] <= MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES
+
+    from kreports.mcp.contracts import build_answer_envelope, enrich_answer_response
+
+    public_result = enrich_answer_response("compare_peer_accounting_policies", {
+        "subject": result["cohort_definition"]["subject"],
+        "note_disclosure_matrix": result,
+        "data_quality": {"status": "limited"},
+    })
+    envelope = build_answer_envelope("compare_peer_accounting_policies", public_result)
+    assert len(json.dumps(
+        envelope.model_dump(mode="json"), ensure_ascii=False,
+    ).encode()) <= 100_000
+
+
 def test_note_comparison_multilabels_long_chapters_with_centered_topic_context(temp_engine):
     """One cached chapter can evidence every requested keyword-bearing topic."""
     from kreports.analysis.note_comparison import compare_peer_accounting_notes

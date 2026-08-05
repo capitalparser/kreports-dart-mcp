@@ -239,8 +239,8 @@ def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table
     }
     table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
     assert table["rows"] == [
-        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "match_status_label": "검증된 연간 공시 일치", "record_count": 1, "note_title": "재고자산", "note_title_truncated": None, "display_truncated": None, "rcept_no": "20250312000001"},
-        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "match_status_label": "미검증 로컬 캐시 일치", "record_count": 2, "note_title": None, "note_title_truncated": None, "display_truncated": None, "rcept_no": None},
+        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "match_status_label": "검증된 연간 공시 일치", "record_count": 1, "source_records_truncated": None, "source_record_rows_omitted_count": None, "note_title": "재고자산", "note_title_truncated": None, "display_truncated": None, "rcept_no": "20250312000001"},
+        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "match_status_label": "미검증 로컬 캐시 일치", "record_count": 2, "source_records_truncated": None, "source_record_rows_omitted_count": None, "note_title": None, "note_title_truncated": None, "display_truncated": None, "rcept_no": None},
     ]
 
 
@@ -281,6 +281,51 @@ def test_note_company_matrix_uses_latest_matched_year_when_query_year_is_omitted
     assert company["matched_years_truncated"] is True
     assert company["matched_years_omitted_count"] == 2
     assert company["display_truncated"] is True
+
+
+def test_note_company_matrix_marks_source_record_truncation_without_guessing_year_omissions():
+    """A search-row cap cannot be reported as an exact count of omitted distinct years."""
+    raw = _matched_note_result()
+    raw["companies"][0]["record_count"] = 12
+
+    result = _enrich_accounting_note_search(raw)
+    company = result["note_disclosure_company_matrix"]["companies"][0]
+    pack = build_answer_pack("search_dataset", result)
+    table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
+
+    assert company["source_records_truncated"] is True
+    assert company["source_record_rows_omitted_count"] == 11
+    assert company["matched_years_truncated"] is True
+    assert company["matched_years_omitted_count"] is None
+    assert table["rows"][0]["source_records_truncated"] is True
+    assert {"source_records_truncated", "source_record_rows_omitted_count"} <= {
+        column["field"] for column in table["columns"]
+    }
+    assert "원본 검색 행" in table["note"]
+
+
+def test_note_company_matrix_bounds_hostile_query_scope_before_serialization():
+    """Scope filters are public matrix fields and must not bypass the byte budget."""
+    oversized = "재" * 20_000
+    result = _enrich_accounting_note_search({
+        "query": {
+            "dataset": "accounting_note_chapters", "keyword": oversized,
+            "market": oversized, "induty_prefix": oversized,
+        },
+        "companies": [],
+        "data_quality": {"status": "missing", "source": "accounting_note_chapters"},
+    })
+
+    matrix = result["note_disclosure_company_matrix"]
+    assert matrix["scope_truncated"] is True
+    assert set(matrix["scope_truncated_fields"]) == {"keyword", "market", "induty_prefix"}
+    assert len(matrix["scope"]["keyword"]) <= 160
+    assert len(matrix["scope"]["market"]) <= 24
+    assert len(matrix["scope"]["induty_prefix"]) <= 24
+    assert matrix["matrix_output_bytes"] == len(json.dumps(
+        matrix, ensure_ascii=False, separators=(",", ":"),
+    ).encode())
+    assert matrix["matrix_output_bytes"] <= matrix["matrix_max_output_bytes"]
 
 
 def test_note_company_matrix_prioritizes_verified_companies_and_bounds_titles():

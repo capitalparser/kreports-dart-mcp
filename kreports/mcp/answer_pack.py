@@ -2140,6 +2140,10 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
                 " 로컬 확인률은 반환된 topic rows 기준이며, "
                 f"생략 회사-주제 행: {note_disclosure_matrix.get('omitted_company_topic_rows', 0)}입니다."
             )
+        if isinstance(note_disclosure_matrix, dict) and (
+            note_disclosure_matrix.get("pagination") or {}
+        ).get("has_more"):
+            matrix_note += " 다음 peer 페이지가 남아 있어 전체 cohort를 대표하지 않습니다."
         pack["tables"].append(_table(
             "topic_company_disclosure_matrix", "주제별 회사 주석 로컬 확인 매트릭스",
             [("topic", "주제"), ("company", "회사"), ("status", "로컬 증빙 상태"),
@@ -2344,6 +2348,8 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                     else None
                 ),
                 "record_count": item.get("record_count"),
+                "source_records_truncated": item.get("source_records_truncated"),
+                "source_record_rows_omitted_count": item.get("source_record_rows_omitted_count"),
                 "note_title": item.get("canonical_note_title"),
                 "note_title_truncated": item.get("canonical_note_title_truncated"),
                 "display_truncated": item.get("display_truncated"),
@@ -2351,6 +2357,9 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
             })
         omitted_company_count = int(matrix.get("omitted_company_count") or 0)
         maximum = matrix.get("matrix_max_output_bytes")
+        source_rows_truncated = any(
+            row.get("source_records_truncated") for row in matrix_rows
+        )
         pack["tables"].append(_table(
             "note_disclosure_company_matrix",
             "회사별 회계주석 캐시 일치",
@@ -2359,6 +2368,8 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 ("year", "표시 연도"), ("matched_years", "일치 연도"),
                 ("match_status", "기계 상태"), ("match_status_label", "일치 상태"),
                 ("record_count", "일치 레코드 수"), ("note_title", "검증 주석"),
+                ("source_records_truncated", "원본 검색 행 생략"),
+                ("source_record_rows_omitted_count", "원본 검색 행 생략 수"),
                 ("note_title_truncated", "주석 제목 생략"),
                 ("display_truncated", "표시 생략"),
                 ("rcept_no", "검증 접수번호"),
@@ -2367,6 +2378,10 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
             note=(
                 "캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아닙니다. "
                 f"비완전 매트릭스이며 최대 출력 byte={maximum}, 생략 회사 행={omitted_company_count}입니다."
+                + (
+                    " 원본 검색 행이 생략된 회사는 일치 연도의 정확한 생략 수를 산정하지 않습니다."
+                    if source_rows_truncated else ""
+                )
             ),
         ))
     return pack

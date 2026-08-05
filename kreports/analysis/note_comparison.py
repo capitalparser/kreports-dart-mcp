@@ -31,6 +31,7 @@ MAX_NOTE_COMPARISON_OUTPUT_BYTES = 100_000
 # The matrix is returned alongside the renderer answer pack.  It intentionally
 # gets a smaller budget so the composed public response remains bounded.
 MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES = 25_000
+_MAX_EMERGENCY_MATRIX_TOPICS = 20
 _TOPIC_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
     # A heading named simply "수익" or "매출" is meaningful.  In a body those
     # words also occur in boilerplate (for example "자산·부채 및 수익·비용"),
@@ -532,6 +533,159 @@ def _refresh_matrix_topic_rate(topic: dict, *, budget_omitted: int) -> None:
     })
 
 
+def _matrix_display_text(value: object, *, max_chars: int) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    return normalized[:max_chars] or None
+
+
+def _matrix_metadata_too_large(value: object, *, max_output_bytes: int = 1_024) -> bool:
+    try:
+        return _output_bytes({"value": value}) > max_output_bytes
+    except (TypeError, ValueError):
+        return True
+
+
+def _compact_matrix_metadata(matrix: dict) -> None:
+    """Remove hostile display/selection metadata before dropping subject topic cells."""
+    source_truncation = matrix["source_truncation"]
+    omitted_fields: list[str] = []
+    cohort = matrix.get("cohort_definition")
+    if isinstance(cohort, dict):
+        subject = cohort.get("subject")
+        if isinstance(subject, dict):
+            compact_subject = {
+                "corp_code": _matrix_display_text(subject.get("corp_code"), max_chars=80),
+                "corp_name": _matrix_display_text(subject.get("corp_name"), max_chars=120),
+            }
+            if compact_subject != subject:
+                omitted_fields.append("cohort_definition.subject")
+                cohort["subject"] = compact_subject
+        for field in ("criteria_requested", "criteria_applied", "selection_policy"):
+            if _matrix_metadata_too_large(cohort.get(field)):
+                cohort[field] = None
+                omitted_fields.append(f"cohort_definition.{field}")
+        selection_mode = cohort.get("selection_mode")
+        bounded_selection_mode = _matrix_display_text(selection_mode, max_chars=120)
+        if selection_mode != bounded_selection_mode:
+            cohort["selection_mode"] = bounded_selection_mode
+            omitted_fields.append("cohort_definition.selection_mode")
+
+    for topic in matrix.get("topics") or []:
+        if not isinstance(topic, dict):
+            continue
+        original_topic = topic.get("topic")
+        topic["topic"] = _matrix_display_text(original_topic, max_chars=120)
+        if topic["topic"] != original_topic:
+            omitted_fields.append("topics.topic")
+        for cell in topic.get("companies") or []:
+            if not isinstance(cell, dict):
+                continue
+            company = cell.get("company")
+            if isinstance(company, dict):
+                compact_company = {
+                    "corp_code": _matrix_display_text(company.get("corp_code"), max_chars=80),
+                    "corp_name": _matrix_display_text(company.get("corp_name"), max_chars=120),
+                }
+                if compact_company != company:
+                    omitted_fields.append("topics.companies.company")
+                    cell["company"] = compact_company
+            for field, max_chars in (("note_title", 160), ("rcept_no", 80), ("source_locator", 240)):
+                original_value = cell.get(field)
+                bounded_value = _matrix_display_text(original_value, max_chars=max_chars)
+                if original_value != bounded_value:
+                    omitted_fields.append(f"topics.companies.{field}")
+                    cell[field] = bounded_value
+
+    for field, value in list(source_truncation.items()):
+        if field.startswith("matrix_") or not _matrix_metadata_too_large(value, max_output_bytes=512):
+            continue
+        source_truncation[field] = None
+        omitted_fields.append(f"source_truncation.{field}")
+    if omitted_fields:
+        source_truncation["cohort_metadata_truncated"] = True
+        source_truncation["cohort_metadata_omitted_fields"] = list(dict.fromkeys(omitted_fields))
+
+
+def _stabilize_matrix_output_bytes(matrix: dict) -> int:
+    """Store the self-referential serialized matrix count exactly."""
+    source_truncation = matrix["source_truncation"]
+    for _ in range(8):
+        actual = _output_bytes(matrix)
+        if source_truncation.get("matrix_output_bytes") == actual:
+            return actual
+        source_truncation["matrix_output_bytes"] = actual
+    return _output_bytes(matrix)
+
+
+def _emergency_matrix_budget_result(matrix: dict) -> dict:
+    """Fail closed to subject topic status if hostile metadata still exceeds the cap."""
+    subject = (matrix.get("cohort_definition") or {}).get("subject") or {}
+    subject_code = str(subject.get("corp_code") or "")
+    topics = []
+    omitted_topic_count = 0
+    for topic in matrix.get("topics") or []:
+        if not isinstance(topic, dict):
+            continue
+        if len(topics) >= _MAX_EMERGENCY_MATRIX_TOPICS:
+            omitted_topic_count += 1
+            continue
+        subject_cell = next(
+            (
+                cell for cell in topic.get("companies") or []
+                if str((cell.get("company") or {}).get("corp_code") or "") == subject_code
+            ),
+            None,
+        )
+        topics.append({
+            "topic": _matrix_display_text(topic.get("topic"), max_chars=120),
+            "companies": ([{
+                "company": {
+                    "corp_code": _matrix_display_text(
+                        (subject_cell.get("company") or {}).get("corp_code"), max_chars=80,
+                    ),
+                    "corp_name": _matrix_display_text(
+                        (subject_cell.get("company") or {}).get("corp_name"), max_chars=120,
+                    ),
+                },
+                "status": _matrix_display_text(subject_cell.get("status"), max_chars=80),
+            }] if isinstance(subject_cell, dict) else []),
+        })
+    compact = {
+        "year": matrix.get("year") if isinstance(matrix.get("year"), int) else None,
+        "cohort_definition": {
+            "subject": {
+                "corp_code": _matrix_display_text(subject.get("corp_code"), max_chars=80),
+                "corp_name": _matrix_display_text(subject.get("corp_name"), max_chars=120),
+            },
+        },
+        "pagination": {"has_more": bool((matrix.get("pagination") or {}).get("has_more"))},
+        "maximum_companies": 200,
+        "is_complete": False,
+        "represented_company_count": sum(len(topic["companies"]) for topic in topics),
+        "requested_company_count": None,
+        "available_company_count": None,
+        "omitted_company_topic_rows": int(matrix.get("omitted_company_topic_rows") or 0),
+        "source_truncation": {
+            "matrix_output_budget_applied": True,
+            "matrix_output_budget_reason": "note_disclosure_matrix_output_budget",
+            "cohort_metadata_truncated": True,
+            "emergency_minimal_result": True,
+            "emergency_omitted_topic_count": omitted_topic_count,
+            "matrix_max_output_bytes": MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES,
+            "matrix_output_bytes": 0,
+        },
+        "rate_scope": "subject_topic_rows_only",
+        "topics": topics,
+        "read_only": True,
+        "limitations": [
+            "note_disclosure_matrix_output_truncated",
+            "subject topic status is retained where available; peer and selection metadata are omitted.",
+        ],
+    }
+    _stabilize_matrix_output_bytes(compact)
+    return compact
+
+
 def _apply_matrix_output_budget(matrix: dict) -> dict:
     """Bound the public matrix without dropping the subject's topic cells.
 
@@ -545,8 +699,8 @@ def _apply_matrix_output_budget(matrix: dict) -> dict:
         "matrix_max_output_bytes": MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES,
         "matrix_output_bytes": 0,
     })
+    _stabilize_matrix_output_bytes(matrix)
     if _output_bytes(matrix) <= MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES:
-        source_truncation["matrix_output_bytes"] = _output_bytes(matrix)
         return matrix
 
     subject = (matrix.get("cohort_definition") or {}).get("subject") or {}
@@ -557,6 +711,7 @@ def _apply_matrix_output_budget(matrix: dict) -> dict:
         "matrix_output_budget_reason": "note_disclosure_matrix_output_budget",
     })
     matrix["is_complete"] = False
+    _compact_matrix_metadata(matrix)
 
     while _output_bytes(matrix) > MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES:
         candidates = []
@@ -587,8 +742,12 @@ def _apply_matrix_output_budget(matrix: dict) -> dict:
         for topic in matrix["topics"]
         for cell in topic["companies"]
     })
-    source_truncation["matrix_output_bytes"] = _output_bytes(matrix)
-    return matrix
+    _stabilize_matrix_output_bytes(matrix)
+    return (
+        matrix
+        if _output_bytes(matrix) <= MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES
+        else _emergency_matrix_budget_result(matrix)
+    )
 
 
 def _select_note_row(
@@ -1185,6 +1344,7 @@ def build_note_disclosure_matrix(
     })
     source_truncation = dict(comparison.get("truncation") or {})
     source_output_truncated = bool(source_truncation.get("output_budget_applied"))
+    peer_pagination_incomplete = bool(pagination.get("has_more"))
     available_peer_count = pagination.get("available_peer_count")
     if not isinstance(available_peer_count, int) or available_peer_count < 0:
         available_peer_count = pagination.get("total_peer_count")
@@ -1204,7 +1364,11 @@ def build_note_disclosure_matrix(
         },
         "pagination": pagination,
         "maximum_companies": 200,
-        "is_complete": not source_output_truncated and complete_topic_rows,
+        "is_complete": (
+            not source_output_truncated
+            and not peer_pagination_incomplete
+            and complete_topic_rows
+        ),
         "represented_company_count": len(represented_company_codes),
         "requested_company_count": effective_page_size + 1,
         "available_company_count": available_company_count,
@@ -1219,6 +1383,12 @@ def build_note_disclosure_matrix(
             "not_found_in_cached_scope means a verified annual note cache was reviewed without a topic match; it is not non-disclosure.",
             "unavailable_raw means no verified annual note cache was available; non-disclosure is not assessed.",
             "A matrix contains the subject plus at most 199 peers, so a response never exceeds 200 companies.",
+            *(
+                [
+                    "Peer pagination has a next page; the returned matrix is not a complete peer-cohort view."
+                ]
+                if peer_pagination_incomplete else []
+            ),
         ],
     }
     return _apply_matrix_output_budget(matrix)

@@ -110,6 +110,7 @@ _MAX_NOTE_FACT_EXCERPT_CHARS = 240
 _MAX_NOTE_MATRIX_COMPANY_NAME_CHARS = 48
 _MAX_NOTE_MATRIX_MARKET_CHARS = 24
 _MAX_NOTE_MATRIX_INDUTY_CHARS = 24
+_MAX_NOTE_MATRIX_SCOPE_KEYWORD_CHARS = 160
 _SOURCE_REQUIRED_SEARCH_DATASETS = {
     "source_documents",
     "report_sections",
@@ -368,6 +369,12 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         if not records:
             continue
         corp_code = str(company.get("corp_code") or "")
+        record_count = company.get("record_count")
+        try:
+            source_record_count = max(len(records), int(record_count))
+        except (TypeError, ValueError):
+            source_record_count = len(records)
+        source_records_truncated = source_record_count > len(records)
         canonical_record = next(
             (item for item in records if item.get("canonical_source_binding")),
             None,
@@ -406,8 +413,19 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
                 matched_years[0] if matched_years else None
             ),
             "matched_years": matched_years,
-            "matched_years_truncated": len(all_matched_years) > len(matched_years),
-            "matched_years_omitted_count": len(all_matched_years) - len(matched_years),
+            "matched_years_truncated": (
+                source_records_truncated
+                or len(all_matched_years) > len(matched_years)
+            ),
+            "matched_years_omitted_count": (
+                None
+                if source_records_truncated
+                else len(all_matched_years) - len(matched_years)
+            ),
+            "source_records_truncated": source_records_truncated,
+            "source_record_rows_omitted_count": (
+                source_record_count - len(records) if source_records_truncated else 0
+            ),
             "match_status": (
                 "verified_annual_filing_match"
                 if canonical_record is not None else "unverified_cache_match"
@@ -429,6 +447,7 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
                 or market_truncated
                 or induty_code_truncated
                 or canonical_note_title_truncated
+                or source_records_truncated
                 or len(all_matched_years) > len(matched_years)
             ),
         })
@@ -439,14 +458,26 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         str(item.get("corp_code") or ""),
     ))
     row_limited_companies = companies[:_MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS]
+    scope_values = {
+        "keyword": (query.get("keyword"), _MAX_NOTE_MATRIX_SCOPE_KEYWORD_CHARS),
+        "market": (query.get("market"), _MAX_NOTE_MATRIX_MARKET_CHARS),
+        "induty_prefix": (query.get("induty_prefix"), _MAX_NOTE_MATRIX_INDUTY_CHARS),
+    }
+    scope = {"year": query.get("year")}
+    scope_truncated_fields: list[str] = []
+    for field, (value, max_chars) in scope_values.items():
+        displayed, truncated = _matrix_display_text(value, max_chars=max_chars)
+        scope[field] = displayed
+        if truncated:
+            scope_truncated_fields.append(field)
+    configured_limit = query.get("limit")
+    if not isinstance(configured_limit, int):
+        configured_limit = None
     matrix = {
-        "scope": {
-            "keyword": query.get("keyword"),
-            "year": query.get("year"),
-            "market": query.get("market"),
-            "induty_prefix": query.get("induty_prefix"),
-        },
-        "configured_limit": query.get("limit"),
+        "scope": scope,
+        "scope_truncated": bool(scope_truncated_fields),
+        "scope_truncated_fields": scope_truncated_fields,
+        "configured_limit": configured_limit,
         "returned_company_count": 0,
         "omitted_company_count": 0,
         "is_exhaustive": False,

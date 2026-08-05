@@ -165,10 +165,6 @@ def handle_compare_peer_accounting_policies(
             _peer_group=peer_group,
             _comparison=note_comparison,
         )
-        if isinstance(note_disclosure_matrix, dict) and "error" not in note_disclosure_matrix:
-            note_disclosure_matrix.setdefault("source_truncation", {})[
-                "comparison_payload_omitted_for_matrix"
-            ] = True
         result["note_disclosure_matrix"] = note_disclosure_matrix
     return result
 
