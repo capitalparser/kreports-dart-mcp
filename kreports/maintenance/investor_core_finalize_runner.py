@@ -355,6 +355,16 @@ def run_investor_core_finalize(
 
             if stop_reason is None:
                 try:
+                    _validate_free_space(
+                        _safe_probe(database, disk_probe),
+                        disk_probe=disk_probe,
+                    )
+                except InvestorCoreBackfillError as exc:
+                    stop_reason = exc.code
+                    stop_message = exc.message
+
+            if stop_reason is None:
+                try:
                     quality_result = rebuild_company_year_quality(
                         scope.quality_year,
                         scope.quality_year,
@@ -365,6 +375,16 @@ def run_investor_core_finalize(
                     stop_reason = "quality_failed"
                     stop_message = "company-year quality rebuild could not be completed"
                     phases["quality"] = _phase("failed")
+
+            if stop_reason is None:
+                try:
+                    _validate_free_space(
+                        _safe_probe(database, disk_probe),
+                        disk_probe=disk_probe,
+                    )
+                except InvestorCoreBackfillError as exc:
+                    stop_reason = exc.code
+                    stop_message = exc.message
 
             if stop_reason is None:
                 try:

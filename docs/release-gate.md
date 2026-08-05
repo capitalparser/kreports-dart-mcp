@@ -141,6 +141,25 @@ readiness: rerun `plan-investor-core-backfill`, then run the bounded financial
 phase on its freshly selected source-ready targets, rebuild derived quality
 artifacts, and verify the release artifact separately.
 
+After the financial phase succeeds, finalization can be restricted to the
+exact company scope recorded by that fresh plan:
+
+```bash
+kreports run-investor-core-finalize \
+  --db artifacts/kreports-runtime.db \
+  --corp-code 00123456 \
+  --corp-code 00654321 \
+  --year-from 2021 --year-to 2025 --quality-year 2025 \
+  --dataset-version investor-core-YYYYMMDD-v1
+```
+
+This is also dry-run by default. Execute mode requires the exact DB SHA and
+collector runtime; it performs scoped compact rebuild, scoped company-year
+quality rebuild, and a new immutable dataset manifest under one writer lock.
+The command deliberately reports `release_ready=false`; run
+`quality-release-gate` and `verify-release-artifact` separately as the final
+readiness evidence.
+
 ## Immutable proof
 
 Build and verify reject non-empty SQLite WAL state. They fingerprint DB/WAL/SHM

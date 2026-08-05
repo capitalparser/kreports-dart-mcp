@@ -120,6 +120,106 @@ def test_run_investor_core_disclosure_backfill_redacts_unexpected_failure(
     assert secret not in result.stdout
 
 
+def test_run_investor_core_finalize_accepts_repeated_company_scope(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Finalization CLI must make the exact company scope explicit and visible."""
+    from kreports.cli.main import app
+    from kreports.maintenance import investor_core_finalize_runner as runner
+
+    database = tmp_path / "runner.db"
+    database.touch()
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "schema": "investor_core_finalize_report",
+            "dry_run": not kwargs["execute"],
+            "execute": kwargs["execute"],
+            "completed": True,
+            "release_ready": False,
+            "scope": {
+                "corp_codes": sorted(kwargs["corp_codes"]),
+                "dataset_version": kwargs["dataset_version"],
+            },
+        }
+
+    monkeypatch.setattr(runner, "run_investor_core_finalize", fake_run)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run-investor-core-finalize",
+            "--db", str(database),
+            "--corp-code", "00000002",
+            "--corp-code", "00000001",
+            "--year-from", "2021",
+            "--year-to", "2025",
+            "--quality-year", "2025",
+            "--dataset-version", "investor-core-v1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "schema": "investor_core_finalize_report",
+        "dry_run": True,
+        "execute": False,
+        "completed": True,
+        "release_ready": False,
+        "scope": {
+            "corp_codes": ["00000001", "00000002"],
+            "dataset_version": "investor-core-v1",
+        },
+    }
+    assert captured["year_from"] == 2021
+    assert captured["quality_year"] == 2025
+
+
+def test_run_investor_core_finalize_emits_stable_error(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from kreports.cli.main import app
+    from kreports.maintenance import investor_core_finalize_runner as runner
+    from kreports.maintenance.investor_core_backfill_runner import (
+        InvestorCoreBackfillError,
+    )
+
+    database = tmp_path / "runner.db"
+    database.touch()
+    monkeypatch.setattr(
+        runner,
+        "run_investor_core_finalize",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            InvestorCoreBackfillError("manifest_failed", "secret detail")
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run-investor-core-finalize",
+            "--db", str(database),
+            "--corp-code", "00000001",
+            "--year-from", "2021",
+            "--year-to", "2025",
+            "--quality-year", "2025",
+            "--dataset-version", "investor-core-v1",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "error": {
+            "code": "manifest_failed",
+            "message": "dataset manifest could not be written",
+        }
+    }
+    assert "secret detail" not in result.stdout
+
+
 def test_run_investor_core_backfill_emits_stable_json_error_and_nonzero_exit(
     tmp_path: Path,
     monkeypatch,

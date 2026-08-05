@@ -2646,6 +2646,13 @@ _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "durability_checkpoint_failed": "SQLite WAL 내구성 체크포인트를 완료하지 못했습니다",
     "disclosure_receipt_identity_conflict": "공시 접수번호가 다른 회사와 충돌하여 메타데이터 보완을 중단했습니다",
     "metadata_persistence_failed": "검증된 공시 메타데이터를 저장하지 못했습니다",
+    "invalid_corp_codes": "corp_codes must be nonempty exact 8-digit strings",
+    "invalid_year_scope": "year_from and year_to must be a positive inclusive range",
+    "invalid_quality_year": "quality_year must be within the financial year range",
+    "invalid_dataset_version": "dataset_version must contain 1 to 80 characters",
+    "compact_failed": "financial compact rebuild could not be completed",
+    "quality_failed": "company-year quality rebuild could not be completed",
+    "manifest_failed": "dataset manifest could not be written",
 }
 
 
@@ -2816,6 +2823,88 @@ def run_investor_core_disclosure_backfill_cmd(
             separators=(",", ":"),
         ))
         raise typer.Exit(2) from exc
+
+    _json_print(report)
+    if not report.get("completed", False):
+        raise typer.Exit(3)
+
+
+@app.command("run-investor-core-finalize")
+def run_investor_core_finalize_cmd(
+    db_path: Path = typer.Option(..., "--db", help="bounded runner SQLite DB path"),
+    corp_code: list[str] = typer.Option(
+        ...,
+        "--corp-code",
+        help="exact 8-digit company code; repeat for each selected company",
+    ),
+    year_from: int = typer.Option(..., "--year-from"),
+    year_to: int = typer.Option(..., "--year-to"),
+    quality_year: int = typer.Option(..., "--quality-year"),
+    dataset_version: str = typer.Option(..., "--dataset-version"),
+    execute: bool = typer.Option(False, "--execute", help="perform scoped derived writes"),
+    expected_db_sha256: Optional[str] = typer.Option(
+        None,
+        "--expected-db-sha256",
+        help="expected SHA-256 for the exact SQLite file (required with --execute)",
+    ),
+) -> None:
+    """Plan or run exact-company compact, quality, and manifest finalization."""
+    from kreports.maintenance.investor_core_backfill_runner import (
+        InvestorCoreBackfillError,
+    )
+    from kreports.maintenance.investor_core_finalize_runner import (
+        run_investor_core_finalize,
+    )
+
+    try:
+        report = run_investor_core_finalize(
+            db_path,
+            corp_codes=corp_code,
+            year_from=year_from,
+            year_to=year_to,
+            quality_year=quality_year,
+            dataset_version=dataset_version,
+            execute=execute,
+            expected_db_sha256=expected_db_sha256,
+        )
+    except InvestorCoreBackfillError as exc:
+        message = _INVESTOR_CORE_RUNNER_ERROR_MESSAGES.get(
+            exc.code,
+            "investor-core finalization runner rejected the request",
+        )
+        typer.echo(json.dumps(
+            {"error": {"code": exc.code, "message": message}},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        raise typer.Exit(2) from exc
+    except (ValueError, sqlite3.Error):
+        typer.echo(json.dumps(
+            {
+                "error": {
+                    "code": "investor_core_finalize_unavailable",
+                    "message": "investor-core finalization runner unavailable",
+                }
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        raise typer.Exit(2)
+    except Exception:
+        typer.echo(json.dumps(
+            {
+                "error": {
+                    "code": "investor_core_finalize_failed",
+                    "message": "investor-core finalization runner failed",
+                }
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        raise typer.Exit(2)
 
     _json_print(report)
     if not report.get("completed", False):

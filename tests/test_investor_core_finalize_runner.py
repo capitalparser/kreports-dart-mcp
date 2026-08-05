@@ -270,3 +270,38 @@ def test_finalize_manifest_failure_returns_stable_incomplete_report(tmp_path, mo
     assert report["phases"]["quality"]["status"] == "completed"
     assert report["phases"]["manifest"]["status"] == "failed"
     assert report["wal_checkpointed"] is True
+
+
+def test_finalize_rechecks_disk_between_derived_phases(tmp_path, monkeypatch):
+    """A compact write must not proceed to quality after crossing the reserve gate."""
+    from kreports.maintenance import investor_core_finalize_runner as runner
+
+    database = tmp_path / "finalize.db"
+    _create_database(database)
+    monkeypatch.setenv("DB_URL", f"sqlite:///{database}")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+    monkeypatch.setattr(
+        runner,
+        "rebuild_financial_facts_compact",
+        lambda **kwargs: {"rows_written": 1},
+    )
+    monkeypatch.setattr(
+        runner,
+        "rebuild_company_year_quality",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("quality phase ran below disk reserve")
+        ),
+    )
+    probes = iter([20 * GIB, 9 * GIB, 20 * GIB])
+
+    report = _run(
+        database,
+        execute=True,
+        expected_db_sha256=_sha256(database),
+        disk_probe=lambda path: next(probes),
+    )
+
+    assert report["completed"] is False
+    assert report["stop_reason"] == "insufficient_free_space"
+    assert report["phases"]["compact"]["status"] == "completed"
+    assert report["phases"]["quality"]["status"] == "not_run"
