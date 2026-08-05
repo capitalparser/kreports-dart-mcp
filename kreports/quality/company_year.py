@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -119,6 +120,32 @@ GROUP_AUDIT_GRADE_RULES = {
         "qsc_classification",
     ),
 }
+
+
+def _normalized_corp_codes(
+    corp_codes: Iterable[str] | None,
+) -> tuple[str, ...] | None:
+    """Return a deterministic exact-company scope, never an implicit broad one."""
+    if corp_codes is None:
+        return None
+    if isinstance(corp_codes, str):
+        raise ValueError("corp_codes must be a nonempty iterable of exact corp codes")
+    try:
+        values = tuple(corp_codes)
+    except TypeError as exc:
+        raise ValueError(
+            "corp_codes must be a nonempty iterable of exact corp codes"
+        ) from exc
+    if not values or any(
+        not isinstance(corp_code, str)
+        or not corp_code
+        or corp_code != corp_code.strip()
+        or len(corp_code) != 8
+        or not corp_code.isdigit()
+        for corp_code in values
+    ):
+        raise ValueError("corp_codes must be a nonempty iterable of exact corp codes")
+    return tuple(sorted(set(values)))
 
 
 def _financial_statuses(
@@ -990,11 +1017,13 @@ def rebuild_company_year_quality(
     year_from: int,
     year_to: int,
     market: str | None = None,
+    corp_codes: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Upsert a scoped ledger from existing derived evidence only."""
     require_runtime_write("rebuild company-year quality")
     if year_from > year_to:
         raise ValueError("year_from must be less than or equal to year_to")
+    normalized_corp_codes = _normalized_corp_codes(corp_codes)
 
     with get_session() as session:
         query = session.query(
@@ -1003,6 +1032,8 @@ def rebuild_company_year_quality(
         ).order_by(Company.corp_code)
         if market is not None:
             query = query.filter(Company.market == market)
+        if normalized_corp_codes is not None:
+            query = query.filter(Company.corp_code.in_(normalized_corp_codes))
         companies = [
             (str(corp_code), company_market)
             for corp_code, company_market in query.all()

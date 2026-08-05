@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from sqlalchemy import text
 
 from kreports.analysis.filing_provenance import compact_citation_anchors
@@ -22,6 +24,32 @@ SUMMARY_METRIC_MAP = {
 }
 
 _COMPACT_METRICS = {definition.key: definition for definition in compact_metric_definitions()}
+
+
+def _normalized_corp_codes(
+    corp_codes: Iterable[str] | None,
+) -> tuple[str, ...] | None:
+    """Return a deterministic exact-company scope, never an implicit broad one."""
+    if corp_codes is None:
+        return None
+    if isinstance(corp_codes, str):
+        raise ValueError("corp_codes must be a nonempty iterable of exact corp codes")
+    try:
+        values = tuple(corp_codes)
+    except TypeError as exc:
+        raise ValueError(
+            "corp_codes must be a nonempty iterable of exact corp codes"
+        ) from exc
+    if not values or any(
+        not isinstance(corp_code, str)
+        or not corp_code
+        or corp_code != corp_code.strip()
+        or len(corp_code) != 8
+        or not corp_code.isdigit()
+        for corp_code in values
+    ):
+        raise ValueError("corp_codes must be a nonempty iterable of exact corp codes")
+    return tuple(sorted(set(values)))
 
 
 def _compact_provenance(
@@ -133,7 +161,13 @@ def _compact_rows(rows: list[dict]) -> list[dict]:
     return compact_rows
 
 
-def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: int | None = None) -> dict:
+def rebuild_financial_facts_compact(
+    *,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    corp_codes: Iterable[str] | None = None,
+) -> dict:
+    normalized_corp_codes = _normalized_corp_codes(corp_codes)
     params: dict[str, object] = {}
     account_placeholders = []
     for idx, account_id in enumerate(METRIC_MAP):
@@ -148,6 +182,13 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
     if year_to is not None:
         where.append("bsns_year <= :year_to")
         params["year_to"] = int(year_to)
+    if normalized_corp_codes is not None:
+        scope_placeholders = []
+        for index, corp_code in enumerate(normalized_corp_codes):
+            key = f"corp_code_{index}"
+            scope_placeholders.append(f":{key}")
+            params[key] = corp_code
+        where.append(f"corp_code IN ({', '.join(scope_placeholders)})")
 
     sql = text(f"""
         SELECT corp_code, bsns_year, fs_div, sj_div, account_id, account_nm, thstrm_amount
@@ -183,7 +224,15 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
         if year_to is not None:
             summary_where.append("year <= :year_to")
             summary_params["year_to"] = int(year_to)
-
+        if normalized_corp_codes is not None:
+            summary_scope_placeholders = []
+            for index, corp_code in enumerate(normalized_corp_codes):
+                key = f"corp_code_{index}"
+                summary_scope_placeholders.append(f":{key}")
+                summary_params[key] = corp_code
+            summary_where.append(
+                f"corp_code IN ({', '.join(summary_scope_placeholders)})"
+            )
         summary_rows = session.execute(text(f"""
             SELECT corp_code, year AS bsns_year, fs_div,
                    revenue, operating_profit, net_income,
@@ -218,6 +267,15 @@ def rebuild_financial_facts_compact(*, year_from: int | None = None, year_to: in
         if year_to is not None:
             delete_where.append("bsns_year <= :delete_year_to")
             delete_params["delete_year_to"] = int(year_to)
+        if normalized_corp_codes is not None:
+            delete_scope_placeholders = []
+            for index, corp_code in enumerate(normalized_corp_codes):
+                key = f"delete_corp_code_{index}"
+                delete_scope_placeholders.append(f":{key}")
+                delete_params[key] = corp_code
+            delete_where.append(
+                f"corp_code IN ({', '.join(delete_scope_placeholders)})"
+            )
         deleted_stale = int(session.execute(text(f"""
             DELETE FROM financial_facts_compact
             WHERE {" AND ".join(delete_where)}

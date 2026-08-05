@@ -222,6 +222,127 @@ def test_compact_rebuild_persists_authoritative_and_uncitable_provenance(temp_en
     assert rows[("00126381", "revenue")]["quality_status"] == "limited"
 
 
+def test_compact_rebuild_scopes_sources_and_stale_deletes_to_exact_companies(
+    temp_engine,
+):
+    """A selected-company refresh must retain another company's compact fact."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financial_facts
+            (corp_code, bsns_year, reprt_code, fs_div, sj_div, account_id, account_nm,
+             ord, thstrm_amount, fetched_at)
+            VALUES
+            ('00126380', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 100, CURRENT_TIMESTAMP),
+            ('00999999', 2024, '11011', 'CFS', 'IS', 'ifrs-full_Revenue', '매출액', 1, 200, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    unscoped = rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        session.execute(text("""
+            UPDATE financial_facts
+            SET thstrm_amount = 125
+            WHERE corp_code = '00126380'
+        """))
+        session.execute(text("""
+            DELETE FROM financial_facts
+            WHERE corp_code = '00999999'
+        """))
+        session.commit()
+
+    scoped = rebuild_financial_facts_compact(
+        year_from=2024,
+        year_to=2024,
+        corp_codes=["00126380", "00126380"],
+    )
+
+    with get_session() as session:
+        amounts = dict(session.execute(text("""
+            SELECT corp_code, amount
+            FROM financial_facts_compact
+            WHERE bsns_year = 2024 AND metric_key = 'revenue'
+            ORDER BY corp_code
+        """)).all())
+
+    assert unscoped["source_rows"] == 2
+    assert unscoped["inserted_or_updated"] == 2
+    assert scoped["source_rows"] == 1
+    assert scoped["inserted_or_updated"] == 1
+    assert scoped["deleted_stale"] == 1
+    assert amounts == {"00126380": 125, "00999999": 200}
+
+
+def test_compact_rebuild_scopes_summary_upserts_and_counts_to_exact_companies(
+    temp_engine,
+):
+    """A selected-company refresh must not update another company's fallback facts."""
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO financials
+            (corp_code, year, quarter, fs_div, revenue, operating_profit, net_income,
+             total_assets, total_debt, total_equity, operating_cf, fetched_at)
+            VALUES
+            ('00126380', 2024, 4, 'CFS', 100, 10, 8, 1000, 400, 600, 25, CURRENT_TIMESTAMP),
+            ('00999999', 2024, 4, 'CFS', 200, 20, 16, 2000, 800, 1200, 50, CURRENT_TIMESTAMP)
+        """))
+        session.commit()
+
+    rebuild_financial_facts_compact(year_from=2024, year_to=2024)
+
+    with get_session() as session:
+        session.execute(text("""
+            UPDATE financials
+            SET revenue = CASE corp_code
+                WHEN '00126380' THEN 125
+                WHEN '00999999' THEN 225
+            END
+            WHERE corp_code IN ('00126380', '00999999')
+        """))
+        session.commit()
+
+    scoped = rebuild_financial_facts_compact(
+        year_from=2024,
+        year_to=2024,
+        corp_codes=["00126380"],
+    )
+
+    with get_session() as session:
+        amounts = dict(session.execute(text("""
+            SELECT corp_code, amount
+            FROM financial_facts_compact
+            WHERE bsns_year = 2024 AND metric_key = 'revenue'
+            ORDER BY corp_code
+        """)).all())
+
+    assert scoped["source_rows"] == 0
+    assert scoped["summary_source_rows"] == 1
+    assert scoped["summary_inserted_or_updated"] == 7
+    assert amounts == {"00126380": 125, "00999999": 200}
+
+
+@pytest.mark.parametrize(
+    "corp_codes",
+    [[], [""], [" 00126380"], ["not-a-corp-code"], "00126380"],
+)
+def test_compact_rebuild_rejects_empty_or_nonexact_company_scope(corp_codes):
+    """An ambiguous company scope must fail before it can widen a rebuild."""
+    from kreports.maintenance.financial_compact import rebuild_financial_facts_compact
+
+    with pytest.raises(ValueError, match="corp_codes"):
+        rebuild_financial_facts_compact(corp_codes=corp_codes)
+
+
 def test_compact_provenance_rejects_unsupported_source_or_period():
     """An invented source or non-financial period cannot be written as compact provenance."""
     from kreports.maintenance.financial_compact import _compact_provenance

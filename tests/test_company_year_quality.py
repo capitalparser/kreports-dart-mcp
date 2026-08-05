@@ -891,6 +891,50 @@ def test_rebuild_is_idempotent_and_scoped_by_year_and_market(temp_engine):
     assert rows == [("00126380", 2024), ("00126380", 2025)]
 
 
+def test_rebuild_scopes_quality_upserts_to_exact_companies(temp_engine):
+    """Refreshing one investor plan company must leave every other ledger row intact."""
+    from kreports.quality.company_year import rebuild_company_year_quality
+
+    _seed_core_financial_years("00126380", range(2025, 2026), market="KOSPI")
+    _seed_core_financial_years("00999999", range(2025, 2026), market="KOSDAQ")
+
+    unscoped = rebuild_company_year_quality(2025, 2025)
+
+    with get_session() as session:
+        untouched = session.get(CompanyYearQuality, ("00999999", 2025))
+        assert untouched is not None
+        untouched.blockers_json = '["must_remain"]'
+
+    scoped = rebuild_company_year_quality(
+        2025,
+        2025,
+        corp_codes=["00126380", "00126380"],
+    )
+
+    with get_session() as session:
+        untouched = session.get(CompanyYearQuality, ("00999999", 2025))
+        assert untouched is not None
+        untouched_blockers = untouched.blockers_json
+
+    assert unscoped["companies_evaluated"] == 2
+    assert unscoped["rows_written"] == 2
+    assert scoped["companies_evaluated"] == 1
+    assert scoped["rows_written"] == 1
+    assert untouched_blockers == '["must_remain"]'
+
+
+@pytest.mark.parametrize(
+    "corp_codes",
+    [[], [""], ["00126380 "], ["not-a-corp-code"], "00126380"],
+)
+def test_rebuild_rejects_empty_or_nonexact_company_scope(temp_engine, corp_codes):
+    """An invalid scope must not silently become an all-company quality refresh."""
+    from kreports.quality.company_year import rebuild_company_year_quality
+
+    with pytest.raises(ValueError, match="corp_codes"):
+        rebuild_company_year_quality(2025, 2025, corp_codes=corp_codes)
+
+
 def test_rebuild_reads_audit_fee_from_current_collector_engine_after_wal_write(
     tmp_path,
     monkeypatch,
