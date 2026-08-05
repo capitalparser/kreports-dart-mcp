@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ TARGET_SAMPLE_LIMIT = 20
 TARGET_QUERY_BATCH_SIZE = 250
 MIN_FREE_SPACE_BYTES = 10 * 1024**3
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+_EXECUTION_LOCK = threading.Lock()
 _WRITER_BIND_LOCK = threading.RLock()
 
 
@@ -310,6 +312,87 @@ def _open_verified_sqlite_connection(identity: _DatabaseIdentity) -> sqlite3.Con
             connection.close()
         if descriptor >= 0:
             os.close(descriptor)
+
+
+@contextmanager
+def _exclusive_execution_guard(identity: _DatabaseIdentity) -> Iterator[None]:
+    """Permit only one bounded writer in this process and across processes."""
+    if not _EXECUTION_LOCK.acquire(blocking=False):
+        raise _fail(
+            "backfill_already_running",
+            "another investor-core backfill is already running",
+        )
+    descriptor = -1
+    locked = False
+    try:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise _fail(
+                "single_writer_guard_unavailable",
+                "single-writer database locking is unavailable",
+            )
+        lock_path = identity.path.with_name(
+            f".{identity.path.name}.investor-core.lock"
+        )
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR
+            | os.O_CREAT
+            | no_follow
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        lock_path_stat = os.lstat(lock_path)
+        lock_descriptor_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(lock_path_stat.st_mode)
+            or not stat.S_ISREG(lock_descriptor_stat.st_mode)
+            or lock_path_stat.st_nlink != 1
+            or lock_descriptor_stat.st_nlink != 1
+            or (
+                int(lock_path_stat.st_dev),
+                int(lock_path_stat.st_ino),
+            )
+            != (
+                int(lock_descriptor_stat.st_dev),
+                int(lock_descriptor_stat.st_ino),
+            )
+        ):
+            raise _fail(
+                "single_writer_guard_unavailable",
+                "single-writer database locking is unavailable",
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise _fail(
+                "backfill_already_running",
+                "another investor-core backfill is already running",
+            ) from exc
+        except OSError as exc:
+            raise _fail(
+                "single_writer_guard_unavailable",
+                "single-writer database locking is unavailable",
+            ) from exc
+        locked = True
+        _revalidate_database_identity(identity)
+        yield
+    except InvestorCoreBackfillError:
+        raise
+    except OSError as exc:
+        raise _fail(
+            "single_writer_guard_unavailable",
+            "single-writer database locking is unavailable",
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            if locked:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(descriptor)
+        _EXECUTION_LOCK.release()
 
 
 @contextmanager
@@ -698,10 +781,11 @@ def _validate_free_space(
         )
 
 
-def run_investor_core_backfill(
-    db_path: str | Path,
+def _run_investor_core_backfill_session(
+    database: Path,
+    identity: _DatabaseIdentity,
+    before_sha256: str,
     *,
-    expected_db_sha256: str | None = None,
     execute: bool = False,
     max_api_calls: int | None = None,
     coverage_year: int | None = None,
@@ -713,13 +797,7 @@ def run_investor_core_backfill(
     disk_probe: Callable[[Path], int] = _default_free_space_probe,
     settings_obj: object = settings,
 ) -> dict[str, Any]:
-    """Plan or execute a bounded annual investor-core backfill session."""
-    database = _resolve_regular_database(db_path)
-    identity = _capture_database_identity(database)
-    _validate_process_binding(database, settings_obj)
-    before_sha256 = _sha256_file(database)
-    _validate_expected_hash(expected_db_sha256, before_sha256, execute=execute)
-
+    """Run one already-bound annual investor-core backfill session."""
     if execute:
         if not isinstance(max_api_calls, int) or isinstance(max_api_calls, bool) or max_api_calls <= 0:
             raise _fail(
@@ -947,3 +1025,45 @@ def run_investor_core_backfill(
         "wal_checkpointed": wal_checkpointed,
     }
     return report
+
+
+def run_investor_core_backfill(
+    db_path: str | Path,
+    *,
+    expected_db_sha256: str | None = None,
+    execute: bool = False,
+    max_api_calls: int | None = None,
+    coverage_year: int | None = None,
+    threshold_pct: float = 95.0,
+    source_ready_only: bool = True,
+    planner_fn: Callable[..., dict[str, Any]] | None = None,
+    collector_fn: Callable[..., str] | None = None,
+    cache_checker: Callable[[str, int, int], bool] | None = None,
+    disk_probe: Callable[[Path], int] = _default_free_space_probe,
+    settings_obj: object = settings,
+) -> dict[str, Any]:
+    """Plan or execute a bounded annual investor-core backfill session."""
+    database = _resolve_regular_database(db_path)
+    identity = _capture_database_identity(database)
+    _validate_process_binding(database, settings_obj)
+    before_sha256 = _sha256_file(database)
+    _validate_expected_hash(expected_db_sha256, before_sha256, execute=execute)
+    execution_scope = (
+        _exclusive_execution_guard(identity) if execute else nullcontext()
+    )
+    with execution_scope:
+        return _run_investor_core_backfill_session(
+            database,
+            identity,
+            before_sha256,
+            execute=execute,
+            max_api_calls=max_api_calls,
+            coverage_year=coverage_year,
+            threshold_pct=threshold_pct,
+            source_ready_only=source_ready_only,
+            planner_fn=planner_fn,
+            collector_fn=collector_fn,
+            cache_checker=cache_checker,
+            disk_probe=disk_probe,
+            settings_obj=settings_obj,
+        )

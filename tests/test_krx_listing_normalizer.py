@@ -474,6 +474,30 @@ def test_safe_output_writer_rejects_preexisting_file_and_leaves_no_partial_outpu
     assert list(tmp_path.glob(".failed.csv.*.tmp")) == []
 
 
+def test_safe_output_writer_preserves_destination_won_after_precheck(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catch a check-to-link race overwriting or obscuring the winning file."""
+    from kreports.maintenance import krx_listing_normalizer as normalizer
+
+    output = tmp_path / "raced.csv"
+    winning_payload = b"concurrent winner"
+    original_link = normalizer.os.link
+
+    def install_winner_before_link(source, destination):
+        Path(destination).write_bytes(winning_payload)
+        return original_link(source, destination)
+
+    monkeypatch.setattr(normalizer.os, "link", install_winner_before_link)
+
+    with pytest.raises(FileExistsError, match="^output path already exists$"):
+        normalizer.write_normalized_listing_csv(output, b"losing payload")
+
+    assert output.read_bytes() == winning_payload
+    assert list(tmp_path.glob(".raced.csv.*.tmp")) == []
+
+
 def test_cli_normalizes_from_explicit_raw_and_db_paths_and_prints_json(tmp_path: Path):
     from kreports.cli.main import app
 

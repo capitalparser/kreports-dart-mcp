@@ -496,7 +496,10 @@ def write_normalized_listing_csv(output_path: str | Path, payload: bytes) -> Non
             temporary_file.write(payload)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        os.link(temporary_path, path)
+        try:
+            os.link(temporary_path, path)
+        except FileExistsError as exc:
+            raise FileExistsError("output path already exists") from exc
     finally:
         try:
             temporary_path.unlink()

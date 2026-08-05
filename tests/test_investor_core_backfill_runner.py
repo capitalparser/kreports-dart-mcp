@@ -1,8 +1,15 @@
 """Focused safety and request-budget tests for the bounded investor runner."""
 from __future__ import annotations
 
-import sqlite3
+import json
+import os
 from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import textwrap
+import threading
+import time
 
 import httpx
 import pytest
@@ -486,6 +493,201 @@ def _bind_runner_db(monkeypatch, runner, database: Path) -> None:
     monkeypatch.setattr(runner.settings, "db_url", f"sqlite:///{database}")
     monkeypatch.setattr(runner.settings, "dart_api_key", "fixture-key")
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+
+
+def test_runner_fails_closed_when_a_second_thread_enters_same_database(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catch removal of the process-local single-writer execution guard."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    _bind_runner_db(monkeypatch, runner, database)
+    expected_hash = runner._sha256_file(database)
+    holder_entered = threading.Event()
+    release_holder = threading.Event()
+    holder_reports: list[dict[str, object]] = []
+    holder_failures: list[BaseException] = []
+
+    def holder_collector(*_args, **_kwargs) -> str:
+        holder_entered.set()
+        if not release_holder.wait(timeout=10):
+            raise RuntimeError("fixture holder was not released")
+        return "success"
+
+    def run_holder() -> None:
+        try:
+            holder_reports.append(
+                runner.run_investor_core_backfill(
+                    database,
+                    execute=True,
+                    expected_db_sha256=expected_hash,
+                    max_api_calls=1,
+                    planner_fn=lambda *_args, **_kwargs: _runner_plan(),
+                    collector_fn=holder_collector,
+                    cache_checker=lambda *_args: False,
+                    disk_probe=lambda _path: 20 * 1024**3,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion evidence
+            holder_failures.append(exc)
+
+    holder = threading.Thread(target=run_holder, name="investor-runner-holder")
+    holder.start()
+    assert holder_entered.wait(timeout=10)
+    contender_calls: list[bool] = []
+    try:
+        with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+            runner.run_investor_core_backfill(
+                database,
+                execute=True,
+                expected_db_sha256=expected_hash,
+                max_api_calls=1,
+                planner_fn=lambda *_args, **_kwargs: _runner_plan(),
+                collector_fn=lambda *_args, **_kwargs: (
+                    contender_calls.append(True) or "success"
+                ),
+                cache_checker=lambda *_args: False,
+                disk_probe=lambda _path: 20 * 1024**3,
+            )
+    finally:
+        release_holder.set()
+        holder.join(timeout=10)
+
+    assert caught.value.code == "backfill_already_running"
+    assert contender_calls == []
+    assert not holder.is_alive()
+    assert holder_failures == []
+    assert [report["completed"] for report in holder_reports] == [True]
+
+
+def test_runner_fails_closed_when_a_second_process_enters_same_database(
+    tmp_path: Path,
+):
+    """Catch a process-local lock that permits two independent writers."""
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    ready = tmp_path / "holder.ready"
+    release = tmp_path / "holder.release"
+    project_root = Path(__file__).resolve().parents[1]
+    script = textwrap.dedent(
+        """
+        import json
+        import os
+        from pathlib import Path
+        import sys
+        import time
+
+        from kreports.maintenance import investor_core_backfill_runner as runner
+
+        database = Path(sys.argv[1])
+        role = sys.argv[2]
+        ready = Path(sys.argv[3])
+        release = Path(sys.argv[4])
+        runner.settings.db_url = f"sqlite:///{database}"
+        runner.settings.dart_api_key = "fixture-key"
+
+        plan = {
+            "coverage_year": 2025,
+            "denominator": 1,
+            "numerator": 0,
+            "target_numerator": 1,
+            "shortfall": 1,
+            "selected_companies": [{
+                "corp_code": "00000001",
+                "stock_code": "000001",
+                "source_ready": True,
+                "selected_years": [2025],
+            }],
+        }
+
+        def collector(*_args, **_kwargs):
+            if role == "holder":
+                ready.write_text("ready", encoding="utf-8")
+                deadline = time.monotonic() + 15
+                while not release.exists():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("fixture holder was not released")
+                    time.sleep(0.02)
+            return "success"
+
+        try:
+            report = runner.run_investor_core_backfill(
+                database,
+                execute=True,
+                expected_db_sha256=runner._sha256_file(database),
+                max_api_calls=1,
+                planner_fn=lambda *_args, **_kwargs: plan,
+                collector_fn=collector,
+                cache_checker=lambda *_args: False,
+                disk_probe=lambda _path: 20 * 1024**3,
+            )
+            print(json.dumps({"ok": True, "completed": report["completed"]}))
+        except runner.InvestorCoreBackfillError as exc:
+            print(json.dumps({"ok": False, "code": exc.code}))
+        """
+    )
+    environment = {
+        **os.environ,
+        "DB_URL": f"sqlite:///{database}",
+        "DART_API_KEY": "fixture-key",
+        "KREPORTS_RUNTIME_MODE": "collector",
+        "PYTHONPATH": str(project_root),
+    }
+    command = [
+        sys.executable,
+        "-c",
+        script,
+        str(database),
+        "holder",
+        str(ready),
+        str(release),
+    ]
+    holder = subprocess.Popen(
+        command,
+        cwd=project_root,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            if holder.poll() is not None:
+                stdout, stderr = holder.communicate()
+                pytest.fail(f"holder exited before entering collector: {stdout} {stderr}")
+            if time.monotonic() >= deadline:
+                pytest.fail("holder did not enter collector")
+            time.sleep(0.02)
+
+        contender = subprocess.run(
+            [*command[:3], str(database), "contender", str(ready), str(release)],
+            cwd=project_root,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert contender.returncode == 0, contender.stderr
+        contender_payload = json.loads(contender.stdout)
+        assert contender_payload == {
+            "ok": False,
+            "code": "backfill_already_running",
+        }
+    finally:
+        release.write_text("release", encoding="utf-8")
+        try:
+            holder_stdout, holder_stderr = holder.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            holder.terminate()
+            holder_stdout, holder_stderr = holder.communicate(timeout=10)
+
+    assert holder.returncode == 0, holder_stderr
+    assert json.loads(holder_stdout) == {"ok": True, "completed": True}
 
 
 def test_runner_rejects_process_db_binding_before_planner_or_collector(

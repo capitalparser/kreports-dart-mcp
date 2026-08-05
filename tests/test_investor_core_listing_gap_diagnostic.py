@@ -124,6 +124,111 @@ def test_holds_only_true_missing_targets_strictly_before_verified_listing_and_ke
     }
 
 
+def test_same_calendar_year_as_verified_listing_remains_actionable(
+    tmp_path,
+    monkeypatch,
+):
+    """Catch comparing only dates instead of the documented business-year boundary."""
+    diagnostic, database, listing, payload = _diagnose(tmp_path, monkeypatch)
+    plan = {
+        "coverage_year": 2025,
+        "threshold_pct": 100.0,
+        "denominator": 1,
+        "numerator": 0,
+        "target_numerator": 1,
+        "shortfall": 1,
+        "selected_companies": [{
+            "corp_code": "00000001",
+            "stock_code": "000001",
+            "corp_name": "One",
+            "selected_years": [2024],
+            "annual_filing_anchors": [],
+            "invalid_annual_anchor_years": [],
+            "missing_disclosure_metadata_years": [2024],
+            "source_ready": False,
+        }],
+    }
+    monkeypatch.setattr(
+        diagnostic,
+        "plan_investor_core_backfill",
+        lambda *_args, **_kwargs: plan,
+    )
+
+    report = diagnostic.diagnose_investor_core_listing_gaps(
+        database,
+        listing_csv=listing,
+        expected_listing_sha256=hashlib.sha256(payload).hexdigest(),
+        listing_as_of=date(2026, 8, 5),
+        expected_company_snapshot_sha256=_company_snapshot_checksum(),
+        coverage_year=2025,
+        threshold_pct=100,
+    )
+
+    assert report["held_pre_listing_true_missing_company_years"] == []
+    assert report["remaining_company_years"] == [{
+        "corp_code": "00000001",
+        "stock_code": "000001",
+        "bsns_year": 2024,
+    }]
+    assert report["zero_remaining_target_company_count"] == 0
+    assert report["remaining_shortfall"] == 1
+
+
+def test_prelisting_valid_and_invalid_anchors_never_enter_true_missing_hold(
+    tmp_path,
+    monkeypatch,
+):
+    """Catch applying listing relief to proven or explicitly invalid anchors."""
+    diagnostic, database, listing, payload = _diagnose(tmp_path, monkeypatch)
+    plan = {
+        "coverage_year": 2025,
+        "threshold_pct": 100.0,
+        "denominator": 1,
+        "numerator": 0,
+        "target_numerator": 1,
+        "shortfall": 1,
+        "selected_companies": [{
+            "corp_code": "00000001",
+            "stock_code": "000001",
+            "corp_name": "One",
+            "selected_years": [2023, 2022],
+            "annual_filing_anchors": [{"bsns_year": 2023}],
+            "invalid_annual_anchor_years": [2022],
+            "missing_disclosure_metadata_years": [],
+            "source_ready": False,
+        }],
+    }
+    monkeypatch.setattr(
+        diagnostic,
+        "plan_investor_core_backfill",
+        lambda *_args, **_kwargs: plan,
+    )
+
+    report = diagnostic.diagnose_investor_core_listing_gaps(
+        database,
+        listing_csv=listing,
+        expected_listing_sha256=hashlib.sha256(payload).hexdigest(),
+        listing_as_of=date(2026, 8, 5),
+        expected_company_snapshot_sha256=_company_snapshot_checksum(),
+        coverage_year=2025,
+        threshold_pct=100,
+    )
+
+    assert report["held_pre_listing_true_missing_company_years"] == []
+    assert report["valid_annual_anchor_company_years"] == [{
+        "corp_code": "00000001",
+        "stock_code": "000001",
+        "bsns_year": 2023,
+    }]
+    assert report["invalid_annual_anchor_company_years"] == [{
+        "corp_code": "00000001",
+        "stock_code": "000001",
+        "bsns_year": 2022,
+    }]
+    assert report["remaining_company_year_count"] == 2
+    assert report["zero_remaining_target_company_count"] == 0
+
+
 def test_rejects_tampered_or_nonbinding_listing_input_before_planner_call(tmp_path, monkeypatch):
     diagnostic, database, listing, payload = _diagnose(tmp_path, monkeypatch)
 
