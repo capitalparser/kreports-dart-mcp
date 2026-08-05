@@ -2594,6 +2594,9 @@ def diagnose_investor_core_listing_gaps_cmd(
 _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "database_unavailable": "database is unavailable or not a regular SQLite file",
     "database_symlink_rejected": "database path must not contain symlinks",
+    "database_hardlink_rejected": "데이터베이스 파일은 하드링크가 하나만 허용됩니다",
+    "database_identity_changed": "실행 중 데이터베이스 파일 식별자가 변경되었습니다",
+    "database_connection_identity_mismatch": "데이터베이스 연결이 요청한 파일과 일치하지 않습니다",
     "database_binding_mismatch": "--db does not match the configured process database",
     "expected_db_sha256_required": "--expected-db-sha256 is required with --execute",
     "invalid_expected_db_sha256": "expected database SHA-256 is invalid",
@@ -2614,6 +2617,7 @@ _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "dart_transport_failure": "DART transport or HTTP failure",
     "collector_failure": "bounded collector failed",
     "evidence_collection_failed": "post-run evidence could not be collected",
+    "durability_checkpoint_failed": "SQLite WAL 내구성 체크포인트를 완료하지 못했습니다",
 }
 
 

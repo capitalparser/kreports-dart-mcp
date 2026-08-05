@@ -40,6 +40,7 @@ from kreports.runtime import require_collector_mode
 REPORT_SCHEMA = "investor_core_backfill_report"
 REPORT_VERSION = 1
 TARGET_SAMPLE_LIMIT = 20
+TARGET_QUERY_BATCH_SIZE = 250
 MIN_FREE_SPACE_BYTES = 10 * 1024**3
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 _WRITER_BIND_LOCK = threading.RLock()
@@ -477,29 +478,56 @@ def _target_where(targets: list[_Target], year_column: str) -> tuple[str, tuple[
     return " OR ".join(clauses), tuple(parameters)
 
 
+def _target_batches(targets: list[_Target]) -> Iterator[list[_Target]]:
+    """Keep each SQLite company-year predicate below expression limits."""
+    for start in range(0, len(targets), TARGET_QUERY_BATCH_SIZE):
+        yield targets[start:start + TARGET_QUERY_BATCH_SIZE]
+
+
+def _batched_relevant_row_count(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    fixed_where: str,
+    targets: list[_Target],
+    year_column: str,
+) -> int:
+    """Sum disjoint target batches so a row can contribute at most once."""
+    total = 0
+    for batch in _target_batches(targets):
+        target_where, target_parameters = _target_where(batch, year_column)
+        total += _count_rows(
+            connection,
+            table,
+            f"{fixed_where} AND ({target_where})",
+            target_parameters,
+        )
+    return total
+
+
 def _relevant_row_counts(database: Path, targets: list[_Target]) -> dict[str, int]:
     with _read_only_connection(database) as connection:
-        financial_where, financial_params = _target_where(targets, "year")
-        fact_where, fact_params = _target_where(targets, "bsns_year")
-        fetch_where, fetch_params = _target_where(targets, "year")
         return {
-            "financials": _count_rows(
+            "financials": _batched_relevant_row_count(
                 connection,
-                "financials",
-                f"quarter = 4 AND ({financial_where})",
-                financial_params,
+                table="financials",
+                fixed_where="quarter = 4",
+                targets=targets,
+                year_column="year",
             ),
-            "financial_facts": _count_rows(
+            "financial_facts": _batched_relevant_row_count(
                 connection,
-                "financial_facts",
-                f"reprt_code = '11011' AND ({fact_where})",
-                fact_params,
+                table="financial_facts",
+                fixed_where="reprt_code = '11011'",
+                targets=targets,
+                year_column="bsns_year",
             ),
-            "fetch_log": _count_rows(
+            "fetch_log": _batched_relevant_row_count(
                 connection,
-                "fetch_log",
-                f"task_type = 'financial' AND quarter = 4 AND ({fetch_where})",
-                fetch_params,
+                table="fetch_log",
+                fixed_where="task_type = 'financial' AND quarter = 4",
+                targets=targets,
+                year_column="year",
             ),
         }
 

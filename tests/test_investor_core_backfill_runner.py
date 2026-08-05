@@ -268,6 +268,47 @@ def test_runner_dry_run_does_not_create_sqlite_sidecars(
     assert not Path(f"{database}-journal").exists()
 
 
+def test_relevant_row_counts_batches_more_than_a_thousand_targets_without_double_counting(
+    tmp_path: Path,
+):
+    """Each target is counted once even when the query must be split for SQLite."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    target_count = 1_201
+    targets = [
+        runner._Target(f"{index:08d}", f"{index:06d}", 2025)
+        for index in range(1, target_count + 1)
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE financials (corp_code TEXT, year INTEGER, quarter INTEGER);
+            CREATE TABLE financial_facts (corp_code TEXT, bsns_year INTEGER, reprt_code TEXT);
+            CREATE TABLE fetch_log (task_type TEXT, corp_code TEXT, year INTEGER, quarter INTEGER);
+            """
+        )
+        connection.executemany(
+            "INSERT INTO financials VALUES (?, ?, ?)",
+            [(target.corp_code, target.year, 4) for target in targets],
+        )
+        connection.executemany(
+            "INSERT INTO financial_facts VALUES (?, ?, ?)",
+            [(target.corp_code, target.year, "11011") for target in targets],
+        )
+        connection.executemany(
+            "INSERT INTO fetch_log VALUES (?, ?, ?, ?)",
+            [("financial", target.corp_code, target.year, 4) for target in targets],
+        )
+        connection.execute("INSERT INTO financials VALUES ('99999999', 2025, 4)")
+
+    assert runner._relevant_row_counts(database, targets) == {
+        "financials": target_count,
+        "financial_facts": target_count,
+        "fetch_log": target_count,
+    }
+
+
 def test_runner_executes_sorted_source_ready_annual_q4_targets_once_and_skips_cache(
     tmp_path: Path,
     monkeypatch,
