@@ -2615,6 +2615,8 @@ def diagnose_credential_leaks_cmd(
 
 
 _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
+    "backfill_already_running": "다른 투자자 핵심 백필이 이미 실행 중입니다",
+    "single_writer_guard_unavailable": "단일 실행 잠금을 확보할 수 없어 투자자 핵심 백필을 시작하지 않았습니다",
     "database_unavailable": "database is unavailable or not a regular SQLite file",
     "database_symlink_rejected": "database path must not contain symlinks",
     "database_hardlink_rejected": "데이터베이스 파일은 하드링크가 하나만 허용됩니다",

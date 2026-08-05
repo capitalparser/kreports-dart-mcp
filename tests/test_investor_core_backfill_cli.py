@@ -85,6 +85,8 @@ def test_run_investor_core_backfill_emits_explicit_korean_safety_messages(
     database = tmp_path / "runner.db"
     database.touch()
     expected_messages = {
+        "backfill_already_running": "다른 투자자 핵심 백필이 이미 실행 중입니다",
+        "single_writer_guard_unavailable": "단일 실행 잠금을 확보할 수 없어 투자자 핵심 백필을 시작하지 않았습니다",
         "database_hardlink_rejected": "데이터베이스 파일은 하드링크가 하나만 허용됩니다",
         "database_identity_changed": "실행 중 데이터베이스 파일 식별자가 변경되었습니다",
         "database_connection_identity_mismatch": "데이터베이스 연결이 요청한 파일과 일치하지 않습니다",
