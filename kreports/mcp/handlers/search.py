@@ -100,6 +100,7 @@ def handle_search_dataset(args: SearchDatasetInput) -> dict:
 
 _DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
 _MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS = 200
+_MAX_NOTE_DISCLOSURE_COMPANY_MATCHED_YEARS = 10
 _MAX_NOTE_CONFIRMED_FACTS = 20
 _SOURCE_REQUIRED_SEARCH_DATASETS = {
     "source_documents",
@@ -312,12 +313,29 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
             (item for item in records if item.get("canonical_source_binding")),
             None,
         )
+        matched_years = sorted({
+            int(item["year"])
+            for item in records
+            if isinstance(item.get("year"), int)
+        }, reverse=True)[:_MAX_NOTE_DISCLOSURE_COMPANY_MATCHED_YEARS]
+        query_year = query.get("year")
+        canonical_note_title = None
+        canonical_note_title_truncated = False
+        if canonical_record is not None:
+            normalized_title = re.sub(
+                r"\s+", " ", str(canonical_record.get("note_title") or ""),
+            ).strip()
+            canonical_note_title_truncated = len(normalized_title) > 160
+            canonical_note_title = normalized_title[:160] or None
         companies.append({
             "corp_code": corp_code,
             "corp_name": company.get("corp_name"),
             "market": company.get("market"),
             "induty_code": company.get("induty_code"),
-            "year": query.get("year"),
+            "year": query_year if query_year is not None else (
+                matched_years[0] if matched_years else None
+            ),
+            "matched_years": matched_years,
             "match_status": (
                 "verified_annual_filing_match"
                 if canonical_record is not None else "unverified_cache_match"
@@ -327,11 +345,17 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
                 canonical_record.get("rcept_no") if canonical_record is not None else None
             ),
             "canonical_note_title": (
-                canonical_record.get("note_title") if canonical_record is not None else None
+                canonical_note_title
             ),
+            "canonical_note_title_truncated": canonical_note_title_truncated,
         })
-        if len(companies) >= _MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS:
-            break
+    companies.sort(key=lambda item: (
+        item["match_status"] != "verified_annual_filing_match",
+        str(item.get("market") or ""),
+        str(item.get("corp_name") or ""),
+        str(item.get("corp_code") or ""),
+    ))
+    companies = companies[:_MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS]
     return {
         "scope": {
             "keyword": query.get("keyword"),

@@ -2334,6 +2334,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 "market": item.get("market"),
                 "induty_code": item.get("induty_code"),
                 "year": item.get("year"),
+                "matched_years": item.get("matched_years"),
                 "match_status": item.get("match_status"),
                 "note_title": item.get("canonical_note_title"),
                 "rcept_no": item.get("canonical_rcept_no"),
@@ -2343,7 +2344,8 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
             "회사별 회계주석 캐시 일치",
             [
                 ("company", "회사"), ("market", "시장"), ("induty_code", "업종"),
-                ("year", "연도"), ("match_status", "일치 상태"),
+                ("year", "표시 연도"), ("matched_years", "일치 연도"),
+                ("match_status", "일치 상태"),
                 ("note_title", "검증 주석"), ("rcept_no", "검증 접수번호"),
             ],
             matrix_rows,

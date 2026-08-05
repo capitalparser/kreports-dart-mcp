@@ -148,8 +148,10 @@ def test_note_search_company_matrix_requires_canonical_annual_source_binding(tem
     assert by_code["90000001"] == {
         "corp_code": "90000001", "corp_name": "Verified", "market": "KOSPI",
         "induty_code": "264", "year": 2025,
+        "matched_years": [2025],
         "match_status": "verified_annual_filing_match", "record_count": 1,
         "canonical_rcept_no": "20260312000001", "canonical_note_title": "재고자산",
+        "canonical_note_title_truncated": False,
     }
     for corp_code in ("90000002", "90000003", "90000004"):
         assert by_code[corp_code]["match_status"] == "unverified_cache_match"

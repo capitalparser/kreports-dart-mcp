@@ -226,8 +226,8 @@ def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table
         "is_exhaustive": False,
         "limitations": ["캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아닙니다."],
         "companies": [
-            {"corp_code": "00999999", "corp_name": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "verified_annual_filing_match", "record_count": 1, "canonical_rcept_no": "20250312000001", "canonical_note_title": "재고자산"},
-            {"corp_code": "00999998", "corp_name": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "unverified_cache_match", "record_count": 2, "canonical_rcept_no": None, "canonical_note_title": None},
+            {"corp_code": "00999999", "corp_name": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "record_count": 1, "canonical_rcept_no": "20250312000001", "canonical_note_title": "재고자산"},
+            {"corp_code": "00999998", "corp_name": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "record_count": 2, "canonical_rcept_no": None, "canonical_note_title": None},
         ],
     }
 
@@ -239,8 +239,91 @@ def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table
     }
     table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
     assert table["rows"] == [
-        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "verified_annual_filing_match", "note_title": "재고자산", "rcept_no": "20250312000001"},
-        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "unverified_cache_match", "note_title": None, "rcept_no": None},
+        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "note_title": "재고자산", "rcept_no": "20250312000001"},
+        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "note_title": None, "rcept_no": None},
+    ]
+
+
+def test_note_company_matrix_uses_latest_matched_year_when_query_year_is_omitted():
+    """An unscoped reverse search must retain each company's returned year coverage."""
+    records = [
+        {
+            "year": year,
+            "note_no": "1",
+            "note_title": "재고자산",
+            "rcept_no": receipt,
+            "source_document_id": index + 1,
+            "source_document_rcept_no": receipt,
+            "source_document_corp_code": "00999999",
+            "source_document_bsns_year": year,
+            "source_document_report_nm": f"사업보고서 ({year}.12)",
+            "disclosure_rcept_no": receipt,
+            "disclosure_corp_code": "00999999",
+            "disclosure_disc_date": f"{year + 1}-03-12",
+            "disclosure_report_nm": f"사업보고서 ({year}.12)",
+            "match_excerpts": [_MATCHED_EXCERPT],
+        }
+        for index, (year, receipt) in enumerate([
+            (2023, "20240312000001"),
+            (2025, "20260312000001"),
+        ])
+    ]
+    result = _enrich_accounting_note_search({
+        "query": {"dataset": "accounting_note_chapters", "keyword": "재고자산", "limit": 50},
+        "companies": [{
+            "corp_code": "00999999", "corp_name": "테스트회사", "market": "KOSPI",
+            "induty_code": "264", "record_count": 2, "records": records,
+        }],
+        "data_quality": {"status": "usable", "source": "accounting_note_chapters"},
+    })
+
+    company = result["note_disclosure_company_matrix"]["companies"][0]
+    assert company["year"] == 2025
+    assert company["matched_years"] == [2025, 2023]
+
+
+def test_note_company_matrix_prioritizes_verified_companies_and_bounds_titles():
+    """A long canonical title or cache-only match must not dominate the matrix UI."""
+    def record(*, corp_code: str, title: str, receipt: str, verified: bool) -> dict:
+        return {
+            "year": 2025,
+            "note_no": "1",
+            "note_title": title,
+            "rcept_no": receipt,
+            "source_document_id": 1 if verified else None,
+            "source_document_rcept_no": receipt if verified else None,
+            "source_document_corp_code": corp_code if verified else None,
+            "source_document_bsns_year": 2025 if verified else None,
+            "source_document_report_nm": "사업보고서 (2025.12)" if verified else None,
+            "disclosure_rcept_no": receipt if verified else None,
+            "disclosure_corp_code": corp_code if verified else None,
+            "disclosure_disc_date": "2025-03-12" if verified else None,
+            "disclosure_report_nm": "사업보고서 (2025.12)" if verified else None,
+            "match_excerpts": [_MATCHED_EXCERPT],
+        }
+
+    result = _enrich_accounting_note_search({
+        "query": {"dataset": "accounting_note_chapters", "keyword": "재고자산", "year": 2025, "limit": 50},
+        "companies": [
+            {"corp_code": "00000001", "corp_name": "AAA cache", "market": "KOSPI", "induty_code": "264", "record_count": 1, "records": [record(corp_code="00000001", title="캐시 제목", receipt="20250312000001", verified=False)]},
+            {"corp_code": "00000002", "corp_name": "Alpha verified", "market": "KOSDAQ", "induty_code": "264", "record_count": 1, "records": [record(corp_code="00000002", title="  정상   제목  ", receipt="20250312000002", verified=True)]},
+            {"corp_code": "00000003", "corp_name": "Zulu verified", "market": "KOSPI", "induty_code": "264", "record_count": 1, "records": [record(corp_code="00000003", title="가" * 161, receipt="20250312000003", verified=True)]},
+        ],
+        "data_quality": {"status": "usable", "source": "accounting_note_chapters"},
+    })
+
+    companies = result["note_disclosure_company_matrix"]["companies"]
+    assert [item["corp_code"] for item in companies] == ["00000002", "00000003", "00000001"]
+    assert companies[0]["canonical_note_title"] == "정상 제목"
+    assert companies[0]["canonical_note_title_truncated"] is False
+    assert companies[1]["canonical_note_title"] == "가" * 160
+    assert companies[1]["canonical_note_title_truncated"] is True
+
+    pack = build_answer_pack("search_dataset", result)
+    assert pack is not None
+    table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
+    assert [row["note_title"] for row in table["rows"]] == [
+        "정상 제목", "가" * 160, None,
     ]
 
 
