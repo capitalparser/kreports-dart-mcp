@@ -148,10 +148,12 @@ def handle_compare_peer_accounting_policies(
             peer_criteria=args.peer_criteria,
             _peer_group=peer_group,
         )
-    if args.include_note_comparison or args.note_topics:
+    # A disclosure matrix is the public presentation of this intermediate
+    # comparison.  Returning both repeats rows and excerpts in one response.
+    if (args.include_note_comparison or args.note_topics) and not args.include_note_disclosure_matrix:
         result["note_comparison"] = note_comparison
     if args.include_note_disclosure_matrix:
-        result["note_disclosure_matrix"] = build_note_disclosure_matrix(
+        note_disclosure_matrix = build_note_disclosure_matrix(
             company=company,
             year=args.year,
             topics=args.note_topics,
@@ -163,6 +165,11 @@ def handle_compare_peer_accounting_policies(
             _peer_group=peer_group,
             _comparison=note_comparison,
         )
+        if isinstance(note_disclosure_matrix, dict) and "error" not in note_disclosure_matrix:
+            note_disclosure_matrix.setdefault("source_truncation", {})[
+                "comparison_payload_omitted_for_matrix"
+            ] = True
+        result["note_disclosure_matrix"] = note_disclosure_matrix
     return result
 
 

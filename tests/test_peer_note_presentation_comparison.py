@@ -208,8 +208,76 @@ def test_consolidated_note_and_matrix_requests_transpose_one_note_comparison(mon
     )
 
     assert len(note_comparison_calls) == 1
-    assert result["note_comparison"] is comparison
+    assert "note_comparison" not in result
     assert result["note_disclosure_matrix"]["read_only"] is True
+
+
+def test_matrix_handler_bounds_the_combined_public_result_and_answer_pack(monkeypatch):
+    """A 9-topic x 200-company matrix cannot bypass the public output budget."""
+    from kreports.analysis.note_comparison import MAX_NOTE_COMPARISON_OUTPUT_BYTES
+    from kreports.mcp.handlers import auditor
+
+    topics = [
+        "revenue", "leases", "financial_instruments", "related_parties",
+        "provisions_contingencies", "impairment", "subsidiaries",
+        "subsequent_events", "accounting_policies",
+    ]
+    rows = [
+        {
+            "company": {"corp_code": f"{index:08d}", "corp_name": f"Peer {index}"},
+            "availability": "available",
+            "topic_match_status": "matched",
+            "value_or_excerpt": "근거본문 " * 400,
+            "match_keyword": "근거본문",
+            "match_location": "body",
+            "match_strength": "body_single_signal_reference",
+            "matched_keyword_count": 1,
+            "match_offset": 0,
+            "rcept_no": None,
+            "provenance_status": "proven_annual_filing",
+            "canonical_source_binding": True,
+            "source_locator": f"accounting_note_chapters:{index}",
+            "source_document_id": index + 1,
+            "source_type": "business_report",
+            "fs_div": "CFS",
+            "fs_div_selection": {"used": "CFS"},
+        }
+        for index in range(200)
+    ]
+    comparison = {
+        "year": 2024,
+        "subject": {"corp_code": "00000000", "corp_name": "Subject"},
+        "selection_policy": {},
+        "pagination": {
+            "offset": 0, "page_size": 199, "peer_limit": 199,
+            "total_peer_count": 199, "available_peer_count": 199,
+            "returned_peer_count": 199, "has_more": False,
+        },
+        "truncation": {"applied": False, "output_budget_applied": False},
+        "topics": [{"topic": topic, "rows": rows} for topic in topics],
+        "read_only": True,
+    }
+    monkeypatch.setattr(auditor, "resolve_company", lambda company: company)
+    monkeypatch.setattr(auditor, "compare_peer_accounting_policies", lambda *args, **kwargs: {
+        "subject": comparison["subject"],
+        "data_quality": {"status": "limited"},
+        "_note_comparison_peer_group": {"subject": comparison["subject"], "peers": []},
+    })
+    monkeypatch.setattr(auditor, "compare_peer_accounting_notes", lambda **kwargs: comparison)
+
+    result = auditor.handle_compare_peer_accounting_policies(
+        ComparePeerAccountingPoliciesInput(
+            company="00000000", year=2024, peer_limit=200, page_size=200,
+            include_note_comparison=True, include_note_disclosure_matrix=True,
+        )
+    )
+    pack = build_answer_pack("compare_peer_accounting_policies", result)
+
+    assert "note_comparison" not in result
+    assert result["note_disclosure_matrix"]["is_complete"] is False
+    assert result["note_disclosure_matrix"]["omitted_company_topic_rows"] > 0
+    assert result["note_disclosure_matrix"]["source_truncation"]["matrix_output_budget_applied"] is True
+    assert len(json.dumps({"result": result, "answer_pack": pack}, ensure_ascii=False).encode()) <= MAX_NOTE_COMPARISON_OUTPUT_BYTES
 
 
 def test_peer_policy_input_rejects_conflicting_overrides_and_unknown_weight():

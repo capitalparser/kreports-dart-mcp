@@ -116,6 +116,39 @@ def test_note_disclosure_matrix_groups_companies_by_topic_without_claiming_unava
     assert unavailable["disclosure_assessment"] == "not_assessed"
 
 
+def test_note_disclosure_matrix_never_promotes_a_topic_match_without_canonical_annual_binding(temp_engine):
+    """A stale or foreign annual-source binding cannot become local disclosure evidence."""
+    from kreports.analysis.note_comparison import build_note_disclosure_matrix
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="Subject", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            # This is a same-receipt cache row, but not an annual source binding.
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="분기보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스부채를 현재가치로 측정합니다."),
+        ])
+
+    result = build_note_disclosure_matrix(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [],
+            "selection_policy": {"selection_mode": "adaptive"},
+        },
+        _read_engine=temp_engine,
+    )
+
+    cell = result["topics"][0]["companies"][0]
+    assert cell["status"] == "summary_only_unverified"
+    assert cell["canonical_source_binding"] is False
+    assert cell["rcept_no"] is None
+    assert cell["source_locator"] is None
+    assert cell["disclosure_assessment"] == "not_assessed"
+
+
 def test_note_disclosure_matrix_uses_supplied_comparison_and_labels_subject_plus_peers_cap(temp_engine, monkeypatch):
     from kreports.analysis import note_comparison
 
@@ -185,7 +218,15 @@ def test_note_disclosure_matrix_exposes_budget_omissions_and_returned_row_rate_s
     assert result["requested_company_count"] == 200
     assert result["available_company_count"] == 221
     assert result["omitted_company_topic_rows"] == 197
-    assert result["source_truncation"] == comparison["truncation"]
+    assert {
+        key: result["source_truncation"][key]
+        for key in comparison["truncation"]
+    } == comparison["truncation"]
+    assert result["source_truncation"]["matrix_output_budget_applied"] is False
+    assert (
+        result["source_truncation"]["matrix_output_bytes"]
+        <= result["source_truncation"]["matrix_max_output_bytes"]
+    )
     assert result["rate_scope"] == "returned_topic_rows"
     assert result["topics"][0]["local_evidence_rate"]["scope"] == "returned_topic_rows"
     assert "returned topic rows" in result["limitations"][0]

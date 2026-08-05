@@ -28,6 +28,9 @@ _STANDARD_FS_DIVS = ("CFS", "OFS")
 _MAX_RAW_TEXT_OUTPUT_CHARS = 96
 _MAX_COMPARISON_TEXT_OUTPUT_CHARS = 4_000
 MAX_NOTE_COMPARISON_OUTPUT_BYTES = 100_000
+# The matrix is returned alongside the renderer answer pack.  It intentionally
+# gets a smaller budget so the composed public response remains bounded.
+MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES = 25_000
 _TOPIC_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
     # A heading named simply "수익" or "매출" is meaningful.  In a body those
     # words also occur in boilerplate (for example "자산·부채 및 수익·비용"),
@@ -496,6 +499,98 @@ def _apply_output_budget(result: dict) -> dict:
     )
 
 
+def _refresh_matrix_topic_rate(topic: dict, *, budget_omitted: int) -> None:
+    """Recalculate returned-row coverage after matrix-only row omission."""
+    companies = topic["companies"]
+    matched_count = sum(
+        cell["status"] in {"disclosed", "summary_only"} for cell in companies
+    )
+    all_company_count = len(companies)
+    reviewable_company_count = sum(
+        cell["status"] in {
+            "disclosed", "summary_only", "not_found_in_cached_scope",
+        }
+        for cell in companies
+    )
+    rate = topic["local_evidence_rate"]
+    rate.update({
+        "numerator": matched_count,
+        "denominator": all_company_count,
+        "pct": round(100.0 * matched_count / all_company_count, 1) if all_company_count else 0.0,
+        "reviewable_denominator": reviewable_company_count,
+        "unavailable_count": all_company_count - reviewable_company_count,
+        "matched_count": matched_count,
+        "all_company_count": all_company_count,
+        "reviewable_company_count": reviewable_company_count,
+        "matched_within_reviewable_pct": (
+            round(100.0 * matched_count / reviewable_company_count, 1)
+            if reviewable_company_count else 0.0
+        ),
+        "represented_company_count": all_company_count,
+        "omitted_company_topic_rows": int(rate.get("omitted_company_topic_rows") or 0)
+        + budget_omitted,
+    })
+
+
+def _apply_matrix_output_budget(matrix: dict) -> dict:
+    """Bound the public matrix without dropping the subject's topic cells.
+
+    The full comparison is an intermediate object when a matrix is requested.
+    Matrix cells therefore carry small source references rather than duplicated
+    note excerpts, and peer cells are omitted deterministically if needed.
+    """
+    source_truncation = matrix["source_truncation"]
+    source_truncation.update({
+        "matrix_output_budget_applied": False,
+        "matrix_max_output_bytes": MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES,
+        "matrix_output_bytes": 0,
+    })
+    if _output_bytes(matrix) <= MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES:
+        source_truncation["matrix_output_bytes"] = _output_bytes(matrix)
+        return matrix
+
+    subject = (matrix.get("cohort_definition") or {}).get("subject") or {}
+    subject_code = str(subject.get("corp_code") or "")
+    budget_omitted_by_topic = {id(topic): 0 for topic in matrix["topics"]}
+    source_truncation.update({
+        "matrix_output_budget_applied": True,
+        "matrix_output_budget_reason": "note_disclosure_matrix_output_budget",
+    })
+    matrix["is_complete"] = False
+
+    while _output_bytes(matrix) > MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES:
+        candidates = []
+        for topic in matrix["topics"]:
+            removable_indexes = [
+                index
+                for index, cell in enumerate(topic["companies"])
+                if str((cell.get("company") or {}).get("corp_code") or "") != subject_code
+            ]
+            if removable_indexes:
+                candidates.append((topic, removable_indexes[-1]))
+        if not candidates:
+            break
+        topic, index = max(candidates, key=lambda item: len(item[0]["companies"]))
+        topic["companies"].pop(index)
+        budget_omitted_by_topic[id(topic)] += 1
+
+    for topic in matrix["topics"]:
+        _refresh_matrix_topic_rate(
+            topic, budget_omitted=budget_omitted_by_topic[id(topic)],
+        )
+    matrix["omitted_company_topic_rows"] = sum(
+        int(topic["local_evidence_rate"].get("omitted_company_topic_rows") or 0)
+        for topic in matrix["topics"]
+    )
+    matrix["represented_company_count"] = len({
+        str((cell.get("company") or {}).get("corp_code") or "")
+        for topic in matrix["topics"]
+        for cell in topic["companies"]
+    })
+    source_truncation["matrix_output_bytes"] = _output_bytes(matrix)
+    return matrix
+
+
 def _select_note_row(
     rows: list[dict],
     requested_fs_div: str | None,
@@ -684,6 +779,7 @@ def compare_peer_accounting_notes(
             if row:
                 raw_fields = _raw_text_fields(row["body"])
                 raw_fields.update(_topic_context_fields(row["body"], row["_topic_match"]))
+                verified_annual_note_cache = bool(row["canonical_source_binding"])
                 evidence_documents, evidence_documents_truncated = _bound_evidence_documents(
                     evidence_by_code.get(code, []), row["rcept_no"] or row["cached_rcept_no"],
                 )
@@ -692,9 +788,15 @@ def compare_peer_accounting_notes(
                     "value_or_excerpt": raw_fields["comparison_text"],
                     **raw_fields,
                     "availability": _availability(row),
-                    "source_locator": f"accounting_note_chapters:{row['id']}",
-                    "source_document_id": row.get("source_document_id"),
-                    "source_type": row.get("source_type"),
+                    "source_locator": (
+                        f"accounting_note_chapters:{row['id']}"
+                        if verified_annual_note_cache else None
+                    ),
+                    "source_document_id": (
+                        row.get("source_document_id")
+                        if verified_annual_note_cache else None
+                    ),
+                    "source_type": row.get("source_type") if verified_annual_note_cache else None,
                     "rcept_no": row["rcept_no"],
                     "cached_rcept_no": row.get("cached_rcept_no"),
                     "provenance_status": row["provenance_status"],
@@ -714,11 +816,21 @@ def compare_peer_accounting_notes(
                     "full_text_hash": row["full_text_hash"],
                     "full_text_length": row["full_text_length"],
                     "full_text_storage_status": row["full_text_storage_status"],
-                    "evidence_documents": evidence_documents,
-                    "evidence_documents_truncated": evidence_documents_truncated,
-                    "comparison_note": "cached_note_present",
-                    "verified_annual_note_cache": True,
-                    "topic_match_status": "matched",
+                    "evidence_documents": (
+                        evidence_documents if verified_annual_note_cache else []
+                    ),
+                    "evidence_documents_truncated": (
+                        evidence_documents_truncated if verified_annual_note_cache else False
+                    ),
+                    "comparison_note": (
+                        "cached_note_present" if verified_annual_note_cache
+                        else "topic_match_without_verified_annual_source"
+                    ),
+                    "verified_annual_note_cache": verified_annual_note_cache,
+                    "topic_match_status": (
+                        "matched" if verified_annual_note_cache
+                        else "summary_only_unverified"
+                    ),
                 })
             else:
                 verified_scope_rows = verified_notes_by_code.get(code, [])
@@ -975,18 +1087,27 @@ def build_note_disclosure_matrix(
                     "available": "disclosed",
                     "summary_only": "summary_only",
                 }.get(availability, "unavailable_raw"),
+                "summary_only_unverified": "summary_only_unverified",
+                "unavailable_unverified": "unavailable_unverified",
                 "not_found_in_cached_scope": "not_found_in_cached_scope",
                 "unavailable_raw": "unavailable_raw",
             }[row.get("topic_match_status", "matched")]
-            unavailable = status == "unavailable_raw"
+            unverified = status in {"summary_only_unverified", "unavailable_unverified"}
+            unavailable = status in {"unavailable_raw", "unavailable_unverified"}
             companies.append({
-                "company": company_row,
+                "company": {
+                    "corp_code": company_row.get("corp_code"),
+                    "corp_name": company_row.get("corp_name"),
+                },
                 "status": status,
-                "note_title": row.get("note_title"),
-                "excerpt": row.get("value_or_excerpt"),
+                "note_title": str(row.get("note_title") or "")[:160] or None,
+                # The comparison payload contains excerpts.  A matrix is a
+                # compact availability/provenance view, so retain references
+                # instead of copying body text into the final response twice.
+                "excerpt": None,
                 "match_evidence": {
-                    "keyword": row.get("match_keyword"),
-                    "location": row.get("match_location"),
+                    "keyword": str(row.get("match_keyword") or "")[:120] or None,
+                    "location": str(row.get("match_location") or "")[:80] or None,
                     "strength": row.get("match_strength"),
                     "matched_keyword_count": row.get("matched_keyword_count"),
                     "offset": row.get("match_offset"),
@@ -994,7 +1115,7 @@ def build_note_disclosure_matrix(
                 "rcept_no": row.get("rcept_no"),
                 "provenance_status": row.get("provenance_status"),
                 "canonical_source_binding": row.get("canonical_source_binding"),
-                "source_locator": row.get("source_locator"),
+                "source_locator": str(row.get("source_locator") or "")[:240] or None,
                 "source_document_id": row.get("source_document_id"),
                 "source_type": row.get("source_type"),
                 "fs_div": row.get("fs_div"),
@@ -1002,14 +1123,16 @@ def build_note_disclosure_matrix(
                 "raw_availability": (
                     "locally_available" if status == "disclosed"
                     else "summary_only" if status == "summary_only"
+                    else "locally_available_unverified" if status == "summary_only_unverified"
                     else "verified_annual_note_cache" if status == "not_found_in_cached_scope"
                     else "not_locally_available"
                 ),
                 "unavailable_reason": (
-                    "local_topic_cache_missing" if unavailable else None
+                    "unverified_annual_source_binding" if unverified
+                    else "local_topic_cache_missing" if unavailable else None
                 ),
                 "disclosure_assessment": (
-                    "not_assessed" if unavailable
+                    "not_assessed" if unavailable or unverified
                     else "topic_not_found_in_cached_scope_not_non_disclosure"
                     if status == "not_found_in_cached_scope"
                     else "matched_local_topic_evidence"
@@ -1070,7 +1193,7 @@ def build_note_disclosure_matrix(
         if isinstance(available_peer_count, int) and available_peer_count >= 0
         else len(represented_company_codes)
     )
-    return {
+    matrix = {
         "year": comparison["year"],
         "cohort_definition": {
             "subject": comparison.get("subject"),
@@ -1098,3 +1221,4 @@ def build_note_disclosure_matrix(
             "A matrix contains the subject plus at most 199 peers, so a response never exceeds 200 companies.",
         ],
     }
+    return _apply_matrix_output_budget(matrix)
