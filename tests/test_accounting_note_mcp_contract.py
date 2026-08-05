@@ -1,7 +1,7 @@
 import json
-from datetime import datetime
+from datetime import date, datetime
 
-from kreports.db.models import AccountingNoteChapter, Company
+from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
 from kreports.mcp.dispatch import dispatch_tool
 from kreports.mcp.tools import call_tool
 
@@ -19,6 +19,23 @@ def _seed_note(
             stock_code="000001",
             corp_name="주석테스트",
             market="KOSPI",
+        ))
+        session.add(Disclosure(
+            rcept_no=rcept_no,
+            corp_code="00000001",
+            corp_name="주석테스트",
+            disc_date=date(2025, 3, 12),
+            disc_type="A",
+            report_nm="사업보고서 (2024.12)",
+        ))
+        session.add(SourceDocument(
+            rcept_no=rcept_no,
+            corp_code="00000001",
+            bsns_year=2024,
+            source_type="business_report",
+            report_nm="사업보고서 (2024.12)",
+            raw_content="<xml/>",
+            doc_hash="a" * 40,
         ))
         session.add(AccountingNoteChapter(
             corp_code="00000001",
