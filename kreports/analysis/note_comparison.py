@@ -1,6 +1,7 @@
 """Read-only, side-by-side accounting-note comparison over one peer cohort."""
 from __future__ import annotations
 
+from bisect import bisect_left
 import html
 import hashlib
 import json
@@ -35,11 +36,13 @@ _TOPIC_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "수익인식", "수익을 인식", "고객과의 계약", "수행의무",
         "거래가격", "매출을 인식", "매출액을 인식", "수익", "매출",
     ),
-    "leases": ("리스", "사용권자산"),
+    "leases": ("사용권자산", "리스부채", "리스료", "리스이용자", "리스"),
     "financial_instruments": ("금융상품", "금융자산", "금융부채", "파생상품"),
     "related_parties": ("특수관계", "관계회사"),
     "provisions_contingencies": ("충당부채", "우발", "소송"),
-    "impairment": ("손상", "회수가능액"),
+    "impairment": (
+        "현금창출단위", "회수가능액", "회수가능금액", "기대신용손실", "손상차손", "손상",
+    ),
     "subsidiaries": ("종속기업", "연결대상"),
     "subsequent_events": ("보고기간후", "후발사건", "후속사건"),
     "accounting_policies": ("회계정책", "회계처리방침"),
@@ -52,6 +55,7 @@ _TOPIC_BODY_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 _TOPIC_CONTEXT_RADIUS = 120
+_TOPIC_LOCAL_CLUSTER_RADIUS = 360
 
 
 def _availability(row: dict) -> str:
@@ -77,12 +81,14 @@ def _keyword_matches(
 ) -> list[tuple[int, int, str]]:
     """Return distinct matches, with configured keyword priority before offset."""
     text = str(value or "")
-    candidates = [
-        (index, text.find(keyword), keyword)
-        for index, keyword in enumerate(keywords)
-        if text.find(keyword) >= 0
-        and (keyword not in standalone_keywords or text.strip() == keyword)
-    ]
+    candidates: list[tuple[int, int, str]] = []
+    for index, keyword in enumerate(keywords):
+        if keyword in standalone_keywords and text.strip() != keyword:
+            continue
+        start = 0
+        while (offset := text.find(keyword, start)) >= 0:
+            candidates.append((index, offset, keyword))
+            start = offset + len(keyword)
     matches: list[tuple[int, int, str]] = []
     for candidate in sorted(candidates):
         _priority, offset, keyword = candidate
@@ -96,6 +102,39 @@ def _keyword_matches(
     return matches
 
 
+def _best_body_match(matches: list[tuple[int, int, str]]) -> tuple[int, int, str, int] | None:
+    """Select a local evidence cluster before using keyword priority or position."""
+    if not matches:
+        return None
+    positions_by_keyword: dict[str, list[int]] = {}
+    for _priority, offset, keyword in matches:
+        positions_by_keyword.setdefault(keyword, []).append(offset)
+
+    def local_distinct_count(center: int) -> int:
+        window_start = center - _TOPIC_LOCAL_CLUSTER_RADIUS
+        window_end = center + _TOPIC_LOCAL_CLUSTER_RADIUS
+        return sum(
+            1
+            for positions in positions_by_keyword.values()
+            if (
+                (index := bisect_left(positions, window_start)) < len(positions)
+                and positions[index] <= window_end
+            )
+        )
+
+    local_counts = {
+        candidate: local_distinct_count(candidate[1])
+        for candidate in matches
+    }
+    keyword_priority, offset, keyword = min(
+        matches,
+        key=lambda candidate: (
+            -local_counts[candidate], candidate[0], candidate[1], candidate[2],
+        ),
+    )
+    return keyword_priority, offset, keyword, local_counts[(keyword_priority, offset, keyword)]
+
+
 def _topic_match(row: dict, topic: str) -> dict[str, object] | None:
     """Find one deterministic, topic-specific match without single-label collapse."""
     title = str(row.get("note_title") or "")
@@ -106,21 +145,21 @@ def _topic_match(row: dict, topic: str) -> dict[str, object] | None:
         standalone_keywords=frozenset({"수익", "매출"}) if topic == "revenue" else frozenset(),
     )
     body_matches = _keyword_matches(body, _TOPIC_BODY_KEYWORDS[topic])
+    best_body_match = _best_body_match(body_matches)
     if title_matches:
         keyword_priority, offset, keyword = title_matches[0]
         return {
             "match_keyword": keyword,
             "match_location": "title",
             "match_offset": offset,
-            "body_context_offset": body_matches[0][1] if body_matches else 0,
+            "body_context_offset": best_body_match[1] if best_body_match else 0,
             "priority": 0 if title.strip() == keyword else 1,
             "keyword_priority": keyword_priority,
             "match_strength": "title_exact" if title.strip() == keyword else "title_keyword",
             "matched_keyword_count": len(title_matches),
         }
-    if body_matches:
-        keyword_priority, offset, keyword = body_matches[0]
-        matched_keyword_count = len(body_matches)
+    if best_body_match:
+        keyword_priority, offset, keyword, matched_keyword_count = best_body_match
         return {
             "match_keyword": keyword,
             "match_location": "body",

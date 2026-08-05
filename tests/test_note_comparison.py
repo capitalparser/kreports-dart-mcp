@@ -102,7 +102,7 @@ def test_note_comparison_multilabels_long_chapters_with_centered_topic_context(t
     assert "수익" in revenue_subject["value_or_excerpt"]
     assert "재무제표 작성기준" not in revenue_subject["value_or_excerpt"]
     assert revenue_subject["raw_text"].startswith("일반적인 재무제표 작성기준")
-    assert lease_subject["match_keyword"] == "리스"
+    assert lease_subject["match_keyword"] == "리스부채"
     assert lease_subject["match_location"] == "body"
     assert policy_subject["match_keyword"] == "회계정책"
     assert policy_subject["match_location"] == "title"
@@ -470,6 +470,46 @@ def test_revenue_match_strength_prefers_multi_signal_and_rejects_generic_interes
     assert subject["matched_keyword_count"] == 3
     assert peer["match_strength"] == "body_single_signal_reference"
     assert peer["matched_keyword_count"] == 1
+
+
+def test_topic_match_prefers_later_substantive_local_clusters(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    body = (
+        "리스 기준서 개정에 대한 일반 참조. "
+        + ("가" * 500)
+        + " 사용권자산 리스부채 리스료 리스이용자의 회계처리. "
+        + ("나" * 500)
+        + " 손상 관련 일반 참조. "
+        + ("다" * 500)
+        + " 현금창출단위 회수가능액 회수가능금액 기대신용손실 손상차손 검토."
+    )
+    with get_session() as session:
+        session.add(AccountingNoteChapter(
+            corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+            source_type="business_report", note_no="1", note_title="기타", section_type="policy",
+            body=body,
+        ))
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases", "impairment"],
+        _peer_group={"subject": {"corp_code": "00000001", "corp_name": "Subject"}, "peers": []},
+        _read_engine=temp_engine,
+    )
+    leases, impairment = (topic["rows"][0] for topic in result["topics"])
+
+    assert leases["match_keyword"] == "사용권자산"
+    assert leases["matched_keyword_count"] == 4
+    assert leases["match_offset"] > body.index("리스 기준서")
+    assert "리스 기준서 개정" not in leases["value_or_excerpt"]
+    assert "리스부채" in leases["value_or_excerpt"]
+    assert impairment["match_keyword"] == "현금창출단위"
+    assert impairment["matched_keyword_count"] == 5
+    assert impairment["match_offset"] > body.index("손상 관련 일반")
+    assert "손상 관련 일반" not in impairment["value_or_excerpt"]
+    assert "회수가능액" in impairment["value_or_excerpt"]
 
 
 def test_note_comparison_output_budget_compaction_remains_visible(temp_engine, monkeypatch):
