@@ -16,7 +16,28 @@ running endpoint continues to serve its previously verified release.
 The endpoint exposes **34 public tools**. Its database and the matching
 `kreports.db.release.json` are an inseparable deployment pair: mount both
 read-only at `/data/` from the same verified release. `/readyz` remains the
-release health gate and cannot report ready without matching artifact proof.
+authenticated release health gate and cannot report ready without matching
+artifact proof.
+
+## Health Endpoint Policy
+
+`/healthz` is the public, unauthenticated liveness endpoint. It deliberately
+returns only `{"ok": true}` and does not disclose tool, prompt, resource, or
+release inventory. This keeps basic public monitoring compatible without making
+deployment details observable.
+
+`/readyz` returns the existing detailed release-gate result only with the same
+`Authorization: Bearer <KREPORTS_MCP_TOKEN>` protection as the MCP endpoint.
+Authenticated readiness remains the release contract: HTTP 200 means the
+artifact is ready, while any release blocker returns HTTP 503. The image and
+Compose healthchecks call `/readyz` through an in-container Python helper that
+reads the token from the environment, rather than putting it in a command-line
+argument. A 503 therefore marks the container unhealthy.
+
+The Dockerfile currently uses upstream image tags (`python:3.12-slim` and the
+uv builder tag), not digest pins. No verified upstream digest is recorded in
+this repository, so none is guessed here. Replace those tags with verified
+digests only alongside recorded image-provenance evidence.
 
 For public pilot deployment, prefer a compact runtime DB artifact over the full
 maintainer DB. The maintainer DB can retain full warehouse tables and extraction
@@ -140,7 +161,7 @@ Health:
 
 ```bash
 curl http://127.0.0.1:8765/healthz
-curl http://127.0.0.1:8765/readyz
+curl -H "Authorization: Bearer ${KREPORTS_MCP_TOKEN}" http://127.0.0.1:8765/readyz
 ```
 
 `/readyz` is ready only when the public-runtime report has `ok: true` and
@@ -330,8 +351,8 @@ Keep these four evidence streams separate:
 | Evidence stream | What it establishes | What it does not establish |
 | --- | --- | --- |
 | Code-test success | Local code and deployment-contract tests pass. | Artifact validity or live coverage. |
-| HTTP liveness | The started service answers `/healthz`. | Release readiness or data completeness. |
-| Release readiness | `verify-release-artifact` accepts the host DB and matching JSON, and `/readyz` is 200 after service recreation. | Current market/year coverage beyond the artifact report. |
+| HTTP liveness | The started service answers public `/healthz` with `ok: true`. | Release readiness or data completeness. |
+| Release readiness | `verify-release-artifact` accepts the host DB and matching JSON, and authenticated `/readyz` is 200 after service recreation. | Current market/year coverage beyond the artifact report. |
 | Live-data coverage | Dataset audit and completeness/readiness commands report the selected release's coverage. | That a code change or HTTP probe is correct. |
 
 - `uv run pytest -q`
@@ -339,7 +360,7 @@ Keep these four evidence streams separate:
 - `kreports mcp-smoke --company 005930`
 - `kreports verify-release-artifact --db ./kreports.db`
 - `curl /healthz` returns `ok: true`
-- `curl /readyz` returns HTTP 200 with `ok: true` and no required failures
+- authenticated `curl /readyz` returns HTTP 200 with `ok: true` and no required failures
 - `kreports dataset-audit --top 20`
 - `kreports dataset-completeness --year 2025 --years-back 5 --sample-size 100`
 - `kreports dataset-auditor-readiness --year 2025 --years-back 5`

@@ -1470,7 +1470,7 @@ def test_readyz_and_manifest_share_the_same_fail_closed_predicate(monkeypatch):
     )
     app = http_server.create_app(token="secret")
     with TestClient(app) as client:
-        response = client.get("/readyz")
+        response = client.get("/readyz", headers={"Authorization": "Bearer secret"})
     assert response.status_code == 503
 
 
@@ -1834,7 +1834,7 @@ def test_readyz_is_503_when_artifact_bound_index_or_contract_blocker_exists(
     )
     app = http_server.create_app(token="secret")
     with TestClient(app) as client:
-        response = client.get("/readyz")
+        response = client.get("/readyz", headers={"Authorization": "Bearer secret"})
     assert response.status_code == 503
 
 

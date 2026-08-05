@@ -7,6 +7,7 @@ a public HTTPS tunnel or deployed ASGI server.
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import os
 from collections.abc import Iterable
@@ -20,9 +21,6 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 from kreports.mcp.server import server
-from kreports.mcp.prompts import list_prompts
-from kreports.mcp.resources import list_resource_templates, list_resources
-from kreports.mcp.tools import ALL_TOOLS
 from kreports.quality.release_gate import evaluate_release_gate, runtime_db_unavailable_report
 from kreports.release_artifact import (
     default_runtime_db_path,
@@ -35,6 +33,20 @@ logger = logging.getLogger("kreports.mcp.http")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_PATH = "/mcp"
+
+
+def _has_valid_bearer_token(authorization: str | None, token: str | None) -> bool:
+    if not token:
+        return False
+    return hmac.compare_digest(authorization or "", f"Bearer {token}")
+
+
+def _unauthorized_response() -> PlainTextResponse:
+    return PlainTextResponse(
+        "Unauthorized",
+        status_code=401,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def evaluate_artifact_readiness(profile: str) -> dict:
@@ -67,14 +79,8 @@ class BearerTokenMiddleware:
             key.decode("latin1").lower(): value.decode("latin1")
             for key, value in scope.get("headers", [])
         }
-        expected = f"Bearer {self.token}"
-        if headers.get("authorization") != expected:
-            response = PlainTextResponse(
-                "Unauthorized",
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-            await response(scope, receive, send)
+        if not _has_valid_bearer_token(headers.get("authorization"), self.token):
+            await _unauthorized_response()(scope, receive, send)
             return
 
         await self.app(scope, receive, send)
@@ -108,27 +114,7 @@ def _security_settings(
 
 
 async def _health(_: Request) -> JSONResponse:
-    return JSONResponse(
-        {
-            "ok": True,
-            "name": "kreports",
-            "transport": "streamable-http",
-            "tool_count": len(ALL_TOOLS),
-            "tools": [tool.name for tool in ALL_TOOLS],
-            "resource_count": (
-                len(list_resources()) + len(list_resource_templates())
-            ),
-            "resources": [
-                resource.uri for resource in list_resources()
-            ],
-            "resource_templates": [
-                resource.uri_template
-                for resource in list_resource_templates()
-            ],
-            "prompt_count": len(list_prompts()),
-            "prompts": [prompt.name for prompt in list_prompts()],
-        }
-    )
+    return JSONResponse({"ok": True})
 
 
 async def _ready(_: Request) -> JSONResponse:
@@ -177,6 +163,11 @@ def create_app(
             }
         )
 
+    async def ready(request: Request) -> JSONResponse:
+        if not _has_valid_bearer_token(request.headers.get("authorization"), token):
+            return _unauthorized_response()
+        return await _ready(request)
+
     @asynccontextmanager
     async def lifespan(_: Starlette):
         async with session_manager.run():
@@ -186,7 +177,7 @@ def create_app(
         routes=[
             Route("/", endpoint=root, methods=["GET"]),
             Route("/healthz", endpoint=_health, methods=["GET"]),
-            Route("/readyz", endpoint=_ready, methods=["GET"]),
+            Route("/readyz", endpoint=ready, methods=["GET"]),
             Route(path, endpoint=mcp_app),
         ],
         lifespan=lifespan,

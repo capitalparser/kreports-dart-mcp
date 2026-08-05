@@ -14,7 +14,7 @@ services:
       - ./kreports.db:/data/kreports.db:ro
       - ./kreports.db.release.json:/data/kreports.db.release.json:ro
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/readyz"]
+      test: ["CMD", "python", "-m", "kreports.deployment_healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

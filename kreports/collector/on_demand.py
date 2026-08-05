@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 import zipfile
 from datetime import date, datetime
 
@@ -22,6 +23,8 @@ MAX_DOCUMENT_ZIP_MEMBERS = 64
 MAX_DOCUMENT_ZIP_MEMBER_BYTES = 50 * 1024 * 1024
 MAX_DOCUMENT_ZIP_TOTAL_BYTES = 60 * 1024 * 1024
 MAX_DOCUMENT_ZIP_COMPRESSION_RATIO = 100
+MAX_ON_DEMAND_FETCH_CONCURRENCY = 4
+_ON_DEMAND_FETCH_SEMAPHORE = threading.BoundedSemaphore(MAX_ON_DEMAND_FETCH_CONCURRENCY)
 
 
 class OnDemandPayloadLimitError(ValueError):
@@ -247,10 +250,23 @@ def fetch_disclosure_on_demand(
             ),
         }
 
+    if not _ON_DEMAND_FETCH_SEMAPHORE.acquire(blocking=False):
+        return {
+            "rcept_no": rcept_no,
+            "error": "on-demand fetch is busy",
+            "data_quality": {
+                "status": "error",
+                "source": "user_keyed_dart_fetch",
+                "limitations": ["On-demand fetch capacity is temporarily unavailable."],
+            },
+        }
     try:
-        content = _fetch_document_xml_with_user_key(rcept_no, clean_key)
-    except Exception as exc:
-        return {"rcept_no": rcept_no, **_safe_fetch_failure(exc)}
+        try:
+            content = _fetch_document_xml_with_user_key(rcept_no, clean_key)
+        except Exception as exc:
+            return {"rcept_no": rcept_no, **_safe_fetch_failure(exc)}
+    finally:
+        _ON_DEMAND_FETCH_SEMAPHORE.release()
     if not content:
         return {
             "error": "document.xml empty",

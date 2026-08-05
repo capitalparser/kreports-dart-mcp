@@ -1,5 +1,6 @@
 import io
 import json
+import threading
 import zipfile
 from datetime import date
 
@@ -229,6 +230,40 @@ def test_on_demand_cache_first_reads_externalized_raw_document(temp_engine, tmp_
     assert out["data_quality"]["source"] == "source_documents_cache"
     assert out["cached"] is True
     assert out["body_length"] == len(raw_content)
+
+
+def test_on_demand_fetch_fails_closed_when_process_slots_are_busy(monkeypatch):
+    """Catches a busy user-keyed fetch still reaching the DART network."""
+    semaphore = threading.BoundedSemaphore(1)
+    assert semaphore.acquire(blocking=False)
+    monkeypatch.setattr(on_demand, "_ON_DEMAND_FETCH_SEMAPHORE", semaphore)
+    monkeypatch.setattr(on_demand, "_cached_source", lambda _rcept_no: None)
+    monkeypatch.setattr(on_demand, "_disclosure_meta", lambda *_args, **_kwargs: {
+        "corp_code": "00126380",
+        "bsns_year": 2025,
+        "report_nm": "주요사항보고서",
+    })
+    monkeypatch.setattr(
+        on_demand,
+        "_fetch_document_xml_with_user_key",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("busy fetch must not call DART")),
+    )
+
+    try:
+        out = on_demand.fetch_disclosure_on_demand(
+            rcept_no="20250101000001",
+            user_dart_api_key="user-key",
+            cache_policy="refresh",
+        )
+    finally:
+        semaphore.release()
+
+    assert out["error"] == "on-demand fetch is busy"
+    assert out["data_quality"] == {
+        "status": "error",
+        "source": "user_keyed_dart_fetch",
+        "limitations": ["On-demand fetch capacity is temporarily unavailable."],
+    }
 
 
 def test_on_demand_rejects_response_larger_than_download_limit(monkeypatch):
