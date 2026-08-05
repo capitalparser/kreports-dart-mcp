@@ -125,6 +125,26 @@ def test_title_match_count_is_distinct_keywords_not_repeated_occurrences():
     assert match["matched_keyword_count"] == 1
 
 
+def test_revenue_body_match_rejects_compound_financial_income_prefixes():
+    from kreports.analysis.note_comparison import _topic_match
+
+    for body in (
+        "이자수익인식은 유효이자율법에 따릅니다.",
+        "이자수익을 인식합니다.",
+        "금융수익인식은 금융상품 정책에 따릅니다.",
+        "배당수익을 인식합니다.",
+    ):
+        assert _topic_match(
+            {"note_title": "금융상품", "body": body}, "revenue",
+        ) is None
+    assert _topic_match(
+        {"note_title": "기타", "body": "수익인식 정책을 적용합니다."}, "revenue",
+    ) is not None
+    assert _topic_match(
+        {"note_title": "기타", "body": "고객과의 계약에서 수행의무를 식별합니다."}, "revenue",
+    ) is not None
+
+
 def test_note_comparison_marks_unbound_cached_note_summary_only_without_receipt(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session

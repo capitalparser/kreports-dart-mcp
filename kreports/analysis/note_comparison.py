@@ -54,6 +54,11 @@ _TOPIC_BODY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "거래가격", "매출을 인식", "매출액을 인식",
     ),
 }
+_TOPIC_BODY_FORBIDDEN_PREFIXES: dict[str, tuple[str, ...]] = {
+    # These compound income labels are financial/dividend interest evidence,
+    # not customer-contract revenue-recognition evidence.
+    "revenue": ("이자", "금융", "배당"),
+}
 _TOPIC_CONTEXT_RADIUS = 120
 _TOPIC_LOCAL_CLUSTER_RADIUS = 360
 
@@ -78,6 +83,7 @@ def _keyword_matches(
     keywords: tuple[str, ...],
     *,
     standalone_keywords: frozenset[str] = frozenset(),
+    forbidden_prefixes: tuple[str, ...] = (),
 ) -> list[tuple[int, int, str]]:
     """Return distinct matches, with configured keyword priority before offset."""
     text = str(value or "")
@@ -87,6 +93,11 @@ def _keyword_matches(
             continue
         start = 0
         while (offset := text.find(keyword, start)) >= 0:
+            prefix_window = text[max(0, offset - 32):offset]
+            normalized_prefix = re.sub(r"\s+", "", prefix_window)
+            if any(normalized_prefix.endswith(prefix) for prefix in forbidden_prefixes):
+                start = offset + len(keyword)
+                continue
             candidates.append((index, offset, keyword))
             start = offset + len(keyword)
     matches: list[tuple[int, int, str]] = []
@@ -144,7 +155,11 @@ def _topic_match(row: dict, topic: str) -> dict[str, object] | None:
         _TOPIC_TITLE_KEYWORDS[topic],
         standalone_keywords=frozenset({"수익", "매출"}) if topic == "revenue" else frozenset(),
     )
-    body_matches = _keyword_matches(body, _TOPIC_BODY_KEYWORDS[topic])
+    body_matches = _keyword_matches(
+        body,
+        _TOPIC_BODY_KEYWORDS[topic],
+        forbidden_prefixes=_TOPIC_BODY_FORBIDDEN_PREFIXES.get(topic, ()),
+    )
     best_body_match = _best_body_match(body_matches)
     if title_matches:
         keyword_priority, offset, keyword = title_matches[0]
