@@ -30,6 +30,15 @@ def _matched_note_result(*, rcept_no: str = "20250312000001") -> dict:
                 "note_no": "7",
                 "note_title": "재고자산",
                 "rcept_no": rcept_no,
+                "source_document_id": 1,
+                "source_document_rcept_no": rcept_no,
+                "source_document_corp_code": "00999999",
+                "source_document_bsns_year": 2025,
+                "source_document_report_nm": "사업보고서 (2025.12)",
+                "disclosure_rcept_no": rcept_no,
+                "disclosure_corp_code": "00999999",
+                "disclosure_disc_date": "2025-03-12",
+                "disclosure_report_nm": "사업보고서 (2025.12)",
                 "match_excerpts": [_MATCHED_EXCERPT, _MATCHED_EXCERPT],
                 "body_excerpt": "무시되어야 하는 앞부분",
             }],
@@ -64,7 +73,7 @@ def test_note_enrichment_marks_matched_uncitable_row_limited():
     result = _enrich_accounting_note_search(_matched_note_result(rcept_no="attachment-only"))
 
     assert result["data_quality"]["status"] == "limited"
-    assert result["confirmed_facts"][0]["excerpt"] == _MATCHED_EXCERPT
+    assert result["confirmed_facts"] == []
     assert "14자리" in result["data_quality"]["coverage_note"]
 
 
@@ -203,6 +212,76 @@ def test_note_pack_and_chatbot_table_share_enriched_status_and_evidence():
     assert "표 형태 결과" in text
     assert "시각화 대체 표" not in text
     assert text.index("확인된 내용") < text.index("표 형태 결과")
+
+
+def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table():
+    """The reverse company lookup must remain visible without removing fact evidence."""
+    result = _enrich_accounting_note_search(_matched_note_result())
+    result["note_disclosure_company_matrix"] = {
+        "scope": {"keyword": "재고자산", "year": 2025, "market": "KOSPI", "induty_prefix": "264"},
+        "configured_limit": 50,
+        "returned_company_count": 2,
+        "is_exhaustive": False,
+        "limitations": ["캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아닙니다."],
+        "companies": [
+            {"corp_code": "00999999", "corp_name": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "verified_annual_filing_match", "record_count": 1, "canonical_rcept_no": "20250312000001", "canonical_note_title": "재고자산"},
+            {"corp_code": "00999998", "corp_name": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "unverified_cache_match", "record_count": 2, "canonical_rcept_no": None, "canonical_note_title": None},
+        ],
+    }
+
+    pack = build_answer_pack("search_dataset", result)
+
+    assert pack is not None
+    assert {table["id"] for table in pack["tables"]} >= {
+        "accounting_note_evidence", "note_disclosure_company_matrix",
+    }
+    table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
+    assert table["rows"] == [
+        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "verified_annual_filing_match", "note_title": "재고자산", "rcept_no": "20250312000001"},
+        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "match_status": "unverified_cache_match", "note_title": None, "rcept_no": None},
+    ]
+
+
+def test_note_company_matrix_bounds_reverse_lookup_to_two_hundred_companies():
+    """A broad cache query must not make the additive matrix unbounded."""
+    companies = [
+        {
+            "corp_code": f"{index:08d}",
+            "corp_name": f"회사 {index}",
+            "market": "KOSPI",
+            "induty_code": "264",
+            "record_count": 1,
+            "records": [{
+                "year": 2025,
+                "note_no": "1",
+                "note_title": "재고자산",
+                "rcept_no": "20250312000001",
+                "source_document_id": index + 1,
+                "source_document_rcept_no": "20250312000001",
+                "source_document_corp_code": f"{index:08d}",
+                "source_document_bsns_year": 2025,
+                "source_document_report_nm": "사업보고서 (2025.12)",
+                "disclosure_rcept_no": "20250312000001",
+                "disclosure_corp_code": f"{index:08d}",
+                "disclosure_disc_date": "2025-03-12",
+                "disclosure_report_nm": "사업보고서 (2025.12)",
+                "match_excerpts": [_MATCHED_EXCERPT],
+            }],
+        }
+        for index in range(201)
+    ]
+
+    result = _enrich_accounting_note_search({
+        "query": {"dataset": "accounting_note_chapters", "keyword": "재고자산", "year": 2025, "limit": 500},
+        "companies": companies,
+        "data_quality": {"status": "usable", "source": "accounting_note_chapters"},
+    })
+
+    matrix = result["note_disclosure_company_matrix"]
+    assert matrix["configured_limit"] == 500
+    assert matrix["returned_company_count"] == 200
+    assert len(matrix["companies"]) == 200
+    assert matrix["is_exhaustive"] is False
 
 
 def test_non_note_visual_tools_keep_their_existing_table_heading():

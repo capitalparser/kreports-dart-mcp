@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from kreports.analysis.search_adapter import search_dataset
 from kreports.db.engine import get_session
-from kreports.db.models import AccountingNoteChapter, Company
+from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
 
 
 def _add_note(*, body: str) -> None:
@@ -105,3 +105,67 @@ def test_accounting_note_revenue_search_weights_sale_evidence_above_generic_reco
 
     assert record["match_excerpts"][0] == sale_revenue
     assert record["body_excerpt"] == sale_revenue
+
+
+def test_note_search_company_matrix_requires_canonical_annual_source_binding(temp_engine):
+    """A valid-looking receipt alone must not promote a cached keyword match."""
+    from kreports.mcp.handlers.search import handle_search_dataset
+    from kreports.mcp.input_models import SearchDatasetInput
+
+    del temp_engine
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="90000001", corp_name="Verified", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000002", corp_name="Invalid receipt", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000003", corp_name="Quarterly source", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000004", corp_name="Foreign source", market="KOSPI", induty_code="264"),
+            Company(corp_code="90000005", corp_name="Foreign owner", market="KOSPI", induty_code="264"),
+            Disclosure(rcept_no="20260312000001", corp_code="90000001", corp_name="Verified", disc_date=date(2026, 3, 12), disc_type="A", report_nm="사업보고서 (2025.12)"),
+            Disclosure(rcept_no="20260312000003", corp_code="90000003", corp_name="Quarterly source", disc_date=date(2026, 3, 12), disc_type="A", report_nm="사업보고서 (2025.12)"),
+            Disclosure(rcept_no="20260312000004", corp_code="90000005", corp_name="Foreign owner", disc_date=date(2026, 3, 12), disc_type="A", report_nm="사업보고서 (2025.12)"),
+            SourceDocument(rcept_no="20260312000001", corp_code="90000001", bsns_year=2025, source_type="business_report", report_nm="사업보고서 (2025.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            SourceDocument(rcept_no="20260312000003", corp_code="90000003", bsns_year=2025, source_type="business_report", report_nm="분기보고서 (2025.12)", raw_content="<xml/>", doc_hash="b" * 40),
+            SourceDocument(rcept_no="20260312000004", corp_code="90000005", bsns_year=2025, source_type="business_report", report_nm="사업보고서 (2025.12)", raw_content="<xml/>", doc_hash="c" * 40),
+            AccountingNoteChapter(corp_code="90000001", bsns_year=2025, fs_div="CFS", rcept_no="20260312000001", source_type="business_report", note_no="1", note_title="재고자산", section_type="policy", body="재고자산은 원가로 측정합니다."),
+            AccountingNoteChapter(corp_code="90000002", bsns_year=2025, fs_div="CFS", rcept_no="attachment-only", source_type="business_report", note_no="1", note_title="재고자산", section_type="policy", body="재고자산은 원가로 측정합니다."),
+            AccountingNoteChapter(corp_code="90000003", bsns_year=2025, fs_div="CFS", rcept_no="20260312000003", source_type="business_report", note_no="1", note_title="재고자산", section_type="policy", body="재고자산은 원가로 측정합니다."),
+            AccountingNoteChapter(corp_code="90000004", bsns_year=2025, fs_div="CFS", rcept_no="20260312000004", source_type="business_report", note_no="1", note_title="재고자산", section_type="policy", body="재고자산은 원가로 측정합니다."),
+        ])
+
+    result = handle_search_dataset(SearchDatasetInput(
+        dataset="accounting_note_chapters", keyword="재고자산", year=2025,
+        market="KOSPI", induty_prefix="264", limit=4,
+    ))
+
+    matrix = result["note_disclosure_company_matrix"]
+    assert matrix["scope"] == {
+        "keyword": "재고자산", "year": 2025, "market": "KOSPI", "induty_prefix": "264",
+    }
+    assert matrix["configured_limit"] == 4
+    assert matrix["returned_company_count"] == 4
+    assert matrix["is_exhaustive"] is False
+    by_code = {item["corp_code"]: item for item in matrix["companies"]}
+    assert by_code["90000001"] == {
+        "corp_code": "90000001", "corp_name": "Verified", "market": "KOSPI",
+        "induty_code": "264", "year": 2025,
+        "match_status": "verified_annual_filing_match", "record_count": 1,
+        "canonical_rcept_no": "20260312000001", "canonical_note_title": "재고자산",
+    }
+    for corp_code in ("90000002", "90000003", "90000004"):
+        assert by_code[corp_code]["match_status"] == "unverified_cache_match"
+        assert by_code[corp_code]["canonical_rcept_no"] is None
+        assert by_code[corp_code]["canonical_note_title"] is None
+    assert "공시 완전성" in matrix["limitations"][0]
+    assert result["data_quality"]["status"] == "limited"
+    assert "확인 1건" in result["data_quality"]["coverage_note"]
+    assert "미검증 캐시 일치 3건" in result["data_quality"]["coverage_note"]
+    assert [fact["source"]["corp_code"] for fact in result["confirmed_facts"]] == [
+        "90000001",
+    ]
+
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("search_dataset", result)
+    assert pack is not None
+    evidence = next(table for table in pack["tables"] if table["id"] == "accounting_note_evidence")
+    assert [row["rcept_no"] for row in evidence["rows"]] == ["20260312000001"]

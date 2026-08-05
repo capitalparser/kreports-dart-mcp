@@ -13,6 +13,7 @@ from kreports.analysis.investor_peer_evidence import (
     select_peer_group_with_evidence,
 )
 from kreports.analysis.financial_analysis import _annual_report_source
+from kreports.analysis.filing_provenance import canonical_annual_filing_source_binding
 from kreports.analysis.search_adapter import search_dataset
 from kreports.collector.on_demand import fetch_disclosure_on_demand
 from kreports.mcp.dispatch import resolve_company
@@ -98,6 +99,7 @@ def handle_search_dataset(args: SearchDatasetInput) -> dict:
 
 
 _DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
+_MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS = 200
 _SOURCE_REQUIRED_SEARCH_DATASETS = {
     "source_documents",
     "report_sections",
@@ -288,6 +290,65 @@ def _note_reference(record: dict) -> str:
     return f"{prefix} {note_title}".strip()
 
 
+def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
+    """Expose one bounded local-cache match row per company.
+
+    This is an inverse lookup over the existing note search.  It deliberately
+    separates a canonical annual-filing match from a cache-only match.
+    """
+    companies: list[dict] = []
+    for company in enriched.get("companies") or []:
+        if not isinstance(company, dict):
+            continue
+        records = [
+            item for item in company.get("records") or []
+            if isinstance(item, dict)
+        ]
+        if not records:
+            continue
+        corp_code = str(company.get("corp_code") or "")
+        canonical_record = next(
+            (item for item in records if item.get("canonical_source_binding")),
+            None,
+        )
+        companies.append({
+            "corp_code": corp_code,
+            "corp_name": company.get("corp_name"),
+            "market": company.get("market"),
+            "induty_code": company.get("induty_code"),
+            "year": query.get("year"),
+            "match_status": (
+                "verified_annual_filing_match"
+                if canonical_record is not None else "unverified_cache_match"
+            ),
+            "record_count": int(company.get("record_count") or len(records)),
+            "canonical_rcept_no": (
+                canonical_record.get("rcept_no") if canonical_record is not None else None
+            ),
+            "canonical_note_title": (
+                canonical_record.get("note_title") if canonical_record is not None else None
+            ),
+        })
+        if len(companies) >= _MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS:
+            break
+    return {
+        "scope": {
+            "keyword": query.get("keyword"),
+            "year": query.get("year"),
+            "market": query.get("market"),
+            "induty_prefix": query.get("induty_prefix"),
+        },
+        "configured_limit": query.get("limit"),
+        "returned_company_count": len(companies),
+        "is_exhaustive": False,
+        "limitations": [
+            "캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아니며, 원 공시 주석 전문 확인이 필요합니다.",
+            "반환 회사 수는 응답 경계를 위해 최대 200개이며, 검색 결과 전체를 대표하지 않습니다.",
+        ],
+        "companies": companies,
+    }
+
+
 def _enrich_accounting_note_search(result: dict) -> dict:
     """Turn cached note passages into fail-closed, filing-backed MCP evidence."""
     enriched = dict(result)
@@ -296,6 +357,7 @@ def _enrich_accounting_note_search(result: dict) -> dict:
     topic = keyword or "회계주석"
     facts: list[dict] = []
     matched_row_count = 0
+    canonical_matched_row_count = 0
     seen_passages: set[tuple[str, str, str, str]] = set()
 
     for company in enriched.get("companies") or []:
@@ -307,8 +369,23 @@ def _enrich_accounting_note_search(result: dict) -> dict:
             if not isinstance(record, dict):
                 continue
             matched_row_count += 1
+            cached_receipt = record.get("rcept_no")
+            receipt = canonical_annual_filing_source_binding(
+                record,
+                corp_code=corp_code,
+                bsns_year=record.get("year") or query.get("year"),
+            )
+            record["cached_rcept_no"] = cached_receipt
+            record["rcept_no"] = receipt
+            record["canonical_source_binding"] = receipt is not None
+            record["provenance_status"] = (
+                "proven_annual_filing" if receipt else "unproven_source_binding"
+            )
+            if receipt is None:
+                continue
+            canonical_matched_row_count += 1
             note_reference = _note_reference(record)
-            raw_receipt = str(record.get("rcept_no") or "").strip()
+            raw_receipt = str(receipt or "").strip()
             for passage in _note_passages(record, keyword=keyword):
                 passage_key = (corp_code, raw_receipt, note_reference, passage)
                 if passage_key in seen_passages:
@@ -324,28 +401,30 @@ def _enrich_accounting_note_search(result: dict) -> dict:
                     "source": {
                         "corp_code": corp_code,
                         "corp_name": corp_name,
-                        "rcept_no": raw_receipt,
+                        "rcept_no": receipt,
                         "report_nm": "사업보고서",
                         "source_table": "accounting_note_chapters",
                         "section_title": note_reference,
                     },
                 })
 
-    valid_fact_count = sum(
-        bool(_DART_RECEIPT_NO.fullmatch(str(fact["source"].get("rcept_no") or "")))
-        for fact in facts
-    )
+    unverified_cache_match_count = matched_row_count - canonical_matched_row_count
     if not matched_row_count:
         status = "missing"
         coverage_note = "로컬 캐시에 일치하는 회계주석 근거가 없습니다."
-    elif facts and valid_fact_count == len(facts):
+    elif facts and unverified_cache_match_count == 0:
         status = "usable"
-        coverage_note = "반환된 발췌문과 14자리 DART 접수번호를 함께 확인했습니다."
+        coverage_note = (
+            f"반환된 일치 주석 행 {canonical_matched_row_count}건 모두 canonical 연간 "
+            "DART source binding과 14자리 접수번호를 함께 확인했습니다."
+        )
     else:
         status = "limited"
         coverage_note = (
-            "일치 주석 행은 있으나 관련 발췌문 또는 14자리 DART 접수번호를 모두 "
-            "확인하지 못해 사용자용 근거로 완결되지 않았습니다."
+            f"일치 주석 행 {matched_row_count}건 중 canonical 연간 source binding 확인 "
+            f"{canonical_matched_row_count}건, 미검증 캐시 일치 "
+            f"{unverified_cache_match_count}건입니다. 미검증 행은 14자리 접수번호가 "
+            "있어도 사용자용 근거 또는 링크로 승격하지 않습니다."
         )
 
     data_quality = dict(enriched.get("data_quality") or {})
@@ -373,6 +452,9 @@ def _enrich_accounting_note_search(result: dict) -> dict:
         else _note_next_checks(topic)
     )
     enriched["data_quality"] = data_quality
+    enriched["note_disclosure_company_matrix"] = _note_disclosure_company_matrix(
+        enriched, query,
+    )
     return enriched
 
 

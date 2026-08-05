@@ -2323,6 +2323,32 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
         rows,
         note="주석 발췌문은 스크리닝 근거이며 감사 결론이나 금액 검증을 대체하지 않습니다.",
     ))
+    matrix = result.get("note_disclosure_company_matrix")
+    if isinstance(matrix, dict):
+        matrix_rows = []
+        for item in matrix.get("companies") or []:
+            if not isinstance(item, dict):
+                continue
+            matrix_rows.append({
+                "company": item.get("corp_name") or item.get("corp_code"),
+                "market": item.get("market"),
+                "induty_code": item.get("induty_code"),
+                "year": item.get("year"),
+                "match_status": item.get("match_status"),
+                "note_title": item.get("canonical_note_title"),
+                "rcept_no": item.get("canonical_rcept_no"),
+            })
+        pack["tables"].append(_table(
+            "note_disclosure_company_matrix",
+            "회사별 회계주석 캐시 일치",
+            [
+                ("company", "회사"), ("market", "시장"), ("induty_code", "업종"),
+                ("year", "연도"), ("match_status", "일치 상태"),
+                ("note_title", "검증 주석"), ("rcept_no", "검증 접수번호"),
+            ],
+            matrix_rows,
+            note="캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아닙니다.",
+        ))
     return pack
 
 

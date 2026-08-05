@@ -325,9 +325,23 @@ def search_dataset(
             SELECT anc.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
                    anc.bsns_year AS year, anc.fs_div, anc.rcept_no, anc.dcm_no,
                    anc.source_type, anc.note_no, anc.note_title, anc.section_type,
-                   anc.body, anc.body_length
+                   anc.body, anc.body_length,
+                   sd.id AS source_document_id,
+                   sd.rcept_no AS source_document_rcept_no,
+                   sd.corp_code AS source_document_corp_code,
+                   sd.bsns_year AS source_document_bsns_year,
+                   sd.report_nm AS source_document_report_nm,
+                   d.rcept_no AS disclosure_rcept_no,
+                   d.corp_code AS disclosure_corp_code,
+                   d.disc_date AS disclosure_disc_date,
+                   d.report_nm AS disclosure_report_nm
             FROM accounting_note_chapters anc
             JOIN companies c ON c.corp_code=anc.corp_code
+            LEFT JOIN source_documents sd
+              ON sd.rcept_no=anc.rcept_no AND sd.source_type=anc.source_type
+             AND sd.corp_code=anc.corp_code AND sd.bsns_year=anc.bsns_year
+            LEFT JOIN disclosures d
+              ON d.rcept_no=anc.rcept_no AND d.corp_code=anc.corp_code
             WHERE {" AND ".join(where)}
             ORDER BY anc.bsns_year DESC, c.market, c.corp_name, anc.note_no
             LIMIT :row_limit
