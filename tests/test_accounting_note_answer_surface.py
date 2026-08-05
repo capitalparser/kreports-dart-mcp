@@ -56,7 +56,7 @@ def test_note_enrichment_binds_keyword_passage_to_auditor_fact_and_dart_receipt(
     assert result["data_quality"]["status"] == "usable"
     assert result["confirmed_facts"][0]["excerpt"] == _MATCHED_EXCERPT
     assert result["confirmed_facts"][0]["statement"] == (
-        "주석 7 재고자산: 재고자산은 평균법으로 측정하며 순실현가능가치로 감액합니다."
+        "주석 7 재고자산에서 재고자산 관련 주석 문구를 확인했습니다."
     )
     assert result["confirmed_facts"][0]["source"]["rcept_no"] == "20250312000001"
     assert result["confirmed_facts"][0]["source"]["source_table"] == "accounting_note_chapters"
@@ -371,11 +371,12 @@ def test_note_company_matrix_bounds_reverse_lookup_to_two_hundred_companies():
     assert matrix["omitted_company_count"] > 0
     assert matrix["is_exhaustive"] is False
     assert len(result["confirmed_facts"]) == 20
-    assert result["confirmed_facts_truncation"] == {
-        "applied": True,
-        "max_rows": 20,
-        "omitted_count": 181,
-    }
+    truncation = result["confirmed_facts_truncation"]
+    assert truncation["applied"] is True
+    assert truncation["max_rows"] == 20
+    assert truncation["max_output_bytes"] > 0
+    assert truncation["output_bytes"] <= truncation["max_output_bytes"]
+    assert truncation["omitted_count"] == 181
     assert "confirmed_facts_output_truncated:181" in result["data_quality"]["limitations"]
 
     public_result = enrich_answer_response("search_dataset", result)
@@ -387,7 +388,7 @@ def test_note_company_matrix_worst_case_text_stays_within_public_envelope_budget
     """Long Korean display fields cannot make the matrix answer pack invalid."""
     long_name = "가" * 100
     long_title = "나" * 300
-    long_excerpt = "다" * 500
+    long_excerpt = "재고자산 " + ("다" * 500)
     companies = [
         {
             "corp_code": f"{index:08d}",
@@ -399,13 +400,13 @@ def test_note_company_matrix_worst_case_text_stays_within_public_envelope_budget
                 "year": 2025 - (index % 12),
                 "note_no": "1",
                 "note_title": long_title,
-                "rcept_no": "20250312000001",
+                "rcept_no": f"20250312{index:06d}",
                 "source_document_id": index + 1,
-                "source_document_rcept_no": "20250312000001",
+                "source_document_rcept_no": f"20250312{index:06d}",
                 "source_document_corp_code": f"{index:08d}",
                 "source_document_bsns_year": 2025 - (index % 12),
                 "source_document_report_nm": f"사업보고서 ({2025 - (index % 12)}.12)",
-                "disclosure_rcept_no": "20250312000001",
+                "disclosure_rcept_no": f"20250312{index:06d}",
                 "disclosure_corp_code": f"{index:08d}",
                 "disclosure_disc_date": "2025-03-12",
                 "disclosure_report_nm": f"사업보고서 ({2025 - (index % 12)}.12)",
@@ -433,6 +434,17 @@ def test_note_company_matrix_worst_case_text_stays_within_public_envelope_budget
     assert matrix["companies"][0]["market_truncated"] is True
     assert matrix["companies"][0]["induty_code_truncated"] is True
     assert matrix["companies"][0]["matched_years_truncated"] is False
+    facts_truncation = result["confirmed_facts_truncation"]
+    assert facts_truncation["max_output_bytes"] > 0
+    assert facts_truncation["output_bytes"] <= facts_truncation["max_output_bytes"]
+    assert facts_truncation["output_bytes"] == len(json.dumps(
+        result["confirmed_facts"], ensure_ascii=False, separators=(",", ":"),
+    ).encode())
+    assert facts_truncation["omitted_count"] > 0
+    assert all("재고자산" in fact["excerpt"] for fact in result["confirmed_facts"])
+    assert all(len(fact["note_reference"]) <= 160 for fact in result["confirmed_facts"])
+    assert all(len(fact["source"]["corp_name"]) <= 48 for fact in result["confirmed_facts"])
+    assert all(long_excerpt not in fact["statement"] for fact in result["confirmed_facts"])
 
     public_result = enrich_answer_response("search_dataset", result)
     envelope = build_answer_envelope("search_dataset", public_result)

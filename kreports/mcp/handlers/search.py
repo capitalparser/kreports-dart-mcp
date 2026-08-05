@@ -103,7 +103,10 @@ _DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
 _MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS = 200
 _MAX_NOTE_DISCLOSURE_COMPANY_MATCHED_YEARS = 10
 _MAX_NOTE_CONFIRMED_FACTS = 20
+_MAX_NOTE_CONFIRMED_FACT_OUTPUT_BYTES = 12_000
 _MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES = 12_000
+_MAX_NOTE_FACT_REFERENCE_CHARS = 160
+_MAX_NOTE_FACT_EXCERPT_CHARS = 240
 _MAX_NOTE_MATRIX_COMPANY_NAME_CHARS = 48
 _MAX_NOTE_MATRIX_MARKET_CHARS = 24
 _MAX_NOTE_MATRIX_INDUTY_CHARS = 24
@@ -289,12 +292,27 @@ def _note_passages(record: dict, *, keyword: str) -> list[str]:
 
 def _note_reference(record: dict) -> str:
     note_no = str(record.get("note_no") or "").strip()
-    note_title = str(record.get("note_title") or "").strip()
+    note_title = re.sub(r"\s+", " ", str(record.get("note_title") or "")).strip()
     prefix = f"주석 {note_no}" if note_no else "주석"
     nested_title = re.match(r"^([0-9]+)(?:\s*[.)]\s*|\s+)(.+)$", note_title)
     if note_no and nested_title:
-        return f"{prefix} · {nested_title.group(1)} {nested_title.group(2)}"
-    return f"{prefix} {note_title}".strip()
+        reference = f"{prefix} · {nested_title.group(1)} {nested_title.group(2)}"
+    else:
+        reference = f"{prefix} {note_title}".strip()
+    return reference[:_MAX_NOTE_FACT_REFERENCE_CHARS]
+
+
+def _note_fact_excerpt(passage: str, *, keyword: str) -> str:
+    """Bound an excerpt while preserving the requested keyword when present."""
+    if len(passage) <= _MAX_NOTE_FACT_EXCERPT_CHARS:
+        return passage
+    keyword_position = passage.find(keyword) if keyword else 0
+    start = max(0, keyword_position - 48)
+    end = start + _MAX_NOTE_FACT_EXCERPT_CHARS
+    if end > len(passage):
+        start = max(0, len(passage) - _MAX_NOTE_FACT_EXCERPT_CHARS)
+        end = len(passage)
+    return passage[start:end]
 
 
 def _matrix_display_text(value: object, *, max_chars: int) -> tuple[str | None, bool]:
@@ -304,6 +322,23 @@ def _matrix_display_text(value: object, *, max_chars: int) -> tuple[str | None, 
 
 def _matrix_output_bytes(matrix: dict) -> int:
     return len(json.dumps(matrix, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def _confirmed_facts_output_bytes(facts: list[dict]) -> int:
+    return len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def _bounded_confirmed_facts(facts: list[dict]) -> tuple[list[dict], int]:
+    """Keep deterministic fact order under both row and serialized-byte limits."""
+    bounded: list[dict] = []
+    for fact in facts:
+        if len(bounded) >= _MAX_NOTE_CONFIRMED_FACTS:
+            break
+        candidate = [*bounded, fact]
+        if _confirmed_facts_output_bytes(candidate) > _MAX_NOTE_CONFIRMED_FACT_OUTPUT_BYTES:
+            break
+        bounded.append(fact)
+    return bounded, len(facts) - len(bounded)
 
 
 def _stabilize_matrix_output_bytes(matrix: dict) -> int:
@@ -473,6 +508,10 @@ def _enrich_accounting_note_search(result: dict) -> dict:
             continue
         corp_code = str(company.get("corp_code") or "")
         corp_name = company.get("corp_name") or corp_code or "대상 회사"
+        source_corp_name, _ = _matrix_display_text(
+            corp_name, max_chars=_MAX_NOTE_MATRIX_COMPANY_NAME_CHARS,
+        )
+        source_corp_name = source_corp_name or "대상 회사"
         for record in company.get("records") or []:
             if not isinstance(record, dict):
                 continue
@@ -499,16 +538,19 @@ def _enrich_accounting_note_search(result: dict) -> dict:
                 if passage_key in seen_passages:
                     continue
                 seen_passages.add(passage_key)
+                excerpt = _note_fact_excerpt(passage, keyword=keyword)
                 facts.append({
-                    "statement": f"{note_reference}: {passage}",
-                    "excerpt": passage,
+                    "statement": (
+                        f"{note_reference}에서 {topic} 관련 주석 문구를 확인했습니다."
+                    ),
+                    "excerpt": excerpt,
                     "topic": topic,
                     "year": record.get("year") or query.get("year"),
                     "fs_div": record.get("fs_div") or query.get("fs_div"),
                     "note_reference": note_reference,
                     "source": {
                         "corp_code": corp_code,
-                        "corp_name": corp_name,
+                        "corp_name": source_corp_name,
                         "rcept_no": receipt,
                         "report_nm": "사업보고서",
                         "source_table": "accounting_note_chapters",
@@ -516,9 +558,8 @@ def _enrich_accounting_note_search(result: dict) -> dict:
                     },
                 })
 
-    confirmed_facts_omitted_count = max(0, len(facts) - _MAX_NOTE_CONFIRMED_FACTS)
-    if confirmed_facts_omitted_count:
-        facts = facts[:_MAX_NOTE_CONFIRMED_FACTS]
+    facts, confirmed_facts_omitted_count = _bounded_confirmed_facts(facts)
+    confirmed_facts_output_bytes = _confirmed_facts_output_bytes(facts)
 
     unverified_cache_match_count = matched_row_count - canonical_matched_row_count
     if not matched_row_count:
@@ -563,6 +604,8 @@ def _enrich_accounting_note_search(result: dict) -> dict:
     enriched["confirmed_facts_truncation"] = {
         "applied": bool(confirmed_facts_omitted_count),
         "max_rows": _MAX_NOTE_CONFIRMED_FACTS,
+        "max_output_bytes": _MAX_NOTE_CONFIRMED_FACT_OUTPUT_BYTES,
+        "output_bytes": confirmed_facts_output_bytes,
         "omitted_count": confirmed_facts_omitted_count,
     }
     enriched["analysis"] = [{
