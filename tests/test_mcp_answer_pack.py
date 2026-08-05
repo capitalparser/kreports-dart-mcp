@@ -1350,6 +1350,9 @@ def test_policy_pack_renders_topic_to_company_disclosure_matrix_without_absence_
         "data_quality": {"status": "limited"},
         "note_disclosure_matrix": {
             "year": 2024,
+            "is_complete": False,
+            "omitted_company_topic_rows": 1,
+            "rate_scope": "returned_topic_rows",
             "topics": [{
                 "topic": "leases",
                 "local_evidence_rate": {
@@ -1396,3 +1399,5 @@ def test_policy_pack_renders_topic_to_company_disclosure_matrix_without_absence_
     assert table["rows"][2]["disclosure_assessment"] == "not_assessed"
     assert table["rows"][0]["matched_within_reviewable_pct"] == 50.0
     assert "공시 부재 판단이 not_assessed" in table["note"]
+    assert "반환된 topic rows" in table["note"]
+    assert "생략 회사-주제 행: 1" in table["note"]

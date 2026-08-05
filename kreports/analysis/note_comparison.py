@@ -941,12 +941,34 @@ def build_note_disclosure_matrix(
         return comparison
 
     topic_results: list[dict] = []
+    represented_company_codes: set[str] = set()
+    omitted_company_topic_rows = 0
+    returned_peer_count = (comparison.get("pagination") or {}).get("returned_peer_count")
+    expected_returned_company_count = (
+        int(returned_peer_count) + 1
+        if isinstance(returned_peer_count, int) and returned_peer_count >= 0
+        else None
+    )
+    complete_topic_rows = True
     for topic_result in comparison["topics"]:
         companies: list[dict] = []
+        topic_rows = topic_result.get("rows") or []
+        topic_omitted_rows = int(topic_result.get("omitted_peer_rows") or 0)
+        omitted_company_topic_rows += max(0, topic_omitted_rows)
+        if (
+            topic_omitted_rows > 0
+            or (
+                expected_returned_company_count is not None
+                and len(topic_rows) != expected_returned_company_count
+            )
+        ):
+            complete_topic_rows = False
         for row in sorted(
-            topic_result["rows"],
+            topic_rows,
             key=lambda item: str(item["company"].get("corp_code") or ""),
         ):
+            company_row = row["company"]
+            represented_company_codes.add(str(company_row.get("corp_code") or ""))
             availability = row["availability"]
             status = {
                 "matched": {
@@ -958,7 +980,7 @@ def build_note_disclosure_matrix(
             }[row.get("topic_match_status", "matched")]
             unavailable = status == "unavailable_raw"
             companies.append({
-                "company": row["company"],
+                "company": company_row,
                 "status": status,
                 "note_title": row.get("note_title"),
                 "excerpt": row.get("value_or_excerpt"),
@@ -1019,6 +1041,9 @@ def build_note_disclosure_matrix(
                     round(100.0 * matched_count / reviewable_company_count, 1)
                     if reviewable_company_count else 0.0
                 ),
+                "scope": "returned_topic_rows",
+                "represented_company_count": len(companies),
+                "omitted_company_topic_rows": max(0, topic_omitted_rows),
             },
         })
     selection_policy = dict(comparison.get("selection_policy") or {})
@@ -1035,6 +1060,16 @@ def build_note_disclosure_matrix(
             or requested_page_size != effective_page_size
         ),
     })
+    source_truncation = dict(comparison.get("truncation") or {})
+    source_output_truncated = bool(source_truncation.get("output_budget_applied"))
+    available_peer_count = pagination.get("available_peer_count")
+    if not isinstance(available_peer_count, int) or available_peer_count < 0:
+        available_peer_count = pagination.get("total_peer_count")
+    available_company_count = (
+        available_peer_count + 1
+        if isinstance(available_peer_count, int) and available_peer_count >= 0
+        else len(represented_company_codes)
+    )
     return {
         "year": comparison["year"],
         "cohort_definition": {
@@ -1046,9 +1081,17 @@ def build_note_disclosure_matrix(
         },
         "pagination": pagination,
         "maximum_companies": 200,
+        "is_complete": not source_output_truncated and complete_topic_rows,
+        "represented_company_count": len(represented_company_codes),
+        "requested_company_count": effective_page_size + 1,
+        "available_company_count": available_company_count,
+        "omitted_company_topic_rows": omitted_company_topic_rows,
+        "source_truncation": source_truncation,
+        "rate_scope": "returned_topic_rows",
         "topics": topic_results,
         "read_only": True,
         "limitations": [
+            "Rates are scoped to returned topic rows; omitted rows are excluded and do not imply non-disclosure.",
             "local_evidence_rate is local matched-evidence coverage, not a regulatory disclosure rate or completeness conclusion.",
             "not_found_in_cached_scope means a verified annual note cache was reviewed without a topic match; it is not non-disclosure.",
             "unavailable_raw means no verified annual note cache was available; non-disclosure is not assessed.",

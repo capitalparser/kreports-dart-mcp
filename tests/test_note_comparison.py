@@ -97,6 +97,9 @@ def test_note_disclosure_matrix_groups_companies_by_topic_without_claiming_unava
         "all_company_count": 4,
         "reviewable_company_count": 3,
         "matched_within_reviewable_pct": 66.7,
+        "scope": "returned_topic_rows",
+        "represented_company_count": 4,
+        "omitted_company_topic_rows": 0,
     }
     assert [cell["status"] for cell in topic["companies"]] == [
         "disclosed", "summary_only", "not_found_in_cached_scope", "unavailable_raw",
@@ -139,6 +142,53 @@ def test_note_disclosure_matrix_uses_supplied_comparison_and_labels_subject_plus
     assert result["pagination"]["effective_peer_limit"] == 199
     assert result["pagination"]["requested_page_size"] == 200
     assert result["pagination"]["effective_page_size"] == 199
+
+
+def test_note_disclosure_matrix_exposes_budget_omissions_and_returned_row_rate_scope():
+    from kreports.analysis.note_comparison import build_note_disclosure_matrix
+
+    comparison = {
+        "year": 2024,
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "selection_policy": {},
+        "pagination": {
+            "offset": 0,
+            "page_size": 199,
+            "total_peer_count": 220,
+            "available_peer_count": 220,
+            "returned_peer_count": 199,
+            "has_more": True,
+        },
+        "truncation": {
+            "applied": True,
+            "reason": "note_comparison_output_budget",
+            "output_budget_applied": True,
+            "omitted_peer_rows": 197,
+        },
+        "topics": [{
+            "topic": "leases",
+            "omitted_peer_rows": 197,
+            "rows": [
+                {"company": {"corp_code": "00000001"}, "availability": "available"},
+                {"company": {"corp_code": "00000002"}, "availability": "unavailable"},
+            ],
+        }],
+    }
+
+    result = build_note_disclosure_matrix(
+        "00000001", 2024, peer_limit=200, page_size=200,
+        _comparison=comparison,
+    )
+
+    assert result["is_complete"] is False
+    assert result["represented_company_count"] == 2
+    assert result["requested_company_count"] == 200
+    assert result["available_company_count"] == 221
+    assert result["omitted_company_topic_rows"] == 197
+    assert result["source_truncation"] == comparison["truncation"]
+    assert result["rate_scope"] == "returned_topic_rows"
+    assert result["topics"][0]["local_evidence_rate"]["scope"] == "returned_topic_rows"
+    assert "returned topic rows" in result["limitations"][0]
 
 
 def test_note_comparison_multilabels_long_chapters_with_centered_topic_context(temp_engine):
