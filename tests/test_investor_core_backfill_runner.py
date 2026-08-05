@@ -1,6 +1,7 @@
 """Focused safety and request-budget tests for the bounded investor runner."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -493,6 +494,99 @@ def _bind_runner_db(monkeypatch, runner, database: Path) -> None:
     monkeypatch.setattr(runner.settings, "db_url", f"sqlite:///{database}")
     monkeypatch.setattr(runner.settings, "dart_api_key", "fixture-key")
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+
+
+def _unsafe_lock_fixture(lock_path: Path, kind: str) -> None:
+    target = lock_path.with_name(f"{lock_path.name}.{kind}.target")
+    target.write_bytes(b"fixture")
+    if kind == "symlink":
+        lock_path.symlink_to(target)
+    elif kind == "fifo":
+        target.unlink()
+        os.mkfifo(lock_path)
+    elif kind == "hardlink":
+        os.link(target, lock_path)
+    else:  # pragma: no cover - test fixture contract
+        raise AssertionError(f"unsupported unsafe lock fixture: {kind}")
+
+
+def test_runner_fails_closed_when_lock_path_is_unlinked_and_recreated_while_flocking(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catch a new pathname inode replacing the descriptor after preflight."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    identity = runner._capture_database_identity(database)
+    lock_path = tmp_path / ".runner.db.investor-core.lock"
+    preserved_path = tmp_path / "preserved-lock-inode"
+    original_flock = runner.fcntl.flock
+    replaced = False
+
+    def flock_then_replace(descriptor: int, operation: int) -> None:
+        nonlocal replaced
+        original_flock(descriptor, operation)
+        if operation & runner.fcntl.LOCK_EX and not replaced:
+            os.link(lock_path, preserved_path)
+            lock_path.unlink()
+            lock_path.write_bytes(b"replacement")
+            replaced = True
+
+    monkeypatch.setattr(runner.fcntl, "flock", flock_then_replace)
+
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        with runner._exclusive_execution_guard(identity):
+            pytest.fail("replaced lock pathname must not enter bounded execution")
+
+    assert replaced is True
+    assert caught.value.code == "single_writer_guard_unavailable"
+
+
+@pytest.mark.parametrize("kind", ("symlink", "fifo", "hardlink"))
+def test_runner_rejects_unsafe_preexisting_single_writer_lock_file(
+    tmp_path: Path,
+    kind: str,
+):
+    """Catch an unsafe filesystem object being accepted as the lock inode."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    identity = runner._capture_database_identity(database)
+    lock_path = tmp_path / ".runner.db.investor-core.lock"
+    _unsafe_lock_fixture(lock_path, kind)
+
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        with runner._exclusive_execution_guard(identity):
+            pytest.fail("unsafe lock filesystem object must fail closed")
+
+    assert caught.value.code == "single_writer_guard_unavailable"
+
+
+def test_runner_maps_flock_oserror_to_single_writer_guard_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catch an OS lock failure being collapsed into an ambiguous runner error."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    identity = runner._capture_database_identity(database)
+
+    def fail_flock(_descriptor: int, operation: int) -> None:
+        if operation & runner.fcntl.LOCK_EX:
+            raise OSError(errno.EIO, "fixture flock failure")
+
+    monkeypatch.setattr(runner.fcntl, "flock", fail_flock)
+
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        with runner._exclusive_execution_guard(identity):
+            pytest.fail("flock failure must not enter bounded execution")
+
+    assert caught.value.code == "single_writer_guard_unavailable"
 
 
 def test_runner_fails_closed_when_a_second_thread_enters_same_database(

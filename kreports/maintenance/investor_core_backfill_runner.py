@@ -314,6 +314,30 @@ def _open_verified_sqlite_connection(identity: _DatabaseIdentity) -> sqlite3.Con
             os.close(descriptor)
 
 
+def _revalidate_lock_file_identity(lock_path: Path, descriptor: int) -> None:
+    """Require the lock pathname and held descriptor to name one safe inode."""
+    lock_path_stat = os.lstat(lock_path)
+    lock_descriptor_stat = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(lock_path_stat.st_mode)
+        or not stat.S_ISREG(lock_descriptor_stat.st_mode)
+        or lock_path_stat.st_nlink != 1
+        or lock_descriptor_stat.st_nlink != 1
+        or (
+            int(lock_path_stat.st_dev),
+            int(lock_path_stat.st_ino),
+        )
+        != (
+            int(lock_descriptor_stat.st_dev),
+            int(lock_descriptor_stat.st_ino),
+        )
+    ):
+        raise _fail(
+            "single_writer_guard_unavailable",
+            "single-writer database locking is unavailable",
+        )
+
+
 @contextmanager
 def _exclusive_execution_guard(identity: _DatabaseIdentity) -> Iterator[None]:
     """Permit only one bounded writer in this process and across processes."""
@@ -342,26 +366,7 @@ def _exclusive_execution_guard(identity: _DatabaseIdentity) -> Iterator[None]:
             | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
-        lock_path_stat = os.lstat(lock_path)
-        lock_descriptor_stat = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(lock_path_stat.st_mode)
-            or not stat.S_ISREG(lock_descriptor_stat.st_mode)
-            or lock_path_stat.st_nlink != 1
-            or lock_descriptor_stat.st_nlink != 1
-            or (
-                int(lock_path_stat.st_dev),
-                int(lock_path_stat.st_ino),
-            )
-            != (
-                int(lock_descriptor_stat.st_dev),
-                int(lock_descriptor_stat.st_ino),
-            )
-        ):
-            raise _fail(
-                "single_writer_guard_unavailable",
-                "single-writer database locking is unavailable",
-            )
+        _revalidate_lock_file_identity(lock_path, descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -375,6 +380,7 @@ def _exclusive_execution_guard(identity: _DatabaseIdentity) -> Iterator[None]:
                 "single-writer database locking is unavailable",
             ) from exc
         locked = True
+        _revalidate_lock_file_identity(lock_path, descriptor)
         _revalidate_database_identity(identity)
         yield
     except InvestorCoreBackfillError:
