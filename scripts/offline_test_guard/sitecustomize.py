@@ -1,8 +1,10 @@
-"""Block non-loopback sockets for the explicit offline pytest lane.
+"""Block non-loopback Python socket API calls for the explicit offline pytest lane.
 
 Python imports ``sitecustomize`` in the test process and in ordinary Python
 subprocesses because the offline runner prepends this directory to
-``PYTHONPATH``.  The guard is inert outside that runner.
+``PYTHONPATH``.  The guard is inert outside that runner. It is not OS-level
+network isolation and does not constrain non-Python subprocesses or native
+network clients that bypass these patched socket methods.
 """
 from __future__ import annotations
 

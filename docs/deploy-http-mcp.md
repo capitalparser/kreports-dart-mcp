@@ -194,6 +194,10 @@ For a short-lived tunnel test only:
 kreports serve-http --host 127.0.0.1 --port 8765 --allow-unauthenticated
 ```
 
+`--allow-unauthenticated` is fail-closed to loopback listeners only
+(`127.0.0.1`, `::1`, or `localhost`); wildcard and external bind addresses are
+rejected before startup. A tunnel must therefore target that local listener.
+
 ## Collector and immutable release promotion
 
 Run collection only against a separate writable maintainer DB. This process must

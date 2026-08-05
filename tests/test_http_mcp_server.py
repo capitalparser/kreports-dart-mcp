@@ -9,6 +9,37 @@ def test_remote_http_requires_token_by_default():
         run_http(host="127.0.0.1", port=9)
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "203.0.113.9"])
+def test_unauthenticated_http_rejects_non_loopback_host_before_startup(host, monkeypatch):
+    """Catches an authless MCP endpoint accidentally becoming internet-reachable."""
+    import uvicorn
+
+    monkeypatch.setattr(
+        uvicorn,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("uvicorn must not start"),
+    )
+    with pytest.raises(RuntimeError, match="loopback host"):
+        run_http(host=host, port=9, allow_unauthenticated=True)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_create_app_allows_explicit_unauthenticated_loopback_only(host):
+    """Catches a local tunnel mode that no longer works on a loopback listener."""
+    app = create_app(token=None, host=host, allow_unauthenticated=True)
+
+    with TestClient(app) as client:
+        response = client.get("/mcp")
+
+    assert response.status_code != 401
+
+
+def test_create_app_rejects_implicit_unauthenticated_mode():
+    """Catches app-factory callers bypassing the explicit local-only escape hatch."""
+    with pytest.raises(RuntimeError, match="KREPORTS_MCP_TOKEN is required"):
+        create_app()
+
+
 def test_remote_http_health_and_bearer_guard():
     app = create_app(token="secret")
 

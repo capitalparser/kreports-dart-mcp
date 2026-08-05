@@ -117,8 +117,9 @@ Security notes:
   implementation currently provides static bearer-token protection for MCP
   clients that can send an `Authorization: Bearer ...` header.
 - If you test Claude Web authless, start the server with
-  `--allow-unauthenticated` and use a short-lived tunnel only. Do not expose a
-  long-lived unauthenticated endpoint with audit/client data.
+  `--allow-unauthenticated` on `127.0.0.1`, `::1`, or `localhost` and use a
+  short-lived tunnel only. Wildcard and external bind addresses are rejected.
+  Do not expose a long-lived unauthenticated endpoint with audit/client data.
 - For production Claude Web use, put this behind an OAuth-capable gateway or a
   deployment layer that restricts access appropriately.
 

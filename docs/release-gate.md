@@ -13,9 +13,15 @@ Run the default code-evidence lane with one command:
 The runner deliberately overrides ambient shell and `.env` inputs with an
 empty `DART_API_KEY`, `DB_URL=sqlite:///:memory:`, and
 `KREPORTS_RUNTIME_MODE=readonly`. It clears live-DB opt-ins and blocks
-non-loopback socket connections in Python test processes and inherited Python
-subprocesses. It excludes only the explicit `live`, `live_data`, and
+non-loopback Python socket API connections in test processes and inherited
+Python subprocesses. It excludes only the explicit `live`, `live_data`, and
 `apfs_real` markers; ordinary tests are still collected and executed.
+
+This is not OS-level network isolation: non-Python subprocesses and native
+clients that bypass the patched Python socket APIs are outside this guard. Use
+a CI network namespace, firewall policy, or an equivalent sandbox when that
+stronger guarantee is required; such isolation is not implemented by this
+runner.
 
 This is code evidence, not a live-data release proof. Run explicit live lanes
 separately, with an approved immutable database and their opt-in environment:

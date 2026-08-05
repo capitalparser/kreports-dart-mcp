@@ -1,11 +1,11 @@
 """Read-only inspection for historical credential-bearing error text."""
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from kreports.maintenance.investor_core_backfill_plan import _open_readonly_database
+from kreports.security import contains_sensitive_text
 
 
 MAX_RENDERED_FINDINGS = 200
@@ -14,13 +14,6 @@ _CANDIDATE_COLUMNS = {
     "audit_fee_observations": ("source_message", "limitations_json"),
     "audit_fees": ("source_observations_json",),
 }
-_CREDENTIAL_RE = re.compile(
-    r"(?i)(?:[?&;\"']\s*(?:crtfc_key|dart_api_key|api[_-]?key|"
-    r"access[_-]?token|token|secret|password)\s*(?:=|:)|"
-    r"\b(?:authorization|bearer)\b)"
-)
-
-
 def _existing_columns(connection: Any, table: str) -> set[str]:
     rows = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
     return {str(row["name"]) for row in rows}
@@ -54,7 +47,7 @@ def diagnose_credential_leaks(db_path: str | Path) -> dict[str, object]:
                     f'WHERE "{column}" IS NOT NULL'
                 )
                 for row in rows:
-                    if _CREDENTIAL_RE.search(str(row["value"])) is None:
+                    if not contains_sensitive_text(row["value"]):
                         continue
                     total += 1
                     if len(findings) < MAX_RENDERED_FINDINGS:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible release-evidence lane: no DART key, no live DB, no external TCP.
+# Reproducible release-evidence lane: no DART key, no live DB, Python socket API network block.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

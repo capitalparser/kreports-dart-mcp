@@ -362,7 +362,11 @@ class TestStreamableHttpE2E:
     def test_http_app_factory_routes(self):
         from kreports.mcp.http_server import create_app
 
-        app = create_app(path="/mcp")
+        app = create_app(
+            path="/mcp",
+            host="127.0.0.1",
+            allow_unauthenticated=True,
+        )
         route_paths = {getattr(route, "path", None) for route in app.routes}
         assert {"/", "/healthz", "/mcp"}.issubset(route_paths)
 

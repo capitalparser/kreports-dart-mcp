@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import ipaddress
 import logging
 import os
 from collections.abc import Iterable
@@ -113,6 +114,37 @@ def _security_settings(
     )
 
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower().strip("[]")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_auth_configuration(
+    *,
+    token: str | None,
+    host: str,
+    allow_unauthenticated: bool,
+) -> None:
+    if token:
+        return
+    if not allow_unauthenticated:
+        raise RuntimeError(
+            "KREPORTS_MCP_TOKEN is required for remote MCP. "
+            "Use --token, set KREPORTS_MCP_TOKEN, or pass --allow-unauthenticated "
+            "only for short-lived local/tunnel testing."
+        )
+    if not _is_loopback_host(host):
+        raise RuntimeError(
+            "--allow-unauthenticated requires a loopback host "
+            "(for example 127.0.0.1, ::1, or localhost)."
+        )
+
+
 async def _health(_: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
@@ -132,6 +164,8 @@ def create_app(
     *,
     path: str = DEFAULT_PATH,
     token: str | None = None,
+    host: str = DEFAULT_HOST,
+    allow_unauthenticated: bool = False,
     stateless: bool = False,
     json_response: bool = False,
     allowed_hosts: str | Iterable[str] | None = None,
@@ -140,6 +174,11 @@ def create_app(
     """Create a Starlette app exposing the existing MCP server over HTTP."""
     if not path.startswith("/"):
         raise ValueError("path must start with '/'")
+    _validate_auth_configuration(
+        token=token,
+        host=host,
+        allow_unauthenticated=allow_unauthenticated,
+    )
 
     session_manager = StreamableHTTPSessionManager(
         app=server,
@@ -205,16 +244,11 @@ def run_http(
     import uvicorn
 
     auth_token = _effective_token(token)
-    if not auth_token and not allow_unauthenticated:
-        raise RuntimeError(
-            "KREPORTS_MCP_TOKEN is required for remote MCP. "
-            "Use --token, set KREPORTS_MCP_TOKEN, or pass --allow-unauthenticated "
-            "only for short-lived local/tunnel testing."
-        )
-
     app = create_app(
         path=path,
         token=auth_token,
+        host=host,
+        allow_unauthenticated=allow_unauthenticated,
         stateless=stateless,
         json_response=json_response,
         allowed_hosts=allowed_hosts,
@@ -229,7 +263,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--path", default=DEFAULT_PATH)
     parser.add_argument("--token", default=None, help="Bearer token. Defaults to KREPORTS_MCP_TOKEN.")
-    parser.add_argument("--allow-unauthenticated", action="store_true")
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help="Allow unauthenticated requests only on a loopback host.",
+    )
     parser.add_argument("--stateless", action="store_true")
     parser.add_argument("--json-response", action="store_true")
     parser.add_argument("--allowed-hosts", default=None, help="Comma-separated Host allowlist.")

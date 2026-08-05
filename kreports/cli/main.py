@@ -592,7 +592,7 @@ def serve_http(
     allow_unauthenticated: bool = typer.Option(
         False,
         "--allow-unauthenticated",
-        help="Allow requests without bearer authentication.",
+        help="Allow requests without bearer authentication on a loopback host only.",
     ),
     stateless: bool = typer.Option(False, "--stateless", help="Use stateless Streamable HTTP sessions."),
     json_response: bool = typer.Option(False, "--json-response", help="Return JSON responses instead of SSE streams."),
