@@ -192,6 +192,7 @@ def test_note_pack_and_chatbot_table_share_enriched_status_and_evidence():
     assert pack["status"] == result["data_quality"]["status"] == "usable"
     assert build_answer_envelope("search_dataset", result).data_quality.status == "usable"
     assert table["rows"] == [{
+        "company": "테스트회사",
         "topic": "재고자산",
         "year": 2025,
         "fs_div": "CFS",
@@ -214,6 +215,32 @@ def test_note_pack_and_chatbot_table_share_enriched_status_and_evidence():
     assert "표 형태 결과" in text
     assert "시각화 대체 표" not in text
     assert text.index("확인된 내용") < text.index("표 형태 결과")
+
+
+def test_note_evidence_table_labels_each_fact_with_its_source_company():
+    """Multiple-company note evidence must retain the company-to-receipt association."""
+    raw = _matched_note_result()
+    second_record = dict(raw["companies"][0]["records"][0])
+    second_record.update({
+        "rcept_no": "20250312000002",
+        "source_document_id": 2,
+        "source_document_rcept_no": "20250312000002",
+        "source_document_corp_code": "00888888",
+        "disclosure_rcept_no": "20250312000002",
+        "disclosure_corp_code": "00888888",
+    })
+    raw["companies"].append({
+        "corp_code": "00888888",
+        "corp_name": "다른회사",
+        "records": [second_record],
+    })
+
+    result = _enrich_accounting_note_search(raw)
+    pack = build_answer_pack("search_dataset", result)
+    table = next(table for table in pack["tables"] if table["id"] == "accounting_note_evidence")
+
+    assert [row["company"] for row in table["rows"]] == ["테스트회사", "다른회사"]
+    assert {"company", "rcept_no"} <= {column["field"] for column in table["columns"]}
 
 
 def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table():

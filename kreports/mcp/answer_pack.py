@@ -2304,6 +2304,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
             continue
         source = fact.get("source") if isinstance(fact.get("source"), dict) else {}
         rows.append({
+            "company": source.get("corp_name") or source.get("corp_code") or "대상 회사",
             "topic": fact.get("topic") or (result.get("query") or {}).get("keyword") or "회계주석",
             "year": fact.get("year"),
             "fs_div": fact.get("fs_div"),
@@ -2321,6 +2322,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
         "accounting_note_evidence",
         "회계주석 확인 근거",
         [
+            ("company", "회사"),
             ("topic", "주제"),
             ("year", "연도"),
             ("fs_div", "재무제표 기준"),
