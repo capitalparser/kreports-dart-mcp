@@ -278,7 +278,9 @@ def diagnose_investor_core_listing_gaps(
     target_numerator = int(plan["target_numerator"])
     adjusted_numerator = min(denominator, numerator + zero_remaining_count)
     adjusted_coverage = (adjusted_numerator * 100.0 / denominator) if denominator else 0.0
-    normal_financial_count = len(valid_rows)
+    # Every remaining target ultimately needs a financial endpoint attempt;
+    # invalid/missing metadata targets first consume metadata refresh capacity.
+    normal_financial_count = len(remaining_rows)
     metadata_remaining_count = len(invalid_rows) + sum(
         (str(row["corp_code"]), int(row["bsns_year"])) in remaining_keys
         for row in missing_rows

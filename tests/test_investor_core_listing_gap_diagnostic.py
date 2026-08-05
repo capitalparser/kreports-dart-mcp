@@ -111,10 +111,10 @@ def test_holds_only_true_missing_targets_strictly_before_verified_listing_and_ke
     assert report["diagnostic_adjusted_coverage_pct"] == 50.0
     assert report["remaining_shortfall"] == 1
     assert report["http_request_estimates"] == {
-        "normal_financial_remaining_year_count": 1,
+        "normal_financial_remaining_year_count": 2,
         "metadata_remaining_invalid_plus_missing_year_count": 1,
-        "financial_fallback_request_ceiling": 4,
-        "combined_request_ceiling_before_retry_or_pagination": 5,
+        "financial_fallback_request_ceiling": 8,
+        "combined_request_ceiling_before_retry_or_pagination": 9,
     }
     assert report["invariants"] == {
         "partitions_cover_target_company_years": True,
