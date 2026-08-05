@@ -442,6 +442,27 @@ def _collect_sources(result: dict[str, Any]) -> list[dict[str, Any]]:
                         receipt,
                         label=f"{company.get('corp_name') or company.get('corp_code') or ''} 사업보고서".strip(),
                     ))
+    note_disclosure_matrix = result.get("note_disclosure_matrix")
+    if isinstance(note_disclosure_matrix, dict):
+        for topic in note_disclosure_matrix.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            for row in topic.get("companies") or []:
+                if not isinstance(row, dict):
+                    continue
+                company = row.get("company") if isinstance(row.get("company"), dict) else {}
+                receipt = canonical_annual_filing_source_receipt(
+                    corp_code=company.get("corp_code"),
+                    bsns_year=note_disclosure_matrix.get("year"),
+                    rcept_no=row.get("rcept_no"),
+                    source_document_id=row.get("source_document_id"),
+                    source_type=row.get("source_type"),
+                )
+                if receipt:
+                    add(_source_from_rcept_no(
+                        receipt,
+                        label=f"{company.get('corp_name') or company.get('corp_code') or ''} 사업보고서".strip(),
+                    ))
     return sources
 
 
@@ -1868,6 +1889,7 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
         result.get("peer_selection")
         or result.get("selected_topic")
         or result.get("note_comparison")
+        or result.get("note_disclosure_matrix")
     )
     if not extended:
         _append_legacy_peer_policy_tables(pack, result, selection_policy)
@@ -2072,6 +2094,51 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
              ("source_locator", "출처 위치")],
             note_comparison_rows,
             note="원문 발췌와 출처를 비교하며, 캐시 미확보는 공시 부재를 뜻하지 않습니다.",
+        ))
+    matrix_rows = []
+    note_disclosure_matrix = result.get("note_disclosure_matrix")
+    if isinstance(note_disclosure_matrix, dict):
+        for topic in note_disclosure_matrix.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            rate = topic.get("local_evidence_rate") if isinstance(topic.get("local_evidence_rate"), dict) else {}
+            for cell in topic.get("companies") or []:
+                if not isinstance(cell, dict):
+                    continue
+                company = cell.get("company") if isinstance(cell.get("company"), dict) else {}
+                evidence = cell.get("match_evidence") if isinstance(cell.get("match_evidence"), dict) else {}
+                matrix_rows.append({
+                    "topic": topic.get("topic"),
+                    "company": company.get("corp_name") or company.get("corp_code"),
+                    "status": cell.get("status"),
+                    "note_title": cell.get("note_title"),
+                    "excerpt": cell.get("excerpt"),
+                    "matched_keyword": evidence.get("keyword"),
+                    "match_location": evidence.get("location"),
+                    "match_strength": evidence.get("strength"),
+                    "receipt": cell.get("rcept_no"),
+                    "provenance_status": cell.get("provenance_status"),
+                    "disclosure_assessment": cell.get("disclosure_assessment") or "not_assessed",
+                    "unavailable_reason": cell.get("unavailable_reason"),
+                    "rate_numerator": rate.get("numerator"),
+                    "rate_denominator": rate.get("denominator"),
+                    "rate_pct": rate.get("pct"),
+                    "reviewable_denominator": rate.get("reviewable_denominator"),
+                    "unavailable_count": rate.get("unavailable_count"),
+                })
+    if matrix_rows:
+        pack["tables"].append(_table(
+            "topic_company_disclosure_matrix", "주제별 회사 주석 로컬 확인 매트릭스",
+            [("topic", "주제"), ("company", "회사"), ("status", "로컬 증빙 상태"),
+             ("note_title", "주석 제목"), ("excerpt", "핵심 발췌"),
+             ("matched_keyword", "일치 키워드"), ("match_location", "일치 위치"),
+             ("match_strength", "일치 강도"), ("receipt", "접수번호"),
+             ("provenance_status", "출처 상태"), ("disclosure_assessment", "공시 판단 상태"),
+             ("unavailable_reason", "미확보 사유"), ("rate_numerator", "로컬 확인 분자"),
+             ("rate_denominator", "전체 회사 분모"), ("rate_pct", "로컬 확인률"),
+             ("reviewable_denominator", "검토 가능 분모"), ("unavailable_count", "원문 미확보 수")],
+            matrix_rows,
+            note="unavailable_raw는 로컬 원문·주제 캐시 미확보이며, 공시 부재는 not_assessed입니다.",
         ))
     coverage_rows = [row for row in result.get("topic_coverage") or [] if isinstance(row, dict)]
     if coverage_rows:

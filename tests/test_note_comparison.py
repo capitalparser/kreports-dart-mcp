@@ -41,6 +41,87 @@ def test_note_comparison_returns_side_by_side_rows_and_explicit_absence(temp_eng
     assert result["peer_selection"]["selection_mode"] == "adaptive"
 
 
+def test_note_disclosure_matrix_groups_companies_by_topic_without_claiming_unavailable_is_non_disclosure(temp_engine):
+    from kreports.analysis.note_comparison import build_note_disclosure_matrix
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
+
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Summary peer", induty_code="26410"),
+            Company(corp_code="00000003", corp_name="Uncached peer", induty_code="26410"),
+            Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="Subject", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            Disclosure(rcept_no="20250301000002", corp_code="00000002", corp_name="Summary peer", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            SourceDocument(rcept_no="20250301000002", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="b" * 40),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스부채를 현재가치로 측정합니다."),
+            AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스기간을 재검토합니다.", full_text_uri="raw://note/peer", full_text_length=100, full_text_storage_status="externalized"),
+        ])
+
+    result = build_note_disclosure_matrix(
+        "00000001",
+        2024,
+        topics=["leases"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [
+                {"corp_code": "00000002", "corp_name": "Summary peer"},
+                {"corp_code": "00000003", "corp_name": "Uncached peer"},
+            ],
+            "selection_policy": {"selection_mode": "adaptive", "criteria_requested": ["industry"]},
+        },
+        _read_engine=temp_engine,
+    )
+
+    assert result["year"] == 2024
+    assert result["cohort_definition"]["criteria_requested"] == ["industry"]
+    topic = result["topics"][0]
+    assert topic["local_evidence_rate"] == {
+        "numerator": 2,
+        "denominator": 3,
+        "pct": 66.7,
+        "reviewable_denominator": 2,
+        "unavailable_count": 1,
+    }
+    assert [cell["status"] for cell in topic["companies"]] == [
+        "disclosed", "summary_only", "unavailable_raw",
+    ]
+    assert topic["companies"][0]["rcept_no"] == "20250301000001"
+    assert topic["companies"][0]["match_evidence"]["keyword"] == "리스"
+    unavailable = topic["companies"][2]
+    assert unavailable["unavailable_reason"] == "local_topic_cache_missing"
+    assert unavailable["disclosure_assessment"] == "not_assessed"
+
+
+def test_note_disclosure_matrix_uses_supplied_comparison_and_labels_subject_plus_peers_cap(temp_engine, monkeypatch):
+    from kreports.analysis import note_comparison
+
+    comparison = {
+        "year": 2024,
+        "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+        "selection_policy": {},
+        "pagination": {"offset": 0, "page_size": 199},
+        "topics": [{"topic": "leases", "rows": []}],
+    }
+
+    def should_not_query_again(*args, **kwargs):
+        raise AssertionError("matrix must transpose the supplied comparison")
+
+    monkeypatch.setattr(note_comparison, "compare_peer_accounting_notes", should_not_query_again)
+    result = note_comparison.build_note_disclosure_matrix(
+        "00000001", 2024, peer_limit=200, page_size=200,
+        _comparison=comparison, _read_engine=temp_engine,
+    )
+
+    assert result["pagination"]["maximum_companies"] == 200
+    assert result["pagination"]["subject_included"] is True
+    assert result["pagination"]["requested_peer_limit"] == 200
+    assert result["pagination"]["effective_peer_limit"] == 199
+    assert result["pagination"]["requested_page_size"] == 200
+    assert result["pagination"]["effective_page_size"] == 199
+
+
 def test_note_comparison_multilabels_long_chapters_with_centered_topic_context(temp_engine):
     """One cached chapter can evidence every requested keyword-bearing topic."""
     from kreports.analysis.note_comparison import compare_peer_accounting_notes

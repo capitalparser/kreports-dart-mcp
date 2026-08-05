@@ -176,6 +176,42 @@ def test_consolidated_policy_and_note_sections_reuse_one_explicit_peer_criteria_
     ]
 
 
+def test_consolidated_note_and_matrix_requests_transpose_one_note_comparison(monkeypatch):
+    """The opt-in matrix must reuse the same raw-note comparison query."""
+    from kreports.mcp.handlers import auditor
+
+    comparison = {"year": 2024, "topics": [], "pagination": {}}
+    note_comparison_calls = []
+
+    monkeypatch.setattr(auditor, "compare_peer_accounting_policies", lambda *args, **kwargs: {
+        "_note_comparison_peer_group": {"subject": {"corp_code": "00000001"}, "peers": []},
+    })
+    monkeypatch.setattr(auditor, "resolve_company", lambda company: company)
+
+    def compare_notes(**kwargs):
+        note_comparison_calls.append(kwargs)
+        return comparison
+
+    def build_matrix(**kwargs):
+        assert kwargs["_comparison"] is comparison
+        return {"topics": [], "read_only": True}
+
+    monkeypatch.setattr(auditor, "compare_peer_accounting_notes", compare_notes)
+    monkeypatch.setattr(auditor, "build_note_disclosure_matrix", build_matrix)
+
+    result = auditor.handle_compare_peer_accounting_policies(
+        ComparePeerAccountingPoliciesInput(
+            company="00000001", year=2024,
+            include_note_comparison=True,
+            include_note_disclosure_matrix=True,
+        )
+    )
+
+    assert len(note_comparison_calls) == 1
+    assert result["note_comparison"] is comparison
+    assert result["note_disclosure_matrix"]["read_only"] is True
+
+
 def test_peer_policy_input_rejects_conflicting_overrides_and_unknown_weight():
     """Input validation must fail closed before any peer resolution."""
     with pytest.raises(ValidationError):

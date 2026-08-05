@@ -875,3 +875,140 @@ def compare_peer_accounting_notes(
         ],
     }
     return _apply_output_budget(result)
+
+
+def build_note_disclosure_matrix(
+    company: str,
+    year: int,
+    *,
+    topics: list[str] | None = None,
+    peer_limit: int = 30,
+    peer_offset: int = 0,
+    page_size: int | None = None,
+    fs_strategy: str = "auto",
+    peer_criteria: list[str] | dict | None = None,
+    _peer_group: dict | None = None,
+    _comparison: dict | None = None,
+    _read_engine=None,
+) -> dict:
+    """Transpose the verified peer-note rows into a topic-to-company matrix.
+
+    This adapter deliberately delegates matching, annual-filing binding, and
+    local raw-availability decisions to ``compare_peer_accounting_notes``.
+    An unavailable matrix cell therefore remains a local-cache limitation, not
+    a conclusion that a company failed to disclose the topic.
+    """
+    requested_page_size = page_size if page_size is not None else peer_limit
+    effective_peer_limit = min(peer_limit, 199)
+    effective_page_size = min(requested_page_size, 199)
+    comparison = _comparison or compare_peer_accounting_notes(
+        company,
+        year,
+        topics=topics,
+        peer_limit=effective_peer_limit,
+        peer_offset=peer_offset,
+        page_size=effective_page_size,
+        fs_strategy=fs_strategy,
+        peer_criteria=peer_criteria,
+        _peer_group=_peer_group,
+        _read_engine=_read_engine,
+    )
+    if "error" in comparison:
+        return comparison
+
+    topic_results: list[dict] = []
+    for topic_result in comparison["topics"]:
+        companies: list[dict] = []
+        for row in sorted(
+            topic_result["rows"],
+            key=lambda item: str(item["company"].get("corp_code") or ""),
+        ):
+            availability = row["availability"]
+            status = {
+                "available": "disclosed",
+                "summary_only": "summary_only",
+                "unavailable": "unavailable_raw",
+            }[availability]
+            unavailable = status == "unavailable_raw"
+            companies.append({
+                "company": row["company"],
+                "status": status,
+                "note_title": row.get("note_title"),
+                "excerpt": row.get("value_or_excerpt"),
+                "match_evidence": {
+                    "keyword": row.get("match_keyword"),
+                    "location": row.get("match_location"),
+                    "strength": row.get("match_strength"),
+                    "matched_keyword_count": row.get("matched_keyword_count"),
+                    "offset": row.get("match_offset"),
+                },
+                "rcept_no": row.get("rcept_no"),
+                "provenance_status": row.get("provenance_status"),
+                "canonical_source_binding": row.get("canonical_source_binding"),
+                "source_locator": row.get("source_locator"),
+                "source_document_id": row.get("source_document_id"),
+                "source_type": row.get("source_type"),
+                "fs_div": row.get("fs_div"),
+                "fs_div_selection": row.get("fs_div_selection"),
+                "raw_availability": (
+                    "locally_available" if status == "disclosed"
+                    else "summary_only" if status == "summary_only"
+                    else "not_locally_available"
+                ),
+                "unavailable_reason": (
+                    "local_topic_cache_missing" if unavailable else None
+                ),
+                "disclosure_assessment": (
+                    "not_assessed" if unavailable
+                    else "matched_local_topic_evidence"
+                ),
+            })
+        numerator = sum(cell["status"] in {"disclosed", "summary_only"} for cell in companies)
+        denominator = len(companies)
+        reviewable_denominator = sum(
+            cell["status"] in {"disclosed", "summary_only"} for cell in companies
+        )
+        topic_results.append({
+            "topic": topic_result["topic"],
+            "companies": companies,
+            "local_evidence_rate": {
+                "numerator": numerator,
+                "denominator": denominator,
+                "pct": round(100.0 * numerator / denominator, 1) if denominator else 0.0,
+                "reviewable_denominator": reviewable_denominator,
+                "unavailable_count": denominator - reviewable_denominator,
+            },
+        })
+    selection_policy = dict(comparison.get("selection_policy") or {})
+    pagination = dict(comparison.get("pagination") or {})
+    pagination.update({
+        "maximum_companies": 200,
+        "subject_included": True,
+        "requested_peer_limit": peer_limit,
+        "effective_peer_limit": effective_peer_limit,
+        "requested_page_size": requested_page_size,
+        "effective_page_size": effective_page_size,
+        "peer_count_capped_for_subject": (
+            peer_limit != effective_peer_limit
+            or requested_page_size != effective_page_size
+        ),
+    })
+    return {
+        "year": comparison["year"],
+        "cohort_definition": {
+            "subject": comparison.get("subject"),
+            "criteria_requested": selection_policy.get("criteria_requested"),
+            "criteria_applied": selection_policy.get("criteria_applied"),
+            "selection_mode": selection_policy.get("selection_mode"),
+            "selection_policy": selection_policy,
+        },
+        "pagination": pagination,
+        "maximum_companies": 200,
+        "topics": topic_results,
+        "read_only": True,
+        "limitations": [
+            "local_evidence_rate is local matched-evidence coverage, not a regulatory disclosure rate or completeness conclusion.",
+            "unavailable_raw means local raw topic evidence was not available; non-disclosure is not assessed.",
+            "A matrix contains the subject plus at most 199 peers, so a response never exceeds 200 companies.",
+        ],
+    }

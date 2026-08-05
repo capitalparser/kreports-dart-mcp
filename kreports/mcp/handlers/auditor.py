@@ -18,7 +18,10 @@ from kreports.analysis.auditor_decisions import (
     compare_peer_kam_topics,
     compare_peer_risk_profile,
 )
-from kreports.analysis.note_comparison import compare_peer_accounting_notes
+from kreports.analysis.note_comparison import (
+    build_note_disclosure_matrix,
+    compare_peer_accounting_notes,
+)
 from kreports.analysis.audit_effort_inputs import prepare_standard_audit_hours_inputs
 from kreports.analysis.group_audit import get_subsidiary_auditors
 from kreports.analysis.peer_benchmarks import (
@@ -117,12 +120,38 @@ def handle_compare_peer_accounting_policies(
         exclude_peers=args.exclude_peers,
         peer_criteria=args.peer_criteria,
         _return_note_comparison_peer_group=(
-            args.include_note_comparison or bool(args.note_topics)
+            args.include_note_comparison
+            or args.include_note_disclosure_matrix
+            or bool(args.note_topics)
         ),
     )
-    if args.include_note_comparison or args.note_topics:
+    if (
+        args.include_note_comparison
+        or args.include_note_disclosure_matrix
+        or args.note_topics
+    ):
         peer_group = result.pop("_note_comparison_peer_group", None)
-        result["note_comparison"] = compare_peer_accounting_notes(
+    note_comparison = None
+    if args.include_note_comparison or args.include_note_disclosure_matrix or args.note_topics:
+        matrix_limited = args.include_note_disclosure_matrix
+        effective_peer_limit = min(args.peer_limit, 199) if matrix_limited else args.peer_limit
+        requested_page_size = args.page_size if args.page_size is not None else args.peer_limit
+        effective_page_size = min(requested_page_size, 199) if matrix_limited else args.page_size
+        note_comparison = compare_peer_accounting_notes(
+            company=company,
+            year=args.year,
+            topics=args.note_topics,
+            peer_limit=effective_peer_limit,
+            peer_offset=args.peer_offset,
+            page_size=effective_page_size,
+            fs_strategy=args.fs_strategy,
+            peer_criteria=args.peer_criteria,
+            _peer_group=peer_group,
+        )
+    if args.include_note_comparison or args.note_topics:
+        result["note_comparison"] = note_comparison
+    if args.include_note_disclosure_matrix:
+        result["note_disclosure_matrix"] = build_note_disclosure_matrix(
             company=company,
             year=args.year,
             topics=args.note_topics,
@@ -132,6 +161,7 @@ def handle_compare_peer_accounting_policies(
             fs_strategy=args.fs_strategy,
             peer_criteria=args.peer_criteria,
             _peer_group=peer_group,
+            _comparison=note_comparison,
         )
     return result
 

@@ -1340,3 +1340,45 @@ def test_policy_pack_renders_consolidated_side_by_side_note_comparison():
         "receipt": "20250301000001",
         "source_locator": "accounting_note_chapters:1",
     }]
+
+
+def test_policy_pack_renders_topic_to_company_disclosure_matrix_without_absence_claim():
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "subject": {"corp_code": "001", "corp_name": "대상회사"},
+        "data_quality": {"status": "limited"},
+        "note_disclosure_matrix": {
+            "year": 2024,
+            "topics": [{
+                "topic": "leases",
+                "local_evidence_rate": {
+                    "numerator": 1, "denominator": 2, "pct": 50.0,
+                    "reviewable_denominator": 1, "unavailable_count": 1,
+                },
+                "companies": [
+                    {
+                        "company": {"corp_code": "001", "corp_name": "대상회사"},
+                        "status": "disclosed",
+                        "note_title": "리스",
+                        "excerpt": "리스부채 측정",
+                        "match_evidence": {"keyword": "리스부채", "location": "body", "strength": "body_single_signal_reference"},
+                        "rcept_no": "20250301000001",
+                        "provenance_status": "proven_annual_filing",
+                    },
+                    {
+                        "company": {"corp_code": "002", "corp_name": "미확보회사"},
+                        "status": "unavailable_raw",
+                        "unavailable_reason": "local_topic_cache_missing",
+                    },
+                ],
+            }],
+        },
+    })
+
+    assert pack is not None
+    table = next(table for table in pack["tables"] if table["id"] == "topic_company_disclosure_matrix")
+    assert table["title"] == "주제별 회사 주석 로컬 확인 매트릭스"
+    assert table["rows"][1]["status"] == "unavailable_raw"
+    assert table["rows"][1]["disclosure_assessment"] == "not_assessed"
+    assert "공시 부재는 not_assessed" in table["note"]

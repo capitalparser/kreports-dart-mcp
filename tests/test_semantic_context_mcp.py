@@ -105,3 +105,6 @@ def test_semantic_context_and_note_comparison_are_consolidated_into_34_tools():
     assert "include_note_comparison" in TOOL_CATALOG[
         "compare_peer_accounting_policies"
     ].input_model.model_fields
+    assert "include_note_disclosure_matrix" in TOOL_CATALOG[
+        "compare_peer_accounting_policies"
+    ].input_model.model_fields

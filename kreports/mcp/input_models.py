@@ -310,6 +310,10 @@ class ComparePeerAccountingPoliciesInput(ToolInput):
         False,
         description="선택. 같은 사업연도 peer별 회계주석 원문 발췌·출처를 추가한다.",
     )
+    include_note_disclosure_matrix: bool = Field(
+        False,
+        description="선택. topic별 회사 주석 로컬 확인 매트릭스를 추가한다. 대상회사 포함 최대 200개이며, 원문 미확보는 공시 부재로 판단하지 않는다.",
+    )
     note_topics: list[NoteTopic] | None = Field(None, max_length=9)
     peer_offset: int = Field(0, ge=0)
     page_size: int | None = Field(None, ge=1, le=200)
