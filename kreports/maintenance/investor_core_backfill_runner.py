@@ -12,12 +12,13 @@ import re
 import shutil
 import sqlite3
 import stat
+import threading
 from typing import Any, Callable, Iterator
 from urllib.parse import unquote
 
 import httpx
-from sqlalchemy.engine import make_url
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from kreports.collector.fetcher import (
@@ -40,6 +41,7 @@ REPORT_VERSION = 1
 TARGET_SAMPLE_LIMIT = 20
 MIN_FREE_SPACE_BYTES = 10 * 1024**3
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+_WRITER_BIND_LOCK = threading.RLock()
 
 
 class InvestorCoreBackfillError(RuntimeError):
@@ -204,40 +206,63 @@ def _verify_writer_connection_identity(connection: object, identity: _DatabaseId
         )
 
 
+def _verify_checkpoint_connection_identity(
+    connection: sqlite3.Connection,
+    identity: _DatabaseIdentity,
+) -> None:
+    """Verify the just-opened checkpoint connection before it issues WAL SQL."""
+    try:
+        rows = connection.execute("PRAGMA database_list").fetchall()
+        main_path = next(str(row[2]) for row in rows if row[1] == "main")
+        path_stat = os.stat(main_path, follow_symlinks=False)
+    except (OSError, StopIteration, sqlite3.Error) as exc:
+        raise _fail(
+            "database_checkpoint_identity_mismatch",
+            "checkpoint connection does not match the requested database",
+        ) from exc
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or path_stat.st_nlink != 1
+        or int(path_stat.st_dev) != identity.device
+        or int(path_stat.st_ino) != identity.inode
+    ):
+        raise _fail(
+            "database_checkpoint_identity_mismatch",
+            "checkpoint connection does not match the requested database",
+        )
+
+
 @contextmanager
 def _bound_financial_writer(identity: _DatabaseIdentity) -> Iterator[Callable[..., str]]:
-    """Bind fin_collector's actual session factory to the checked target file."""
+    """Bind every imported engine.get_session path to the checked target file."""
     from kreports.collector import fin_collector
+    from kreports.db import engine as database_engine
 
-    writer_engine = create_engine(
-        f"sqlite:///{identity.path}",
-        connect_args={"check_same_thread": False, "timeout": 60},
-        echo=False,
-    )
-    writer_session = sessionmaker(bind=writer_engine, autocommit=False, autoflush=False)
-    original_get_session = fin_collector.get_session
-
-    @contextmanager
-    def exact_get_session() -> Iterator[object]:
+    with _WRITER_BIND_LOCK:
         _revalidate_database_identity(identity)
-        session = writer_session()
+        original_engine = database_engine.engine
+        original_session = database_engine.SessionLocal
+        writer_engine = create_engine(
+            f"sqlite:///{identity.path}",
+            connect_args={"check_same_thread": False, "timeout": 60},
+            echo=False,
+        )
+        writer_session = sessionmaker(
+            bind=writer_engine,
+            autocommit=False,
+            autoflush=False,
+        )
         try:
-            _verify_writer_connection_identity(session.connection(), identity)
-            yield session
+            with writer_engine.connect() as connection:
+                _verify_writer_connection_identity(connection, identity)
+            database_engine.engine = writer_engine
+            database_engine.SessionLocal = writer_session
             _revalidate_database_identity(identity)
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
+            yield fin_collector.collect_financial
         finally:
-            session.close()
-
-    fin_collector.get_session = exact_get_session
-    try:
-        yield fin_collector.collect_financial
-    finally:
-        fin_collector.get_session = original_get_session
-        writer_engine.dispose()
+            database_engine.SessionLocal = original_session
+            database_engine.engine = original_engine
+            writer_engine.dispose()
 
 
 def _checkpoint_wal(identity: _DatabaseIdentity) -> bool:
@@ -245,6 +270,7 @@ def _checkpoint_wal(identity: _DatabaseIdentity) -> bool:
     _revalidate_database_identity(identity)
     try:
         with sqlite3.connect(identity.path) as connection:
+            _verify_checkpoint_connection_identity(connection, identity)
             result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     except sqlite3.Error as exc:
         raise _fail(
@@ -744,21 +770,29 @@ def run_investor_core_backfill(
     after_sha256: str | None = None
     after_rows: dict[str, int] | None = None
     free_after: int | None = None
+    checkpoint_failed = False
     if execute and action_attempted:
         try:
             wal_checkpointed = _checkpoint_wal(identity)
         except InvestorCoreBackfillError as exc:
             stop_code, stop_message = exc.code, exc.message
-    try:
-        _revalidate_database_identity(identity)
-        after_sha256 = _sha256_file(database)
-        after_rows = _relevant_row_counts(database, targets)
-        _revalidate_database_identity(identity)
-        free_after = int(disk_probe(database))
-    except Exception:
-        if stop_code is None:
-            stop_code = "evidence_collection_failed"
-            stop_message = "post-run evidence could not be collected"
+            checkpoint_failed = True
+    if not checkpoint_failed:
+        try:
+            _revalidate_database_identity(identity)
+            after_sha256 = _sha256_file(database)
+            after_rows = _relevant_row_counts(database, targets)
+            _revalidate_database_identity(identity)
+            free_after = int(disk_probe(database))
+        except Exception:
+            if stop_code is None:
+                stop_code = "evidence_collection_failed"
+                stop_message = "post-run evidence could not be collected"
+    else:
+        try:
+            free_after = int(disk_probe(database))
+        except Exception:
+            free_after = None
 
     counts = dict(sorted(outcome_counts.items()))
     report: dict[str, Any] = {

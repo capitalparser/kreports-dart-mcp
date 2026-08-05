@@ -32,7 +32,12 @@
 - After any target action, dispose the bound writer pool, perform and verify
   `PRAGMA wal_checkpoint(TRUNCATE)`, then collect immutable post-run hash/count
   evidence. Checkpoint/evidence failures return incomplete reports retaining
-  outcomes and request-budget evidence.
+  outcomes and request-budget evidence. A failed checkpoint makes post hash and
+  row counts unavailable, because main-file reads cannot prove WAL contents.
+- Bind and restore both `kreports.db.engine.engine` and `SessionLocal` under a
+  module lock for the full default collector scope, so imported `get_session`
+  references in collection, company lookup, flags, and Beneish share the
+  identity-verified target writer.
 - Apply the post-target free-space probe to cache hits as well as collector
   calls. Under a bounded request scope, HTTP-success JSON decoding failures are
   redacted generic transport/protocol stops; unbounded behavior stays legacy.

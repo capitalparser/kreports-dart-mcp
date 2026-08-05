@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
 
 class _Response:
@@ -1022,6 +1023,59 @@ def test_runner_preserves_outcomes_and_budget_when_real_wal_checkpoint_is_busy(
     assert report["target_outcomes"]["counts"] == {"success": 1}
     assert report["max_api_calls"] == 7
     assert report["used_api_calls"] == 0
+    assert report["db_sha256_after"] is None
+    assert report["relevant_row_counts"]["after"] is None
+
+
+def test_default_collector_binds_all_imported_engine_sessions_to_target_database(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from kreports.collector import corp_sync, fin_collector
+    from kreports.db import engine as db_engine
+    from kreports.judge import beneish, flags
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    target_database = tmp_path / "target.db"
+    stale_database = tmp_path / "stale.db"
+    _create_runner_db(target_database)
+    _create_runner_db(stale_database)
+    _bind_runner_db(monkeypatch, runner, target_database)
+    stale_engine = create_engine(f"sqlite:///{stale_database}")
+    stale_session = sessionmaker(bind=stale_engine, autocommit=False, autoflush=False)
+    original_engine = db_engine.engine
+    original_session = db_engine.SessionLocal
+    db_engine.engine = stale_engine
+    db_engine.SessionLocal = stale_session
+
+    def collector(stock_code: str, year: int, quarter: int) -> str:
+        del stock_code, year, quarter
+        for module in (fin_collector, corp_sync, flags, beneish):
+            with module.get_session() as session:
+                session.execute(text("INSERT INTO marker VALUES ('target-only')"))
+        return "success"
+
+    monkeypatch.setattr(fin_collector, "collect_financial", collector)
+    try:
+        report = runner.run_investor_core_backfill(
+            target_database,
+            execute=True,
+            expected_db_sha256=runner._sha256_file(target_database),
+            max_api_calls=1,
+            planner_fn=lambda *args, **kwargs: _runner_plan(),
+            cache_checker=lambda *args: False,
+            disk_probe=lambda path: 20 * 1024**3,
+        )
+    finally:
+        db_engine.engine = original_engine
+        db_engine.SessionLocal = original_session
+        stale_engine.dispose()
+
+    assert report["completed"] is True
+    with sqlite3.connect(target_database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM marker").fetchone()[0] == 5
+    with sqlite3.connect(stale_database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM marker").fetchone()[0] == 1
 
 
 def test_runner_partitions_fifty_three_targets_into_cached_and_collected(

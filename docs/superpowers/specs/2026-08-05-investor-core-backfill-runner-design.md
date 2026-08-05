@@ -61,6 +61,11 @@ setting even when execution stops. The report never contains the API key.
     `PRAGMA wal_checkpoint(TRUNCATE)`, and only a verified checkpoint permits
     immutable post-run hash/count evidence. Cache hits use the same
     post-target free-space probe as collection targets.
+11. The default collector binding replaces and restores both
+    `kreports.db.engine.engine` and `SessionLocal` under a process-local lock.
+    This keeps every already-imported `get_session` function used by financial
+    collection, company lookup, flags, and Beneish on the same verified target
+    writer for the entire bounded collector scope.
 
 ## Evidence report
 
@@ -76,6 +81,9 @@ If checkpointing or post-run evidence fails after an action, the runner returns
 an incomplete report instead of raising away causal evidence. It retains target
 outcomes, the request budget, before evidence, and any safely available partial
 post-evidence; `completed=false` and the stable stop code identify the phase.
+When a WAL checkpoint fails, main-file post hash and post row counts are
+explicitly unavailable because they cannot represent the uncheckpointed frames;
+safe free-space observation may still be retained.
 
 ## Error handling
 
