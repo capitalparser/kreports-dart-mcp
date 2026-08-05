@@ -1,6 +1,7 @@
 """Dataset, peer-selection, industry, and on-demand retrieval handlers."""
 from __future__ import annotations
 
+import json
 import re
 
 from kreports.analysis.peer_benchmarks import (
@@ -102,6 +103,10 @@ _DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
 _MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS = 200
 _MAX_NOTE_DISCLOSURE_COMPANY_MATCHED_YEARS = 10
 _MAX_NOTE_CONFIRMED_FACTS = 20
+_MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES = 12_000
+_MAX_NOTE_MATRIX_COMPANY_NAME_CHARS = 48
+_MAX_NOTE_MATRIX_MARKET_CHARS = 24
+_MAX_NOTE_MATRIX_INDUTY_CHARS = 24
 _SOURCE_REQUIRED_SEARCH_DATASETS = {
     "source_documents",
     "report_sections",
@@ -292,6 +297,15 @@ def _note_reference(record: dict) -> str:
     return f"{prefix} {note_title}".strip()
 
 
+def _matrix_display_text(value: object, *, max_chars: int) -> tuple[str | None, bool]:
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    return normalized[:max_chars] or None, len(normalized) > max_chars
+
+
+def _matrix_output_bytes(matrix: dict) -> int:
+    return len(json.dumps(matrix, ensure_ascii=False, separators=(",", ":")).encode())
+
+
 def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
     """Expose one bounded local-cache match row per company.
 
@@ -313,32 +327,49 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
             (item for item in records if item.get("canonical_source_binding")),
             None,
         )
-        matched_years = sorted({
+        all_matched_years = sorted({
             int(item["year"])
             for item in records
             if isinstance(item.get("year"), int)
-        }, reverse=True)[:_MAX_NOTE_DISCLOSURE_COMPANY_MATCHED_YEARS]
+        }, reverse=True)
+        matched_years = all_matched_years[:_MAX_NOTE_DISCLOSURE_COMPANY_MATCHED_YEARS]
         query_year = query.get("year")
         canonical_note_title = None
         canonical_note_title_truncated = False
         if canonical_record is not None:
-            normalized_title = re.sub(
-                r"\s+", " ", str(canonical_record.get("note_title") or ""),
-            ).strip()
-            canonical_note_title_truncated = len(normalized_title) > 160
-            canonical_note_title = normalized_title[:160] or None
+            canonical_note_title, canonical_note_title_truncated = _matrix_display_text(
+                canonical_record.get("note_title"), max_chars=160,
+            )
+        corp_name, corp_name_truncated = _matrix_display_text(
+            company.get("corp_name"), max_chars=_MAX_NOTE_MATRIX_COMPANY_NAME_CHARS,
+        )
+        market, market_truncated = _matrix_display_text(
+            company.get("market"), max_chars=_MAX_NOTE_MATRIX_MARKET_CHARS,
+        )
+        induty_code, induty_code_truncated = _matrix_display_text(
+            company.get("induty_code"), max_chars=_MAX_NOTE_MATRIX_INDUTY_CHARS,
+        )
         companies.append({
             "corp_code": corp_code,
-            "corp_name": company.get("corp_name"),
-            "market": company.get("market"),
-            "induty_code": company.get("induty_code"),
+            "corp_name": corp_name,
+            "corp_name_truncated": corp_name_truncated,
+            "market": market,
+            "market_truncated": market_truncated,
+            "induty_code": induty_code,
+            "induty_code_truncated": induty_code_truncated,
             "year": query_year if query_year is not None else (
                 matched_years[0] if matched_years else None
             ),
             "matched_years": matched_years,
+            "matched_years_truncated": len(all_matched_years) > len(matched_years),
+            "matched_years_omitted_count": len(all_matched_years) - len(matched_years),
             "match_status": (
                 "verified_annual_filing_match"
                 if canonical_record is not None else "unverified_cache_match"
+            ),
+            "match_status_label": (
+                "검증된 연간 공시 일치"
+                if canonical_record is not None else "미검증 로컬 캐시 일치"
             ),
             "record_count": int(company.get("record_count") or len(records)),
             "canonical_rcept_no": (
@@ -355,8 +386,8 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         str(item.get("corp_name") or ""),
         str(item.get("corp_code") or ""),
     ))
-    companies = companies[:_MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS]
-    return {
+    row_limited_companies = companies[:_MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS]
+    matrix = {
         "scope": {
             "keyword": query.get("keyword"),
             "year": query.get("year"),
@@ -364,14 +395,49 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
             "induty_prefix": query.get("induty_prefix"),
         },
         "configured_limit": query.get("limit"),
-        "returned_company_count": len(companies),
+        "returned_company_count": 0,
+        "omitted_company_count": 0,
         "is_exhaustive": False,
+        "matrix_output_budget_applied": False,
+        "matrix_max_output_bytes": _MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES,
+        "matrix_output_bytes": 0,
         "limitations": [
             "캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아니며, 원 공시 주석 전문 확인이 필요합니다.",
             "반환 회사 수는 응답 경계를 위해 최대 200개이며, 검색 결과 전체를 대표하지 않습니다.",
         ],
-        "companies": companies,
+        "companies": [],
     }
+    for company in row_limited_companies:
+        matrix["companies"].append(company)
+        matrix["returned_company_count"] = len(matrix["companies"])
+        matrix["omitted_company_count"] = len(companies) - len(matrix["companies"])
+        if _matrix_output_bytes(matrix) > _MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES:
+            matrix["companies"].pop()
+            matrix["returned_company_count"] = len(matrix["companies"])
+            matrix["omitted_company_count"] = len(companies) - len(matrix["companies"])
+            matrix["matrix_output_budget_applied"] = True
+            break
+    if not matrix["companies"] and row_limited_companies:
+        matrix["companies"] = [row_limited_companies[0]]
+        matrix["returned_company_count"] = 1
+        matrix["omitted_company_count"] = len(companies) - 1
+        matrix["matrix_output_budget_applied"] = True
+    if _matrix_output_bytes(matrix) > _MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES:
+        matrix["matrix_output_budget_applied"] = True
+    if matrix["matrix_output_budget_applied"]:
+        matrix["limitations"].append(
+            "매트릭스 출력 byte 경계로 정렬된 후행 회사 행을 생략했습니다."
+        )
+    matrix["matrix_output_bytes"] = _matrix_output_bytes(matrix)
+    while (
+        matrix["matrix_output_bytes"] > _MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES
+        and len(matrix["companies"]) > 1
+    ):
+        matrix["companies"].pop()
+        matrix["returned_company_count"] = len(matrix["companies"])
+        matrix["omitted_company_count"] = len(companies) - len(matrix["companies"])
+        matrix["matrix_output_bytes"] = _matrix_output_bytes(matrix)
+    return matrix
 
 
 def _enrich_accounting_note_search(result: dict) -> dict:

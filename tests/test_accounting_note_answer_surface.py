@@ -239,8 +239,8 @@ def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table
     }
     table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
     assert table["rows"] == [
-        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "note_title": "재고자산", "rcept_no": "20250312000001"},
-        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "note_title": None, "rcept_no": None},
+        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "match_status_label": "검증된 연간 공시 일치", "record_count": 1, "note_title": "재고자산", "note_title_truncated": None, "rcept_no": "20250312000001"},
+        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "match_status_label": "미검증 로컬 캐시 일치", "record_count": 2, "note_title": None, "note_title_truncated": None, "rcept_no": None},
     ]
 
 
@@ -263,23 +263,23 @@ def test_note_company_matrix_uses_latest_matched_year_when_query_year_is_omitted
             "disclosure_report_nm": f"사업보고서 ({year}.12)",
             "match_excerpts": [_MATCHED_EXCERPT],
         }
-        for index, (year, receipt) in enumerate([
-            (2023, "20240312000001"),
-            (2025, "20260312000001"),
-        ])
+        for index, year in enumerate(range(2025, 2013, -1))
+        for receipt in [f"{year + 1}0312{index:06d}"]
     ]
     result = _enrich_accounting_note_search({
         "query": {"dataset": "accounting_note_chapters", "keyword": "재고자산", "limit": 50},
         "companies": [{
             "corp_code": "00999999", "corp_name": "테스트회사", "market": "KOSPI",
-            "induty_code": "264", "record_count": 2, "records": records,
+            "induty_code": "264", "record_count": 12, "records": records,
         }],
         "data_quality": {"status": "usable", "source": "accounting_note_chapters"},
     })
 
     company = result["note_disclosure_company_matrix"]["companies"][0]
     assert company["year"] == 2025
-    assert company["matched_years"] == [2025, 2023]
+    assert company["matched_years"] == list(range(2025, 2015, -1))
+    assert company["matched_years_truncated"] is True
+    assert company["matched_years_omitted_count"] == 2
 
 
 def test_note_company_matrix_prioritizes_verified_companies_and_bounds_titles():
@@ -364,8 +364,10 @@ def test_note_company_matrix_bounds_reverse_lookup_to_two_hundred_companies():
 
     matrix = result["note_disclosure_company_matrix"]
     assert matrix["configured_limit"] == 500
-    assert matrix["returned_company_count"] == 200
-    assert len(matrix["companies"]) == 200
+    assert 0 < matrix["returned_company_count"] <= 200
+    assert len(matrix["companies"]) == matrix["returned_company_count"]
+    assert matrix["matrix_output_budget_applied"] is True
+    assert matrix["omitted_company_count"] > 0
     assert matrix["is_exhaustive"] is False
     assert len(result["confirmed_facts"]) == 20
     assert result["confirmed_facts_truncation"] == {
@@ -378,6 +380,64 @@ def test_note_company_matrix_bounds_reverse_lookup_to_two_hundred_companies():
     public_result = enrich_answer_response("search_dataset", result)
     envelope = build_answer_envelope("search_dataset", public_result)
     assert len(json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False).encode()) <= 100_000
+
+
+def test_note_company_matrix_worst_case_text_stays_within_public_envelope_budget():
+    """Long Korean display fields cannot make the matrix answer pack invalid."""
+    long_name = "가" * 100
+    long_title = "나" * 300
+    long_excerpt = "다" * 500
+    companies = [
+        {
+            "corp_code": f"{index:08d}",
+            "corp_name": f"{long_name}{index}",
+            "market": "KOSPI" * 20,
+            "induty_code": "264" * 30,
+            "record_count": 1,
+            "records": [{
+                "year": 2025 - (index % 12),
+                "note_no": "1",
+                "note_title": long_title,
+                "rcept_no": "20250312000001",
+                "source_document_id": index + 1,
+                "source_document_rcept_no": "20250312000001",
+                "source_document_corp_code": f"{index:08d}",
+                "source_document_bsns_year": 2025 - (index % 12),
+                "source_document_report_nm": f"사업보고서 ({2025 - (index % 12)}.12)",
+                "disclosure_rcept_no": "20250312000001",
+                "disclosure_corp_code": f"{index:08d}",
+                "disclosure_disc_date": "2025-03-12",
+                "disclosure_report_nm": f"사업보고서 ({2025 - (index % 12)}.12)",
+                "match_excerpts": [long_excerpt],
+            }],
+        }
+        for index in range(201)
+    ]
+    result = _enrich_accounting_note_search({
+        "query": {"dataset": "accounting_note_chapters", "keyword": "재고자산", "limit": 500},
+        "companies": companies,
+        "data_quality": {"status": "usable", "source": "accounting_note_chapters"},
+    })
+
+    matrix = result["note_disclosure_company_matrix"]
+    assert matrix["matrix_output_budget_applied"] is True
+    assert matrix["matrix_output_bytes"] <= matrix["matrix_max_output_bytes"]
+    assert matrix["omitted_company_count"] > 0
+    assert matrix["is_exhaustive"] is False
+    assert matrix["companies"]
+    assert matrix["companies"][0]["corp_name_truncated"] is True
+    assert matrix["companies"][0]["market_truncated"] is True
+    assert matrix["companies"][0]["induty_code_truncated"] is True
+    assert matrix["companies"][0]["matched_years_truncated"] is False
+
+    public_result = enrich_answer_response("search_dataset", result)
+    envelope = build_answer_envelope("search_dataset", public_result)
+    assert len(json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False).encode()) <= 100_000
+    table = next(table for table in public_result["answer_pack"]["tables"] if table["id"] == "note_disclosure_company_matrix")
+    assert "생략" in table["note"]
+    assert {"record_count", "match_status_label", "note_title_truncated"} <= {
+        column["field"] for column in table["columns"]
+    }
 
 
 def test_non_note_visual_tools_keep_their_existing_table_heading():

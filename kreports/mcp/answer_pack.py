@@ -2336,20 +2336,36 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 "year": item.get("year"),
                 "matched_years": item.get("matched_years"),
                 "match_status": item.get("match_status"),
+                "match_status_label": item.get("match_status_label") or (
+                    "검증된 연간 공시 일치"
+                    if item.get("match_status") == "verified_annual_filing_match"
+                    else "미검증 로컬 캐시 일치"
+                    if item.get("match_status") == "unverified_cache_match"
+                    else None
+                ),
+                "record_count": item.get("record_count"),
                 "note_title": item.get("canonical_note_title"),
+                "note_title_truncated": item.get("canonical_note_title_truncated"),
                 "rcept_no": item.get("canonical_rcept_no"),
             })
+        omitted_company_count = int(matrix.get("omitted_company_count") or 0)
+        maximum = matrix.get("matrix_max_output_bytes")
         pack["tables"].append(_table(
             "note_disclosure_company_matrix",
             "회사별 회계주석 캐시 일치",
             [
                 ("company", "회사"), ("market", "시장"), ("induty_code", "업종"),
                 ("year", "표시 연도"), ("matched_years", "일치 연도"),
-                ("match_status", "일치 상태"),
-                ("note_title", "검증 주석"), ("rcept_no", "검증 접수번호"),
+                ("match_status", "기계 상태"), ("match_status_label", "일치 상태"),
+                ("record_count", "일치 레코드 수"), ("note_title", "검증 주석"),
+                ("note_title_truncated", "주석 제목 생략"),
+                ("rcept_no", "검증 접수번호"),
             ],
             matrix_rows,
-            note="캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아닙니다.",
+            note=(
+                "캐시 일치는 규제상 공시 완전성 또는 공시 부재 결론이 아닙니다. "
+                f"비완전 매트릭스이며 최대 출력 byte={maximum}, 생략 회사 행={omitted_company_count}입니다."
+            ),
         ))
     return pack
 

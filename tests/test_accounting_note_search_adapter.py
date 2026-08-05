@@ -146,10 +146,13 @@ def test_note_search_company_matrix_requires_canonical_annual_source_binding(tem
     assert matrix["is_exhaustive"] is False
     by_code = {item["corp_code"]: item for item in matrix["companies"]}
     assert by_code["90000001"] == {
-        "corp_code": "90000001", "corp_name": "Verified", "market": "KOSPI",
-        "induty_code": "264", "year": 2025,
-        "matched_years": [2025],
+        "corp_code": "90000001", "corp_name": "Verified", "corp_name_truncated": False,
+        "market": "KOSPI", "market_truncated": False,
+        "induty_code": "264", "induty_code_truncated": False, "year": 2025,
+        "matched_years": [2025], "matched_years_truncated": False,
+        "matched_years_omitted_count": 0,
         "match_status": "verified_annual_filing_match", "record_count": 1,
+        "match_status_label": "검증된 연간 공시 일치",
         "canonical_rcept_no": "20260312000001", "canonical_note_title": "재고자산",
         "canonical_note_title_truncated": False,
     }
