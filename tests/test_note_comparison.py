@@ -332,7 +332,7 @@ def test_note_comparison_paginates_against_selector_total_peer_count(temp_engine
     assert result["truncation"]["reason"] == "peer_pagination"
 
 
-def test_note_comparison_is_indeterminate_when_only_truncated_text_differs(temp_engine):
+def test_note_comparison_ignores_hidden_changes_outside_topic_excerpt(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session
     from kreports.db.models import AccountingNoteChapter
@@ -367,17 +367,18 @@ def test_note_comparison_is_indeterminate_when_only_truncated_text_differs(temp_
     assert subject_row["comparison_text_truncated"] is True
     assert peer_row["comparison_text_truncated"] is True
     assert subject_row["comparison_text"] == peer_row["comparison_text"]
-    assert subject_row["comparison_text_hash"] != peer_row["comparison_text_hash"]
-    assert result["differences"][0]["status"] == "indeterminate_truncated"
+    assert subject_row["comparison_text_hash"] == peer_row["comparison_text_hash"]
+    assert subject_row["raw_text_hash"] != peer_row["raw_text_hash"]
+    assert result["differences"] == []
 
 
-def test_note_comparison_enforces_utf8_budget_without_unbounded_raw_duplicates(temp_engine):
+def test_note_comparison_keeps_complete_four_topic_six_company_cohort_under_budget(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session
     from kreports.db.models import AccountingNoteChapter
 
-    large_body = "본문 " + ("가나다라마바사" * 2_000)
-    peer_codes = [f"0000000{number}" for number in range(2, 8)]
+    large_body = "수익인식 수행의무 리스 손상 회계정책 " + ("가나다라마바사" * 2_000)
+    peer_codes = [f"0000000{number}" for number in range(2, 7)]
     with get_session() as session:
         session.add(AccountingNoteChapter(
             corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
@@ -394,24 +395,102 @@ def test_note_comparison_enforces_utf8_budget_without_unbounded_raw_duplicates(t
         ])
 
     result = compare_peer_accounting_notes(
-        "00000001", 2024, topics=["leases"], peer_limit=6,
+        "00000001", 2024,
+        topics=["revenue", "leases", "impairment", "accounting_policies"], peer_limit=5,
         _peer_group={
             "subject": {"corp_code": "00000001", "corp_name": "Subject"},
             "peers": [{"corp_code": code, "corp_name": f"Peer {index}"} for index, code in enumerate(peer_codes)],
-            "peer_count": 6,
+            "peer_count": 5,
             "selection_policy": {},
         },
         _read_engine=temp_engine,
     )
 
     assert len(json.dumps(result, ensure_ascii=False).encode("utf-8")) <= 100_000
-    assert result["truncation"]["applied"] is True
-    assert result["truncation"]["reason"] == "note_comparison_output_budget"
-    assert result["truncation"]["output_budget_applied"] is True
+    assert result["truncation"]["applied"] is False
+    assert result["truncation"]["output_budget_applied"] is False
     assert result["truncation"]["max_output_bytes"] == 100_000
-    for row in result["topics"][0]["rows"]:
-        assert row["raw_text_length"] > len(row["raw_text"] or "")
-        assert len(row["value_or_excerpt"] or "") <= len(row["raw_text"] or "")
+    assert [len(topic["rows"]) for topic in result["topics"]] == [6, 6, 6, 6]
+    assert [topic["coverage"] for topic in result["topics"]] == [6, 6, 6, 6]
+    assert [
+        sum(topic["coverage"].values())
+        for topic in result["coverage_matrix"]["topics"]
+    ] == [6, 6, 6, 6]
+    for topic in result["topics"]:
+        for row in topic["rows"]:
+            assert len(row["raw_text"] or "") <= 2_000
+            assert row.get("output_budget_truncated") is not True
+            assert row["comparison_text_hash"]
+            assert row["raw_text_hash"]
+
+
+def test_revenue_match_strength_prefers_multi_signal_and_rejects_generic_interest(temp_engine):
+    from kreports.analysis.note_comparison import _topic_match, compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    generic_interest = {
+        "note_title": "금융수익",
+        "body": "이자수익은 유효이자율법에 따라 인식합니다.",
+    }
+    assert _topic_match(generic_interest, "revenue") is None
+
+    with get_session() as session:
+        session.add_all([
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="1", note_title="기타", section_type="policy",
+                body="고객과의 계약 관련 일반 설명입니다.",
+            ),
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="2", note_title="기타", section_type="policy",
+                body="수익인식 정책에서 수행의무를 식별하고 수익을 인식합니다.",
+            ),
+            AccountingNoteChapter(
+                corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002",
+                source_type="business_report", note_no="1", note_title="기타", section_type="policy",
+                body="고객과의 계약 관련 일반 설명입니다.",
+            ),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["revenue"],
+        _peer_group={
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+            "selection_policy": {"fs_div_used": "CFS"},
+        },
+        _read_engine=temp_engine,
+    )
+    subject, peer = result["topics"][0]["rows"]
+    assert subject["note_no"] == "2"
+    assert subject["match_keyword"] == "수익인식"
+    assert subject["match_strength"] == "body_multi_signal"
+    assert subject["matched_keyword_count"] == 3
+    assert peer["match_strength"] == "body_single_signal_reference"
+    assert peer["matched_keyword_count"] == 1
+
+
+def test_note_comparison_output_budget_compaction_remains_visible(temp_engine, monkeypatch):
+    from kreports.analysis import note_comparison
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    monkeypatch.setattr(note_comparison, "MAX_NOTE_COMPARISON_OUTPUT_BYTES", 1_000)
+    with get_session() as session:
+        session.add(AccountingNoteChapter(
+            corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+            source_type="business_report", note_no="1", note_title="리스", section_type="policy",
+            body="리스 " + ("가나다라마바사" * 1_000),
+        ))
+    result = note_comparison.compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={"subject": {"corp_code": "00000001", "corp_name": "Subject"}, "peers": []},
+        _read_engine=temp_engine,
+    )
+    assert result["truncation"]["output_budget_applied"] is True
+    assert "note_comparison_output_truncated" in result["limitations"]
 
 
 def test_note_comparison_display_escapes_markdown_links_and_unicode_separators():

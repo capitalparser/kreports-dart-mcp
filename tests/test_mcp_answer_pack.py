@@ -1332,6 +1332,8 @@ def test_policy_pack_renders_consolidated_side_by_side_note_comparison():
         "note_title": None,
         "matched_keyword": None,
         "match_location": None,
+        "match_strength": None,
+        "matched_keyword_count": None,
         "excerpt": "리스부채 측정",
         "availability": "available",
         "cache_status": None,

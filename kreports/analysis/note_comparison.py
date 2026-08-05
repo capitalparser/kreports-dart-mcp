@@ -24,7 +24,7 @@ NOTE_TOPICS = (
     "accounting_policies",
 )
 _STANDARD_FS_DIVS = ("CFS", "OFS")
-_MAX_RAW_TEXT_OUTPUT_CHARS = 12_000
+_MAX_RAW_TEXT_OUTPUT_CHARS = 96
 _MAX_COMPARISON_TEXT_OUTPUT_CHARS = 4_000
 MAX_NOTE_COMPARISON_OUTPUT_BYTES = 100_000
 _TOPIC_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -32,7 +32,7 @@ _TOPIC_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
     # words also occur in boilerplate (for example "자산·부채 및 수익·비용"),
     # so title matching and body evidence intentionally use different signals.
     "revenue": (
-        "수익인식", "수익을 인식", "수익으로 인식", "고객과의 계약", "수행의무",
+        "수익인식", "수익을 인식", "고객과의 계약", "수행의무",
         "거래가격", "매출을 인식", "매출액을 인식", "수익", "매출",
     ),
     "leases": ("리스", "사용권자산"),
@@ -47,11 +47,11 @@ _TOPIC_TITLE_KEYWORDS: dict[str, tuple[str, ...]] = {
 _TOPIC_BODY_KEYWORDS: dict[str, tuple[str, ...]] = {
     **_TOPIC_TITLE_KEYWORDS,
     "revenue": (
-        "수익인식", "수익을 인식", "수익으로 인식", "고객과의 계약", "수행의무",
+        "수익인식", "수익을 인식", "고객과의 계약", "수행의무",
         "거래가격", "매출을 인식", "매출액을 인식",
     ),
 }
-_TOPIC_CONTEXT_RADIUS = 240
+_TOPIC_CONTEXT_RADIUS = 120
 
 
 def _availability(row: dict) -> str:
@@ -69,66 +69,94 @@ def _availability(row: dict) -> str:
     return "available"
 
 
-def _first_keyword_match(value: object, keywords: tuple[str, ...]) -> tuple[str, int] | None:
+def _keyword_matches(
+    value: object,
+    keywords: tuple[str, ...],
+    *,
+    standalone_keywords: frozenset[str] = frozenset(),
+) -> list[tuple[int, int, str]]:
+    """Return distinct matches, with configured keyword priority before offset."""
     text = str(value or "")
-    matches = [
-        (text.find(keyword), index, keyword)
+    candidates = [
+        (index, text.find(keyword), keyword)
         for index, keyword in enumerate(keywords)
         if text.find(keyword) >= 0
+        and (keyword not in standalone_keywords or text.strip() == keyword)
     ]
-    if not matches:
-        return None
-    offset, _index, keyword = min(matches)
-    return keyword, offset
+    matches: list[tuple[int, int, str]] = []
+    for candidate in sorted(candidates):
+        _priority, offset, keyword = candidate
+        if any(
+            offset < existing_offset + len(existing_keyword)
+            and existing_offset < offset + len(keyword)
+            for _existing_priority, existing_offset, existing_keyword in matches
+        ):
+            continue
+        matches.append(candidate)
+    return matches
 
 
 def _topic_match(row: dict, topic: str) -> dict[str, object] | None:
     """Find one deterministic, topic-specific match without single-label collapse."""
     title = str(row.get("note_title") or "")
     body = str(row.get("body") or "")
-    title_match = _first_keyword_match(title, _TOPIC_TITLE_KEYWORDS[topic])
-    body_match = _first_keyword_match(body, _TOPIC_BODY_KEYWORDS[topic])
-    if title_match is not None:
-        keyword, offset = title_match
+    title_matches = _keyword_matches(
+        title,
+        _TOPIC_TITLE_KEYWORDS[topic],
+        standalone_keywords=frozenset({"수익", "매출"}) if topic == "revenue" else frozenset(),
+    )
+    body_matches = _keyword_matches(body, _TOPIC_BODY_KEYWORDS[topic])
+    if title_matches:
+        keyword_priority, offset, keyword = title_matches[0]
         return {
             "match_keyword": keyword,
             "match_location": "title",
             "match_offset": offset,
-            "body_context_offset": body_match[1] if body_match is not None else 0,
+            "body_context_offset": body_matches[0][1] if body_matches else 0,
             "priority": 0 if title.strip() == keyword else 1,
+            "keyword_priority": keyword_priority,
+            "match_strength": "title_exact" if title.strip() == keyword else "title_keyword",
+            "matched_keyword_count": len(title_matches),
         }
-    if body_match is not None:
-        keyword, offset = body_match
+    if body_matches:
+        keyword_priority, offset, keyword = body_matches[0]
+        matched_keyword_count = len(body_matches)
         return {
             "match_keyword": keyword,
             "match_location": "body",
             "match_offset": offset,
             "body_context_offset": offset,
-            "priority": 2,
+            "priority": 2 if matched_keyword_count > 1 else 3,
+            "keyword_priority": keyword_priority,
+            "match_strength": (
+                "body_multi_signal"
+                if matched_keyword_count > 1
+                else "body_single_signal_reference"
+            ),
+            "matched_keyword_count": matched_keyword_count,
         }
     return None
 
 
 def _topic_context_fields(value: object, match: dict[str, object]) -> dict[str, object]:
-    """Build a bounded display value while retaining a full-text difference hash."""
+    """Build the topic-centred value used for rendering and difference checks."""
     body = str(value or "")
     center = int(match["body_context_offset"])
     start = max(0, center - _TOPIC_CONTEXT_RADIUS)
     end = min(len(body), center + len(str(match["match_keyword"])) + _TOPIC_CONTEXT_RADIUS)
     excerpt = body[start:end]
     comparison_text = _comparison_text(excerpt)
-    full_comparison_text = _comparison_text(body)
     return {
         "value_or_excerpt": comparison_text,
         "comparison_text": comparison_text,
-        # The visible comparison is topic-centred, but the full normalized hash
-        # preserves an indeterminate result when omitted text alone differs.
-        "comparison_text_length": len(full_comparison_text),
-        "comparison_text_hash": hashlib.sha256(full_comparison_text.encode("utf-8")).hexdigest(),
+        "comparison_text_length": len(comparison_text),
+        "comparison_text_hash": hashlib.sha256(comparison_text.encode("utf-8")).hexdigest(),
         "comparison_text_truncated": start > 0 or end < len(body),
         "match_keyword": match["match_keyword"],
         "match_location": match["match_location"],
         "match_offset": match["match_offset"],
+        "match_strength": match["match_strength"],
+        "matched_keyword_count": match["matched_keyword_count"],
         "excerpt_start": start,
         "excerpt_end": end,
     }
@@ -207,6 +235,8 @@ def _raw_text_fields(value: object) -> dict:
         "raw_text": output_text,
         "raw_text_length": len(raw_text),
         "raw_text_truncated": raw_text_truncated,
+        "raw_text_hash": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+        "raw_text_normalized_hash": hashlib.sha256(normalized_text.encode("utf-8")).hexdigest(),
         "raw_text_format": _raw_text_format(raw_text),
         "comparison_text": normalized_text[:_MAX_COMPARISON_TEXT_OUTPUT_CHARS],
         "comparison_text_length": len(normalized_text),
@@ -218,6 +248,15 @@ def _raw_text_fields(value: object) -> dict:
         },
     }
     return result
+
+
+def _bound_evidence_documents(
+    documents: list[dict],
+    receipt: str | None,
+) -> tuple[list[dict], bool]:
+    """Keep one deterministic, receipt-bound evidence locator per repeated topic row."""
+    matched = [item for item in documents if item.get("rcept_no") == receipt]
+    return matched[:1], len(matched) > 1
 
 
 def _output_bytes(value: dict) -> int:
@@ -347,6 +386,8 @@ def _apply_output_budget(result: dict) -> dict:
         truncation["reason"] = "note_comparison_output_budget"
     truncation["output_budget_applied"] = True
     truncation["output_budget_reason"] = "note_comparison_output_budget"
+    if "note_comparison_output_truncated" not in result["limitations"]:
+        result["limitations"].append("note_comparison_output_truncated")
     _refresh_coverage_matrix(result)
 
     while _output_bytes(result) > MAX_NOTE_COMPARISON_OUTPUT_BYTES:
@@ -405,6 +446,7 @@ def _select_note_row(
             candidates,
             key=lambda row: (
                 int(row["_topic_match"]["priority"]),
+                int(row["_topic_match"]["keyword_priority"]),
                 int(row["_topic_match"]["match_offset"]),
                 str(row.get("note_no") or ""),
                 int(row.get("id") or 0),
@@ -568,6 +610,9 @@ def compare_peer_accounting_notes(
             if row:
                 raw_fields = _raw_text_fields(row["body"])
                 raw_fields.update(_topic_context_fields(row["body"], row["_topic_match"]))
+                evidence_documents, evidence_documents_truncated = _bound_evidence_documents(
+                    evidence_by_code.get(code, []), row["rcept_no"] or row["cached_rcept_no"],
+                )
                 comparison_rows.append({
                     "company": {"corp_code": code, "corp_name": names.get(code)},
                     "value_or_excerpt": raw_fields["comparison_text"],
@@ -585,6 +630,8 @@ def compare_peer_accounting_notes(
                     "match_keyword": raw_fields["match_keyword"],
                     "match_location": raw_fields["match_location"],
                     "match_offset": raw_fields["match_offset"],
+                    "match_strength": raw_fields["match_strength"],
+                    "matched_keyword_count": raw_fields["matched_keyword_count"],
                     "excerpt_start": raw_fields["excerpt_start"],
                     "excerpt_end": raw_fields["excerpt_end"],
                     "fs_div": row["fs_div"],
@@ -593,7 +640,8 @@ def compare_peer_accounting_notes(
                     "full_text_hash": row["full_text_hash"],
                     "full_text_length": row["full_text_length"],
                     "full_text_storage_status": row["full_text_storage_status"],
-                    "evidence_documents": evidence_by_code.get(code, []),
+                    "evidence_documents": evidence_documents,
+                    "evidence_documents_truncated": evidence_documents_truncated,
                     "comparison_note": "cached_note_present",
                 })
             else:
@@ -603,6 +651,8 @@ def compare_peer_accounting_notes(
                     "raw_text": None,
                     "raw_text_length": 0,
                     "raw_text_truncated": False,
+                    "raw_text_hash": None,
+                    "raw_text_normalized_hash": None,
                     "raw_text_format": "unavailable",
                     "comparison_text": None,
                     "comparison_text_length": 0,
@@ -625,11 +675,14 @@ def compare_peer_accounting_notes(
                     "match_keyword": None,
                     "match_location": None,
                     "match_offset": None,
+                    "match_strength": None,
+                    "matched_keyword_count": None,
                     "excerpt_start": None,
                     "excerpt_end": None,
                     "full_text_hash": None,
                     "fs_div_selection": fs_div_selection,
-                    "evidence_documents": evidence_by_code.get(code, []),
+                    "evidence_documents": [],
+                    "evidence_documents_truncated": False,
                     "comparison_note": "no_cached_note_for_exact_business_year",
                 })
         subject_row = comparison_rows[0]

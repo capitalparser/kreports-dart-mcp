@@ -345,6 +345,8 @@ def test_note_comparison_pack_uses_final_roster_and_exposes_match_cache_status(t
                     "note_title": None,
                     "match_keyword": None,
                     "match_location": None,
+                    "match_strength": None,
+                    "matched_keyword_count": None,
                     "rcept_no": None,
                     "source_locator": None,
                 }],
@@ -368,9 +370,20 @@ def test_note_comparison_pack_uses_final_roster_and_exposes_match_cache_status(t
     assert comparison["rows"] == [{
         "topic": "leases", "company": "Subject", "note_title": None,
         "matched_keyword": None, "match_location": None, "excerpt": None,
+        "match_strength": None, "matched_keyword_count": None,
         "availability": "unavailable", "cache_status": "no_cached_note_for_exact_business_year",
         "receipt": None, "source_locator": None,
     }]
+    synthetic["note_comparison"]["truncation"] = {
+        "applied": True, "reason": "note_comparison_output_budget",
+    }
+    truncated_pack = build_answer_pack("compare_peer_accounting_policies", synthetic)
+    assert "note_comparison_output_truncated" in truncated_pack["limitations"]
+    truncation_table = next(
+        table for table in truncated_pack["tables"]
+        if table["id"] == "peer_topic_note_truncation"
+    )
+    assert truncation_table["rows"][0]["reason"] == "note_comparison_output_budget"
 
 
 def test_unproven_or_missing_final_peer_topic_makes_selected_comparison_limited(temp_engine):

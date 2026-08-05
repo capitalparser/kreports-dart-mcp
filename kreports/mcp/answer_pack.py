@@ -1872,6 +1872,28 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
     if not extended:
         _append_legacy_peer_policy_tables(pack, result, selection_policy)
         return pack
+    note_comparison = result.get("note_comparison")
+    note_truncation = (
+        note_comparison.get("truncation")
+        if isinstance(note_comparison, dict)
+        else None
+    )
+    if isinstance(note_truncation, dict) and note_truncation.get("applied"):
+        pack["limitations"] = [
+            *pack.get("limitations", []),
+            "note_comparison_output_truncated",
+        ]
+        pack["tables"].append(_table(
+            "peer_topic_note_truncation", "회계주석 비교 출력 제한",
+            [("reason", "제한 사유"), ("output_bytes", "출력 바이트"),
+             ("max_output_bytes", "최대 바이트")],
+            [{
+                "reason": note_truncation.get("reason") or "note_comparison_output_budget",
+                "output_bytes": note_truncation.get("output_bytes"),
+                "max_output_bytes": note_truncation.get("max_output_bytes"),
+            }],
+            note="출력 예산으로 일부 주석 비교 행 또는 cohort 메타데이터가 생략될 수 있습니다.",
+        ))
     peer_selection = [
         row for row in result.get("peer_selection") or [] if isinstance(row, dict)
     ]
@@ -1943,7 +1965,6 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
             presentation_rows,
             note="텍스트/표시 차이는 스크리닝 신호일 뿐 회계처리 결론이 아닙니다.",
         ))
-    note_comparison = result.get("note_comparison")
     topic_payloads = {
         str(topic.get("topic")): topic
         for topic in (note_comparison.get("topics") or [])
@@ -2008,6 +2029,8 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
                     "note_title": row.get("note_title"),
                     "matched_keyword": row.get("match_keyword"),
                     "match_location": row.get("match_location"),
+                    "match_strength": row.get("match_strength"),
+                    "matched_keyword_count": row.get("matched_keyword_count"),
                     "excerpt": row.get("value_or_excerpt"),
                     "availability": row.get("availability"),
                     "cache_status": (
@@ -2024,6 +2047,7 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
             "peer_topic_note_comparison", "동일 사업연도 회계주석 비교",
             [("topic", "주제"), ("company", "회사"), ("note_title", "주석 제목"),
              ("matched_keyword", "일치 키워드"), ("match_location", "일치 위치"),
+             ("match_strength", "일치 강도"), ("matched_keyword_count", "일치 키워드 수"),
              ("excerpt", "본문 발췌"), ("availability", "캐시 상태"),
              ("cache_status", "캐시 상세"), ("receipt", "접수번호"),
              ("source_locator", "출처 위치")],
