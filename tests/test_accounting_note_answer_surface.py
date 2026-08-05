@@ -1,7 +1,9 @@
+import json
+
 import pytest
 
 from kreports.mcp.answer_pack import build_answer_pack
-from kreports.mcp.contracts import build_answer_envelope
+from kreports.mcp.contracts import build_answer_envelope, enrich_answer_response
 from kreports.mcp.handlers.search import _enrich_accounting_note_search
 from kreports.mcp.renderers import render_answer
 
@@ -282,6 +284,17 @@ def test_note_company_matrix_bounds_reverse_lookup_to_two_hundred_companies():
     assert matrix["returned_company_count"] == 200
     assert len(matrix["companies"]) == 200
     assert matrix["is_exhaustive"] is False
+    assert len(result["confirmed_facts"]) == 20
+    assert result["confirmed_facts_truncation"] == {
+        "applied": True,
+        "max_rows": 20,
+        "omitted_count": 181,
+    }
+    assert "confirmed_facts_output_truncated:181" in result["data_quality"]["limitations"]
+
+    public_result = enrich_answer_response("search_dataset", result)
+    envelope = build_answer_envelope("search_dataset", public_result)
+    assert len(json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False).encode()) <= 100_000
 
 
 def test_non_note_visual_tools_keep_their_existing_table_heading():

@@ -100,6 +100,7 @@ def handle_search_dataset(args: SearchDatasetInput) -> dict:
 
 _DART_RECEIPT_NO = re.compile(r"^[0-9]{14}$", re.ASCII)
 _MAX_NOTE_DISCLOSURE_COMPANY_MATRIX_ROWS = 200
+_MAX_NOTE_CONFIRMED_FACTS = 20
 _SOURCE_REQUIRED_SEARCH_DATASETS = {
     "source_documents",
     "report_sections",
@@ -408,6 +409,10 @@ def _enrich_accounting_note_search(result: dict) -> dict:
                     },
                 })
 
+    confirmed_facts_omitted_count = max(0, len(facts) - _MAX_NOTE_CONFIRMED_FACTS)
+    if confirmed_facts_omitted_count:
+        facts = facts[:_MAX_NOTE_CONFIRMED_FACTS]
+
     unverified_cache_match_count = matched_row_count - canonical_matched_row_count
     if not matched_row_count:
         status = "missing"
@@ -428,16 +433,31 @@ def _enrich_accounting_note_search(result: dict) -> dict:
         )
 
     data_quality = dict(enriched.get("data_quality") or {})
+    limitations = [
+        str(item)
+        for item in data_quality.get("limitations") or []
+        if str(item).strip()
+    ]
+    if confirmed_facts_omitted_count:
+        limitations.append(
+            f"confirmed_facts_output_truncated:{confirmed_facts_omitted_count}"
+        )
     data_quality.update({
         "status": status,
         "source": "accounting_note_chapters",
         "coverage_note": coverage_note,
+        "limitations": list(dict.fromkeys(limitations)),
         "interpretation": (
             "반환된 주석 발췌문은 로컬 캐시 기반의 스크리닝 근거이며, "
             "중요 판단 전 원 공시 주석 전문을 확인해야 합니다."
         ),
     })
     enriched["confirmed_facts"] = facts
+    enriched["confirmed_facts_truncation"] = {
+        "applied": bool(confirmed_facts_omitted_count),
+        "max_rows": _MAX_NOTE_CONFIRMED_FACTS,
+        "omitted_count": confirmed_facts_omitted_count,
+    }
     enriched["analysis"] = [{
         "statement": _note_audit_implication(topic),
         "perspective": "auditor",
