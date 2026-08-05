@@ -154,10 +154,34 @@ def _in_predicate(values: tuple[str, ...]) -> str:
     return ", ".join("?" for _ in values)
 
 
+def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(str(row[1]) == column for row in rows)
+
+
 def _scoped_row_counts(database: Path, scope: _FinalizeScope) -> dict[str, int]:
     """Collect only bounded finalization evidence using a readonly snapshot."""
     companies = _in_predicate(scope.corp_codes)
     with _read_only_connection(database) as connection:
+        manifest_identity_count = _table_count(
+            connection,
+            "SELECT COUNT(*) FROM dataset_manifest WHERE dataset_version = ?",
+            (scope.dataset_version,),
+        )
+        manifest_id_count = 0
+        manifest_identity_mismatch = 0
+        if _has_column(connection, "dataset_manifest", "manifest_id"):
+            manifest_id_count = _table_count(
+                connection,
+                "SELECT COUNT(*) FROM dataset_manifest WHERE manifest_id = ?",
+                (scope.dataset_version,),
+            )
+            manifest_identity_mismatch = _table_count(
+                connection,
+                "SELECT COUNT(*) FROM dataset_manifest "
+                "WHERE manifest_id = ? AND dataset_version <> ?",
+                (scope.dataset_version, scope.dataset_version),
+            )
         return {
             "financial_facts_compact": _table_count(
                 connection,
@@ -172,11 +196,8 @@ def _scoped_row_counts(database: Path, scope: _FinalizeScope) -> dict[str, int]:
                 f"WHERE corp_code IN ({companies}) AND bsns_year = ?",
                 (*scope.corp_codes, scope.quality_year),
             ),
-            "dataset_manifest": _table_count(
-                connection,
-                "SELECT COUNT(*) FROM dataset_manifest WHERE dataset_version = ?",
-                (scope.dataset_version,),
-            ),
+            "dataset_manifest": max(manifest_identity_count, manifest_id_count),
+            "dataset_manifest_identity_mismatch": manifest_identity_mismatch,
         }
 
 

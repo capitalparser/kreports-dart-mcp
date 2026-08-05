@@ -191,11 +191,18 @@ def group_company_records(rows: list[dict], *, limit: int) -> list[dict]:
             "market": row.pop("market", None),
             "induty_code": row.pop("induty_code", None),
             "records": [],
+            "_source_record_count": 0,
         })
+        item["_source_record_count"] = max(
+            item["_source_record_count"],
+            int(row.pop("_company_total_rows", 0) or 0),
+        )
         item["records"].append(row)
     companies = list(grouped.values())
     for item in companies:
-        item["record_count"] = len(item["records"])
+        item["record_count"] = max(
+            len(item["records"]), int(item.pop("_source_record_count", 0) or 0)
+        )
         item["records"] = item["records"][:10]
     companies.sort(key=lambda item: (-item["record_count"], item.get("market") or "", item.get("corp_name") or ""))
     return companies[:limit]
@@ -396,8 +403,12 @@ def search_dataset(
                        d.report_nm AS disclosure_report_nm,
                        ROW_NUMBER() OVER (
                            PARTITION BY anc.corp_code
-                           ORDER BY anc.bsns_year DESC, anc.note_no, anc.rcept_no
-                       ) AS _company_row_no
+                           ORDER BY
+                               CASE WHEN LENGTH(anc.rcept_no) = 14
+                                     AND sd.report_nm LIKE '%사업보고서%' THEN 0 ELSE 1 END,
+                               anc.bsns_year DESC, anc.note_no, anc.rcept_no
+                       ) AS _company_row_no,
+                       COUNT(*) OVER (PARTITION BY anc.corp_code) AS _company_total_rows
                 FROM accounting_note_chapters anc
                 JOIN companies c ON c.corp_code=anc.corp_code
                 LEFT JOIN source_documents sd

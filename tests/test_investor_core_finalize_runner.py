@@ -80,6 +80,31 @@ def test_finalize_dry_run_does_not_call_writers_or_change_database(tmp_path, mon
     }
 
 
+def test_finalize_rejects_manifest_id_collision_before_derived_writes(tmp_path, monkeypatch):
+    """A tampered manifest identity must fail before compact/quality writes."""
+    database = tmp_path / "manifest-id-collision.db"
+    _create_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE dataset_manifest")
+        connection.execute(
+            "CREATE TABLE dataset_manifest (manifest_id TEXT PRIMARY KEY, dataset_version TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO dataset_manifest VALUES (?, ?)",
+            ("investor-core-test-v1", "different-version"),
+        )
+    from kreports.maintenance import investor_core_finalize_runner as runner
+
+    monkeypatch.setattr(
+        runner, "rebuild_financial_facts_compact",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("writer reached")),
+    )
+    report = _run(database, execute=False)
+    assert report["completed"] is False
+    assert report["stop_reason"] == "dataset_version_exists"
+    assert report["phases"]["manifest"]["status"] == "blocked"
+
+
 @pytest.mark.parametrize(
     "corp_codes",
     [[], ["0000000"], [" 00000001"], "00000001", ["00000001", 2]],

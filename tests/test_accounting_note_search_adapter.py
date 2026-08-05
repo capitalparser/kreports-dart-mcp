@@ -115,6 +115,33 @@ def test_note_company_matrix_uses_annual_q4_not_interim_metric(temp_engine):
     assert result["note_disclosure_company_matrix"]["companies"] == []
 
 
+def test_note_company_matrix_reports_rows_omitted_after_per_company_cap(temp_engine):
+    """Per-company SQL bounding must not masquerade as complete evidence."""
+    del temp_engine
+    with get_session() as session:
+        session.add(Company(corp_code="93000001", corp_name="다수주석", market="KOSPI", induty_code="264"))
+        session.add_all([
+            AccountingNoteChapter(
+                corp_code="93000001", bsns_year=2025, fs_div="CFS",
+                rcept_no=f"2026031200{index:04d}", source_type="business_report",
+                note_no=str(index), note_title="재고자산", section_type="policy",
+                body="재고자산 공시", body_hash=f"many-{index}", body_length=8,
+            )
+            for index in range(1, 12)
+        ])
+
+    from kreports.mcp.handlers.search import handle_search_dataset
+    from kreports.mcp.input_models import SearchDatasetInput
+
+    result = handle_search_dataset(SearchDatasetInput(
+        dataset="accounting_note_chapters", keyword="재고자산", year=2025,
+    ))
+    company = result["note_disclosure_company_matrix"]["companies"][0]
+    assert company["record_count"] == 11
+    assert company["source_records_truncated"] is True
+    assert company["source_record_rows_omitted_count"] == 1
+
+
 def test_accounting_note_keyword_search_returns_up_to_three_unique_match_excerpts(temp_engine):
     """Catches a regression that omits excerpts or repeats the same match window."""
     del temp_engine
