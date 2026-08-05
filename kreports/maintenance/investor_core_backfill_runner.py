@@ -311,29 +311,6 @@ def _open_verified_sqlite_connection(identity: _DatabaseIdentity) -> sqlite3.Con
             os.close(descriptor)
 
 
-def _verify_writer_connection_identity(connection: object, identity: _DatabaseIdentity) -> None:
-    """Verify the actual SQLAlchemy writer points at the requested inode."""
-    try:
-        rows = connection.exec_driver_sql("PRAGMA database_list").fetchall()  # type: ignore[attr-defined]
-        main_path = next(str(row[2]) for row in rows if row[1] == "main")
-        path_stat = os.stat(main_path, follow_symlinks=False)
-    except (OSError, StopIteration, AttributeError) as exc:
-        raise _fail(
-            "database_writer_identity_mismatch",
-            "collector writer does not match the requested database",
-        ) from exc
-    if (
-        not stat.S_ISREG(path_stat.st_mode)
-        or path_stat.st_nlink != 1
-        or int(path_stat.st_dev) != identity.device
-        or int(path_stat.st_ino) != identity.inode
-    ):
-        raise _fail(
-            "database_writer_identity_mismatch",
-            "collector writer does not match the requested database",
-        )
-
-
 @contextmanager
 def _bound_financial_writer(identity: _DatabaseIdentity) -> Iterator[Callable[..., str]]:
     """Bind every imported engine.get_session path to the checked target file."""

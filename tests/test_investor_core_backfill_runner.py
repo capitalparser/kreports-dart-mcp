@@ -1102,6 +1102,97 @@ def test_checkpoint_open_does_not_create_database_after_path_is_deleted(
     assert not database.exists()
 
 
+def test_verified_writer_open_does_not_recreate_path_deleted_after_fd_authentication(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catch a creation-capable SQLite connect after the checked FD is open."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    identity = runner._capture_database_identity(database)
+    original_connect = runner.sqlite3.connect
+    authenticated_open_reached = False
+
+    def delete_immediately_before_sqlite_connect(*args, **kwargs):
+        nonlocal authenticated_open_reached
+        authenticated_open_reached = True
+        database.unlink()
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        runner.sqlite3,
+        "connect",
+        delete_immediately_before_sqlite_connect,
+    )
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        runner._open_verified_sqlite_connection(identity)
+
+    assert authenticated_open_reached is True
+    assert caught.value.code == "database_connection_identity_mismatch"
+    assert not database.exists()
+
+
+def test_verified_writer_open_rejects_wrong_inode_after_path_is_restored(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catch SQLite retaining a swapped inode after the pathname looks safe again."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    wrong_database = tmp_path / "wrong-opened.db"
+    retained_wrong_database = tmp_path / "retained-wrong-opened.db"
+    staged_expected_database = tmp_path / "staged-expected.db"
+    _create_runner_db(database)
+    _create_runner_db(wrong_database)
+    with sqlite3.connect(wrong_database) as connection:
+        connection.execute("INSERT INTO marker VALUES ('wrong-opened')")
+    retained_wrong_database.hardlink_to(wrong_database)
+    expected_identity = runner._capture_database_identity(database)
+    wrong_identity = wrong_database.stat()
+    wrong_bytes_before = retained_wrong_database.read_bytes()
+    original_connect = runner.sqlite3.connect
+    authenticated_open_reached = False
+
+    def connect_wrong_inode_then_restore_expected(*args, **kwargs):
+        nonlocal authenticated_open_reached
+        authenticated_open_reached = True
+        assert (database.stat().st_dev, database.stat().st_ino) == (
+            expected_identity.device,
+            expected_identity.inode,
+        )
+        database.replace(staged_expected_database)
+        wrong_database.replace(database)
+        try:
+            return original_connect(*args, **kwargs)
+        finally:
+            staged_expected_database.replace(database)
+
+    monkeypatch.setattr(
+        runner.sqlite3,
+        "connect",
+        connect_wrong_inode_then_restore_expected,
+    )
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        runner._open_verified_sqlite_connection(expected_identity)
+
+    assert authenticated_open_reached is True
+    assert caught.value.code == "database_connection_identity_mismatch"
+    current_expected = database.stat()
+    assert (current_expected.st_dev, current_expected.st_ino) == (
+        expected_identity.device,
+        expected_identity.inode,
+    )
+    retained_wrong = retained_wrong_database.stat()
+    assert (retained_wrong.st_dev, retained_wrong.st_ino) == (
+        wrong_identity.st_dev,
+        wrong_identity.st_ino,
+    )
+    assert retained_wrong_database.read_bytes() == wrong_bytes_before
+
+
 def test_verified_writer_open_rejects_replacement_inode_before_sqlite_connects(
     tmp_path: Path,
     monkeypatch,
@@ -1273,25 +1364,6 @@ def test_runner_stops_when_database_path_is_replaced_during_target(
     assert report["completed"] is False
     assert report["stop_reason"] == "database_identity_changed"
     assert report["target_outcomes"]["counts"] == {"cached": 1}
-
-
-def test_writer_connection_identity_must_match_requested_database(tmp_path: Path):
-    from kreports.maintenance import investor_core_backfill_runner as runner
-
-    database = tmp_path / "runner.db"
-    other_database = tmp_path / "other.db"
-    _create_runner_db(database)
-    _create_runner_db(other_database)
-    identity = runner._capture_database_identity(database)
-    engine = create_engine(f"sqlite:///{other_database}")
-    try:
-        with engine.connect() as connection:
-            with pytest.raises(runner.InvestorCoreBackfillError) as caught:
-                runner._verify_writer_connection_identity(connection, identity)
-    finally:
-        engine.dispose()
-
-    assert caught.value.code == "database_writer_identity_mismatch"
 
 
 class _MalformedJsonResponse:
