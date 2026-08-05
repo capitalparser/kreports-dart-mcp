@@ -7,12 +7,14 @@ it.  Its only filesystem mutation is the explicit output writer.
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
 from html.parser import HTMLParser
 import os
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 from typing import Iterable, Mapping, Sequence
@@ -40,6 +42,18 @@ _HEADER_ALIASES = {
     "market": frozenset({"시장구분", "시장"}),
     "listed_from": frozenset({"상장일", "상장일자"}),
 }
+MAX_RAW_SIZE_BYTES = 2 * 1024 * 1024
+MAX_TABLE_ROWS = 10_000
+MAX_CELLS_PER_ROW = 32
+MAX_CELL_TEXT_CHARS = 4_096
+_BOM_PREFIXES = (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META_CHARSET_RE = re.compile(r"\bcharset\s*=\s*['\"]?([A-Za-z0-9_-]+)", re.IGNORECASE)
+_DISALLOWED_FORMAT_CHARS = frozenset({
+    "\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\ufeff",
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+    "\u2066", "\u2067", "\u2068", "\u2069",
+})
 
 
 class KrxListingNormalizationError(ValueError):
@@ -55,6 +69,37 @@ class NormalizedListingResult:
     summary: dict[str, object]
 
 
+def _reject_prohibited_text(value: str) -> None:
+    for char in value:
+        ordinal = ord(char)
+        if (ordinal < 32 and char not in "\t\n\r") or ordinal == 127:
+            raise KrxListingNormalizationError("prohibited control character in KIND HTML-XLS")
+        if char in _DISALLOWED_FORMAT_CHARS:
+            raise KrxListingNormalizationError("prohibited zero-width or bidi character in KIND HTML-XLS")
+
+
+def _decode_kind_document(raw_bytes: bytes) -> str:
+    if len(raw_bytes) > MAX_RAW_SIZE_BYTES:
+        raise KrxListingNormalizationError("raw KIND payload exceeds maximum size")
+    if raw_bytes.startswith(_BOM_PREFIXES):
+        raise KrxListingNormalizationError("KIND HTML-XLS must be raw EUC-KR without a BOM")
+    if raw_bytes.isascii():
+        raise KrxListingNormalizationError("KIND HTML-XLS must not be ASCII-only")
+    try:
+        document = raw_bytes.decode("euc-kr")
+    except UnicodeDecodeError as exc:
+        raise KrxListingNormalizationError("KIND HTML-XLS must be raw EUC-KR") from exc
+    _reject_prohibited_text(document)
+    charset_declarations = [
+        match.group(1).lower()
+        for tag in _META_TAG_RE.findall(document)
+        if (match := _META_CHARSET_RE.search(tag)) is not None
+    ]
+    if not charset_declarations or any(value != "euc-kr" for value in charset_declarations):
+        raise KrxListingNormalizationError("EUC-KR meta charset is required and must not conflict")
+    return document
+
+
 class _HtmlTableParser(HTMLParser):
     """Small HTML table reader sufficient for the table-shaped KIND XLS export."""
 
@@ -64,33 +109,68 @@ class _HtmlTableParser(HTMLParser):
         self._table: list[list[str]] | None = None
         self._row: list[str] | None = None
         self._cell_parts: list[str] | None = None
+        self._cell_tag: str | None = None
+        self._cell_text_length = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
-        if tag == "table" and self._table is None:
+        tag = tag.lower()
+        if tag == "table":
+            if self._table is not None:
+                raise KrxListingNormalizationError("unsupported table structure")
             self._table = []
-        elif tag == "tr" and self._table is not None:
+        elif tag == "tr":
+            if self._table is None or self._row is not None or self._cell_parts is not None:
+                raise KrxListingNormalizationError("unsupported table structure")
             self._row = []
-        elif tag in {"td", "th"} and self._row is not None:
+        elif tag in {"td", "th"}:
+            if self._row is None or self._cell_parts is not None:
+                raise KrxListingNormalizationError("unsupported table structure")
+            if any(name.lower() in {"colspan", "rowspan"} for name, _value in attrs):
+                raise KrxListingNormalizationError("unsupported table structure")
+            if len(self._row) >= MAX_CELLS_PER_ROW:
+                raise KrxListingNormalizationError("row exceeds maximum cell count")
             self._cell_parts = []
+            self._cell_tag = tag
+            self._cell_text_length = 0
         elif tag == "br" and self._cell_parts is not None:
             self._cell_parts.append(" ")
+            self._cell_text_length += 1
+            if self._cell_text_length > MAX_CELL_TEXT_CHARS:
+                raise KrxListingNormalizationError("cell text exceeds maximum length")
 
     def handle_data(self, data: str) -> None:
+        _reject_prohibited_text(data)
         if self._cell_parts is not None:
+            self._cell_text_length += len(data)
+            if self._cell_text_length > MAX_CELL_TEXT_CHARS:
+                raise KrxListingNormalizationError("cell text exceeds maximum length")
             self._cell_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"td", "th"} and self._cell_parts is not None and self._row is not None:
+        tag = tag.lower()
+        if tag in {"td", "th"}:
+            if self._cell_parts is None or self._row is None or self._cell_tag != tag:
+                raise KrxListingNormalizationError("unsupported table structure")
             self._row.append("".join(self._cell_parts).strip())
             self._cell_parts = None
-        elif tag == "tr" and self._row is not None and self._table is not None:
-            if self._row:
-                self._table.append(self._row)
+            self._cell_tag = None
+            self._cell_text_length = 0
+        elif tag == "tr":
+            if self._row is None or self._table is None or self._cell_parts is not None:
+                raise KrxListingNormalizationError("unsupported table structure")
+            if len(self._table) >= MAX_TABLE_ROWS:
+                raise KrxListingNormalizationError("table exceeds maximum row count")
+            self._table.append(self._row)
             self._row = None
-        elif tag == "table" and self._table is not None:
+        elif tag == "table":
+            if self._table is None or self._row is not None or self._cell_parts is not None:
+                raise KrxListingNormalizationError("unsupported table structure")
             self.tables.append(self._table)
             self._table = None
+
+    def finalize(self) -> None:
+        if self._table is not None or self._row is not None or self._cell_parts is not None:
+            raise KrxListingNormalizationError("unsupported table structure")
 
 
 def _normalize_corp_code(value: object) -> str:
@@ -172,14 +252,14 @@ def _header_indexes(table: Sequence[Sequence[str]]) -> dict[str, int] | None:
 
 
 def _parse_kind_rows(raw_bytes: bytes, *, as_of: date) -> list[tuple[str, str, str, str]]:
-    try:
-        document = raw_bytes.decode("euc-kr")
-    except UnicodeDecodeError as exc:
-        raise KrxListingNormalizationError("KIND HTML-XLS must be EUC-KR") from exc
+    document = _decode_kind_document(raw_bytes)
     parser = _HtmlTableParser()
     try:
         parser.feed(document)
         parser.close()
+        parser.finalize()
+    except KrxListingNormalizationError:
+        raise
     except Exception as exc:  # HTMLParser rarely raises, but malformed input must not leak through.
         raise KrxListingNormalizationError("KIND HTML-XLS could not be parsed") from exc
     matching = [(table, _header_indexes(table)) for table in parser.tables]
@@ -188,12 +268,13 @@ def _parse_kind_rows(raw_bytes: bytes, *, as_of: date) -> list[tuple[str, str, s
         raise KrxListingNormalizationError("required KIND columns are missing or ambiguous")
     table, indexes = matching[0]
     assert indexes is not None
+    header_length = len(table[0])
     rows: list[tuple[str, str, str, str]] = []
     for row_no, source_row in enumerate(table[1:], start=2):
-        if not any(cell.strip() for cell in source_row):
-            continue
-        if len(source_row) <= max(indexes.values()):
-            raise KrxListingNormalizationError(f"KIND row {row_no} is shorter than its header")
+        if len(source_row) != header_length:
+            raise KrxListingNormalizationError(
+                f"KIND row {row_no} does not match header length"
+            )
         company_name = source_row[indexes["company_name"]].strip()
         if not company_name:
             raise KrxListingNormalizationError(f"company_name is blank at row {row_no}")
@@ -222,6 +303,14 @@ def _csv_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
     writer.writeheader()
     writer.writerows(rows)
     return output.getvalue().encode("utf-8")
+
+
+def _current_company_snapshot_checksum(companies: Sequence[Mapping[str, str]]) -> str:
+    canonical = "".join(
+        f"{company['corp_code']},{company['stock_code']},{company['market']}\n"
+        for company in companies
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def normalize_krx_listing_bytes(
@@ -264,18 +353,40 @@ def normalize_krx_listing_bytes(
                 row["status"] = "conflict"
         output_rows.append(row)
     artifact = _csv_bytes(output_rows)
-    status_counts = {status: sum(row["status"] == status for row in output_rows) for status in ("conflict", "unknown", "verified")}
+    status_counts = {
+        status: sum(row["status"] == status for row in output_rows)
+        for status in ("conflict", "unknown", "verified")
+    }
+    exact_source_counts = Counter(source_rows)
+    unique_source_rows = set(source_rows)
+    unmatched_krx_stock_codes = sorted(set(source_by_stock) - known_stock_codes)
     return NormalizedListingResult(
         rows=output_rows,
         csv_bytes=artifact,
         summary={
             "raw_checksum": hashlib.sha256(raw_bytes).hexdigest(),
+            "raw_size_bytes": len(raw_bytes),
             "normalized_checksum": hashlib.sha256(artifact).hexdigest(),
+            "normalized_size_bytes": len(artifact),
             "row_count": len(output_rows),
             "status_counts": status_counts,
             "transformation_version": TRANSFORMATION_VERSION,
             "as_of": as_of.isoformat(),
-            "unmatched_krx_stock_codes": sorted(set(source_by_stock) - known_stock_codes),
+            "source_row_count": len(source_rows),
+            "source_unique_row_count": len(unique_source_rows),
+            "exact_duplicate_row_count": len(source_rows) - len(unique_source_rows),
+            "exact_duplicate_group_count": sum(
+                count > 1 for count in exact_source_counts.values()
+            ),
+            "conflicting_source_stock_code_count": sum(
+                len(options) > 1 for options in source_by_stock.values()
+            ),
+            "current_company_count": len(current_companies),
+            "current_company_snapshot_checksum": _current_company_snapshot_checksum(
+                current_companies
+            ),
+            "unmatched_krx_stock_codes": unmatched_krx_stock_codes,
+            "unmatched_krx_stock_code_count": len(unmatched_krx_stock_codes),
         },
     )
 
