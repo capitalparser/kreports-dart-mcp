@@ -2516,6 +2516,15 @@ def plan_investor_core_backfill_cmd(
         f"{plan['selected_source_ready_count']} ready, "
         f"{plan['selected_needing_disclosure_metadata_count']} need disclosure metadata"
     )
+    typer.echo(
+        "Annual filing anchors: "
+        f"{plan['selected_valid_annual_anchor_company_count']} companies/"
+        f"{plan['selected_valid_annual_anchor_year_count']} years valid, "
+        f"{plan['selected_invalid_annual_anchor_company_count']} companies/"
+        f"{plan['selected_invalid_annual_anchor_year_count']} years invalid, "
+        f"{plan['selected_true_missing_disclosure_metadata_company_count']} companies/"
+        f"{plan['selected_true_missing_disclosure_metadata_year_count']} years true-missing"
+    )
     if plan["unfillable_shortfall"]:
         typer.echo(f"Unfillable shortfall: {plan['unfillable_shortfall']}")
 

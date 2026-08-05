@@ -453,6 +453,33 @@ def test_cli_emits_stable_json_for_an_explicit_database(tmp_path):
     }.items() <= payload.items()
 
 
+def test_cli_separates_invalid_annual_anchor_diagnostics_from_missing_metadata(tmp_path):
+    from kreports.cli.main import app
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(database, corp_code="000001", grade="B", status="missing")
+    _add_annual(
+        database,
+        corp_code="000001",
+        year=2025,
+        receipt="20260330000001",
+        disc_date=date(2026, 3, 31),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["plan-investor-core-backfill", "--db", str(database)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Source readiness: 0 ready, 1 need disclosure metadata" in result.output
+    assert (
+        "Annual filing anchors: 0 companies/0 years valid, "
+        "1 companies/1 years invalid, 0 companies/0 years true-missing"
+    ) in result.output
+
+
 def test_cli_reports_missing_schema_without_a_traceback_even_for_json(tmp_path):
     from kreports.cli.main import app
 
@@ -624,12 +651,14 @@ def test_plan_separates_invalid_annual_anchors_from_true_metadata_gaps(tmp_path)
     assert [anchor["bsns_year"] for anchor in selected["annual_filing_anchors"]] == [2025]
     assert selected["invalid_annual_anchor_years"] == [2024]
     assert selected["missing_disclosure_metadata_years"] == [2023]
+    assert plan["selected_valid_annual_anchor_company_count"] == 1
+    assert plan["selected_valid_annual_anchor_year_count"] == 1
     assert plan["selected_invalid_annual_anchor_company_count"] == 1
     assert plan["selected_invalid_annual_anchor_year_count"] == 1
     assert plan["selected_true_missing_disclosure_metadata_company_count"] == 1
     assert plan["selected_true_missing_disclosure_metadata_year_count"] == 1
     assert (
-        sum(len(row["annual_filing_anchors"]) for row in plan["selected_companies"])
+        plan["selected_valid_annual_anchor_year_count"]
         + plan["selected_invalid_annual_anchor_year_count"]
         + plan["selected_true_missing_disclosure_metadata_year_count"]
         == plan["selected_successful_company_year_request_count"]

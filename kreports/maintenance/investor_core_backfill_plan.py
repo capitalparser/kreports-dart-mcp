@@ -350,6 +350,13 @@ def plan_investor_core_backfill(
         "selected_needing_disclosure_metadata_count": sum(
             1 for candidate in selected_companies if not candidate["source_ready"]
         ),
+        "selected_valid_annual_anchor_company_count": sum(
+            1 for candidate in selected_companies if candidate["annual_filing_anchors"]
+        ),
+        "selected_valid_annual_anchor_year_count": sum(
+            len(candidate["annual_filing_anchors"])
+            for candidate in selected_companies
+        ),
         "selected_invalid_annual_anchor_company_count": sum(
             1 for candidate in selected_companies if candidate["invalid_annual_anchor_years"]
         ),
