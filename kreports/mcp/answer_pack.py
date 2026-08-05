@@ -1872,15 +1872,32 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
     if not extended:
         _append_legacy_peer_policy_tables(pack, result, selection_policy)
         return pack
+    peer_selection = [
+        row for row in result.get("peer_selection") or [] if isinstance(row, dict)
+    ]
+    selected_roster = [
+        row for row in result.get("selected_peers") or [] if isinstance(row, dict)
+    ]
+    evaluated_count = len(peer_selection) if peer_selection else len(selected_roster)
+    selected_input_rows = (
+        [row for row in peer_selection if row.get("selection_status") == "included"]
+        if peer_selection
+        else selected_roster
+    )
+    using_final_roster_fallback = not peer_selection
     selection_rows = []
-    for row in result.get("peer_selection") or []:
+    for row in selected_input_rows:
         if not isinstance(row, dict):
             continue
         selection_rows.append({
             "company": row.get("corp_name") or row.get("corp_code"),
             "corp_code": row.get("corp_code"),
-            "status": row.get("selection_status"),
-            "reason": row.get("selection_reason"),
+            "status": row.get("selection_status") or (
+                "included" if using_final_roster_fallback else None
+            ),
+            "reason": row.get("selection_reason") or (
+                "final_selected_peer_roster" if using_final_roster_fallback else None
+            ),
             "score": row.get("algorithmic_score"),
             "profile_or_weights": _flat_peer_policy_mapping(row.get("weights")),
             "data_year": row.get("data_year"),
@@ -1901,7 +1918,11 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
          ("score_components", "지표별 점수"), ("component_contributions", "가중 기여도"),
          ("limitations", "데이터 한계")],
         selection_rows,
-        note="직접 포함은 사용자의 명시적 override이며 알고리즘 유사성 매칭이 아닙니다.",
+        note=(
+            f"평가 후보 {evaluated_count}개 중 제외 {evaluated_count - len(selection_rows)}개; "
+            "최종 included peer만 표시합니다. 직접 포함은 사용자의 명시적 override이며 "
+            "알고리즘 유사성 매칭이 아닙니다."
+        ),
     ))
     presentation_rows = []
     for row in result.get("note_presentations") or []:
@@ -1922,8 +1943,57 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
             presentation_rows,
             note="텍스트/표시 차이는 스크리닝 신호일 뿐 회계처리 결론이 아닙니다.",
         ))
-    note_comparison_rows = []
     note_comparison = result.get("note_comparison")
+    topic_payloads = {
+        str(topic.get("topic")): topic
+        for topic in (note_comparison.get("topics") or [])
+        if isinstance(topic, dict) and topic.get("topic") is not None
+    } if isinstance(note_comparison, dict) else {}
+    coverage_rows = []
+    coverage_matrix = note_comparison.get("coverage_matrix") if isinstance(note_comparison, dict) else None
+    matrix_topics = coverage_matrix.get("topics") if isinstance(coverage_matrix, dict) else None
+    coverage_topics = matrix_topics if isinstance(matrix_topics, list) else topic_payloads.values()
+    for coverage_topic in coverage_topics:
+        if not isinstance(coverage_topic, dict):
+            continue
+        topic_name = coverage_topic.get("topic")
+        payload = topic_payloads.get(str(topic_name), {})
+        rows_for_topic = payload.get("rows") if isinstance(payload, dict) else []
+        coverage = coverage_topic.get("coverage")
+        if not isinstance(coverage, dict):
+            coverage = {
+                status: sum(
+                    row.get("availability") == status
+                    for row in rows_for_topic or [] if isinstance(row, dict)
+                )
+                for status in ("available", "summary_only", "unavailable")
+            }
+        differences = payload.get("differences") if isinstance(payload, dict) else []
+        if not isinstance(differences, list):
+            differences = []
+        if not differences:
+            differences = [
+                item for item in result.get("differences") or []
+                if isinstance(item, dict) and item.get("topic") == topic_name
+            ]
+        coverage_rows.append({
+            "topic": topic_name,
+            "available": coverage.get("available", 0),
+            "summary_only": coverage.get("summary_only", 0),
+            "unavailable": coverage.get("unavailable", 0),
+            "total": sum(coverage.get(status, 0) for status in ("available", "summary_only", "unavailable")),
+            "difference_count": len(differences),
+        })
+    if coverage_rows:
+        pack["tables"].append(_table(
+            "peer_topic_note_coverage", "주제별 회계주석 비교 가능 범위",
+            [("topic", "주제"), ("available", "원문 비교 가능"),
+             ("summary_only", "요약만 가능"), ("unavailable", "캐시 미확보"),
+             ("total", "총 회사 수"), ("difference_count", "텍스트 차이 수")],
+            coverage_rows,
+            note="unavailable은 로컬 캐시 미확보이며 해당 주제 공시 또는 회계처리의 부재를 뜻하지 않습니다.",
+        ))
+    note_comparison_rows = []
     if isinstance(note_comparison, dict):
         for topic in note_comparison.get("topics") or []:
             if not isinstance(topic, dict):
@@ -1935,16 +2005,27 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
                 note_comparison_rows.append({
                     "topic": topic.get("topic"),
                     "company": company.get("corp_name") or company.get("corp_code"),
+                    "note_title": row.get("note_title"),
+                    "matched_keyword": row.get("match_keyword"),
+                    "match_location": row.get("match_location"),
                     "excerpt": row.get("value_or_excerpt"),
                     "availability": row.get("availability"),
+                    "cache_status": (
+                        row.get("comparison_note")
+                        or "cache_missing_not_filing_absence"
+                        if row.get("availability") == "unavailable"
+                        else row.get("comparison_note")
+                    ),
                     "receipt": row.get("rcept_no"),
                     "source_locator": row.get("source_locator"),
                 })
     if note_comparison_rows:
         pack["tables"].append(_table(
             "peer_topic_note_comparison", "동일 사업연도 회계주석 비교",
-            [("topic", "주제"), ("company", "회사"), ("excerpt", "본문 발췌"),
-             ("availability", "캐시 상태"), ("receipt", "접수번호"),
+            [("topic", "주제"), ("company", "회사"), ("note_title", "주석 제목"),
+             ("matched_keyword", "일치 키워드"), ("match_location", "일치 위치"),
+             ("excerpt", "본문 발췌"), ("availability", "캐시 상태"),
+             ("cache_status", "캐시 상세"), ("receipt", "접수번호"),
              ("source_locator", "출처 위치")],
             note_comparison_rows,
             note="원문 발췌와 출처를 비교하며, 캐시 미확보는 공시 부재를 뜻하지 않습니다.",

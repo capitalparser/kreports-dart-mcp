@@ -306,6 +306,73 @@ def test_dispatch_envelope_carries_extended_peer_policy_answer_pack(temp_engine)
     }
 
 
+def test_note_comparison_pack_uses_final_roster_and_exposes_match_cache_status(temp_engine):
+    """The visible selection is bounded to final peers, not every evaluated candidate."""
+    _seed_peer_note_comparison(temp_engine)
+    result = raw_result("compare_peer_accounting_policies", {
+        "company": "00000001", "year": 2024, "peer_limit": 1,
+        "include_note_comparison": True, "note_topics": ["leases"],
+    })
+    tables = {table["id"]: table for table in build_answer_pack(
+        "compare_peer_accounting_policies", result,
+    )["tables"]}
+
+    assert "topic_selector_required" not in result["data_quality"].get("limitations", [])
+    assert "peer_selection" not in result
+    assert len(result["selected_peers"]) == result["peer_count"]
+    assert len(tables["peer_policy_selection"]["rows"]) == result["peer_count"]
+    assert {row["status"] for row in tables["peer_policy_selection"]["rows"]} == {"included"}
+
+    synthetic = {
+        "subject": {"corp_name": "Subject"},
+        "data_quality": {"status": "limited"},
+        "peer_selection": [
+            {
+                "corp_code": f"{index:08d}", "corp_name": f"Peer {index}",
+                "selection_status": "included" if index < 5 else "excluded",
+                "selection_reason": "fixture",
+            }
+            for index in range(50)
+        ],
+        "note_comparison": {
+            "topics": [{
+                "topic": "leases",
+                "rows": [{
+                    "company": {"corp_code": "00000001", "corp_name": "Subject"},
+                    "availability": "unavailable",
+                    "comparison_note": "no_cached_note_for_exact_business_year",
+                    "value_or_excerpt": None,
+                    "note_title": None,
+                    "match_keyword": None,
+                    "match_location": None,
+                    "rcept_no": None,
+                    "source_locator": None,
+                }],
+            }],
+        },
+    }
+    synthetic_tables = {table["id"]: table for table in build_answer_pack(
+        "compare_peer_accounting_policies", synthetic,
+    )["tables"]}
+    selection = synthetic_tables["peer_policy_selection"]
+    coverage = synthetic_tables["peer_topic_note_coverage"]
+    comparison = synthetic_tables["peer_topic_note_comparison"]
+
+    assert len(selection["rows"]) == 5
+    assert "50" in selection["note"] and "45" in selection["note"]
+    assert coverage["rows"] == [{
+        "topic": "leases", "available": 0, "summary_only": 0,
+        "unavailable": 1, "total": 1, "difference_count": 0,
+    }]
+    assert "공시 또는 회계처리의 부재" in coverage["note"]
+    assert comparison["rows"] == [{
+        "topic": "leases", "company": "Subject", "note_title": None,
+        "matched_keyword": None, "match_location": None, "excerpt": None,
+        "availability": "unavailable", "cache_status": "no_cached_note_for_exact_business_year",
+        "receipt": None, "source_locator": None,
+    }]
+
+
 def test_unproven_or_missing_final_peer_topic_makes_selected_comparison_limited(temp_engine):
     """A proven subject row cannot conceal a final peer's unproven/missing topic."""
     _seed_peer_note_comparison(

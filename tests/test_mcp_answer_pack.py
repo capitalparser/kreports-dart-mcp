@@ -1329,8 +1329,12 @@ def test_policy_pack_renders_consolidated_side_by_side_note_comparison():
     assert table["rows"] == [{
         "topic": "leases",
         "company": "대상회사",
+        "note_title": None,
+        "matched_keyword": None,
+        "match_location": None,
         "excerpt": "리스부채 측정",
         "availability": "available",
+        "cache_status": None,
         "receipt": "20250301000001",
         "source_locator": "accounting_note_chapters:1",
     }]

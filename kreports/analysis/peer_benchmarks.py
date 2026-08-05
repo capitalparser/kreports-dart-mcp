@@ -2365,7 +2365,11 @@ def compare_peer_accounting_policies(
         include_peers or exclude_peers or peer_weights or size_bucket_decade is not None
         or selection_profile != "balanced" or peer_criteria is not None
     )
-    presentation_mode = custom_selection or item_key is not None or keyword is not None
+    presentation_mode = (
+        custom_selection
+        or item_key is not None
+        or keyword is not None
+    )
     base = _peer_group if _peer_group is not None else select_peer_group(
         company=company, peer_limit=200 if custom_selection else peer_limit,
         fs_strategy=fs_strategy, year=year, size_bucket_decade=size_bucket_decade,
@@ -2652,7 +2656,7 @@ def compare_peer_accounting_policies(
                 "returned_item_count": returned_per_company.get(code, 0),
             })
     topic_inventory = []
-    if presentation_mode and not topic_requested:
+    if presentation_mode and not topic_requested and not _return_note_comparison_peer_group:
         for code in all_codes:
             items = by_corp.get(code, [])
             keys = sorted(row["item_key"] for row in items)
@@ -2684,7 +2688,7 @@ def compare_peer_accounting_policies(
         ),
     }
     limitations = list(data_quality.get("limitations") or [])
-    if presentation_mode and not topic_requested:
+    if presentation_mode and not topic_requested and not _return_note_comparison_peer_group:
         data_quality["status"] = "limited"
         limitations.append("topic_selector_required")
     elif not subject_topic_available:

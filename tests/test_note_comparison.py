@@ -41,6 +41,77 @@ def test_note_comparison_returns_side_by_side_rows_and_explicit_absence(temp_eng
     assert result["peer_selection"]["selection_mode"] == "adaptive"
 
 
+def test_note_comparison_multilabels_long_chapters_with_centered_topic_context(temp_engine):
+    """One cached chapter can evidence every requested keyword-bearing topic."""
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import (
+        AccountingNoteChapter,
+        Company,
+        Disclosure,
+        SourceDocument,
+    )
+
+    generic_prefix = "일반적인 재무제표 작성기준. " + ("가" * 500)
+    subject_body = (
+        generic_prefix
+        + " 수익은 수행의무 이행 시 인식합니다. "
+        + ("나" * 500)
+        + " 리스부채는 현재가치로 측정합니다. "
+        + ("다" * 500)
+        + " 회계정책은 중요한 판단을 포함합니다."
+    )
+    peer_body = subject_body.replace(
+        "수익은 수행의무 이행 시 인식", "수익은 고객과의 계약에 따라 인식",
+    )
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
+            Company(corp_code="00000002", corp_name="Peer", induty_code="26410"),
+            Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="Subject", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            Disclosure(rcept_no="20250301000002", corp_code="00000002", corp_name="Peer", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            SourceDocument(rcept_no="20250301000002", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="b" * 40),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="1", note_title="회계정책", section_type="policy", body=subject_body),
+            AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002", source_type="business_report", note_no="1", note_title="회계정책", section_type="policy", body=peer_body),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="0", note_title="재무제표 작성기준", section_type="policy", body="자산·부채 및 수익·비용과 회계정책의 일반적인 표시 기준입니다."),
+            AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="2", note_title="재무제표 작성기준", section_type="policy", body="일반적인 작성기준만 기재합니다."),
+        ])
+
+    kwargs = {
+        "topics": ["revenue", "leases", "accounting_policies", "impairment"],
+        "_peer_group": {
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "peers": [{"corp_code": "00000002", "corp_name": "Peer"}],
+            "selection_policy": {"fs_div_used": "CFS"},
+        },
+        "_read_engine": temp_engine,
+    }
+    result = compare_peer_accounting_notes("00000001", 2024, **kwargs)
+    repeated = compare_peer_accounting_notes("00000001", 2024, **kwargs)
+    rows = {topic["topic"]: topic["rows"] for topic in result["topics"]}
+    revenue_subject = rows["revenue"][0]
+    lease_subject = rows["leases"][0]
+    policy_subject = rows["accounting_policies"][0]
+
+    assert revenue_subject["rcept_no"] == "20250301000001"
+    assert revenue_subject["match_keyword"] == "수행의무"
+    assert revenue_subject["match_location"] == "body"
+    assert revenue_subject["match_offset"] > len(generic_prefix)
+    assert revenue_subject["excerpt_start"] > 0
+    assert "수익" in revenue_subject["value_or_excerpt"]
+    assert "재무제표 작성기준" not in revenue_subject["value_or_excerpt"]
+    assert revenue_subject["raw_text"].startswith("일반적인 재무제표 작성기준")
+    assert lease_subject["match_keyword"] == "리스"
+    assert lease_subject["match_location"] == "body"
+    assert policy_subject["match_keyword"] == "회계정책"
+    assert policy_subject["match_location"] == "title"
+    assert policy_subject["note_no"] == "1"
+    assert rows["impairment"][0]["availability"] == "unavailable"
+    assert revenue_subject["comparison_text_hash"] == repeated["topics"][0]["rows"][0]["comparison_text_hash"]
+    assert any(item["topic"] == "revenue" for item in result["differences"])
+
+
 def test_note_comparison_marks_unbound_cached_note_summary_only_without_receipt(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session
