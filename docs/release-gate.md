@@ -2,6 +2,37 @@
 
 ## Build versus verify
 
+## Offline code-evidence lane
+
+Run the default code-evidence lane with one command:
+
+```bash
+./scripts/run_offline_tests.sh
+```
+
+The runner deliberately overrides ambient shell and `.env` inputs with an
+empty `DART_API_KEY`, `DB_URL=sqlite:///:memory:`, and
+`KREPORTS_RUNTIME_MODE=readonly`. It clears live-DB opt-ins and blocks
+non-loopback socket connections in Python test processes and inherited Python
+subprocesses. It excludes only the explicit `live`, `live_data`, and
+`apfs_real` markers; ordinary tests are still collected and executed.
+
+This is code evidence, not a live-data release proof. Run explicit live lanes
+separately, with an approved immutable database and their opt-in environment:
+
+```bash
+KREPORTS_LIVE_DB=/absolute/path/kreports.db \
+  KREPORTS_RUNTIME_MODE=readonly \
+  .venv/bin/python -m pytest -q -m live tests/test_professional_mcp_live.py
+
+KREPORTS_RUN_LIVE_DB_TESTS=1 DB_URL=sqlite:////absolute/path/kreports.db \
+  KREPORTS_RUNTIME_MODE=readonly \
+  .venv/bin/python -m pytest -q -m live_data tests/test_golden_company_contracts.py
+
+.venv/bin/python -m pytest -q -m apfs_real \
+  tests/test_rehearsal_safety.py tests/test_kam_rehearsal_integration.py
+```
+
 ```bash
 kreports build-release-manifest --db artifacts/kreports-runtime.db
 kreports verify-release-artifact --db artifacts/kreports-runtime.db

@@ -72,4 +72,6 @@ packages = ["kreports"]
 testpaths = ["tests"]
 markers = [
     "live: requires explicit KREPORTS_LIVE_DB and immutable local DB",
+    "live_data: requires explicit opt-in immutable local dataset evidence",
+    "apfs_real: requires a real Darwin APFS clonefile rehearsal",
 ]

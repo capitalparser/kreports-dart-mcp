@@ -397,6 +397,7 @@ def test_live_regression_is_opt_in_by_default():
     os.environ.get("KREPORTS_RUN_LIVE_DB_TESTS") != "1",
     reason="live DB regression is explicit opt-in",
 )
+@pytest.mark.live_data
 def test_live_golden_company_shapes_are_read_immutably_without_dart_calls():
     from kreports.config import settings
 

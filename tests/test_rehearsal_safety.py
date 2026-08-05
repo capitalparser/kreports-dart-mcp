@@ -798,6 +798,7 @@ def test_assert_source_unchanged_rejects_metadata_and_sidecar_changes(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires Darwin APFS clonefile")
+@pytest.mark.apfs_real
 def test_create_apfs_clone_with_real_cp_on_apfs(tmp_path: Path) -> None:
     paths = _valid_paths(tmp_path)
     filesystem_type = rehearsal_safety._filesystem_type(paths.rehearsal_dir)

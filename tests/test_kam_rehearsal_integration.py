@@ -385,6 +385,7 @@ def test_file_backed_db_evidence_rehearsal_reaches_revision_11(
 # Break caught: the orchestrator can claim schema closure after a real legacy
 # migration while skipping an MCP gate, changing the source, or losing the clone.
 @pytest.mark.skipif(sys.platform != "darwin", reason="APFS clonefile required")
+@pytest.mark.apfs_real
 def test_real_rehearsal_migrates_rebuilds_and_preserves_source(
     legacy_kam_source: Path,
     apfs_rehearsal_dir: Path,
