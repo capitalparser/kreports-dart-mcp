@@ -1,6 +1,7 @@
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 
+import pytest
 from sqlalchemy import inspect
 from sqlalchemy import text
 
@@ -136,6 +137,244 @@ def test_export_runtime_db_excludes_heavy_warehouse_tables(temp_engine, tmp_path
     assert "financial_facts" in result["excluded_tables"]
     assert "extraction_runs" in result["excluded_tables"]
     assert "fetch_log" in result["excluded_tables"]
+
+
+def test_export_runtime_db_applies_the_requested_year_window_to_runtime_rows(
+    temp_engine,
+    tmp_path,
+):
+    """Catches an export manifest claiming 2024 while copying 2023 rows."""
+    from sqlalchemy.orm import Session
+
+    from kreports.collector.audit_fee_sources import AuditFeeObservation
+    from kreports.db.audit_fee_observation_store import persist_audit_fee_observations
+    from kreports.db.models import (
+        AccountingPolicyItem,
+        AuditFee,
+        BackfillRun,
+            CompanyYearQuality,
+            DatasetManifest,
+            DisclosureEvent,
+        EvidenceDocument,
+        GroupEntityRecord,
+        ReportDocument,
+    )
+    from kreports.maintenance.runtime_export import export_runtime_db
+
+    with Session(temp_engine) as session:
+        for year in (2023, 2024):
+            receipt = f"{year + 1}0318000001"
+            session.add(Financial(
+                corp_code="00126380",
+                year=year,
+                quarter=4,
+                fs_div="CFS",
+            ))
+            session.add(FinancialFactCompact(
+                corp_code="00126380",
+                bsns_year=year,
+                fs_div="CFS",
+                metric_key=f"revenue_{year}",
+                metric_name="매출액",
+            ))
+            session.add(AuditFee(corp_code="00126380", bsns_year=year))
+            session.add(AccountingPolicyItem(
+                corp_code="00126380",
+                bsns_year=year,
+                fs_div="CFS",
+                rcept_no=receipt,
+                item_key=f"revenue_{year}",
+                body="policy",
+            ))
+            session.add(ReportDocument(
+                rcept_no=receipt,
+                corp_code="00126380",
+                bsns_year=year,
+                source_type="business_report",
+                report_nm="사업보고서",
+            ))
+            session.add(EvidenceDocument(
+                corp_code="00126380",
+                bsns_year=year,
+                source_type="business_report",
+                rcept_no=receipt,
+                normalized_text="evidence",
+            ))
+            session.add(GroupEntityRecord(
+                parent_corp_code="00126380",
+                effective_year=year,
+                entity_key=f"entity-{year}",
+                original_name="entity",
+                normalized_name="entity",
+                resolution_status="unresolved",
+                resolution_reason="fixture",
+                source_rcept_no=receipt,
+                source_table="fixture",
+                source_ordinal=0,
+            ))
+            session.add(CompanyYearQuality(
+                corp_code="00126380",
+                bsns_year=year,
+                financial_core_status="available",
+                auditor_status="available",
+                audit_fee_status="available",
+                policy_status="available",
+                kam_status="available",
+                audit_procedure_status="available",
+                group_audit_status="available",
+                investor_grade="A",
+                auditor_grade="A",
+                group_audit_grade="A",
+            ))
+            session.add(BackfillRun(task_type="fixture", year=year, status="success"))
+            session.add(DisclosureEvent(
+                rcept_no=f"{year}0101000001",
+                corp_code="00126380",
+                event_date=datetime(year, 1, 1),
+                event_type="capital",
+                event_title="event",
+                source_report_nm="주요사항보고서",
+            ))
+        session.add(BackfillRun(task_type="fixture", year=None, status="success"))
+        session.add_all([
+            DatasetManifest(
+                manifest_id="fixture-2023-2024",
+                schema_version="v1",
+                dataset_version="fixture",
+                generated_at=datetime(2025, 1, 1),
+                year_from=2023,
+                year_to=2024,
+                company_count=1,
+                disclosure_count=2,
+                evidence_document_count=2,
+            ),
+            DatasetManifest(
+                manifest_id="fixture-2024",
+                schema_version="v1",
+                dataset_version="fixture",
+                generated_at=datetime(2025, 1, 1),
+                year_from=2024,
+                year_to=2024,
+                company_count=1,
+                disclosure_count=2,
+                evidence_document_count=1,
+            ),
+        ])
+        session.add_all([
+            Disclosure(
+                rcept_no="20240318000001",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2024, 3, 18),
+                disc_type="A",
+                report_nm="사업보고서 (2023.12)",
+            ),
+            Disclosure(
+                rcept_no="20230101000001",
+                corp_code="00126380",
+                corp_name="삼성전자",
+                disc_date=date(2023, 1, 1),
+                disc_type="B",
+                report_nm="주요사항보고서",
+            ),
+            SourceDocument(
+                rcept_no="20240318000001",
+                corp_code="00126380",
+                bsns_year=2023,
+                source_type="business_report",
+                report_nm="사업보고서",
+                content_type="xml",
+                raw_content="old raw",
+                doc_hash="old",
+            ),
+            SourceDocument(
+                rcept_no="20250101000001",
+                corp_code="00126380",
+                bsns_year=2024,
+                source_type="event_disclosure",
+                report_nm="주요사항보고서",
+                content_type="xml",
+                raw_content="event raw",
+                doc_hash="event",
+            ),
+            SourceDocument(
+                rcept_no="20250318000001",
+                corp_code="00126380",
+                bsns_year=2024,
+                source_type="business_report",
+                report_nm="사업보고서",
+                content_type="xml",
+                raw_content="current raw",
+                doc_hash="current",
+            ),
+        ])
+        persist_audit_fee_observations(session, [
+            AuditFeeObservation(
+                corp_code="00126380",
+                bsns_year=2023,
+                source_class="cached_business_report",
+                source_rcept_no="20240318000001",
+            ),
+            AuditFeeObservation(
+                corp_code="00126380",
+                bsns_year=2024,
+                source_class="cached_business_report",
+                source_rcept_no="20250318000001",
+            ),
+        ])
+        session.commit()
+
+    out_path = tmp_path / "runtime-2024.db"
+    result = export_runtime_db(output_path=out_path, year_from=2024, year_to=2024)
+
+    assert result["table_filters"]["financials"] == "year BETWEEN 2024 AND 2024"
+    assert result["table_filters"]["group_entities"] == "effective_year BETWEEN 2024 AND 2024"
+    assert result["table_filters"]["backfill_runs"] == "year IS NULL OR year BETWEEN 2024 AND 2024"
+    assert result["table_filters"]["source_documents"] == (
+        "bsns_year BETWEEN 2024 AND 2024 AND source_type <> 'event_disclosure'"
+    )
+    assert result["table_filters"]["dataset_manifest"] == "year_from >= 2024 AND year_to <= 2024"
+    assert result["copied_row_counts"]["financials"] == 1
+    assert result["copied_row_counts"]["source_documents"] == 1
+
+    with sqlite3.connect(out_path) as connection:
+        for table, column in (
+            ("financials", "year"),
+            ("financial_facts_compact", "bsns_year"),
+            ("audit_fees", "bsns_year"),
+            ("audit_fee_observations", "bsns_year"),
+            ("accounting_policy_items", "bsns_year"),
+            ("report_documents", "bsns_year"),
+            ("evidence_documents", "bsns_year"),
+            ("group_entities", "effective_year"),
+            ("company_year_quality", "bsns_year"),
+        ):
+            assert connection.execute(
+                f"SELECT DISTINCT {column} FROM {table}"
+            ).fetchall() == [(2024,)]
+        assert connection.execute(
+            "SELECT year FROM backfill_runs ORDER BY year IS NOT NULL, year"
+        ).fetchall() == [(None,), (2024,)]
+        assert connection.execute("SELECT COUNT(*) FROM disclosures").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM disclosure_events").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT rcept_no, raw_content FROM source_documents"
+        ).fetchall() == [("20250318000001", "")]
+        assert connection.execute(
+            "SELECT manifest_id FROM dataset_manifest"
+        ).fetchall() == [("fixture-2024",)]
+
+
+def test_export_runtime_db_rejects_inverted_year_window(temp_engine, tmp_path):
+    """Catches an invalid manifest range being accepted and copied without a policy."""
+    from kreports.maintenance.runtime_export import export_runtime_db
+
+    with pytest.raises(ValueError, match="year_from must not exceed year_to"):
+        export_runtime_db(
+            output_path=tmp_path / "invalid-runtime.db",
+            year_from=2025,
+            year_to=2024,
+        )
 
 
 def test_exported_compact_runtime_preserves_all_tool_public_contract(
@@ -310,7 +549,9 @@ def test_export_runtime_db_keeps_disclosure_list_but_excludes_on_demand_bodies(t
     out_path = tmp_path / "runtime.db"
     result = export_runtime_db(output_path=out_path, year_from=2024, year_to=2025, profile="compact")
 
-    assert result["table_filters"]["source_documents"] == "source_type <> 'event_disclosure'"
+    assert result["table_filters"]["source_documents"] == (
+        "bsns_year BETWEEN 2024 AND 2025 AND source_type <> 'event_disclosure'"
+    )
     with sqlite3.connect(out_path) as conn:
         disclosure_count = conn.execute("SELECT COUNT(*) FROM disclosures").fetchone()[0]
         source_count = conn.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]

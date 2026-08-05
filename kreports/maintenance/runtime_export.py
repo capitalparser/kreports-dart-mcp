@@ -25,6 +25,19 @@ COMPACT_TABLE_WHERE = {
 }
 
 COPY_BATCH_SIZE = 1000
+YEAR_COLUMNS = ("bsns_year", "year", "effective_year")
+
+# These tables are dimensions or tool-facing timelines.  A business-year
+# predicate cannot be derived from their columns without discarding valid
+# annual filing receipts (which may arrive the following year) or events that
+# the public event timeline needs to show.
+RETAINED_RUNTIME_TABLES = {
+    "companies": "company dimension",
+    "company_listing_periods": "listing-period provenance",
+    "disclosures": "annual filing receipt lag",
+    "disclosure_events": "public event timeline contract",
+    "schema_migrations": "schema dimension",
+}
 
 
 def _quote_ident(name: str) -> str:
@@ -40,6 +53,40 @@ def _compact_select_expression(table: str, column: str) -> str:
     return _quote_ident(column)
 
 
+def _compact_table_filter(
+    table: str,
+    columns: list[str],
+    *,
+    year_from: int,
+    year_to: int,
+) -> str | None:
+    column_set = set(columns)
+    terms: list[str] = []
+
+    if table == "dataset_manifest" and {"year_from", "year_to"}.issubset(column_set):
+        # A manifest spanning a broader range would make this compact export
+        # look more complete than it is. Omitting it makes the release gate
+        # fail closed until a matching manifest is produced.
+        terms.extend([
+            f"year_from >= {year_from}",
+            f"year_to <= {year_to}",
+        ])
+    elif table == "backfill_runs" and "year" in column_set:
+        terms.append(f"year IS NULL OR year BETWEEN {year_from} AND {year_to}")
+    elif table not in RETAINED_RUNTIME_TABLES:
+        for column in YEAR_COLUMNS:
+            if column in column_set:
+                terms.append(f"{column} BETWEEN {year_from} AND {year_to}")
+                break
+
+    static_filter = COMPACT_TABLE_WHERE.get(table)
+    if static_filter:
+        terms.append(static_filter)
+    if not terms:
+        return None
+    return " AND ".join(terms)
+
+
 def export_runtime_db(
     *,
     output_path: str | Path,
@@ -50,6 +97,10 @@ def export_runtime_db(
 ) -> dict:
     if profile != "compact":
         raise ValueError("only compact profile is supported")
+    export_year_from = int(year_from)
+    export_year_to = int(year_to)
+    if export_year_from > export_year_to:
+        raise ValueError("year_from must not exceed year_to")
 
     dest = Path(output_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +108,8 @@ def export_runtime_db(
         dest.unlink()
 
     copied: list[str] = []
+    copied_row_counts: dict[str, int] = {}
+    table_filters: dict[str, str] = {}
     dest_conn = sqlite3.connect(dest)
     try:
         with engine_module.engine.connect() as src_conn:
@@ -83,21 +136,30 @@ def export_runtime_db(
                 ]
                 if not columns:
                     copied.append(table)
+                    copied_row_counts[table] = 0
                     continue
                 col_csv = ", ".join(_quote_ident(col) for col in columns)
                 select_csv = ", ".join(_compact_select_expression(table, col) for col in columns)
-                where = COMPACT_TABLE_WHERE.get(table)
+                where = _compact_table_filter(
+                    table,
+                    columns,
+                    year_from=export_year_from,
+                    year_to=export_year_to,
+                )
                 query = f"SELECT {select_csv} FROM {_quote_ident(table)}"
                 if where:
                     query += f" WHERE {where}"
+                    table_filters[table] = where
                 result = src_conn.exec_driver_sql(query)
                 placeholders = ", ".join(["?"] * len(columns))
                 insert_sql = f"INSERT INTO {_quote_ident(table)} ({col_csv}) VALUES ({placeholders})"
+                copied_row_counts[table] = 0
                 while True:
                     rows = result.fetchmany(COPY_BATCH_SIZE)
                     if not rows:
                         break
                     dest_conn.executemany(insert_sql, rows)
+                    copied_row_counts[table] += len(rows)
                 copied.append(table)
 
             indexes = src_conn.exec_driver_sql(
@@ -122,11 +184,15 @@ def export_runtime_db(
         "ok": True,
         "output_path": str(dest),
         "profile": profile,
-        "year_from": int(year_from),
-        "year_to": int(year_to),
+        "year_from": export_year_from,
+        "year_to": export_year_to,
         "copied_tables": copied,
+        "copied_row_counts": copied_row_counts,
         "excluded_tables": sorted(COMPACT_EXCLUDED_TABLES),
-        "table_filters": COMPACT_TABLE_WHERE,
+        "table_filters": table_filters,
+        "retained_table_policies": {
+            table: policy for table, policy in RETAINED_RUNTIME_TABLES.items() if table in copied
+        },
         "vacuum": bool(vacuum),
         "bytes": dest.stat().st_size,
     }
