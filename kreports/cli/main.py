@@ -2547,6 +2547,50 @@ def plan_investor_core_backfill_cmd(
         typer.echo(f"Unfillable shortfall: {plan['unfillable_shortfall']}")
 
 
+@app.command("diagnose-investor-core-listing-gaps")
+def diagnose_investor_core_listing_gaps_cmd(
+    db_path: Path = typer.Option(..., "--db", help="Read-only SQLite DB path"),
+    listing_csv: Path = typer.Option(..., "--listing-csv", help="Normalized listing CSV"),
+    expected_listing_sha256: str = typer.Option(..., "--expected-listing-sha256"),
+    listing_as_of: str = typer.Option(..., "--listing-as-of", help="YYYY-MM-DD"),
+    expected_company_snapshot_sha256: str = typer.Option(
+        ..., "--expected-company-snapshot-sha256"
+    ),
+    coverage_year: Optional[int] = typer.Option(None, "--coverage-year"),
+    threshold_pct: float = typer.Option(95.0, "--threshold-pct"),
+    json_output: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Diagnose pre-listing true-missing targets without altering release semantics."""
+    from kreports.maintenance.investor_core_listing_gap_diagnostic import (
+        diagnose_investor_core_listing_gaps,
+    )
+
+    try:
+        report = diagnose_investor_core_listing_gaps(
+            db_path,
+            listing_csv=listing_csv,
+            expected_listing_sha256=expected_listing_sha256,
+            listing_as_of=date.fromisoformat(listing_as_of),
+            expected_company_snapshot_sha256=expected_company_snapshot_sha256,
+            coverage_year=coverage_year,
+            threshold_pct=threshold_pct,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        if json_output:
+            typer.echo(json.dumps({"error": "investor_core_listing_gap_diagnostic_unavailable"}, sort_keys=True, separators=(",", ":")))
+        else:
+            typer.echo("investor-core listing-gap diagnostic unavailable", err=True)
+        raise typer.Exit(2) from exc
+    if json_output:
+        typer.echo(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        return
+    typer.echo(
+        "Investor-core listing-gap diagnostic: "
+        f"remaining={report['remaining_company_year_count']} "
+        f"held={report['held_pre_listing_true_missing_company_year_count']}"
+    )
+
+
 _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "database_unavailable": "database is unavailable or not a regular SQLite file",
     "database_symlink_rejected": "database path must not contain symlinks",
