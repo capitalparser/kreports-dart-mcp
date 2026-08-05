@@ -2543,6 +2543,20 @@ def compare_peer_accounting_policies(
             "item_keys": sorted(row["item_key"] for row in items),
         })
 
+    selected_peers = [
+        {
+            "corp_code": cc,
+            "corp_name": candidate_by_code[cc].get("corp_name"),
+            "policy_cache_status": (
+                "cached_policy"
+                if by_corp.get(cc)
+                else "cache_missing_not_filing_absence"
+            ),
+            "cached_item_count": len(by_corp.get(cc, [])),
+        }
+        for cc in peer_codes
+    ]
+
     peer_coverage_pct = round(100.0 * len(peer_summaries) / len(peer_codes), 1) if peer_codes else 0.0
     topic_requested = item_key is not None or keyword is not None
     selected_topic = {"item_key": item_key, "keyword": keyword}
@@ -2775,6 +2789,7 @@ def compare_peer_accounting_policies(
             },
         })
     else:
+        result["selected_peers"] = selected_peers
         result["selection_policy"] = base["selection_policy"]
     if _return_note_comparison_peer_group:
         result["_note_comparison_peer_group"] = {

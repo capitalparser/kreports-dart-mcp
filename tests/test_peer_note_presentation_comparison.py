@@ -251,6 +251,47 @@ def test_default_peer_policy_pack_has_legacy_rows_but_not_empty_side_by_side_cla
     assert tables["peer_note_presentations"]["title"] == "대상회사 회계정책 캐시"
 
 
+def test_default_peer_policy_public_pack_lists_selected_peers_without_policy_cache(
+    temp_engine,
+):
+    """Selected peers must remain visible when only one has cached policies."""
+    _seed_peer_note_comparison(temp_engine)
+    session = sessionmaker(bind=temp_engine)()
+    session.query(Company).filter_by(corp_code="00000003").one().induty_code = "26113"
+    session.query(AccountingPolicyItem).filter_by(corp_code="00000003").delete()
+    session.add_all([
+        Company(
+            corp_code="00000004", stock_code="000004", corp_name="캐시미확보피어",
+            market="KOSPI", induty_code="26114",
+        ),
+        Financial(
+            corp_code="00000004", year=2024, quarter=4, fs_div="CFS",
+            revenue=900, operating_profit=70, total_assets=1800, total_debt=350,
+            total_equity=1450, revenue_yoy=0.07, source="fixture",
+        ),
+    ])
+    session.commit()
+    session.close()
+
+    public = legacy_result("compare_peer_accounting_policies", {
+        "company": "00000001", "year": 2024, "peer_limit": 3,
+    })
+    tables = {table["id"]: table for table in public["answer_pack"]["tables"]}
+    selected_rows = tables["peer_policy_selection"]["rows"]
+
+    assert public["peer_count"] == 3
+    assert [row["corp_code"] for row in public["peer_summaries"]] == ["00000002"]
+    assert len(selected_rows) == public["peer_count"]
+    assert {
+        (row["corp_code"], row["policy_cache_status"], row["cached_item_count"])
+        for row in selected_rows
+    } == {
+        ("00000002", "cached_policy", 1),
+        ("00000003", "cache_missing_not_filing_absence", 0),
+        ("00000004", "cache_missing_not_filing_absence", 0),
+    }
+
+
 def test_dispatch_envelope_carries_extended_peer_policy_answer_pack(temp_engine):
     _seed_peer_note_comparison(temp_engine)
 

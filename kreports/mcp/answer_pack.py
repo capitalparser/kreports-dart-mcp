@@ -2008,6 +2008,12 @@ def _peer_policy_methodology_rows(
 def _append_legacy_peer_policy_tables(
     pack: dict[str, Any], result: dict[str, Any], selection_policy: dict[str, Any],
 ) -> None:
+    selected_peers = result.get("selected_peers")
+    roster = (
+        selected_peers
+        if isinstance(selected_peers, list)
+        else result.get("peer_summaries") or []
+    )
     selection_rows = [
         {
             "company": row.get("corp_name") or row.get("corp_code"),
@@ -2015,9 +2021,15 @@ def _append_legacy_peer_policy_tables(
             "reason": "existing_peer_group", "profile_or_weights": "legacy default; no additional score",
             "data_year": selection_policy.get("resolved_year") or result.get("year"),
             "fs_div": result.get("fs_div"), "financial_values": "legacy raw contract",
-            "limitations": "side-by-side topic selector not requested",
+            "policy_cache_status": row.get("policy_cache_status") or "cached_policy",
+            "cached_item_count": row.get("cached_item_count", row.get("item_count", 0)),
+            "limitations": (
+                "local policy cache missing; not filing absence"
+                if row.get("policy_cache_status") == "cache_missing_not_filing_absence"
+                else "side-by-side topic selector not requested"
+            ),
         }
-        for row in result.get("peer_summaries") or []
+        for row in roster
         if isinstance(row, dict)
     ]
     pack["tables"].append(_table(
@@ -2025,7 +2037,8 @@ def _append_legacy_peer_policy_tables(
         [("company", "회사"), ("corp_code", "회사코드"), ("status", "선정 상태"),
          ("reason", "선정 사유"), ("profile_or_weights", "유효 가중치/프로필"),
          ("data_year", "데이터 연도"), ("fs_div", "재무제표 기준"),
-         ("financial_values", "재무값"), ("limitations", "데이터 한계")],
+         ("financial_values", "재무값"), ("policy_cache_status", "정책 캐시 상태"),
+         ("cached_item_count", "캐시 정책 항목 수"), ("limitations", "데이터 한계")],
         selection_rows,
     ))
     subject_rows = [

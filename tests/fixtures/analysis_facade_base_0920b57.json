@@ -1645,6 +1645,20 @@
         ]
       }
     ],
+    "selected_peers": [
+      {
+        "cached_item_count": 1,
+        "corp_code": "00000003",
+        "corp_name": "패리티피어B",
+        "policy_cache_status": "cached_policy"
+      },
+      {
+        "cached_item_count": 1,
+        "corp_code": "00000002",
+        "corp_name": "패리티피어A",
+        "policy_cache_status": "cached_policy"
+      }
+    ],
     "peers_with_policy": 2,
     "selection_policy": {
       "confidence": "insufficient",
