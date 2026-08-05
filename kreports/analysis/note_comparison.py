@@ -485,6 +485,7 @@ def _select_note_row(
             candidates,
             key=lambda row: (
                 int(row["_topic_match"]["priority"]),
+                -int(row["_topic_match"]["matched_keyword_count"]),
                 int(row["_topic_match"]["keyword_priority"]),
                 int(row["_topic_match"]["match_offset"]),
                 str(row.get("note_no") or ""),

@@ -525,6 +525,36 @@ def test_topic_match_prefers_later_substantive_local_clusters(temp_engine):
     assert "회수가능액" in impairment["value_or_excerpt"]
 
 
+def test_note_row_selection_prefers_higher_local_signal_density(temp_engine):
+    from kreports.analysis.note_comparison import compare_peer_accounting_notes
+    from kreports.db.engine import get_session
+    from kreports.db.models import AccountingNoteChapter
+
+    with get_session() as session:
+        session.add_all([
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="1", note_title="기타", section_type="policy",
+                body="사용권자산과 리스부채를 인식합니다.",
+            ),
+            AccountingNoteChapter(
+                corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001",
+                source_type="business_report", note_no="2", note_title="기타", section_type="policy",
+                body="사용권자산, 리스부채, 리스료 및 리스이용자 회계처리를 설명합니다.",
+            ),
+        ])
+
+    result = compare_peer_accounting_notes(
+        "00000001", 2024, topics=["leases"],
+        _peer_group={"subject": {"corp_code": "00000001", "corp_name": "Subject"}, "peers": []},
+        _read_engine=temp_engine,
+    )
+    row = result["topics"][0]["rows"][0]
+
+    assert row["note_no"] == "2"
+    assert row["matched_keyword_count"] == 4
+
+
 def test_note_comparison_output_budget_compaction_remains_visible(temp_engine, monkeypatch):
     from kreports.analysis import note_comparison
     from kreports.db.engine import get_session
