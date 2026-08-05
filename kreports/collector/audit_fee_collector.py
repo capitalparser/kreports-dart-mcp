@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone
 import json
 
 from kreports.collector.fetcher import fetch_audit_fee
+from kreports.security import redact_external_error, redact_sensitive_text
 from kreports.collector.audit_fee_sources import (
     AuditFeeObservation,
     ds002_source_supported,
@@ -93,12 +94,17 @@ def collect_audit_fees_for(
         try:
             data = fetch_audit_fee(corp_code, year)
             status = data.get("status")
+            safe_message = (
+                redact_sensitive_text(data.get("message"))
+                if data.get("message")
+                else None
+            )
             observation = normalize_endpoint_result(
                 corp_code=corp_code,
                 year=year,
                 status=status,
                 rows=data.get("list") or [],
-                message=data.get("message"),
+                message=safe_message,
                 source_supported=source_supported,
             )
             if status != "000":
@@ -113,7 +119,7 @@ def collect_audit_fees_for(
                 else:
                     logger.warning(
                         "감사보수 API 오류 [%s %d]: status=%s message=%s",
-                        corp_code, year, status, data.get("message"),
+                        corp_code, year, status, safe_message,
                     )
                     error += 1
                     upsert_audit_fee_observations([observation])
@@ -122,7 +128,7 @@ def collect_audit_fees_for(
                         year,
                         status="error",
                         error_msg=str(
-                            data.get("message")
+                            safe_message
                             or f"DART status={status}"
                         ),
                     )
@@ -185,7 +191,8 @@ def collect_audit_fees_for(
                          audit_fee_m or "-", nas_ratio or 0)
 
         except Exception as e:
-            logger.warning("감사보수 수집 실패 [%s %d]: %s", corp_code, year, e)
+            message = redact_external_error(e)
+            logger.warning("감사보수 수집 실패 [%s %d]: %s", corp_code, year, message)
             error += 1
             upsert_audit_fee_observations(
                 [
@@ -204,8 +211,8 @@ def collect_audit_fees_for(
                         availability_status="transport_error",
                         quality_status="error",
                         source_status="exception",
-                        source_message=str(e),
-                        limitations=(str(e),),
+                        source_message=message,
+                        limitations=(message,),
                     )
                 ]
             )
@@ -213,7 +220,7 @@ def collect_audit_fees_for(
                 corp_code,
                 year,
                 status="error",
-                error_msg=str(e),
+                error_msg=message,
             )
 
         time.sleep(settings.request_delay)

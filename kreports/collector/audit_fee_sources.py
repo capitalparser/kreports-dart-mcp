@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from kreports.security import redact_sensitive_text
+
 _MISSING_TOKENS = {"", "-", "n/a", "na", "해당없음", "없음"}
 _DS002_OFFICIAL_AVAILABLE_FROM_YEAR = 2015
 AUDIT_FEE_OBSERVATION_PARSER_VERSION = "v2"
@@ -332,6 +334,7 @@ def normalize_endpoint_result(
 ) -> AuditFeeObservation:
     """Adapt one OpenDART DS002 response without collapsing source fields."""
     status_value = str(status or "")
+    message = redact_sensitive_text(message) if message else None
     row = _current_row(rows or ())
     if status_value == "013" and source_supported is False:
         return AuditFeeObservation(

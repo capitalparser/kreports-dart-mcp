@@ -14,6 +14,7 @@ from urllib.parse import parse_qs
 import httpx
 
 from kreports.config import settings
+from kreports.security import redact_external_error
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +291,7 @@ def fetch_financial_statements(
         except httpx.RequestError as e:
             if attempt < settings.max_retries - 1:
                 wait = 2 ** attempt
-                logger.warning("요청 오류 %s, %d초 후 재시도", e, wait)
+                logger.warning("요청 오류 %s, %d초 후 재시도", redact_external_error(e), wait)
                 time.sleep(wait)
             else:
                 _bounded_transport_error("fnlttSinglAcntAll.json", e)
@@ -351,7 +352,7 @@ def fetch_financial_summary(
         except httpx.RequestError as e:
             if attempt < settings.max_retries - 1:
                 wait = 2 ** attempt
-                logger.warning("요청 오류 %s, %d초 후 재시도", e, wait)
+                logger.warning("요청 오류 %s, %d초 후 재시도", redact_external_error(e), wait)
                 time.sleep(wait)
             else:
                 _bounded_transport_error("fnlttSinglAcnt.json", e)
@@ -406,7 +407,7 @@ def fetch_xbrl_zip(rcept_no: str, reprt_code: str) -> bytes | None:
         logger.warning("XBRL ZIP HTTP %d [%s]", e.response.status_code, rcept_no)
         return None
     except Exception as e:
-        logger.warning("XBRL ZIP 다운로드 실패 [%s]: %s", rcept_no, e)
+        logger.warning("XBRL ZIP 다운로드 실패 [%s]: %s", rcept_no, redact_external_error(e))
         return None
 
 
@@ -426,7 +427,7 @@ def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
             resp = client.get(f"{DART_BASE}/document.xml", params=params, timeout=60.0)
             resp.raise_for_status()
     except Exception as e:
-        logger.warning("document.xml ZIP 수집 실패 [%s]: %s", rcept_no, e)
+        logger.warning("document.xml ZIP 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
         return {}
 
     result: dict[str, str] = {}
@@ -455,7 +456,7 @@ def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
             _raise_if_dart_limit(status, message)
             logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
             return {}
-        logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, e)
+        logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, redact_external_error(e))
     return result
 
 
@@ -511,7 +512,7 @@ def fetch_document_xml(rcept_no: str) -> str | None:
                 _raise_if_dart_limit(status, message)
                 logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
                 return None
-        logger.warning("document.xml 수집 실패 [%s]: %s", rcept_no, e)
+        logger.warning("document.xml 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
         return None
 
 
@@ -529,7 +530,7 @@ def fetch_dart_main_html(rcept_no: str) -> str | None:
                 return _decode_dart_text(resp.content, resp.encoding)
         except Exception as e:
             if attempt == 3:
-                logger.warning("DART main HTML 수집 실패 [%s]: %s", rcept_no, e)
+                logger.warning("DART main HTML 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
                 return None
             time.sleep(settings.request_delay * attempt)
     return None
@@ -610,7 +611,7 @@ def fetch_viewer_html(
                 return _decode_dart_text(resp.content, resp.encoding)
         except Exception as e:
             if attempt == 3:
-                logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, e)
+                logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, redact_external_error(e))
                 return None
             time.sleep(settings.request_delay * attempt)
     return None
@@ -651,7 +652,7 @@ def fetch_affiliates(corp_code: str) -> list[dict]:
             })
         return result
     except Exception as e:
-        logger.warning("affcoInfo 조회 실패 [%s]: %s", corp_code, e)
+        logger.warning("affcoInfo 조회 실패 [%s]: %s", corp_code, redact_external_error(e))
         return []
 
 
@@ -687,7 +688,7 @@ def fetch_company_info(corp_code: str) -> dict | None:
             "induty_code": induty_code,
         }
     except Exception as e:
-        logger.warning("company.json 조회 실패 [%s]: %s", corp_code, e)
+        logger.warning("company.json 조회 실패 [%s]: %s", corp_code, redact_external_error(e))
         return None
 
 
@@ -741,8 +742,9 @@ def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
 
             return audit_data
     except Exception as e:
-        logger.warning("감사용역 API 조회 실패 [%s %s]: %s", corp_code, bsns_year, e)
-        return {"status": "ERR", "message": str(e)}
+        message = redact_external_error(e)
+        logger.warning("감사용역 API 조회 실패 [%s %s]: %s", corp_code, bsns_year, message)
+        return {"status": "ERR", "message": message}
 
 
 def fetch_disclosure_list(

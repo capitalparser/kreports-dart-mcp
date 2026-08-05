@@ -111,7 +111,7 @@ def _run_documented_promotion(tmp_path: Path, *, fail_final_verify: bool = False
 
 
 def test_public_compose_fails_closed_with_a_readonly_verified_artifact_pair():
-    """Catches removal of public auth, readonly mode, or manifest mount proof."""
+    """Catches removal of auth, readonly mode, manifest proof, or loopback binding."""
     compose_text = (REPO_ROOT / "docker-compose.deploy.yml").read_text()
 
     assert _environment_entries(compose_text) == {
@@ -126,6 +126,8 @@ def test_public_compose_fails_closed_with_a_readonly_verified_artifact_pair():
         "./kreports.db.release.json:/data/kreports.db.release.json:ro"
         in compose_text
     )
+    assert '"127.0.0.1:8765:8765"' in compose_text
+    assert '"8765:8765"' not in compose_text
     assert "DART_API_KEY" not in compose_text
     assert "RAW_STORAGE_" not in compose_text
 

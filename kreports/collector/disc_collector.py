@@ -7,6 +7,7 @@ from kreports.collector.fetcher import fetch_disclosure_list
 from kreports.db.engine import get_session
 from kreports.db.models import Company, Disclosure, FetchLog
 from kreports.processor.disc_parser import parse_disclosure
+from kreports.security import redact_external_error
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,9 @@ def collect_disclosures(
         items = fetch_disclosure_list(corp_code, start_date, end_date)
         time.sleep(settings.request_delay)
     except Exception as e:
-        logger.error("공시 목록 수집 실패 [%s]: %s", corp_code, e)
-        _log_fetch(corp_code, "error", str(e))
+        message = redact_external_error(e)
+        logger.error("공시 목록 수집 실패 [%s]: %s", corp_code, message)
+        _log_fetch(corp_code, "error", message)
         return {"saved": 0, "skipped": 0, "error": 1}
 
     saved = skipped = 0

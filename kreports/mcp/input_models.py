@@ -428,7 +428,7 @@ class FetchDisclosureOnDemandInput(ToolInput):
         None,
         repr=False,
         description="요청 사용자의 OpenDART API key. 저장/로그/응답 노출 금지.",
-        json_schema_extra={"writeOnly": False},
+        json_schema_extra={"writeOnly": True},
     )
     cache_policy: Literal["cache_first", "refresh"] = "cache_first"
     corp_code: str | None = Field(None, description="선택. disclosures 메타가 없을 때 캐시 메타데이터로 사용.")

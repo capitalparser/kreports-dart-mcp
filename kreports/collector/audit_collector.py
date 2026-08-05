@@ -16,6 +16,7 @@ from kreports.maintenance.backfill_runs import (
     BackfillRunError,
     classify_backfill_error,
 )
+from kreports.security import redact_external_error
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,11 @@ def collect_auditors(
         time.sleep(settings.request_delay)
         items = items_a + items_f
     except Exception as e:
-        logger.error("감사인 공시 수집 실패 [%s]: %s", corp_code, e)
+        message = redact_external_error(e)
+        logger.error("감사인 공시 수집 실패 [%s]: %s", corp_code, message)
         raise BackfillRunError(
             classify_backfill_error(e),
-            f"auditor disclosure collection failed [{corp_code}]: {e}",
+            f"auditor disclosure collection failed [{corp_code}]: {message}",
         ) from e
 
     saved = skipped = 0

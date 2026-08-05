@@ -17,6 +17,16 @@ from kreports.storage.raw_documents import RawDocumentStore
 
 logger = logging.getLogger(__name__)
 
+MAX_DOCUMENT_RESPONSE_BYTES = 25 * 1024 * 1024
+MAX_DOCUMENT_ZIP_MEMBERS = 64
+MAX_DOCUMENT_ZIP_MEMBER_BYTES = 50 * 1024 * 1024
+MAX_DOCUMENT_ZIP_TOTAL_BYTES = 60 * 1024 * 1024
+MAX_DOCUMENT_ZIP_COMPRESSION_RATIO = 100
+
+
+class OnDemandPayloadLimitError(ValueError):
+    """The fixed DART response exceeded a bounded public-runtime limit."""
+
 
 def _clean_key(value: str | None) -> str | None:
     value = (value or "").strip()
@@ -84,27 +94,71 @@ def _disclosure_meta(rcept_no: str, *, corp_code: str | None = None, year: int |
         }
 
 
-def _fetch_document_xml_with_user_key(rcept_no: str, user_dart_api_key: str) -> str | None:
-    with httpx.Client(timeout=60.0) as client:
-        resp = client.get(
-            f"{DART_BASE}/document.xml",
-            params={"crtfc_key": user_dart_api_key, "rcept_no": rcept_no},
-            timeout=60.0,
-        )
-        resp.raise_for_status()
+def _read_limited_response(response: httpx.Response) -> bytes:
+    """Stream a DART response while enforcing an in-memory upper bound."""
+    content_length = response.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_DOCUMENT_RESPONSE_BYTES:
+                raise OnDemandPayloadLimitError("response exceeds maximum size")
+        except ValueError as exc:
+            if isinstance(exc, OnDemandPayloadLimitError):
+                raise
+    payload = bytearray()
+    for chunk in response.iter_bytes():
+        payload.extend(chunk)
+        if len(payload) > MAX_DOCUMENT_RESPONSE_BYTES:
+            raise OnDemandPayloadLimitError("response exceeds maximum size")
+    return bytes(payload)
 
+
+def _document_xml_from_payload(payload: bytes, rcept_no: str) -> str | None:
+    """Read one XML member after rejecting oversized or bomb-like ZIP metadata."""
     try:
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_DOCUMENT_ZIP_MEMBERS:
+                raise OnDemandPayloadLimitError("ZIP contains too many members")
+            total_size = 0
+            for info in infos:
+                if info.file_size > MAX_DOCUMENT_ZIP_MEMBER_BYTES:
+                    raise OnDemandPayloadLimitError("ZIP member exceeds maximum size")
+                total_size += info.file_size
+                if total_size > MAX_DOCUMENT_ZIP_TOTAL_BYTES:
+                    raise OnDemandPayloadLimitError("ZIP exceeds maximum expanded size")
+                if (
+                    info.compress_size > 0
+                    and info.file_size / info.compress_size
+                    > MAX_DOCUMENT_ZIP_COMPRESSION_RATIO
+                ):
+                    raise OnDemandPayloadLimitError(
+                        "ZIP member exceeds maximum compression ratio"
+                    )
             xml_name = f"{rcept_no}.xml"
             if xml_name not in zf.namelist():
                 xml_name = next((name for name in zf.namelist() if name.endswith(".xml")), None)
             if xml_name is None:
                 return None
             with zf.open(xml_name) as fh:
-                raw = fh.read()
+                raw = fh.read(MAX_DOCUMENT_ZIP_MEMBER_BYTES + 1)
+            if len(raw) > MAX_DOCUMENT_ZIP_MEMBER_BYTES:
+                raise OnDemandPayloadLimitError("ZIP member exceeds maximum size")
         return _decode_dart_text(raw)
     except zipfile.BadZipFile:
-        return _decode_dart_text(resp.content)
+        return _decode_dart_text(payload)
+
+
+def _fetch_document_xml_with_user_key(rcept_no: str, user_dart_api_key: str) -> str | None:
+    with httpx.Client(timeout=60.0) as client:
+        with client.stream(
+            "GET",
+            f"{DART_BASE}/document.xml",
+            params={"crtfc_key": user_dart_api_key, "rcept_no": rcept_no},
+            timeout=60.0,
+        ) as resp:
+            resp.raise_for_status()
+            payload = _read_limited_response(resp)
+    return _document_xml_from_payload(payload, rcept_no)
 
 
 def _body_excerpt(content: str, limit: int = 1200) -> str:

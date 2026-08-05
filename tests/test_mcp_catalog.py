@@ -168,6 +168,22 @@ def test_user_api_key_is_secret_and_not_disclosed():
     assert model.user_dart_api_key.get_secret_value() == raw_secret
 
 
+def test_user_api_key_is_write_only_in_the_published_tool_schema():
+    """Catches MCP clients being told that a caller DART key is ordinary data."""
+    from kreports.mcp.dispatch import list_mcp_tools
+    from kreports.mcp.input_models import FetchDisclosureOnDemandInput
+
+    model_schema = FetchDisclosureOnDemandInput.model_json_schema()
+    published_schema = next(
+        tool.inputSchema
+        for tool in list_mcp_tools()
+        if tool.name == "fetch_disclosure_on_demand"
+    )
+
+    assert model_schema["properties"]["user_dart_api_key"]["writeOnly"] is True
+    assert published_schema["properties"]["user_dart_api_key"]["writeOnly"] is True
+
+
 @pytest.mark.parametrize("input_type", ["raw", "secret_str"])
 @pytest.mark.parametrize("padded", [False, True])
 @pytest.mark.parametrize("exception_type", [ValueError, RuntimeError])

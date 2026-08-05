@@ -2591,6 +2591,29 @@ def diagnose_investor_core_listing_gaps_cmd(
     )
 
 
+@app.command("diagnose-credential-leaks")
+def diagnose_credential_leaks_cmd(
+    db_path: Path = typer.Option(..., "--db", help="Read-only SQLite DB path"),
+) -> None:
+    """Inspect historical error fields for credential-shaped text without writing."""
+    from kreports.maintenance.credential_leak_diagnostic import (
+        diagnose_credential_leaks,
+    )
+
+    try:
+        report = diagnose_credential_leaks(db_path)
+    except (ValueError, sqlite3.Error) as exc:
+        typer.echo(
+            json.dumps(
+                {"error": "credential_leak_diagnostic_unavailable"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        raise typer.Exit(2) from exc
+    typer.echo(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "database_unavailable": "database is unavailable or not a regular SQLite file",
     "database_symlink_rejected": "database path must not contain symlinks",

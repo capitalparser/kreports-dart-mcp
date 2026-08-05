@@ -61,7 +61,6 @@ def _legacy_compatible_schema(model: type[BaseModel], name: str) -> dict:
                     node.pop("anyOf", None)
                     node.update(replacement)
             node.pop("format", None)
-            node.pop("writeOnly", None)
             for value in list(node.values()):
                 clean(value)
         elif isinstance(node, list):

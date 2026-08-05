@@ -153,7 +153,9 @@ MCP URL:
 http://127.0.0.1:8765/mcp
 ```
 
-For Claude Web or other remote clients, put this behind HTTPS and connect to:
+The Compose port is intentionally bound to host loopback only. For Claude Web
+or other remote clients, terminate TLS in a reverse proxy on the same host and
+connect to:
 
 ```text
 https://<host>/mcp

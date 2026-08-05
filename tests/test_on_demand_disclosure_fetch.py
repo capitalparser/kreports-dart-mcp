@@ -3,6 +3,8 @@ import json
 import zipfile
 from datetime import date
 
+import pytest
+
 from kreports.collector import on_demand
 from kreports.db.models import Disclosure, SourceDocument
 from kreports.mcp.tools import call_tool
@@ -10,7 +12,7 @@ from kreports.mcp.tools import call_tool
 
 def _zip_bytes(name: str, content: str) -> bytes:
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(name, content.encode("utf-8"))
     return buf.getvalue()
 
@@ -62,8 +64,17 @@ def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypa
         )
         headers = {"content-type": "application/zip"}
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
         def raise_for_status(self):
             return None
+
+        def iter_bytes(self):
+            yield self.content
 
     class FakeClient:
         def __enter__(self):
@@ -72,7 +83,8 @@ def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypa
         def __exit__(self, *args):
             return None
 
-        def get(self, url, params, timeout):
+        def stream(self, method, url, params, timeout):
+            assert method == "GET"
             captured["key"] = params["crtfc_key"]
             captured["rcept_no"] = params["rcept_no"]
             return FakeResponse()
@@ -217,3 +229,40 @@ def test_on_demand_cache_first_reads_externalized_raw_document(temp_engine, tmp_
     assert out["data_quality"]["source"] == "source_documents_cache"
     assert out["cached"] is True
     assert out["body_length"] == len(raw_content)
+
+
+def test_on_demand_rejects_response_larger_than_download_limit(monkeypatch):
+    """Catches a full unbounded document response being accumulated in memory."""
+    monkeypatch.setattr(on_demand, "MAX_DOCUMENT_RESPONSE_BYTES", 8)
+
+    class StreamingResponse:
+        headers = {}
+
+        def iter_bytes(self):
+            yield b"1234"
+            yield b"56789"
+
+    with pytest.raises(on_demand.OnDemandPayloadLimitError, match="response exceeds"):
+        on_demand._read_limited_response(StreamingResponse())
+
+
+def test_on_demand_rejects_zip_with_too_many_members(monkeypatch):
+    """Catches ZIP member-count bombs before any member is decompressed."""
+    monkeypatch.setattr(on_demand, "MAX_DOCUMENT_ZIP_MEMBERS", 1)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("20250101000001.xml", b"<DOCUMENT/>")
+        zf.writestr("other.xml", b"<DOCUMENT/>")
+    payload = buffer.getvalue()
+
+    with pytest.raises(on_demand.OnDemandPayloadLimitError, match="too many members"):
+        on_demand._document_xml_from_payload(payload, "20250101000001")
+
+
+def test_on_demand_rejects_zip_member_with_excessive_compression_ratio(monkeypatch):
+    """Catches a highly compressed XML member before it is read into memory."""
+    monkeypatch.setattr(on_demand, "MAX_DOCUMENT_ZIP_COMPRESSION_RATIO", 2)
+    payload = _zip_bytes("20250101000001.xml", "A" * 20_000)
+
+    with pytest.raises(on_demand.OnDemandPayloadLimitError, match="compression ratio"):
+        on_demand._document_xml_from_payload(payload, "20250101000001")

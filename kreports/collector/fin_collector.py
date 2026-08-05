@@ -26,6 +26,7 @@ from kreports.collector.fetcher import (
 from kreports.collector.corp_sync import get_corp_code
 from kreports.db.engine import get_session
 from kreports.db.models import Company, Financial, FinancialFact, FetchLog
+from kreports.security import redact_external_error
 from kreports.processor.fin_parser import (
     parse_all_accounts,
     compute_summary_from_facts,
@@ -101,7 +102,7 @@ def collect_financial(
     except DartBoundedStop:
         raise
     except Exception as e:
-        _log_fetch(corp_code, year, quarter, "error", str(e))
+        _log_fetch(corp_code, year, quarter, "error", redact_external_error(e))
         return "error"
 
     if _is_dart_limit_response(response):
@@ -122,7 +123,7 @@ def collect_financial(
         except DartBoundedStop:
             raise
         except Exception as e:
-            _log_fetch(corp_code, year, quarter, "error", str(e))
+            _log_fetch(corp_code, year, quarter, "error", redact_external_error(e))
             return "error"
 
         if _is_dart_limit_response(response):
@@ -175,8 +176,9 @@ def _try_summary_fallback(
         except DartBoundedStop:
             raise
         except Exception as e:
-            logger.warning("acnt 폴백 실패 [%s %s %s]: %s", corp_code, year, fs_div, e)
-            _log_fetch(corp_code, year, quarter, "error", str(e))
+            message = redact_external_error(e)
+            logger.warning("acnt 폴백 실패 [%s %s %s]: %s", corp_code, year, fs_div, message)
+            _log_fetch(corp_code, year, quarter, "error", message)
             saw_error = True
             continue
 
