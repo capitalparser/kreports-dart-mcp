@@ -218,6 +218,7 @@ def search_dataset(
     financial_min: float | None = None,
     financial_max: float | None = None,
     financial_year: int | None = None,
+    financial_quarter: int = 4,
     financial_fs_div: str = "CFS",
     limit: int = 50,
     include_excerpt: bool = True,
@@ -246,6 +247,7 @@ def search_dataset(
         filters.append(
             "EXISTS (SELECT 1 FROM financials ff "
             "WHERE ff.corp_code=c.corp_code AND ff.year=:financial_year "
+            "AND ff.quarter=:financial_quarter "
             "AND ff.fs_div=:financial_fs_div "
             f"AND ff.{metric_column} IS NOT NULL"
             + (" AND ff." + metric_column + ">=:financial_min" if financial_min is not None else "")
@@ -253,6 +255,7 @@ def search_dataset(
             + ")"
         )
         params["financial_year"] = int(resolved_financial_year)
+        params["financial_quarter"] = int(financial_quarter)
         params["financial_fs_div"] = financial_fs_div
         if financial_min is not None:
             params["financial_min"] = float(financial_min)
@@ -360,29 +363,52 @@ def search_dataset(
         if keyword:
             where.append("(anc.note_title LIKE :kw OR anc.body LIKE :kw)")
             params["kw"] = f"%{keyword}%"
+        financial_select = (
+            f"(SELECT ff.{metric_column} FROM financials ff "
+            "WHERE ff.corp_code=anc.corp_code AND ff.year=:financial_year "
+            "AND ff.quarter=:financial_quarter AND ff.fs_div=:financial_fs_div "
+            "LIMIT 1) AS financial_filter_value, "
+            f"(SELECT ff.source FROM financials ff WHERE ff.corp_code=anc.corp_code AND ff.year=:financial_year "
+            "AND ff.quarter=:financial_quarter AND ff.fs_div=:financial_fs_div LIMIT 1) AS financial_filter_source, "
+            ":financial_year AS financial_filter_year, "
+            ":financial_quarter AS financial_filter_quarter, "
+            ":financial_fs_div AS financial_filter_fs_div, "
+            if financial_metric else (
+                "NULL AS financial_filter_value, NULL AS financial_filter_source, NULL AS financial_filter_year, "
+                "NULL AS financial_filter_quarter, NULL AS financial_filter_fs_div, "
+            )
+        )
         sql = f"""
-            SELECT anc.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
-                   anc.bsns_year AS year, anc.fs_div, anc.rcept_no, anc.dcm_no,
-                   anc.source_type, anc.note_no, anc.note_title, anc.section_type,
-                   anc.body, anc.body_length,
-                   sd.id AS source_document_id,
-                   sd.rcept_no AS source_document_rcept_no,
-                   sd.corp_code AS source_document_corp_code,
-                   sd.bsns_year AS source_document_bsns_year,
-                   sd.report_nm AS source_document_report_nm,
-                   d.rcept_no AS disclosure_rcept_no,
-                   d.corp_code AS disclosure_corp_code,
-                   d.disc_date AS disclosure_disc_date,
-                   d.report_nm AS disclosure_report_nm
-            FROM accounting_note_chapters anc
-            JOIN companies c ON c.corp_code=anc.corp_code
-            LEFT JOIN source_documents sd
-              ON sd.rcept_no=anc.rcept_no AND sd.source_type=anc.source_type
-             AND sd.corp_code=anc.corp_code AND sd.bsns_year=anc.bsns_year
-            LEFT JOIN disclosures d
-              ON d.rcept_no=anc.rcept_no AND d.corp_code=anc.corp_code
-            WHERE {" AND ".join(where)}
-            ORDER BY anc.bsns_year DESC, c.market, c.corp_name, anc.note_no
+            SELECT * FROM (
+                SELECT anc.corp_code, c.stock_code, c.corp_name, c.market, c.induty_code,
+                       anc.bsns_year AS year, anc.fs_div, anc.rcept_no, anc.dcm_no,
+                       anc.source_type, anc.note_no, anc.note_title, anc.section_type,
+                       anc.body, anc.body_length,
+                       {financial_select}
+                       sd.id AS source_document_id,
+                       sd.rcept_no AS source_document_rcept_no,
+                       sd.corp_code AS source_document_corp_code,
+                       sd.bsns_year AS source_document_bsns_year,
+                       sd.report_nm AS source_document_report_nm,
+                       d.rcept_no AS disclosure_rcept_no,
+                       d.corp_code AS disclosure_corp_code,
+                       d.disc_date AS disclosure_disc_date,
+                       d.report_nm AS disclosure_report_nm,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY anc.corp_code
+                           ORDER BY anc.bsns_year DESC, anc.note_no, anc.rcept_no
+                       ) AS _company_row_no
+                FROM accounting_note_chapters anc
+                JOIN companies c ON c.corp_code=anc.corp_code
+                LEFT JOIN source_documents sd
+                  ON sd.rcept_no=anc.rcept_no AND sd.source_type=anc.source_type
+                 AND sd.corp_code=anc.corp_code AND sd.bsns_year=anc.bsns_year
+                LEFT JOIN disclosures d
+                  ON d.rcept_no=anc.rcept_no AND d.corp_code=anc.corp_code
+                WHERE {" AND ".join(where)}
+            ) note_rows
+            WHERE _company_row_no <= 10
+            ORDER BY year DESC, market, corp_name, note_no
             LIMIT :row_limit
         """
         source = "accounting_note_chapters"
@@ -496,6 +522,7 @@ def search_dataset(
         rows = filtered_rows
 
     for row in rows:
+        row.pop("_company_row_no", None)
         if dataset == "evidence_documents":
             row["full_text_available"] = bool(row.get("full_text_uri"))
             row["text_storage_status"] = row.pop("full_text_storage_status", None) or "inline_excerpt"
@@ -531,6 +558,7 @@ def search_dataset(
             "financial_min": financial_min,
             "financial_max": financial_max,
             "financial_year": financial_year,
+            "financial_quarter": financial_quarter,
             "financial_fs_div": financial_fs_div,
             "limit": limit,
             "include_excerpt": include_excerpt,

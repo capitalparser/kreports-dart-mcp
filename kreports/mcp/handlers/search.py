@@ -359,6 +359,13 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
     separates a canonical annual-filing match from a cache-only match.
     """
     companies: list[dict] = []
+    financial_metric = query.get("financial_metric")
+    financial_unit = (
+        "KRW" if financial_metric in {
+            "revenue", "operating_profit", "net_income", "total_assets",
+            "total_debt", "total_equity", "operating_cf",
+        } else "dimensionless" if financial_metric == "beneish_m_score" else None
+    )
     for company in enriched.get("companies") or []:
         if not isinstance(company, dict):
             continue
@@ -401,7 +408,26 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         induty_code, induty_code_truncated = _matrix_display_text(
             company.get("induty_code"), max_chars=_MAX_NOTE_MATRIX_INDUTY_CHARS,
         )
-        companies.append({
+        financial_record = next(
+            (item for item in records if item.get("financial_filter_value") is not None),
+            None,
+        )
+        financial_filter = None
+        if financial_metric is not None:
+            financial_filter = {
+                "metric": financial_metric,
+                "value": financial_record.get("financial_filter_value") if financial_record else None,
+                "unit": financial_unit,
+                "year": query.get("financial_year") or query.get("year"),
+                "quarter": query.get("financial_quarter") or 4,
+                "fs_div": query.get("financial_fs_div") or "CFS",
+                "source": financial_record.get("financial_filter_source") if financial_record else None,
+                "locator": (
+                    f"financials:{corp_code}:{query.get('financial_year') or query.get('year')}"
+                    f":Q{query.get('financial_quarter') or 4}:{query.get('financial_fs_div') or 'CFS'}"
+                ),
+            }
+        company_matrix_row = {
             "corp_code": corp_code,
             "corp_name": corp_name,
             "corp_name_truncated": corp_name_truncated,
@@ -450,7 +476,10 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
                 or source_records_truncated
                 or len(all_matched_years) > len(matched_years)
             ),
-        })
+        }
+        if financial_filter is not None:
+            company_matrix_row["financial_filter"] = financial_filter
+        companies.append(company_matrix_row)
     companies.sort(key=lambda item: (
         item["match_status"] != "verified_annual_filing_match",
         str(item.get("market") or ""),
@@ -480,6 +509,10 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
             scope[field] = value
     if query.get("financial_metric") is not None:
         scope["financial_fs_div"] = query.get("financial_fs_div") or "CFS"
+        scope["financial_quarter"] = query.get("financial_quarter") or 4
+        scope["financial_unit"] = (
+            "KRW" if query.get("financial_metric") != "beneish_m_score" else "dimensionless"
+        )
     configured_limit = query.get("limit")
     if not isinstance(configured_limit, int):
         configured_limit = None
@@ -500,6 +533,11 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         ],
         "companies": [],
     }
+    if financial_metric is not None:
+        matrix["limitations"].extend([
+            "재무 필터 값은 로컬 financials 캐시의 지정 연도·분기 행이며, 회사별 financial_filter에 값과 locator를 표시합니다.",
+            "금액 지표의 입력 경계·반환값 단위는 저장 원화(KRW)이며, Beneish_M 점수는 dimensionless입니다.",
+        ])
     for company in row_limited_companies:
         matrix["companies"].append(company)
         matrix["returned_company_count"] = len(matrix["companies"])

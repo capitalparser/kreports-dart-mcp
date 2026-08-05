@@ -2341,7 +2341,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
         for item in matrix.get("companies") or []:
             if not isinstance(item, dict):
                 continue
-            matrix_rows.append({
+            matrix_row = {
                 "company": item.get("corp_name") or item.get("corp_code"),
                 "market": item.get("market"),
                 "induty_code": item.get("induty_code"),
@@ -2362,7 +2362,10 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 "note_title_truncated": item.get("canonical_note_title_truncated"),
                 "display_truncated": item.get("display_truncated"),
                 "rcept_no": item.get("canonical_rcept_no"),
-            })
+            }
+            if item.get("financial_filter") is not None:
+                matrix_row["financial_filter"] = item.get("financial_filter")
+            matrix_rows.append(matrix_row)
         omitted_company_count = int(matrix.get("omitted_company_count") or 0)
         maximum = matrix.get("matrix_max_output_bytes")
         source_rows_truncated = any(
@@ -2381,6 +2384,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 ("note_title_truncated", "주석 제목 생략"),
                 ("display_truncated", "표시 생략"),
                 ("rcept_no", "검증 접수번호"),
+                ("financial_filter", "재무 매트릭스 일치값"),
             ],
             matrix_rows,
             note=(

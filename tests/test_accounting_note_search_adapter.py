@@ -82,6 +82,37 @@ def test_note_company_matrix_can_filter_disclosers_by_financial_metric(temp_engi
     assert [item["corp_code"] for item in result["note_disclosure_company_matrix"]["companies"]] == ["91000001"]
     assert result["note_disclosure_company_matrix"]["scope"]["financial_metric"] == "total_assets"
     assert result["note_disclosure_company_matrix"]["scope"]["financial_min"] == 500.0
+    assert result["note_disclosure_company_matrix"]["scope"]["financial_quarter"] == 4
+    financial_filter = result["note_disclosure_company_matrix"]["companies"][0]["financial_filter"]
+    assert financial_filter["value"] == 1000
+    assert financial_filter["unit"] == "KRW"
+    assert financial_filter["locator"] == "financials:91000001:2025:Q4:CFS"
+
+
+def test_note_company_matrix_uses_annual_q4_not_interim_metric(temp_engine):
+    """An interim value must not satisfy an annual/Q4 financial cohort."""
+    del temp_engine
+    with get_session() as session:
+        session.add(Company(corp_code="92000001", corp_name="분기혼합", market="KOSPI", induty_code="264"))
+        session.add(AccountingNoteChapter(
+            corp_code="92000001", bsns_year=2025, fs_div="CFS", rcept_no="20260312000003",
+            source_type="business_report", note_no="7", note_title="재고자산", section_type="policy",
+            body="재고자산 공시", body_hash="mixed", body_length=8,
+        ))
+        session.add_all([
+            Financial(corp_code="92000001", year=2025, quarter=1, fs_div="CFS", total_assets=1_000),
+            Financial(corp_code="92000001", year=2025, quarter=4, fs_div="CFS", total_assets=100),
+        ])
+
+    from kreports.mcp.handlers.search import handle_search_dataset
+    from kreports.mcp.input_models import SearchDatasetInput
+
+    result = handle_search_dataset(SearchDatasetInput(
+        dataset="accounting_note_chapters", keyword="재고자산", year=2025,
+        financial_metric="total_assets", financial_min=500,
+    ))
+    assert result["companies"] == []
+    assert result["note_disclosure_company_matrix"]["companies"] == []
 
 
 def test_accounting_note_keyword_search_returns_up_to_three_unique_match_excerpts(temp_engine):
