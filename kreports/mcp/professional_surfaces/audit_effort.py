@@ -306,9 +306,11 @@ def _build_materiality_pack(result: dict[str, Any]) -> dict[str, Any]:
         {
             **reference,
             "source_location": (
-                reference.get("official_url")
-                or reference.get("source_locator")
-                or "-"
+                str(reference["official_url"])
+                .removeprefix("https://")
+                .removeprefix("http://")
+                if reference.get("official_url")
+                else reference.get("source_locator") or "-"
             ),
         }
         for reference in result.get("methodology_references") or []

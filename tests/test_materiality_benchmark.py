@@ -706,6 +706,39 @@ def test_live_shaped_legacy_compact_rows_render_limited_series_and_methodology_s
     assert "후보 금액을 표시하지 않았습니다" in out["answer"]
 
 
+def test_public_materiality_methodology_table_uses_readable_official_location(temp_engine):
+    """Table display locations must not feed a URL scheme into the generic sanitizer."""
+    from sqlalchemy.orm import Session
+
+    from kreports.db.models import Company
+    from kreports.mcp.tools import call_tool
+
+    with Session(temp_engine) as session:
+        session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자"))
+        session.commit()
+
+    out = json.loads(call_tool("prepare_audit_materiality_inputs", {
+        "company": "005930", "end_year": 2025, "years_back": 5, "fs_strategy": "CFS",
+    }))
+
+    tables = {table["id"]: table for table in out["answer_pack"]["tables"]}
+    references = tables["materiality_methodology_references"]["rows"]
+    auasb_rows = [row for row in references if row["issuer"] == "AUASB"]
+    assert auasb_rows
+    assert {row["source_location"] for row in auasb_rows} == {
+        "standards.auasb.gov.au/asa-320-dec-2015"
+    }
+    assert any(
+        source["url"] == "https://standards.auasb.gov.au/asa-320-dec-2015"
+        for source in out["answer_pack"]["sources"]
+    )
+    internal_row = next(
+        row for row in references
+        if row["reference_id"] == "materiality_candidate_ranges_v1"
+    )
+    assert internal_row["source_location"] == "docs/data-contract.md#audit-materiality-preparation"
+
+
 def test_materiality_prepare_handles_missing_schema_without_operational_error(temp_engine):
     """A partial local cache is missing evidence, not an exposed SQL failure."""
     from sqlalchemy import text
