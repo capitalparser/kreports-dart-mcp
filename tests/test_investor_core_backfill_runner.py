@@ -1078,6 +1078,103 @@ def test_default_collector_binds_all_imported_engine_sessions_to_target_database
         assert connection.execute("SELECT COUNT(*) FROM marker").fetchone()[0] == 1
 
 
+def test_checkpoint_open_does_not_create_database_after_path_is_deleted(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    identity = runner._capture_database_identity(database)
+    original_open = runner.os.open
+
+    def delete_before_open(path, flags, *args):
+        if Path(path) == database:
+            database.unlink()
+        return original_open(path, flags, *args)
+
+    monkeypatch.setattr(runner.os, "open", delete_before_open)
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        runner._checkpoint_wal(identity)
+
+    assert caught.value.code == "database_connection_identity_mismatch"
+    assert not database.exists()
+
+
+def test_verified_writer_open_rejects_replacement_inode_before_sqlite_connects(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    replacement = tmp_path / "replacement.db"
+    _create_runner_db(database)
+    _create_runner_db(replacement)
+    identity = runner._capture_database_identity(database)
+    original_open = runner.os.open
+
+    def replace_before_open(path, flags, *args):
+        if Path(path) == database:
+            replacement.replace(database)
+        return original_open(path, flags, *args)
+
+    monkeypatch.setattr(runner.os, "open", replace_before_open)
+    with pytest.raises(runner.InvestorCoreBackfillError) as caught:
+        runner._open_verified_sqlite_connection(identity)
+
+    assert caught.value.code == "database_connection_identity_mismatch"
+    current = database.stat()
+    assert (current.st_dev, current.st_ino) != (identity.device, identity.inode)
+
+
+def test_default_writer_creator_verifies_each_new_dbapi_connection(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from kreports.collector import fin_collector
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    _bind_runner_db(monkeypatch, runner, database)
+    identity = runner._capture_database_identity(database)
+    original_open = runner.os.open
+    opened_identities: list[tuple[int, int]] = []
+
+    def recording_open(path, flags, *args):
+        descriptor = original_open(path, flags, *args)
+        if Path(path) == database:
+            metadata = runner.os.fstat(descriptor)
+            opened_identities.append((metadata.st_dev, metadata.st_ino))
+        return descriptor
+
+    monkeypatch.setattr(runner.os, "open", recording_open)
+
+    def collector(stock_code: str, year: int, quarter: int) -> str:
+        del stock_code, year, quarter
+        for _ in range(2):
+            with fin_collector.get_session() as session:
+                session.execute(text("INSERT INTO marker VALUES ('verified-writer')"))
+        return "success"
+
+    monkeypatch.setattr(fin_collector, "collect_financial", collector)
+    report = runner.run_investor_core_backfill(
+        database,
+        execute=True,
+        expected_db_sha256=runner._sha256_file(database),
+        max_api_calls=1,
+        planner_fn=lambda *args, **kwargs: _runner_plan(),
+        cache_checker=lambda *args: False,
+        disk_probe=lambda path: 20 * 1024**3,
+    )
+
+    assert report["completed"] is True
+    assert len(opened_identities) >= 3
+    assert all(item == (identity.device, identity.inode) for item in opened_identities)
+
+
 def test_runner_partitions_fifty_three_targets_into_cached_and_collected(
     tmp_path: Path,
     monkeypatch,

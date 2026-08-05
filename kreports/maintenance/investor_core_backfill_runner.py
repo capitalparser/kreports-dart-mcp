@@ -20,6 +20,7 @@ import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from kreports.collector.fetcher import (
     DartApiAuthError,
@@ -183,6 +184,133 @@ def _revalidate_database_identity(identity: _DatabaseIdentity) -> None:
         )
 
 
+def _open_file_identities() -> dict[int, tuple[int, int]]:
+    """Snapshot this process's file descriptors without retaining /dev/fd."""
+    identities: dict[int, tuple[int, int]] = {}
+    try:
+        descriptor_names = os.listdir("/dev/fd")
+    except OSError as exc:
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database descriptors cannot be inspected",
+        ) from exc
+    for descriptor_name in descriptor_names:
+        if not descriptor_name.isdigit():
+            continue
+        descriptor = int(descriptor_name)
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError:
+            continue
+        identities[descriptor] = (int(metadata.st_dev), int(metadata.st_ino))
+    return identities
+
+
+def _verify_open_descriptor(identity: _DatabaseIdentity, descriptor: int) -> None:
+    """Check the no-follow handle and currently requested path agree exactly."""
+    try:
+        path_stat = os.lstat(identity.path)
+        descriptor_stat = os.fstat(descriptor)
+    except OSError as exc:
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection does not match the requested database",
+        ) from exc
+    expected = (identity.device, identity.inode)
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or not stat.S_ISREG(descriptor_stat.st_mode)
+        or path_stat.st_nlink != 1
+        or descriptor_stat.st_nlink != 1
+        or (int(path_stat.st_dev), int(path_stat.st_ino)) != expected
+        or (int(descriptor_stat.st_dev), int(descriptor_stat.st_ino)) != expected
+    ):
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection does not match the requested database",
+        )
+
+
+def _verify_sqlite_descriptor_delta(
+    connection: sqlite3.Connection,
+    identity: _DatabaseIdentity,
+    *,
+    descriptors_before: dict[int, tuple[int, int]],
+) -> None:
+    """Prove SQLite opened a duplicate of the authenticated descriptor."""
+    try:
+        main_path = next(
+            str(row[2])
+            for row in connection.execute("PRAGMA database_list")
+            if str(row[1]) == "main"
+        )
+        descriptors_after = _open_file_identities()
+    except (sqlite3.Error, StopIteration) as exc:
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection does not match the requested database",
+        ) from exc
+    if main_path != str(identity.path):
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection opened an unexpected database path",
+        )
+    expected = (identity.device, identity.inode)
+    sqlite_descriptors = [
+        descriptor
+        for descriptor, descriptor_identity in descriptors_after.items()
+        if descriptor not in descriptors_before and descriptor_identity == expected
+    ]
+    if len(sqlite_descriptors) != 1:
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection did not retain the authenticated descriptor",
+        )
+
+
+def _open_verified_sqlite_connection(identity: _DatabaseIdentity) -> sqlite3.Connection:
+    """Open one non-creating SQLite writer connection pinned to a verified FD."""
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow:
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "no-follow database open is unavailable",
+        )
+    flags = os.O_RDWR | no_follow | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    connection: sqlite3.Connection | None = None
+    connected = False
+    try:
+        descriptor = os.open(identity.path, flags)
+        _verify_open_descriptor(identity, descriptor)
+        descriptors_before = _open_file_identities()
+        connection = sqlite3.connect(
+            f"{identity.path.as_uri()}?mode=rw",
+            uri=True,
+            check_same_thread=False,
+        )
+        _verify_sqlite_descriptor_delta(
+            connection,
+            identity,
+            descriptors_before=descriptors_before,
+        )
+        _revalidate_database_identity(identity)
+        connected = True
+        return connection
+    except InvestorCoreBackfillError:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection does not match the requested database",
+        ) from exc
+    finally:
+        if connection is not None and not connected:
+            connection.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _verify_writer_connection_identity(connection: object, identity: _DatabaseIdentity) -> None:
     """Verify the actual SQLAlchemy writer points at the requested inode."""
     try:
@@ -206,32 +334,6 @@ def _verify_writer_connection_identity(connection: object, identity: _DatabaseId
         )
 
 
-def _verify_checkpoint_connection_identity(
-    connection: sqlite3.Connection,
-    identity: _DatabaseIdentity,
-) -> None:
-    """Verify the just-opened checkpoint connection before it issues WAL SQL."""
-    try:
-        rows = connection.execute("PRAGMA database_list").fetchall()
-        main_path = next(str(row[2]) for row in rows if row[1] == "main")
-        path_stat = os.stat(main_path, follow_symlinks=False)
-    except (OSError, StopIteration, sqlite3.Error) as exc:
-        raise _fail(
-            "database_checkpoint_identity_mismatch",
-            "checkpoint connection does not match the requested database",
-        ) from exc
-    if (
-        not stat.S_ISREG(path_stat.st_mode)
-        or path_stat.st_nlink != 1
-        or int(path_stat.st_dev) != identity.device
-        or int(path_stat.st_ino) != identity.inode
-    ):
-        raise _fail(
-            "database_checkpoint_identity_mismatch",
-            "checkpoint connection does not match the requested database",
-        )
-
-
 @contextmanager
 def _bound_financial_writer(identity: _DatabaseIdentity) -> Iterator[Callable[..., str]]:
     """Bind every imported engine.get_session path to the checked target file."""
@@ -243,8 +345,9 @@ def _bound_financial_writer(identity: _DatabaseIdentity) -> Iterator[Callable[..
         original_engine = database_engine.engine
         original_session = database_engine.SessionLocal
         writer_engine = create_engine(
-            f"sqlite:///{identity.path}",
-            connect_args={"check_same_thread": False, "timeout": 60},
+            "sqlite://",
+            creator=lambda: _open_verified_sqlite_connection(identity),
+            poolclass=NullPool,
             echo=False,
         )
         writer_session = sessionmaker(
@@ -253,8 +356,8 @@ def _bound_financial_writer(identity: _DatabaseIdentity) -> Iterator[Callable[..
             autoflush=False,
         )
         try:
-            with writer_engine.connect() as connection:
-                _verify_writer_connection_identity(connection, identity)
+            with writer_engine.connect():
+                pass
             database_engine.engine = writer_engine
             database_engine.SessionLocal = writer_session
             _revalidate_database_identity(identity)
@@ -268,15 +371,18 @@ def _bound_financial_writer(identity: _DatabaseIdentity) -> Iterator[Callable[..
 def _checkpoint_wal(identity: _DatabaseIdentity) -> bool:
     """Durably fold all released writer pages into the requested SQLite file."""
     _revalidate_database_identity(identity)
+    connection: sqlite3.Connection | None = None
     try:
-        with sqlite3.connect(identity.path) as connection:
-            _verify_checkpoint_connection_identity(connection, identity)
-            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        connection = _open_verified_sqlite_connection(identity)
+        result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     except sqlite3.Error as exc:
         raise _fail(
             "durability_checkpoint_failed",
             "SQLite WAL checkpoint could not be completed",
         ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
     _revalidate_database_identity(identity)
     # SQLite reports (0, -1, -1) when the database is not in WAL mode.  There
     # are then no WAL frames to leave out of the immutable post-run evidence.

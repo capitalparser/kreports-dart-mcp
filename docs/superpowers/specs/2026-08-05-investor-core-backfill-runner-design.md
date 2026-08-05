@@ -66,6 +66,12 @@ setting even when execution stops. The report never contains the API key.
     This keeps every already-imported `get_session` function used by financial
     collection, company lookup, flags, and Beneish on the same verified target
     writer for the entire bounded collector scope.
+12. Every writer DBAPI connection and the checkpoint connection starts from a
+    no-follow authenticated file descriptor, then uses a non-creating SQLite
+    `mode=rw` open. A descriptor-delta check proves the resulting SQLite
+    handle has the requested device/inode before any mutable SQL. SQLAlchemy
+    uses that verified creator with `NullPool`, so a later pool connection
+    cannot bypass the check.
 
 ## Evidence report
 

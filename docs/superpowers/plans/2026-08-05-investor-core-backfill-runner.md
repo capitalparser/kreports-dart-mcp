@@ -38,6 +38,11 @@
   module lock for the full default collector scope, so imported `get_session`
   references in collection, company lookup, flags, and Beneish share the
   identity-verified target writer.
+- Use a no-follow authenticated descriptor plus non-creating SQLite `mode=rw`
+  open and descriptor-delta verification for every writer DBAPI and checkpoint
+  connection before mutable SQL. Configure the SQLAlchemy target engine with
+  that creator and `NullPool`, preventing later pool connections from bypassing
+  the identity check.
 - Apply the post-target free-space probe to cache hits as well as collector
   calls. Under a bounded request scope, HTTP-success JSON decoding failures are
   redacted generic transport/protocol stops; unbounded behavior stays legacy.
