@@ -661,7 +661,12 @@ def _emergency_matrix_budget_result(matrix: dict) -> dict:
         "pagination": {"has_more": bool((matrix.get("pagination") or {}).get("has_more"))},
         "maximum_companies": 200,
         "is_complete": False,
-        "represented_company_count": sum(len(topic["companies"]) for topic in topics),
+        "represented_company_count": len({
+            str((cell.get("company") or {}).get("corp_code") or "")
+            for topic in topics
+            for cell in topic["companies"]
+            if str((cell.get("company") or {}).get("corp_code") or "")
+        }),
         "requested_company_count": None,
         "available_company_count": None,
         "omitted_company_topic_rows": int(matrix.get("omitted_company_topic_rows") or 0),
@@ -670,6 +675,7 @@ def _emergency_matrix_budget_result(matrix: dict) -> dict:
             "matrix_output_budget_reason": "note_disclosure_matrix_output_budget",
             "cohort_metadata_truncated": True,
             "emergency_minimal_result": True,
+            "comparison_payload_omitted_for_matrix": True,
             "emergency_omitted_topic_count": omitted_topic_count,
             "matrix_max_output_bytes": MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES,
             "matrix_output_bytes": 0,
@@ -1343,8 +1349,13 @@ def build_note_disclosure_matrix(
         ),
     })
     source_truncation = dict(comparison.get("truncation") or {})
+    source_truncation["comparison_payload_omitted_for_matrix"] = True
     source_output_truncated = bool(source_truncation.get("output_budget_applied"))
-    peer_pagination_incomplete = bool(pagination.get("has_more"))
+    try:
+        peer_offset_incomplete = int(pagination.get("offset") or 0) > 0
+    except (TypeError, ValueError):
+        peer_offset_incomplete = False
+    peer_pagination_incomplete = bool(pagination.get("has_more")) or peer_offset_incomplete
     available_peer_count = pagination.get("available_peer_count")
     if not isinstance(available_peer_count, int) or available_peer_count < 0:
         available_peer_count = pagination.get("total_peer_count")
@@ -1387,7 +1398,13 @@ def build_note_disclosure_matrix(
                 [
                     "Peer pagination has a next page; the returned matrix is not a complete peer-cohort view."
                 ]
-                if peer_pagination_incomplete else []
+                if pagination.get("has_more") else []
+            ),
+            *(
+                [
+                    "Peer pagination has a previous page; earlier peers are not represented in this matrix."
+                ]
+                if peer_offset_incomplete else []
             ),
         ],
     }

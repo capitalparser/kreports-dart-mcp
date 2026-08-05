@@ -2140,10 +2140,16 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
                 " 로컬 확인률은 반환된 topic rows 기준이며, "
                 f"생략 회사-주제 행: {note_disclosure_matrix.get('omitted_company_topic_rows', 0)}입니다."
             )
-        if isinstance(note_disclosure_matrix, dict) and (
-            note_disclosure_matrix.get("pagination") or {}
-        ).get("has_more"):
-            matrix_note += " 다음 peer 페이지가 남아 있어 전체 cohort를 대표하지 않습니다."
+        if isinstance(note_disclosure_matrix, dict):
+            pagination = note_disclosure_matrix.get("pagination") or {}
+            try:
+                peer_offset = int(pagination.get("offset") or 0)
+            except (TypeError, ValueError):
+                peer_offset = 0
+            if peer_offset > 0:
+                matrix_note += " 이전 peer 페이지가 생략되어 전체 cohort를 대표하지 않습니다."
+            if pagination.get("has_more"):
+                matrix_note += " 다음 peer 페이지가 남아 있어 전체 cohort를 대표하지 않습니다."
         pack["tables"].append(_table(
             "topic_company_disclosure_matrix", "주제별 회사 주석 로컬 확인 매트릭스",
             [("topic", "주제"), ("company", "회사"), ("status", "로컬 증빙 상태"),

@@ -266,6 +266,40 @@ def test_note_disclosure_matrix_marks_peer_pagination_incomplete_without_row_omi
     assert "다음 peer 페이지" in table["note"]
 
 
+def test_note_disclosure_matrix_marks_last_offset_page_incomplete_and_warns_previous_page():
+    """The last page still omits earlier peers when its offset is non-zero."""
+    from kreports.analysis.note_comparison import build_note_disclosure_matrix
+    from kreports.mcp.answer_pack import build_answer_pack
+
+    result = build_note_disclosure_matrix(
+        "00000001", 2024,
+        _comparison={
+            "year": 2024,
+            "subject": {"corp_code": "00000001", "corp_name": "Subject"},
+            "selection_policy": {},
+            "pagination": {
+                "offset": 2, "page_size": 1, "returned_peer_count": 0,
+                "total_peer_count": 2, "available_peer_count": 2, "has_more": False,
+            },
+            "truncation": {"applied": True, "output_budget_applied": False},
+            "topics": [{"topic": "leases", "rows": [{
+                "company": {"corp_code": "00000001", "corp_name": "Subject"},
+                "availability": "available",
+            }]}],
+        },
+    )
+
+    assert result["is_complete"] is False
+    assert any("previous page" in limitation for limitation in result["limitations"])
+    assert result["source_truncation"]["comparison_payload_omitted_for_matrix"] is True
+    pack = build_answer_pack("compare_peer_accounting_policies", {
+        "note_disclosure_matrix": result,
+        "data_quality": {"status": "limited"},
+    })
+    table = next(table for table in pack["tables"] if table["id"] == "topic_company_disclosure_matrix")
+    assert "이전 peer 페이지" in table["note"]
+
+
 def test_note_disclosure_matrix_bounds_hostile_subject_and_selection_metadata():
     """Subject-only matrices must remain bounded even when selector metadata is hostile."""
     from kreports.analysis.note_comparison import (
@@ -308,7 +342,9 @@ def test_note_disclosure_matrix_bounds_hostile_subject_and_selection_metadata():
     assert truncation["matrix_output_budget_applied"] is True
     assert truncation["cohort_metadata_truncated"] is True
     assert truncation["emergency_minimal_result"] is True
+    assert truncation["comparison_payload_omitted_for_matrix"] is True
     assert result["topics"][0]["companies"][0]["status"] == "disclosed"
+    assert result["represented_company_count"] == 1
     assert truncation["matrix_output_bytes"] == len(json.dumps(
         result, ensure_ascii=False, separators=(",", ":"),
     ).encode())
