@@ -35,8 +35,6 @@ tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_m_score_well_
 tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_tata_negative
 tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_sgi_2023_below_one
 tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_operating_cf_positive
-tests/test_dart_analyst.py::TestResolveCorpCode::test_corp_code_passthrough
-tests/test_dart_analyst.py::TestResolveCorpCode::test_stock_code_resolution
 tests/test_dart_analyst.py::TestSamsungIntegration::test_search_company_finds_samsung
 tests/test_dart_analyst.py::TestSamsungIntegration::test_get_company_returns_induty_code_key
 tests/test_dart_analyst.py::TestSamsungIntegration::test_financial_snapshot_has_annual_rows
