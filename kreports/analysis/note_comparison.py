@@ -156,7 +156,7 @@ def _topic_match(row: dict, topic: str) -> dict[str, object] | None:
             "priority": 0 if title.strip() == keyword else 1,
             "keyword_priority": keyword_priority,
             "match_strength": "title_exact" if title.strip() == keyword else "title_keyword",
-            "matched_keyword_count": len(title_matches),
+            "matched_keyword_count": len({match_keyword for _priority, _offset, match_keyword in title_matches}),
         }
     if best_body_match:
         keyword_priority, offset, keyword, matched_keyword_count = best_body_match

@@ -334,6 +334,10 @@ def test_note_comparison_pack_uses_final_roster_and_exposes_match_cache_status(t
             }
             for index in range(50)
         ],
+        "selected_peers": [
+            {"corp_code": f"{index:08d}", "corp_name": f"Peer {index}"}
+            for index in (3, 1, 4, 0, 2)
+        ],
         "note_comparison": {
             "topics": [{
                 "topic": "leases",
@@ -361,6 +365,10 @@ def test_note_comparison_pack_uses_final_roster_and_exposes_match_cache_status(t
     comparison = synthetic_tables["peer_topic_note_comparison"]
 
     assert len(selection["rows"]) == 5
+    assert [row["corp_code"] for row in selection["rows"]] == [
+        "00000003", "00000001", "00000004", "00000000", "00000002",
+    ]
+    assert [row["rank"] for row in selection["rows"]] == [1, 2, 3, 4, 5]
     assert "50" in selection["note"] and "45" in selection["note"]
     assert coverage["rows"] == [{
         "topic": "leases", "available": 0, "summary_only": 0,

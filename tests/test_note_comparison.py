@@ -112,6 +112,19 @@ def test_note_comparison_multilabels_long_chapters_with_centered_topic_context(t
     assert any(item["topic"] == "revenue" for item in result["differences"])
 
 
+def test_title_match_count_is_distinct_keywords_not_repeated_occurrences():
+    from kreports.analysis.note_comparison import _topic_match
+
+    match = _topic_match(
+        {"note_title": "회계정책 및 회계정책", "body": ""},
+        "accounting_policies",
+    )
+
+    assert match is not None
+    assert match["match_keyword"] == "회계정책"
+    assert match["matched_keyword_count"] == 1
+
+
 def test_note_comparison_marks_unbound_cached_note_summary_only_without_receipt(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session

@@ -1901,17 +1901,35 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
         row for row in result.get("selected_peers") or [] if isinstance(row, dict)
     ]
     evaluated_count = len(peer_selection) if peer_selection else len(selected_roster)
-    selected_input_rows = (
-        [row for row in peer_selection if row.get("selection_status") == "included"]
-        if peer_selection
-        else selected_roster
-    )
-    using_final_roster_fallback = not peer_selection
+    included_detail_rows = [
+        row for row in peer_selection if row.get("selection_status") == "included"
+    ]
+    cohort = note_comparison.get("cohort") if isinstance(note_comparison, dict) else None
+    cohort_roster = [
+        row for row in (cohort.get("peers") or [])
+        if isinstance(row, dict)
+    ] if isinstance(cohort, dict) else []
+    authoritative_roster = selected_roster or cohort_roster
+    if authoritative_roster:
+        detail_by_code = {
+            str(row.get("corp_code")): row
+            for row in included_detail_rows
+            if row.get("corp_code") is not None
+        }
+        selected_input_rows = [
+            detail_by_code.get(str(row.get("corp_code")), row)
+            for row in authoritative_roster
+            if row.get("corp_code") is not None
+        ]
+    else:
+        selected_input_rows = included_detail_rows
+    using_final_roster_fallback = bool(authoritative_roster) or not peer_selection
     selection_rows = []
-    for row in selected_input_rows:
+    for rank, row in enumerate(selected_input_rows, start=1):
         if not isinstance(row, dict):
             continue
         selection_rows.append({
+            "rank": rank,
             "company": row.get("corp_name") or row.get("corp_code"),
             "corp_code": row.get("corp_code"),
             "status": row.get("selection_status") or (
@@ -1932,7 +1950,8 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
         })
     pack["tables"].append(_table(
         "peer_policy_selection", "Peer 선정 근거",
-        [("company", "회사"), ("corp_code", "회사코드"), ("status", "선정 상태"),
+        [("rank", "순위"), ("company", "회사"), ("corp_code", "회사코드"),
+         ("status", "선정 상태"),
          ("reason", "선정 사유"), ("score", "유사도 점수"),
          ("profile_or_weights", "유효 가중치"), ("data_year", "데이터 연도"),
          ("fs_div", "재무제표 기준"), ("financial_values", "재무값"),
