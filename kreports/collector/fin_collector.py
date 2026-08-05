@@ -15,7 +15,11 @@ from datetime import datetime
 from sqlalchemy import case
 
 from kreports.config import settings
+from kreports.collector import fetcher as _fetcher
 from kreports.collector.fetcher import (
+    DartApiAuthError,
+    DartApiLimitExceeded,
+    DartBoundedStop,
     fetch_financial_statements,
     fetch_financial_summary,
 )
@@ -36,20 +40,21 @@ from kreports.judge.flags import (
 
 logger = logging.getLogger(__name__)
 
+DartRequestBudgetExceeded = _fetcher.DartRequestBudgetExceeded
+DartTransportError = _fetcher.DartTransportError
+
 QUARTER_TO_REPRT = {v: k for k, v in REPRT_TO_QUARTER.items()}
 
 _LISTED_MARKETS = {"KOSPI", "KOSDAQ", "KONEX"}
 _DART_NO_DATA_STATUS = "013"
-_DART_LIMIT_MARKERS = ("사용한도", "초과", "limit")
-_DART_AUTH_MARKERS = ("등록되지 않은 인증키", "invalid api key", "invalid key")
-
-
-class DartApiLimitExceeded(RuntimeError):
-    """Raised when DART reports that the API key has exhausted its call quota."""
-
-
-class DartApiAuthError(RuntimeError):
-    """Raised when DART rejects the configured API key."""
+_DART_LIMIT_MARKERS = ("사용한도", "초과", "limit", "quota")
+_DART_AUTH_MARKERS = (
+    "등록되지 않은 인증키",
+    "인증키",
+    "invalid api key",
+    "invalid key",
+    "authentication",
+)
 
 
 def _is_dart_limit_response(response: dict | None) -> bool:
@@ -93,6 +98,8 @@ def collect_financial(
     try:
         response = fetch_financial_statements(corp_code, year, reprt_code, fs_div)
         time.sleep(settings.request_delay)
+    except DartBoundedStop:
+        raise
     except Exception as e:
         _log_fetch(corp_code, year, quarter, "error", str(e))
         return "error"
@@ -112,6 +119,8 @@ def collect_financial(
             response = fetch_financial_statements(corp_code, year, reprt_code, "OFS")
             fs_div = "OFS"
             time.sleep(settings.request_delay)
+        except DartBoundedStop:
+            raise
         except Exception as e:
             _log_fetch(corp_code, year, quarter, "error", str(e))
             return "error"
@@ -163,6 +172,8 @@ def _try_summary_fallback(
         try:
             response = fetch_financial_summary(corp_code, year, reprt_code, fs_div)
             time.sleep(settings.request_delay)
+        except DartBoundedStop:
+            raise
         except Exception as e:
             logger.warning("acnt 폴백 실패 [%s %s %s]: %s", corp_code, year, fs_div, e)
             _log_fetch(corp_code, year, quarter, "error", str(e))

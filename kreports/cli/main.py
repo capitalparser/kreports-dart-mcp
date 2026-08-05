@@ -2493,6 +2493,120 @@ def plan_investor_core_backfill_cmd(
         typer.echo(f"Unfillable shortfall: {plan['unfillable_shortfall']}")
 
 
+_INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
+    "database_unavailable": "database is unavailable or not a regular SQLite file",
+    "database_symlink_rejected": "database path must not contain symlinks",
+    "database_binding_mismatch": "--db does not match the configured process database",
+    "expected_db_sha256_required": "--expected-db-sha256 is required with --execute",
+    "invalid_expected_db_sha256": "expected database SHA-256 is invalid",
+    "expected_db_sha256_mismatch": "database SHA-256 does not match expected value",
+    "database_changed_before_execution": "database changed after preflight",
+    "max_api_calls_required": "--max-api-calls must be positive with --execute",
+    "dart_api_key_required": "DART API key is required with --execute",
+    "collector_mode_required": "collector runtime mode is required with --execute",
+    "non_source_ready_execution_rejected": "execute mode accepts source-ready targets only",
+    "invalid_planner_output": "investor-core planner output is invalid",
+    "duplicate_planner_target": "investor-core planner contains duplicate targets",
+    "free_space_probe_failed": "free-space probe failed",
+    "relevant_row_count_failed": "relevant database rows could not be counted",
+    "insufficient_free_space": "free-space reserve is below the 10 GiB minimum",
+    "api_budget_exhausted": "DART request budget exhausted",
+    "dart_auth_failure": "DART authentication failed",
+    "dart_quota_failure": "DART API quota or limit failure",
+    "dart_transport_failure": "DART transport or HTTP failure",
+    "collector_failure": "bounded collector failed",
+    "evidence_collection_failed": "post-run evidence could not be collected",
+}
+
+
+@app.command("run-investor-core-backfill")
+def run_investor_core_backfill_cmd(
+    db_path: Path = typer.Option(..., "--db", help="bounded runner SQLite DB path"),
+    execute: bool = typer.Option(False, "--execute", help="perform the bounded collector session"),
+    expected_db_sha256: Optional[str] = typer.Option(
+        None,
+        "--expected-db-sha256",
+        help="expected SHA-256 for the exact SQLite file (required with --execute)",
+    ),
+    max_api_calls: Optional[int] = typer.Option(
+        None,
+        "--max-api-calls",
+        help="positive maximum actual DART HTTP attempts (required with --execute)",
+    ),
+    coverage_year: Optional[int] = typer.Option(None, "--coverage-year"),
+    threshold_pct: float = typer.Option(95.0, "--threshold-pct"),
+    source_ready_only: bool = typer.Option(
+        True,
+        "--source-ready-only/--include-non-source-ready",
+        help="execute only planner candidates with source_ready=true",
+    ),
+) -> None:
+    """Run or dry-run the fail-closed bounded investor-core backfill."""
+    from kreports.maintenance.investor_core_backfill_runner import (
+        InvestorCoreBackfillError,
+        run_investor_core_backfill,
+    )
+
+    try:
+        report = run_investor_core_backfill(
+            db_path,
+            expected_db_sha256=expected_db_sha256,
+            execute=execute,
+            max_api_calls=max_api_calls,
+            coverage_year=coverage_year,
+            threshold_pct=threshold_pct,
+            source_ready_only=source_ready_only,
+        )
+    except InvestorCoreBackfillError as exc:
+        message = _INVESTOR_CORE_RUNNER_ERROR_MESSAGES.get(
+            exc.code,
+            "investor-core backfill runner rejected the request",
+        )
+        typer.echo(
+            json.dumps(
+                {"error": {"code": exc.code, "message": message}},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        raise typer.Exit(2) from exc
+    except (ValueError, sqlite3.Error) as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "investor_core_backfill_unavailable",
+                        "message": "investor-core backfill runner unavailable",
+                    }
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        raise typer.Exit(2) from exc
+    except Exception as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "investor_core_backfill_failed",
+                        "message": "investor-core backfill runner failed",
+                    }
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        raise typer.Exit(2) from exc
+
+    _json_print(report)
+    if not report.get("completed", False):
+        raise typer.Exit(3)
+
+
 @app.command("build-release-manifest")
 def build_release_manifest_cmd(
     db_path: Optional[Path] = typer.Option(

@@ -5,6 +5,9 @@ import zipfile
 import io
 import re
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -17,7 +20,7 @@ logger = logging.getLogger(__name__)
 DART_BASE = "https://opendart.fss.or.kr/api"
 DART_WEB_BASE = "https://dart.fss.or.kr"
 CORP_CODE_ZIP_URL = f"{DART_BASE}/corpCode.xml"  # zip 반환
-_DART_LIMIT_MARKERS = ("사용한도", "초과", "limit")
+_DART_LIMIT_MARKERS = ("사용한도", "초과", "limit", "quota")
 
 # 로컬 캐시 경로 (30일 유효)
 _CACHE_DIR = Path(__file__).parent.parent.parent / ".cache"
@@ -25,8 +28,86 @@ _CORP_ZIP_CACHE = _CACHE_DIR / "corp_code.zip"
 _CACHE_MAX_AGE_DAYS = 30
 
 
-class DartApiLimitExceeded(RuntimeError):
+class DartBoundedStop(RuntimeError):
+    """Base class for stop signals that a bounded collector must propagate."""
+
+
+class DartRequestBudgetExceeded(DartBoundedStop):
+    """Raised before an HTTP attempt would exceed the scoped request budget."""
+
+    def __init__(self, max_calls: int) -> None:
+        self.max_calls = max_calls
+        super().__init__("DART request budget exhausted")
+
+
+class DartTransportError(DartBoundedStop):
+    """A transport or HTTP failure in a bounded request scope."""
+
+    def __init__(self, endpoint: str, *, status_code: int | None = None) -> None:
+        self.endpoint = endpoint
+        self.status_code = status_code
+        super().__init__("DART transport or HTTP failure")
+
+
+class DartApiLimitExceeded(DartBoundedStop):
     """Raised when DART reports that the API key has exhausted its call quota."""
+
+
+class DartApiAuthError(DartBoundedStop):
+    """Raised when DART rejects the configured API key."""
+
+
+@dataclass
+class RequestBudget:
+    """Count actual outbound attempts made inside one bounded scope."""
+
+    max_calls: int
+    used_calls: int = 0
+    endpoint_counts: dict[str, int] = field(default_factory=dict)
+
+    def consume(self, endpoint: str) -> None:
+        if self.used_calls >= self.max_calls:
+            raise DartRequestBudgetExceeded(self.max_calls)
+        self.used_calls += 1
+        endpoint_name = endpoint.rsplit("/", 1)[-1]
+        self.endpoint_counts[endpoint_name] = (
+            self.endpoint_counts.get(endpoint_name, 0) + 1
+        )
+
+
+_REQUEST_BUDGET: ContextVar[RequestBudget | None] = ContextVar(
+    "kreports_dart_request_budget",
+    default=None,
+)
+
+
+@contextmanager
+def request_budget(max_calls: int):
+    """Install a request budget for the current collector execution scope."""
+    if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls <= 0:
+        raise ValueError("max_calls must be a positive integer")
+    budget = RequestBudget(max_calls=max_calls)
+    token = _REQUEST_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _REQUEST_BUDGET.reset(token)
+
+
+def _record_request_attempt(endpoint: str) -> None:
+    budget = _REQUEST_BUDGET.get()
+    if budget is not None:
+        budget.consume(endpoint)
+
+
+def _bounded_transport_error(endpoint: str, exc: Exception) -> None:
+    """Raise a redacted bounded transport error when a budget is active."""
+    if _REQUEST_BUDGET.get() is None:
+        raise exc
+    status_code = None
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+    raise DartTransportError(endpoint, status_code=status_code) from exc
 
 
 def _get_client() -> httpx.Client:
@@ -192,23 +273,27 @@ def fetch_financial_statements(
     for attempt in range(settings.max_retries):
         try:
             with _get_client() as client:
+                _record_request_attempt("fnlttSinglAcntAll.json")
                 resp = client.get(f"{DART_BASE}/fnlttSinglAcntAll.json", params=params)
                 resp.raise_for_status()
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError as exc:
+                    _bounded_transport_error("fnlttSinglAcntAll.json", exc)
         except httpx.HTTPStatusError as e:
             if attempt < settings.max_retries - 1:
                 wait = 2 ** attempt
                 logger.warning("HTTP 오류 %s, %d초 후 재시도", e.response.status_code, wait)
                 time.sleep(wait)
             else:
-                raise
+                _bounded_transport_error("fnlttSinglAcntAll.json", e)
         except httpx.RequestError as e:
             if attempt < settings.max_retries - 1:
                 wait = 2 ** attempt
                 logger.warning("요청 오류 %s, %d초 후 재시도", e, wait)
                 time.sleep(wait)
             else:
-                raise
+                _bounded_transport_error("fnlttSinglAcntAll.json", e)
 
         time.sleep(settings.request_delay)
 
@@ -249,23 +334,27 @@ def fetch_financial_summary(
     for attempt in range(settings.max_retries):
         try:
             with _get_client() as client:
+                _record_request_attempt("fnlttSinglAcnt.json")
                 resp = client.get(f"{DART_BASE}/fnlttSinglAcnt.json", params=params)
                 resp.raise_for_status()
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError as exc:
+                    _bounded_transport_error("fnlttSinglAcnt.json", exc)
         except httpx.HTTPStatusError as e:
             if attempt < settings.max_retries - 1:
                 wait = 2 ** attempt
                 logger.warning("HTTP 오류 %s, %d초 후 재시도", e.response.status_code, wait)
                 time.sleep(wait)
             else:
-                raise
+                _bounded_transport_error("fnlttSinglAcnt.json", e)
         except httpx.RequestError as e:
             if attempt < settings.max_retries - 1:
                 wait = 2 ** attempt
                 logger.warning("요청 오류 %s, %d초 후 재시도", e, wait)
                 time.sleep(wait)
             else:
-                raise
+                _bounded_transport_error("fnlttSinglAcnt.json", e)
 
         time.sleep(settings.request_delay)
 
