@@ -32,6 +32,16 @@ Metric = Literal[
     "매출성장률",
     "Beneish_M",
 ]
+FinancialFilterMetric = Literal[
+    "revenue",
+    "operating_profit",
+    "net_income",
+    "total_assets",
+    "total_debt",
+    "total_equity",
+    "operating_cf",
+    "beneish_m_score",
+]
 Year = Annotated[int, Field(ge=2000, le=2100)]
 PeerSelector = Annotated[str, Field(min_length=1, max_length=100)]
 SemanticContextTopic = Literal[
@@ -422,8 +432,32 @@ class SearchDatasetInput(ToolInput):
     )
     fs_div: FsDiv | None = Field(None, description="재무/회계정책 검색 시 선택")
     quarter: int | None = Field(None, ge=1, le=4, description="financials 검색 시 선택")
+    financial_metric: FinancialFilterMetric | None = Field(
+        None,
+        description="선택. 주석을 공시한 회사를 재무 매트릭스 값으로 추가 필터링한다.",
+    )
+    financial_min: float | None = Field(None, description="선택. financial_metric 하한(포함).")
+    financial_max: float | None = Field(None, description="선택. financial_metric 상한(포함).")
+    financial_year: Year | None = Field(
+        None,
+        description="선택. 재무 필터 사업연도. 생략 시 year를 사용하고, 둘 다 없으면 최신값이 아닌 명시적 연도 필요.",
+    )
+    financial_fs_div: FsDiv = Field("CFS", description="재무 필터 연결/별도 구분")
     limit: int = Field(50, ge=1, le=500)
     include_excerpt: bool = True
+
+    @model_validator(mode="after")
+    def validate_financial_filter(self):
+        if (self.financial_min is not None or self.financial_max is not None) and not self.financial_metric:
+            raise ValueError("financial_min/max를 사용하려면 financial_metric이 필요합니다.")
+        if self.financial_min is not None and self.financial_max is not None:
+            if not math.isfinite(self.financial_min) or not math.isfinite(self.financial_max):
+                raise ValueError("financial_min/max는 유한한 숫자여야 합니다.")
+            if self.financial_min > self.financial_max:
+                raise ValueError("financial_min은 financial_max보다 클 수 없습니다.")
+        if self.financial_metric and self.financial_year is None and self.year is None:
+            raise ValueError("financial_metric 사용 시 year 또는 financial_year를 지정해야 합니다.")
+        return self
 
 
 class FetchDisclosureOnDemandInput(ToolInput):

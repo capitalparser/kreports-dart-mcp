@@ -142,6 +142,17 @@ _SEARCH_DATASETS = {
     "financials",
 }
 
+_FINANCIAL_FILTER_COLUMNS = {
+    "revenue": "revenue",
+    "operating_profit": "operating_profit",
+    "net_income": "net_income",
+    "total_assets": "total_assets",
+    "total_debt": "total_debt",
+    "total_equity": "total_equity",
+    "operating_cf": "operating_cf",
+    "beneish_m_score": "beneish_m_score",
+}
+
 
 def build_company_filters(
     *,
@@ -203,6 +214,11 @@ def search_dataset(
     section_type: str | None = None,
     fs_div: str | None = None,
     quarter: int | None = None,
+    financial_metric: str | None = None,
+    financial_min: float | None = None,
+    financial_max: float | None = None,
+    financial_year: int | None = None,
+    financial_fs_div: str = "CFS",
     limit: int = 50,
     include_excerpt: bool = True,
 ) -> dict:
@@ -219,6 +235,29 @@ def search_dataset(
     )
     if "__company_not_found__" in filters:
         return {"error": "company not found", "company": company}
+
+    if financial_metric is not None:
+        metric_column = _FINANCIAL_FILTER_COLUMNS.get(str(financial_metric))
+        if metric_column is None:
+            return {"error": "invalid financial metric", "financial_metric": financial_metric}
+        resolved_financial_year = financial_year if financial_year is not None else year
+        if resolved_financial_year is None:
+            return {"error": "financial_year required when financial_metric is set"}
+        filters.append(
+            "EXISTS (SELECT 1 FROM financials ff "
+            "WHERE ff.corp_code=c.corp_code AND ff.year=:financial_year "
+            "AND ff.fs_div=:financial_fs_div "
+            f"AND ff.{metric_column} IS NOT NULL"
+            + (" AND ff." + metric_column + ">=:financial_min" if financial_min is not None else "")
+            + (" AND ff." + metric_column + "<=:financial_max" if financial_max is not None else "")
+            + ")"
+        )
+        params["financial_year"] = int(resolved_financial_year)
+        params["financial_fs_div"] = financial_fs_div
+        if financial_min is not None:
+            params["financial_min"] = float(financial_min)
+        if financial_max is not None:
+            params["financial_max"] = float(financial_max)
 
     bind_expanding = []
     source = dataset
@@ -488,6 +527,11 @@ def search_dataset(
             "section_type": section_type,
             "fs_div": fs_div,
             "quarter": quarter,
+            "financial_metric": financial_metric,
+            "financial_min": financial_min,
+            "financial_max": financial_max,
+            "financial_year": financial_year,
+            "financial_fs_div": financial_fs_div,
             "limit": limit,
             "include_excerpt": include_excerpt,
         },

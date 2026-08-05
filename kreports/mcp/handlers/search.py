@@ -470,6 +470,16 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         scope[field] = displayed
         if truncated:
             scope_truncated_fields.append(field)
+    # Financial filters are part of the cohort definition, not a hidden
+    # implementation detail. Keep them visible in the inverse disclosure
+    # lookup so an auditor/investor can reproduce the company set.
+    financial_fields = ("financial_metric", "financial_min", "financial_max", "financial_year")
+    for field in financial_fields:
+        value = query.get(field)
+        if value is not None:
+            scope[field] = value
+    if query.get("financial_metric") is not None:
+        scope["financial_fs_div"] = query.get("financial_fs_div") or "CFS"
     configured_limit = query.get("limit")
     if not isinstance(configured_limit, int):
         configured_limit = None

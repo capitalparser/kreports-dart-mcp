@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from kreports.analysis.search_adapter import search_dataset
 from kreports.db.engine import get_session
-from kreports.db.models import AccountingNoteChapter, Company, Disclosure, SourceDocument
+from kreports.db.models import AccountingNoteChapter, Company, Disclosure, Financial, SourceDocument
 
 
 def _add_note(*, body: str) -> None:
@@ -49,6 +49,39 @@ def test_accounting_note_keyword_search_uses_late_match_instead_of_body_prefix(t
     assert "재고자산" in record["body_excerpt"]
     assert "평균법" in record["body_excerpt"]
     assert record["body_excerpt"] != prefix[:1200]
+
+
+def test_note_company_matrix_can_filter_disclosers_by_financial_metric(temp_engine):
+    """The inverse disclosure lookup must expose a reproducible financial cohort."""
+    del temp_engine
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="91000001", corp_name="큰회사", market="KOSPI", induty_code="264"),
+            Company(corp_code="91000002", corp_name="작은회사", market="KOSPI", induty_code="264"),
+            AccountingNoteChapter(
+                corp_code="91000001", bsns_year=2025, fs_div="CFS", rcept_no="20260312000001",
+                source_type="business_report", note_no="7", note_title="재고자산", section_type="policy",
+                body="재고자산은 원가로 측정합니다.", body_hash="large", body_length=17,
+            ),
+            AccountingNoteChapter(
+                corp_code="91000002", bsns_year=2025, fs_div="CFS", rcept_no="20260312000002",
+                source_type="business_report", note_no="7", note_title="재고자산", section_type="policy",
+                body="재고자산은 원가로 측정합니다.", body_hash="small", body_length=17,
+            ),
+            Financial(corp_code="91000001", year=2025, quarter=4, fs_div="CFS", total_assets=1_000),
+            Financial(corp_code="91000002", year=2025, quarter=4, fs_div="CFS", total_assets=100),
+        ])
+
+    from kreports.mcp.handlers.search import handle_search_dataset
+    from kreports.mcp.input_models import SearchDatasetInput
+
+    result = handle_search_dataset(SearchDatasetInput(
+        dataset="accounting_note_chapters", keyword="재고자산", year=2025,
+        financial_metric="total_assets", financial_min=500, financial_year=2025,
+    ))
+    assert [item["corp_code"] for item in result["note_disclosure_company_matrix"]["companies"]] == ["91000001"]
+    assert result["note_disclosure_company_matrix"]["scope"]["financial_metric"] == "total_assets"
+    assert result["note_disclosure_company_matrix"]["scope"]["financial_min"] == 500.0
 
 
 def test_accounting_note_keyword_search_returns_up_to_three_unique_match_excerpts(temp_engine):
