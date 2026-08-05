@@ -68,8 +68,8 @@ def _compact_table_filter(
         # look more complete than it is. Omitting it makes the release gate
         # fail closed until a matching manifest is produced.
         terms.extend([
-            f"year_from >= {year_from}",
-            f"year_to <= {year_to}",
+            f"year_from = {year_from}",
+            f"year_to = {year_to}",
         ])
     elif table == "backfill_runs" and "year" in column_set:
         terms.append(f"year IS NULL OR year BETWEEN {year_from} AND {year_to}")

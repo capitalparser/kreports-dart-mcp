@@ -333,7 +333,7 @@ def test_export_runtime_db_applies_the_requested_year_window_to_runtime_rows(
     assert result["table_filters"]["source_documents"] == (
         "bsns_year BETWEEN 2024 AND 2024 AND source_type <> 'event_disclosure'"
     )
-    assert result["table_filters"]["dataset_manifest"] == "year_from >= 2024 AND year_to <= 2024"
+    assert result["table_filters"]["dataset_manifest"] == "year_from = 2024 AND year_to = 2024"
     assert result["copied_row_counts"]["financials"] == 1
     assert result["copied_row_counts"]["source_documents"] == 1
 
@@ -363,6 +363,20 @@ def test_export_runtime_db_applies_the_requested_year_window_to_runtime_rows(
         assert connection.execute(
             "SELECT manifest_id FROM dataset_manifest"
         ).fetchall() == [("fixture-2024",)]
+
+    full_range_path = tmp_path / "runtime-2023-2024.db"
+    full_range = export_runtime_db(
+        output_path=full_range_path,
+        year_from=2023,
+        year_to=2024,
+    )
+    assert full_range["table_filters"]["dataset_manifest"] == (
+        "year_from = 2023 AND year_to = 2024"
+    )
+    with sqlite3.connect(full_range_path) as connection:
+        assert connection.execute(
+            "SELECT manifest_id FROM dataset_manifest"
+        ).fetchall() == [("fixture-2023-2024",)]
 
 
 def test_export_runtime_db_rejects_inverted_year_window(temp_engine, tmp_path):
