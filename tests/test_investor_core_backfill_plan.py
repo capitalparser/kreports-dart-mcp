@@ -591,11 +591,49 @@ def test_latest_invalid_annual_anchor_never_falls_back_to_older_valid_disclosure
     plan = plan_investor_core_backfill(database, threshold_pct=100)
 
     assert plan["selected_companies"][0]["proven_years"] == []
+    assert plan["selected_companies"][0]["invalid_annual_anchor_years"] == [2024]
     assert plan["selected_companies"][0]["missing_disclosure_metadata_years"] == [
         2025,
-        2024,
         2023,
     ]
+
+
+def test_plan_separates_invalid_annual_anchors_from_true_metadata_gaps(tmp_path):
+    """Strict-anchor rejection is not evidence that annual metadata is absent."""
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(database, corp_code="000001", grade="D", status="available")
+    _add_annual(database, corp_code="000001", year=2025)
+    _add_annual(
+        database,
+        corp_code="000001",
+        year=2024,
+        receipt="20250330000001",
+        disc_date=date(2025, 3, 31),
+    )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    selected = plan["selected_companies"][0]
+    assert selected["selected_years"] == [2025, 2024, 2023]
+    assert selected["source_ready"] is False
+    assert [anchor["bsns_year"] for anchor in selected["annual_filing_anchors"]] == [2025]
+    assert selected["invalid_annual_anchor_years"] == [2024]
+    assert selected["missing_disclosure_metadata_years"] == [2023]
+    assert plan["selected_invalid_annual_anchor_company_count"] == 1
+    assert plan["selected_invalid_annual_anchor_year_count"] == 1
+    assert plan["selected_true_missing_disclosure_metadata_company_count"] == 1
+    assert plan["selected_true_missing_disclosure_metadata_year_count"] == 1
+    assert (
+        sum(len(row["annual_filing_anchors"]) for row in plan["selected_companies"])
+        + plan["selected_invalid_annual_anchor_year_count"]
+        + plan["selected_true_missing_disclosure_metadata_year_count"]
+        == plan["selected_successful_company_year_request_count"]
+    )
 
 
 def test_plan_counts_all_rejections_but_samples_only_twenty_diagnostics(tmp_path):

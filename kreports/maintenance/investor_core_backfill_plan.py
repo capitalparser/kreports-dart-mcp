@@ -73,17 +73,38 @@ def _annual_anchor(
     corp_code: str,
     year: int,
 ) -> dict[str, str] | None:
+    anchor, _has_matching_annual_row = _annual_anchor_diagnostic(
+        connection,
+        corp_code=corp_code,
+        year=year,
+    )
+    return anchor
+
+
+def _annual_anchor_diagnostic(
+    connection: sqlite3.Connection,
+    *,
+    corp_code: str,
+    year: int,
+) -> tuple[dict[str, str] | None, bool]:
+    """Return strict-anchor validity and whether business-year metadata exists."""
     rows = connection.execute(
         "SELECT corp_code, rcept_no, disc_date, report_nm FROM disclosures "
         "WHERE corp_code=? "
         "ORDER BY disc_date DESC, rcept_no DESC",
         (corp_code,),
     ).fetchall()
-    return latest_annual_filing_anchor_from_rows(
-        (dict(row) for row in rows),
+    disclosure_rows = [dict(row) for row in rows]
+    anchor = latest_annual_filing_anchor_from_rows(
+        disclosure_rows,
         corp_code=corp_code,
         bsns_year=year,
     )
+    has_matching_annual_row = any(
+        annual_report_name_matches_business_year(row.get("report_nm"), year)
+        for row in disclosure_rows
+    )
+    return anchor, has_matching_annual_row
 
 
 def _diagnostic(
@@ -241,9 +262,17 @@ def plan_investor_core_backfill(
                 coverage_year=coverage_year,
                 diagnostics=diagnostics,
             )
-            annual_anchors = {
-                year: _annual_anchor(connection, corp_code=corp_code, year=year)
+            annual_anchor_diagnostics = {
+                year: _annual_anchor_diagnostic(
+                    connection,
+                    corp_code=corp_code,
+                    year=year,
+                )
                 for year in range(window_start, coverage_year + 1)
+            }
+            annual_anchors = {
+                year: anchor
+                for year, (anchor, _has_matching_annual_row) in annual_anchor_diagnostics.items()
             }
             available_anchors = {
                 year: anchor
@@ -272,8 +301,17 @@ def plan_investor_core_backfill(
                     for year in selected_years
                     if year in available_anchors
                 ],
+                "invalid_annual_anchor_years": [
+                    year
+                    for year in selected_years
+                    if annual_anchors[year] is None
+                    and annual_anchor_diagnostics[year][1]
+                ],
                 "missing_disclosure_metadata_years": [
-                    year for year in selected_years if year not in available_anchors
+                    year
+                    for year in selected_years
+                    if annual_anchors[year] is None
+                    and not annual_anchor_diagnostics[year][1]
                 ],
                 "source_ready": source_ready,
                 "fillable": len(selected_years) == required,
@@ -312,6 +350,22 @@ def plan_investor_core_backfill(
         "selected_needing_disclosure_metadata_count": sum(
             1 for candidate in selected_companies if not candidate["source_ready"]
         ),
+        "selected_invalid_annual_anchor_company_count": sum(
+            1 for candidate in selected_companies if candidate["invalid_annual_anchor_years"]
+        ),
+        "selected_invalid_annual_anchor_year_count": sum(
+            len(candidate["invalid_annual_anchor_years"])
+            for candidate in selected_companies
+        ),
+        "selected_true_missing_disclosure_metadata_company_count": sum(
+            1
+            for candidate in selected_companies
+            if candidate["missing_disclosure_metadata_years"]
+        ),
+        "selected_true_missing_disclosure_metadata_year_count": sum(
+            len(candidate["missing_disclosure_metadata_years"])
+            for candidate in selected_companies
+        ),
         "unfillable_shortfall": unfillable_shortfall,
         "selected_companies": selected_companies,
         "rejected_proof_row_count": diagnostics.total_count,
@@ -324,5 +378,7 @@ def plan_investor_core_backfill(
             "This plan does not prove DART API quota or request success.",
             "This plan does not prove listing-period eligibility.",
             "This plan does not prove release readiness.",
+            "Source readiness requires a strict latest annual-filing anchor; "
+            "a business-year matching row with an invalid anchor is not filing absence.",
         ],
     }
