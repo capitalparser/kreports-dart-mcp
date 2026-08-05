@@ -105,6 +105,198 @@ def test_request_budget_records_distinct_financial_endpoints(monkeypatch):
     }
 
 
+def test_request_budget_counts_each_disclosure_list_page_and_blocks_the_next(monkeypatch):
+    """Removing the per-page budget charge would permit an unbounded list crawl."""
+    from kreports.collector import fetcher
+
+    client = _SequenceClient(
+        [
+            {
+                "status": "000", "message": "정상", "total_count": 201,
+                "list": [{"rcept_no": f"2025030100{index:04d}"} for index in range(100)],
+            },
+            {
+                "status": "000", "message": "정상", "total_count": 201,
+                "list": [{"rcept_no": f"2025030200{index:04d}"} for index in range(100)],
+            },
+        ]
+    )
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "fixture-key")
+    monkeypatch.setattr(fetcher.settings, "request_delay", 0)
+
+    with pytest.raises(fetcher.DartRequestBudgetExceeded):
+        with fetcher.request_budget(2) as budget:
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+    assert client.calls == ["list.json", "list.json"]
+    assert budget.used_calls == 2
+    assert budget.endpoint_counts == {"list.json": 2}
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_error"),
+    [
+        (
+            {"status": "020", "message": "사용한도 초과"},
+            "DartApiLimitExceeded",
+        ),
+        (
+            {"status": "010", "message": "등록되지 않은 인증키"},
+            "DartApiAuthError",
+        ),
+    ],
+)
+def test_disclosure_list_promotes_quota_and_auth_to_bounded_stops(
+    monkeypatch,
+    response,
+    expected_error,
+):
+    """Stable stop classes prevent secret-bearing DART messages entering reports."""
+    from kreports.collector import fetcher
+
+    client = _SequenceClient([response])
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "fixture-key")
+
+    error_type = getattr(fetcher, expected_error)
+    with pytest.raises(error_type):
+        with fetcher.request_budget(1):
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+
+def test_disclosure_list_malformed_json_is_redacted_bounded_transport(monkeypatch):
+    """Malformed list payloads must not expose the request credential."""
+    from kreports.collector import fetcher
+
+    secret = "fixture-secret-key"
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, *args, **kwargs):
+            return _MalformedJsonResponse()
+
+    monkeypatch.setattr(fetcher, "_get_client", Client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", secret)
+
+    with pytest.raises(fetcher.DartTransportError) as caught:
+        with fetcher.request_budget(1):
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+    assert secret not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"status": "000", "message": "정상", "total_count": 1, "list": "bad"},
+        {"status": "000", "message": "정상", "total_count": "bad", "list": []},
+        {"status": "000", "message": "정상", "list": [{"rcept_no": "1"}]},
+        {"status": "000", "message": "정상", "total_count": -1, "list": []},
+        {
+            "status": "000", "message": "정상", "total_count": 0,
+            "list": [{"rcept_no": "1"}],
+        },
+        {"status": "000", "message": "정상", "total_count": 1, "list": []},
+    ],
+)
+def test_disclosure_list_rejects_malformed_success_payload(monkeypatch, payload):
+    """Successful DART status still requires a bounded list response shape."""
+    from kreports.collector import fetcher
+
+    client = _SequenceClient([payload])
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "fixture-key")
+
+    with pytest.raises(fetcher.DartTransportError):
+        with fetcher.request_budget(1):
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+
+def test_disclosure_list_rejects_total_count_drift_between_pages(monkeypatch):
+    """A changing total cannot prove a complete, deterministic bounded crawl."""
+    from kreports.collector import fetcher
+
+    client = _SequenceClient([
+        {
+            "status": "000", "message": "정상", "total_count": 101,
+            "list": [{"rcept_no": str(index)} for index in range(100)],
+        },
+        {
+            "status": "000", "message": "정상", "total_count": 102,
+            "list": [{"rcept_no": "last"}],
+        },
+    ])
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "fixture-key")
+    monkeypatch.setattr(fetcher.settings, "request_delay", 0)
+
+    with pytest.raises(fetcher.DartTransportError):
+        with fetcher.request_budget(2) as budget:
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+    assert budget.used_calls == 2
+
+
+def test_disclosure_list_rejects_no_data_status_after_partial_page(monkeypatch):
+    """Status 013 cannot silently terminate an already incomplete pagination."""
+    from kreports.collector import fetcher
+
+    client = _SequenceClient([
+        {
+            "status": "000", "message": "정상", "total_count": 101,
+            "list": [{"rcept_no": str(index)} for index in range(100)],
+        },
+        {"status": "013", "message": "조회된 데이터가 없습니다"},
+    ])
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "fixture-key")
+    monkeypatch.setattr(fetcher.settings, "request_delay", 0)
+
+    with pytest.raises(fetcher.DartTransportError):
+        with fetcher.request_budget(2):
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+
+def test_disclosure_list_unknown_status_does_not_echo_remote_message(monkeypatch):
+    """Unknown DART failures may carry request data and must stay redacted."""
+    from kreports.collector import fetcher
+
+    secret = "fixture-secret-key"
+    client = _SequenceClient([
+        {"status": "999", "message": f"remote echoed crtfc_key={secret}"},
+    ])
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", secret)
+
+    with pytest.raises(RuntimeError) as caught:
+        with fetcher.request_budget(1):
+            fetcher.fetch_disclosure_list(
+                "00000001", "20250101", "20251231", disc_type="A",
+            )
+
+    assert str(caught.value) == "DART list.json returned an unsupported status"
+    assert secret not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     "bounded_failure",
     [

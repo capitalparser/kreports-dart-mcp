@@ -2633,6 +2633,7 @@ _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "non_source_ready_execution_rejected": "execute mode accepts source-ready targets only",
     "invalid_planner_output": "investor-core planner output is invalid",
     "duplicate_planner_target": "investor-core planner contains duplicate targets",
+    "invalid_as_of_date": "metadata cutoff precedes the selected business year",
     "free_space_probe_failed": "free-space probe failed",
     "relevant_row_count_failed": "relevant database rows could not be counted",
     "insufficient_free_space": "free-space reserve is below the 10 GiB minimum",
@@ -2643,6 +2644,8 @@ _INVESTOR_CORE_RUNNER_ERROR_MESSAGES = {
     "collector_failure": "bounded collector failed",
     "evidence_collection_failed": "post-run evidence could not be collected",
     "durability_checkpoint_failed": "SQLite WAL 내구성 체크포인트를 완료하지 못했습니다",
+    "disclosure_receipt_identity_conflict": "공시 접수번호가 다른 회사와 충돌하여 메타데이터 보완을 중단했습니다",
+    "metadata_persistence_failed": "검증된 공시 메타데이터를 저장하지 못했습니다",
 }
 
 
@@ -2727,6 +2730,91 @@ def run_investor_core_backfill_cmd(
                 separators=(",", ":"),
             )
         )
+        raise typer.Exit(2) from exc
+
+    _json_print(report)
+    if not report.get("completed", False):
+        raise typer.Exit(3)
+
+
+@app.command("run-investor-core-disclosure-backfill")
+def run_investor_core_disclosure_backfill_cmd(
+    db_path: Path = typer.Option(..., "--db", help="bounded runner SQLite DB path"),
+    as_of_date: str = typer.Option(
+        ...,
+        "--as-of-date",
+        help="DART metadata query cutoff (YYYY-MM-DD)",
+    ),
+    execute: bool = typer.Option(False, "--execute", help="perform bounded DART metadata repair"),
+    expected_db_sha256: Optional[str] = typer.Option(
+        None,
+        "--expected-db-sha256",
+        help="expected SHA-256 for the exact SQLite file (required with --execute)",
+    ),
+    max_api_calls: Optional[int] = typer.Option(
+        None,
+        "--max-api-calls",
+        help="positive maximum actual DART list.json attempts (required with --execute)",
+    ),
+    coverage_year: Optional[int] = typer.Option(None, "--coverage-year"),
+    threshold_pct: float = typer.Option(95.0, "--threshold-pct"),
+) -> None:
+    """Plan or run bounded annual-disclosure metadata remediation."""
+    from kreports.maintenance.investor_core_backfill_runner import (
+        InvestorCoreBackfillError,
+    )
+    from kreports.maintenance.investor_core_disclosure_backfill_runner import (
+        run_investor_core_disclosure_backfill,
+    )
+
+    try:
+        parsed_as_of_date = date.fromisoformat(as_of_date)
+        report = run_investor_core_disclosure_backfill(
+            db_path,
+            expected_db_sha256=expected_db_sha256,
+            execute=execute,
+            max_api_calls=max_api_calls,
+            as_of_date=parsed_as_of_date,
+            coverage_year=coverage_year,
+            threshold_pct=threshold_pct,
+        )
+    except InvestorCoreBackfillError as exc:
+        message = _INVESTOR_CORE_RUNNER_ERROR_MESSAGES.get(
+            exc.code,
+            "investor-core disclosure metadata runner rejected the request",
+        )
+        typer.echo(json.dumps(
+            {"error": {"code": exc.code, "message": message}},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        raise typer.Exit(2) from exc
+    except (ValueError, sqlite3.Error) as exc:
+        typer.echo(json.dumps(
+            {
+                "error": {
+                    "code": "investor_core_disclosure_backfill_unavailable",
+                    "message": "investor-core disclosure metadata runner unavailable",
+                }
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        raise typer.Exit(2) from exc
+    except Exception as exc:
+        typer.echo(json.dumps(
+            {
+                "error": {
+                    "code": "investor_core_disclosure_backfill_failed",
+                    "message": "investor-core disclosure metadata runner failed",
+                }
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
         raise typer.Exit(2) from exc
 
     _json_print(report)

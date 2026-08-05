@@ -22,6 +22,9 @@ DART_BASE = "https://opendart.fss.or.kr/api"
 DART_WEB_BASE = "https://dart.fss.or.kr"
 CORP_CODE_ZIP_URL = f"{DART_BASE}/corpCode.xml"  # zip 반환
 _DART_LIMIT_MARKERS = ("사용한도", "초과", "limit", "quota")
+_DART_AUTH_MARKERS = (
+    "인증키", "api key", "apikey", "auth", "unauthorized", "등록되지 않은",
+)
 
 # 로컬 캐시 경로 (30일 유효)
 _CACHE_DIR = Path(__file__).parent.parent.parent / ".cache"
@@ -148,6 +151,13 @@ def _is_dart_limit_error(status: str | None, message: str | None) -> bool:
         return False
     msg = (message or "").lower()
     return status != "000" and any(marker in msg for marker in _DART_LIMIT_MARKERS)
+
+
+def _is_dart_auth_error(status: str | None, message: str | None) -> bool:
+    if not status:
+        return False
+    msg = (message or "").lower()
+    return status != "000" and any(marker in msg for marker in _DART_AUTH_MARKERS)
 
 
 def _raise_if_dart_limit(status: str | None, message: str | None) -> None:
@@ -770,6 +780,7 @@ def fetch_disclosure_list(
     results = []
     page = 1
     page_count = 100  # DART 최대값
+    expected_total: int | None = None
 
     while True:
         params = {
@@ -784,23 +795,55 @@ def fetch_disclosure_list(
         if disc_type:
             params["pblntf_ty"] = disc_type
 
-        with _get_client() as client:
-            resp = client.get(f"{DART_BASE}/list.json", params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        _record_request_attempt("list.json")
+        try:
+            with _get_client() as client:
+                resp = client.get(f"{DART_BASE}/list.json", params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict):
+                    raise ValueError("DART list response must be an object")
+        except (httpx.HTTPError, ValueError) as exc:
+            _bounded_transport_error("list.json", exc)
 
         status = data.get("status")
         if status == "013":
+            if expected_total is not None and len(results) < expected_total:
+                _bounded_transport_error(
+                    "list.json",
+                    ValueError("DART pagination ended before total_count"),
+                )
             break
         if status != "000":
             message = data.get("message") or "unknown error"
-            raise RuntimeError(f"DART list.json status={status}: {message}")
+            if _is_dart_limit_error(status, message):
+                raise DartApiLimitExceeded("DART API limit exceeded")
+            if _is_dart_auth_error(status, message):
+                raise DartApiAuthError("DART API authentication failed")
+            raise RuntimeError("DART list.json returned an unsupported status")
 
-        items = data.get("list", [])
+        try:
+            items = data.get("list", [])
+            if not isinstance(items, list) or any(
+                not isinstance(item, dict) for item in items
+            ):
+                raise ValueError("DART list field must contain objects")
+            total = data.get("total_count")
+            if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+                raise ValueError("DART total_count must be a nonnegative integer")
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                raise ValueError("DART total_count changed between pages")
+            projected_count = len(results) + len(items)
+            if projected_count > total:
+                raise ValueError("DART list exceeds total_count")
+            if not items and projected_count < total:
+                raise ValueError("DART list pagination made no progress")
+        except (TypeError, ValueError) as exc:
+            _bounded_transport_error("list.json", exc)
         results.extend(items)
-
-        total = int(data.get("total_count", 0))
-        if len(results) >= total:
+        if len(results) == total:
             break
 
         page += 1

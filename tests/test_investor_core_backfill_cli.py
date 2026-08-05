@@ -41,6 +41,85 @@ def test_run_investor_core_backfill_defaults_to_json_dry_run(
     }
 
 
+def test_run_investor_core_disclosure_backfill_has_explicit_as_of_dry_run(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The metadata query cutoff must be explicit and visible in the report."""
+    from kreports.cli.main import app
+    from kreports.maintenance import investor_core_disclosure_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    database.touch()
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "schema": "investor_core_disclosure_backfill_report",
+            "dry_run": not kwargs["execute"],
+            "execute": kwargs["execute"],
+            "as_of_date": kwargs["as_of_date"].isoformat(),
+            "completed": True,
+        }
+
+    monkeypatch.setattr(runner, "run_investor_core_disclosure_backfill", fake_run)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run-investor-core-disclosure-backfill",
+            "--db", str(database),
+            "--as-of-date", "2026-08-05",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "schema": "investor_core_disclosure_backfill_report",
+        "dry_run": True,
+        "execute": False,
+        "as_of_date": "2026-08-05",
+        "completed": True,
+    }
+    assert captured["max_api_calls"] is None
+
+
+def test_run_investor_core_disclosure_backfill_redacts_unexpected_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Unexpected runner errors must remain stable, JSON, and secret-free."""
+    from kreports.cli.main import app
+    from kreports.maintenance import investor_core_disclosure_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    database.touch()
+    secret = "must-not-appear"
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        raise TypeError(f"malformed payload {secret}")
+
+    monkeypatch.setattr(runner, "run_investor_core_disclosure_backfill", fail)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run-investor-core-disclosure-backfill",
+            "--db", str(database),
+            "--as-of-date", "2026-08-05",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "error": {
+            "code": "investor_core_disclosure_backfill_failed",
+            "message": "investor-core disclosure metadata runner failed",
+        }
+    }
+    assert secret not in result.stdout
+
+
 def test_run_investor_core_backfill_emits_stable_json_error_and_nonzero_exit(
     tmp_path: Path,
     monkeypatch,

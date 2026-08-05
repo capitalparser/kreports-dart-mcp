@@ -107,6 +107,40 @@ API quota or request success, historical listing eligibility, or release
 readiness. Run the actual authorized backfill and then the full release gate
 separately; this command never weakens the gate or writes the DB.
 
+The bounded execution is deliberately split into two commands. First repair
+only the annual-filing metadata needed by non-source-ready planner candidates:
+
+```bash
+kreports run-investor-core-disclosure-backfill \
+  --db artifacts/kreports-runtime.db \
+  --as-of-date YYYY-MM-DD
+```
+
+Dry-run is the default and performs no network request or database write. An
+authorized execution additionally requires collector mode, a DART API key, the
+exact current database SHA-256, a positive request budget, and at least 10 GiB
+of free space:
+
+```bash
+kreports run-investor-core-disclosure-backfill \
+  --db artifacts/kreports-runtime.db \
+  --as-of-date YYYY-MM-DD \
+  --execute \
+  --expected-db-sha256 SHA256 \
+  --max-api-calls N
+```
+
+Each `list.json` page consumes one budget unit. The runner accepts only exact
+company codes, 14-digit receipts whose prefix matches the exact DART receipt
+date, annual reports for planner-selected years, and rows inside the explicit
+query window. It updates an existing receipt only for the same company and
+rolls back the target on a cross-company receipt collision. The single-writer
+lock remains held through WAL checkpoint and post-run hash, row-count, and disk
+evidence. A successful metadata phase is not financial backfill or release
+readiness: rerun `plan-investor-core-backfill`, then run the bounded financial
+phase on its freshly selected source-ready targets, rebuild derived quality
+artifacts, and verify the release artifact separately.
+
 ## Immutable proof
 
 Build and verify reject non-empty SQLite WAL state. They fingerprint DB/WAL/SHM
