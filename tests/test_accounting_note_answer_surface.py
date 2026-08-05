@@ -239,8 +239,8 @@ def test_note_pack_adds_company_matrix_without_replacing_existing_evidence_table
     }
     table = next(table for table in pack["tables"] if table["id"] == "note_disclosure_company_matrix")
     assert table["rows"] == [
-        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "match_status_label": "검증된 연간 공시 일치", "record_count": 1, "note_title": "재고자산", "note_title_truncated": None, "rcept_no": "20250312000001"},
-        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "match_status_label": "미검증 로컬 캐시 일치", "record_count": 2, "note_title": None, "note_title_truncated": None, "rcept_no": None},
+        {"company": "테스트회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025], "match_status": "verified_annual_filing_match", "match_status_label": "검증된 연간 공시 일치", "record_count": 1, "note_title": "재고자산", "note_title_truncated": None, "display_truncated": None, "rcept_no": "20250312000001"},
+        {"company": "미검증회사", "market": "KOSPI", "induty_code": "264", "year": 2025, "matched_years": [2025, 2024], "match_status": "unverified_cache_match", "match_status_label": "미검증 로컬 캐시 일치", "record_count": 2, "note_title": None, "note_title_truncated": None, "display_truncated": None, "rcept_no": None},
     ]
 
 
@@ -280,6 +280,7 @@ def test_note_company_matrix_uses_latest_matched_year_when_query_year_is_omitted
     assert company["matched_years"] == list(range(2025, 2015, -1))
     assert company["matched_years_truncated"] is True
     assert company["matched_years_omitted_count"] == 2
+    assert company["display_truncated"] is True
 
 
 def test_note_company_matrix_prioritizes_verified_companies_and_bounds_titles():
@@ -422,6 +423,9 @@ def test_note_company_matrix_worst_case_text_stays_within_public_envelope_budget
     matrix = result["note_disclosure_company_matrix"]
     assert matrix["matrix_output_budget_applied"] is True
     assert matrix["matrix_output_bytes"] <= matrix["matrix_max_output_bytes"]
+    assert matrix["matrix_output_bytes"] == len(json.dumps(
+        matrix, ensure_ascii=False, separators=(",", ":"),
+    ).encode())
     assert matrix["omitted_company_count"] > 0
     assert matrix["is_exhaustive"] is False
     assert matrix["companies"]
@@ -435,7 +439,7 @@ def test_note_company_matrix_worst_case_text_stays_within_public_envelope_budget
     assert len(json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False).encode()) <= 100_000
     table = next(table for table in public_result["answer_pack"]["tables"] if table["id"] == "note_disclosure_company_matrix")
     assert "생략" in table["note"]
-    assert {"record_count", "match_status_label", "note_title_truncated"} <= {
+    assert {"record_count", "match_status_label", "note_title_truncated", "display_truncated"} <= {
         column["field"] for column in table["columns"]
     }
 

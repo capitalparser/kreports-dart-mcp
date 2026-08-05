@@ -2346,6 +2346,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 "record_count": item.get("record_count"),
                 "note_title": item.get("canonical_note_title"),
                 "note_title_truncated": item.get("canonical_note_title_truncated"),
+                "display_truncated": item.get("display_truncated"),
                 "rcept_no": item.get("canonical_rcept_no"),
             })
         omitted_company_count = int(matrix.get("omitted_company_count") or 0)
@@ -2359,6 +2360,7 @@ def _build_accounting_note_evidence_pack(result: dict[str, Any]) -> dict[str, An
                 ("match_status", "기계 상태"), ("match_status_label", "일치 상태"),
                 ("record_count", "일치 레코드 수"), ("note_title", "검증 주석"),
                 ("note_title_truncated", "주석 제목 생략"),
+                ("display_truncated", "표시 생략"),
                 ("rcept_no", "검증 접수번호"),
             ],
             matrix_rows,

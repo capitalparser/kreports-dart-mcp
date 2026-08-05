@@ -306,6 +306,16 @@ def _matrix_output_bytes(matrix: dict) -> int:
     return len(json.dumps(matrix, ensure_ascii=False, separators=(",", ":")).encode())
 
 
+def _stabilize_matrix_output_bytes(matrix: dict) -> int:
+    """Store the serialized byte count until the self-referential field settles."""
+    for _ in range(8):
+        actual = _matrix_output_bytes(matrix)
+        if matrix.get("matrix_output_bytes") == actual:
+            return actual
+        matrix["matrix_output_bytes"] = actual
+    return _matrix_output_bytes(matrix)
+
+
 def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
     """Expose one bounded local-cache match row per company.
 
@@ -379,6 +389,13 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
                 canonical_note_title
             ),
             "canonical_note_title_truncated": canonical_note_title_truncated,
+            "display_truncated": (
+                corp_name_truncated
+                or market_truncated
+                or induty_code_truncated
+                or canonical_note_title_truncated
+                or len(all_matched_years) > len(matched_years)
+            ),
         })
     companies.sort(key=lambda item: (
         item["match_status"] != "verified_annual_filing_match",
@@ -428,7 +445,7 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         matrix["limitations"].append(
             "매트릭스 출력 byte 경계로 정렬된 후행 회사 행을 생략했습니다."
         )
-    matrix["matrix_output_bytes"] = _matrix_output_bytes(matrix)
+    _stabilize_matrix_output_bytes(matrix)
     while (
         matrix["matrix_output_bytes"] > _MAX_NOTE_DISCLOSURE_MATRIX_OUTPUT_BYTES
         and len(matrix["companies"]) > 1
@@ -436,7 +453,7 @@ def _note_disclosure_company_matrix(enriched: dict, query: dict) -> dict:
         matrix["companies"].pop()
         matrix["returned_company_count"] = len(matrix["companies"])
         matrix["omitted_company_count"] = len(companies) - len(matrix["companies"])
-        matrix["matrix_output_bytes"] = _matrix_output_bytes(matrix)
+        _stabilize_matrix_output_bytes(matrix)
     return matrix
 
 

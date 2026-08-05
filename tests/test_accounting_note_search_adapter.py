@@ -155,6 +155,7 @@ def test_note_search_company_matrix_requires_canonical_annual_source_binding(tem
         "match_status_label": "검증된 연간 공시 일치",
         "canonical_rcept_no": "20260312000001", "canonical_note_title": "재고자산",
         "canonical_note_title_truncated": False,
+        "display_truncated": False,
     }
     for corp_code in ("90000002", "90000003", "90000004"):
         assert by_code[corp_code]["match_status"] == "unverified_cache_match"
