@@ -1,0 +1,113 @@
+"""Keep the offline exclusion lane limited to genuine retained-data checks."""
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+import sys
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+EXPECTED_LIVE_DATA_NODES = frozenset("""
+tests/test_audit_landscape.py::test_audit_landscape_samsung_basic_shape
+tests/test_audit_landscape.py::test_audit_landscape_returns_top_auditors_sorted
+tests/test_auditor_peer_tools.py::test_compare_peer_audit_fees_real_db_shape
+tests/test_auditor_peer_tools.py::test_compare_peer_audit_fees_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_compare_peer_risk_profile_shape
+tests/test_auditor_peer_tools.py::test_compare_peer_risk_profile_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_compare_peer_accounting_policies_shape
+tests/test_auditor_peer_tools.py::test_compare_peer_accounting_policies_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_compare_peer_kam_topics_shape
+tests/test_auditor_peer_tools.py::test_compare_peer_kam_topics_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_compare_peer_audit_report_matters_shape
+tests/test_auditor_peer_tools.py::test_compare_peer_audit_report_matters_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_search_audit_report_matters_company_question_shape
+tests/test_auditor_peer_tools.py::test_search_audit_report_matters_industry_question_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_search_dataset_report_sections_shape
+tests/test_auditor_peer_tools.py::test_search_dataset_policy_and_structured_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_estimate_audit_hours_proxy_shape
+tests/test_auditor_peer_tools.py::test_estimate_audit_hours_proxy_mcp_dispatch
+tests/test_auditor_peer_tools.py::test_build_audit_acceptance_pack_shape
+tests/test_auditor_peer_tools.py::test_build_audit_acceptance_pack_mcp_dispatch
+tests/test_beneish.py::TestSamsungBeneishIntegration::test_beneish_computed_for_all_years
+tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_no_manipulation_flag
+tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_m_score_well_below_threshold
+tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_tata_negative
+tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_sgi_2023_below_one
+tests/test_beneish.py::TestSamsungBeneishIntegration::test_samsung_operating_cf_positive
+tests/test_dart_analyst.py::TestResolveCorpCode::test_corp_code_passthrough
+tests/test_dart_analyst.py::TestResolveCorpCode::test_stock_code_resolution
+tests/test_dart_analyst.py::TestSamsungIntegration::test_search_company_finds_samsung
+tests/test_dart_analyst.py::TestSamsungIntegration::test_get_company_returns_induty_code_key
+tests/test_dart_analyst.py::TestSamsungIntegration::test_financial_snapshot_has_annual_rows
+tests/test_dart_analyst.py::TestSamsungIntegration::test_financial_snapshot_json_serializable
+tests/test_dart_analyst.py::TestSamsungIntegration::test_going_concern_samsung_stable
+tests/test_dart_analyst.py::TestSamsungIntegration::test_going_concern_json_serializable
+tests/test_dart_analyst.py::TestSamsungIntegration::test_audit_history_has_entries
+tests/test_dart_analyst.py::TestSamsungIntegration::test_audit_history_json_serializable
+tests/test_dart_mcp.py::TestCallToolRealData::test_search_company_samsung
+tests/test_dart_mcp.py::TestCallToolRealData::test_get_financial_snapshot_by_stock_code
+tests/test_dart_mcp.py::TestCallToolRealData::test_get_financial_snapshot_by_name
+tests/test_dart_mcp.py::TestCallToolRealData::test_ambiguous_company_name_returns_candidates
+tests/test_dart_mcp.py::TestCallToolRealData::test_score_going_concern
+tests/test_dart_mcp.py::TestCallToolRealData::test_get_audit_history
+tests/test_dart_mcp.py::TestCallToolRealData::test_get_investor_signals
+tests/test_dart_mcp.py::TestCallToolRealData::test_subsidiary_auditors_default_slim_100
+tests/test_dart_mcp.py::TestCallToolRealData::test_subsidiary_auditors_only_with_auditor
+tests/test_dart_mcp.py::TestCallToolRealData::test_subsidiary_auditors_json_serializable
+tests/test_dart_mcp.py::TestStdioE2E::test_stdio_call_search_company
+tests/test_dart_mcp.py::TestStdioE2E::test_stdio_call_score_going_concern_samsung
+tests/test_golden_company_contracts.py::test_live_golden_company_shapes_are_read_immutably_without_dart_calls
+tests/test_industry_aggregates.py::TestRealDataSemiconductor::test_samsung_found_in_prefix_26
+tests/test_industry_aggregates.py::TestRealDataSemiconductor::test_peers_sorted_descending
+tests/test_industry_aggregates.py::TestRealDataSemiconductor::test_quantiles_min_max_correct
+tests/test_industry_aggregates.py::TestRealDataSemiconductor::test_p25_p75_null_when_sparse
+tests/test_industry_aggregates.py::TestCompareToIndustryTool::test_company_with_induty_code
+tests/test_industry_aggregates.py::TestCompareToIndustryTool::test_percentile_calculation
+tests/test_industry_aggregates.py::TestCompareToIndustryTool::test_subject_calculated_when_peers_omitted
+tests/test_industry_aggregates.py::TestCompareToIndustryTool::test_prefix_len_3
+tests/test_industry_aggregates.py::TestCompareToIndustryTool::test_response_json_serializable
+tests/test_induty_code.py::TestGetCompanyReturnsInduty::test_get_company_has_induty_code_key
+tests/test_integrity.py::TestSamsungDataCompleteness::test_minimum_quarters_collected
+tests/test_integrity.py::TestSamsungDataCompleteness::test_no_missing_core_accounts
+tests/test_integrity.py::TestSamsungDataCompleteness::test_account_map_confidence_perfect
+tests/test_integrity.py::TestSamsungDataCompleteness::test_annual_q4_has_beneish
+tests/test_integrity.py::TestSamsungAmountSanity::test_annual_revenue_in_valid_range
+tests/test_integrity.py::TestSamsungAmountSanity::test_total_assets_exceeds_equity
+tests/test_integrity.py::TestSamsungAmountSanity::test_assets_equals_debt_plus_equity_approx
+tests/test_integrity.py::TestSamsungAmountSanity::test_no_negative_revenue
+tests/test_integrity.py::TestSamsungAmountSanity::test_no_negative_total_assets
+tests/test_integrity.py::TestSamsungAmountSanity::test_operating_cf_quarterly_reasonable
+tests/test_integrity.py::TestUpsertNoDuplicates::test_no_duplicate_periods
+tests/test_integrity.py::TestDisclosureIntegrity::test_disclosures_exist
+tests/test_integrity.py::TestDisclosureIntegrity::test_disclosure_type_classified
+tests/test_integrity.py::TestDisclosureIntegrity::test_annual_reports_exist
+tests/test_integrity.py::TestAuditorIntegrity::test_auditors_exist
+tests/test_integrity.py::TestAuditorIntegrity::test_auditor_change_detected
+tests/test_mcp_narrative_responses.py::test_search_dataset_returns_user_facing_narrative
+tests/test_mcp_narrative_responses.py::test_search_audit_report_matters_returns_user_facing_narrative
+tests/test_peer.py::test_resolve_peers_samsung_uses_p3_general
+tests/test_peer.py::test_resolve_peers_excludes_financial_when_subject_general
+tests/test_peer.py::test_resolve_peers_size_bucket_reduces_pool
+tests/test_peer.py::test_resolve_peers_note_warns_when_low_n
+tests/test_peer_selection.py::test_select_peer_group_returns_reason_codes_for_real_db
+tests/test_peer_selection.py::test_select_peer_group_mcp_dispatch
+tests/test_policy_persistence.py::TestRealSamsungPolicies::test_samsung_has_multiple_years
+tests/test_policy_persistence.py::TestRealSamsungPolicies::test_samsung_body_hash_length
+""".split())
+
+
+def test_live_data_marker_inventory_excludes_only_retained_data_assertions():
+    """Catch a newly unmarked real-DB assertion or a broad module exclusion."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-m", "live_data"],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    actual = frozenset(
+        line for line in completed.stdout.splitlines() if line.startswith("tests/")
+    )
+
+    assert actual == EXPECTED_LIVE_DATA_NODES

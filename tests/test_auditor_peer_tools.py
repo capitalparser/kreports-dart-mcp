@@ -43,6 +43,7 @@ def test_prepare_standard_audit_hours_inputs_mcp_dispatch(temp_engine):
     assert out["standard_audit_hours_assessment"] == "not_assessed"
 
 
+@pytest.mark.live_data
 def test_compare_peer_audit_fees_real_db_shape():
     out = compare_peer_audit_fees("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -52,6 +53,7 @@ def test_compare_peer_audit_fees_real_db_shape():
     assert "audit_fee_to_assets_bps" in out["benchmarks"]
 
 
+@pytest.mark.live_data
 def test_compare_peer_audit_fees_mcp_dispatch():
     out = json.loads(call_tool("compare_peer_audit_fees", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "compare_peer_audit_fees"
@@ -415,6 +417,7 @@ def test_compare_peer_audit_fees_excludes_uncorroborated_unit_anomalies_and_expl
     assert "단위를 추정 변환하지 않고" in enriched["answer"]
 
 
+@pytest.mark.live_data
 def test_compare_peer_risk_profile_shape():
     out = compare_peer_risk_profile("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -422,12 +425,14 @@ def test_compare_peer_risk_profile_shape():
     assert "disclosure_event_counts" in out
 
 
+@pytest.mark.live_data
 def test_compare_peer_risk_profile_mcp_dispatch():
     out = json.loads(call_tool("compare_peer_risk_profile", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "compare_peer_risk_profile"
     assert out["peer_count"] > 0
 
 
+@pytest.mark.live_data
 def test_compare_peer_accounting_policies_shape():
     out = compare_peer_accounting_policies("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -436,12 +441,14 @@ def test_compare_peer_accounting_policies_shape():
     assert "coverage_note" in out
 
 
+@pytest.mark.live_data
 def test_compare_peer_accounting_policies_mcp_dispatch():
     out = json.loads(call_tool("compare_peer_accounting_policies", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "compare_peer_accounting_policies"
     assert "peer_item_coverage" in out
 
 
+@pytest.mark.live_data
 def test_compare_peer_kam_topics_shape():
     out = compare_peer_kam_topics("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -450,12 +457,14 @@ def test_compare_peer_kam_topics_shape():
     assert out["limitations"]
 
 
+@pytest.mark.live_data
 def test_compare_peer_kam_topics_mcp_dispatch():
     out = json.loads(call_tool("compare_peer_kam_topics", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "compare_peer_kam_topics"
     assert "audit_report_events" in out
 
 
+@pytest.mark.live_data
 def test_compare_peer_audit_report_matters_shape():
     out = compare_peer_audit_report_matters("005930", year=2024, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -503,12 +512,14 @@ def test_peer_matter_counts_keep_boilerplate_as_evidence_without_acceptance_sign
     assert "data_quality" in out
 
 
+@pytest.mark.live_data
 def test_compare_peer_audit_report_matters_mcp_dispatch():
     out = json.loads(call_tool("compare_peer_audit_report_matters", {"company": "005930", "year": 2024}))
     assert out["_meta"]["tool"] == "compare_peer_audit_report_matters"
     assert "matter_counts" in out
 
 
+@pytest.mark.live_data
 def test_search_audit_report_matters_company_question_shape():
     out = search_audit_report_matters(company="005930", year=2024, section_keys=["other_matter"], limit=20)
     assert out["query"]["company"] == "005930"
@@ -523,6 +534,7 @@ def test_search_audit_report_matters_company_question_shape():
         assert "sections" in first
 
 
+@pytest.mark.live_data
 def test_search_audit_report_matters_industry_question_mcp_dispatch():
     out = json.loads(call_tool(
         "search_audit_report_matters",
@@ -697,6 +709,7 @@ def test_search_audit_procedures_falls_back_to_full_body_kam_only(temp_engine):
     assert "내부통제" in record["procedure_excerpt"]
 
 
+@pytest.mark.live_data
 def test_search_dataset_report_sections_shape():
     out = search_dataset(
         dataset="report_sections",
@@ -714,6 +727,7 @@ def test_search_dataset_report_sections_shape():
         assert "records" in out["companies"][0]
 
 
+@pytest.mark.live_data
 def test_search_dataset_policy_and_structured_mcp_dispatch():
     policy = json.loads(call_tool(
         "search_dataset",
@@ -982,6 +996,7 @@ def test_compare_peer_audit_procedures_shape(temp_engine):
     assert out["peer_procedure_type_counts"]["substantive_test"] == 1
 
 
+@pytest.mark.live_data
 def test_estimate_audit_hours_proxy_shape():
     out = estimate_audit_hours_proxy("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -992,12 +1007,14 @@ def test_estimate_audit_hours_proxy_shape():
     assert all("score_after" in d for d in out["drivers"])
 
 
+@pytest.mark.live_data
 def test_estimate_audit_hours_proxy_mcp_dispatch():
     out = json.loads(call_tool("estimate_audit_hours_proxy", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "estimate_audit_hours_proxy"
     assert "complexity_score" in out
 
 
+@pytest.mark.live_data
 def test_build_audit_acceptance_pack_shape():
     out = build_audit_acceptance_pack("005930", year=2025, peer_limit=20)
     assert out["subject"]["corp_code"] == "00126380"
@@ -1013,6 +1030,7 @@ def test_build_audit_acceptance_pack_shape():
     assert "audit_report_matters" in out["data_quality"]
 
 
+@pytest.mark.live_data
 def test_build_audit_acceptance_pack_mcp_dispatch():
     out = json.loads(call_tool("build_audit_acceptance_pack", {"company": "005930", "year": 2025}))
     assert out["_meta"]["tool"] == "build_audit_acceptance_pack"

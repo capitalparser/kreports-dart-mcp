@@ -620,7 +620,8 @@ def test_collect_auditors_transport_failure_is_durable_and_cli_nonzero(
             .one()
         )
         assert run.status == "transport_error"
-        assert "DART transport timeout" in run.error_msg
+        assert "external request failed (TimeoutError)" in run.error_msg
+        assert "DART transport timeout" not in run.error_msg
 
 
 @pytest.mark.parametrize(

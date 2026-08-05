@@ -6,6 +6,7 @@ from kreports.mcp.tools import call_tool
 from kreports.mcp.renderers import render_answer
 
 
+@pytest.mark.live_data
 def test_search_dataset_returns_user_facing_narrative():
     out = json.loads(call_tool(
         "search_dataset",
@@ -102,6 +103,7 @@ def test_acceptance_narrative_includes_three_year_scale_table_for_plain_chatbots
     assert "판정:\n- limited" in text
 
 
+@pytest.mark.live_data
 def test_search_audit_report_matters_returns_user_facing_narrative():
     out = json.loads(call_tool("search_audit_report_matters", {"company": "005930", "year": 2024, "limit": 3}))
 

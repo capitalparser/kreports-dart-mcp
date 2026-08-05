@@ -119,6 +119,7 @@ def _samsung_available() -> bool:
     return cc is not None
 
 
+@pytest.mark.live_data
 class TestRealDataSemiconductor:
     """
     prefix=26에 삼성전자·SK하이닉스가 있어야 하므로 둘 다 DB에 존재해야 한다.
@@ -198,6 +199,7 @@ class TestCompareToIndustryTool:
         ))
         assert "error" in result
 
+    @pytest.mark.live_data
     def test_company_with_induty_code(self):
         if not _samsung_available():
             pytest.skip("Samsung DB 미등록")
@@ -220,6 +222,7 @@ class TestCompareToIndustryTool:
         assert "subject" not in result or result.get("subject") is None
         assert "quantiles" in result
 
+    @pytest.mark.live_data
     def test_percentile_calculation(self):
         """subject의 percentile이 올바르게 계산되는지."""
         if not _samsung_available():
@@ -235,6 +238,7 @@ class TestCompareToIndustryTool:
         assert pct is not None
         assert 0 <= pct <= 100
 
+    @pytest.mark.live_data
     def test_subject_calculated_when_peers_omitted(self):
         """peer 리스트를 생략해도 subject 위치는 전체 peer set 기준으로 계산되어야 한다."""
         if not _samsung_available():
@@ -250,6 +254,7 @@ class TestCompareToIndustryTool:
         assert result["subject"]["found_in_returned_peers"] is False
         assert result["subject"]["percentile"] is not None
 
+    @pytest.mark.live_data
     def test_prefix_len_3(self):
         """prefix_len=3 지정 시 match_prefix 3자리."""
         if not _samsung_available():
@@ -261,6 +266,7 @@ class TestCompareToIndustryTool:
         # Samsung induty_code="264" → prefix 3자리 = "264"
         assert result["match_prefix"] == "264"
 
+    @pytest.mark.live_data
     def test_response_json_serializable(self):
         if not _samsung_available():
             pytest.skip("Samsung DB 미등록")

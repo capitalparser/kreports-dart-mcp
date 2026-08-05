@@ -17,6 +17,8 @@ _10억 = 1_000_000_000       # 10억 원
 _1조 = 1_000_000_000_000    # 1조 원
 _300조 = 300 * _1조
 
+pytestmark = pytest.mark.live_data
+
 
 @pytest.fixture(scope="module")
 def samsung_corp_code():

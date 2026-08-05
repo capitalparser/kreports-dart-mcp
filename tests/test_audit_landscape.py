@@ -12,6 +12,7 @@ def test_is_big4_keywords():
     assert _is_big4("") is False
 
 
+@pytest.mark.live_data
 def test_audit_landscape_samsung_basic_shape():
     out = get_industry_audit_landscape(company="005930")
     if "error" in out:
@@ -26,6 +27,7 @@ def test_audit_landscape_samsung_basic_shape():
     assert "subject_auditor" in out
 
 
+@pytest.mark.live_data
 def test_audit_landscape_returns_top_auditors_sorted():
     out = get_industry_audit_landscape(company="005930", top_n=5)
     shares = out.get("auditor_market_share", [])

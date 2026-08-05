@@ -98,6 +98,7 @@ class TestCallToolErrors:
         assert "절대로존재하지않는기업명XYZ" not in result["error"]
 
 
+@pytest.mark.live_data
 class TestCallToolRealData:
     """삼성전자 데이터가 DB에 있는 경우의 실제 호출."""
 
@@ -335,6 +336,7 @@ class TestStdioE2E:
         assert "compare_to_industry" in names
         assert "prepare_audit_materiality_inputs" in names
 
+    @pytest.mark.live_data
     def test_stdio_call_search_company(self):
         text = asyncio.run(
             _e2e_stdio_call_tool("search_company", {"query": "삼성전자", "limit": 2})
@@ -342,6 +344,7 @@ class TestStdioE2E:
         assert text.startswith("판정:")
         assert "삼성전자" in text or "search_company" in text
 
+    @pytest.mark.live_data
     def test_stdio_call_score_going_concern_samsung(self):
         import kreports
         if kreports.resolve_corp_code("005930") is None:

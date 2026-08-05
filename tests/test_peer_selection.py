@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from kreports.analysis.api import select_peer_group
 from kreports.analysis.peer import resolve_fs_div_for_company
 from kreports.mcp.tools import call_tool
@@ -27,6 +29,7 @@ def test_resolve_fs_strategy_auto_falls_back_to_ofs(temp_engine):
     assert resolve_fs_div_for_company("00000001", 2025, "auto") == "OFS"
 
 
+@pytest.mark.live_data
 def test_select_peer_group_returns_reason_codes_for_real_db():
     out = select_peer_group("005930", criteria=["industry", "size"], peer_limit=10)
     assert out["subject"]["corp_code"] == "00126380"
@@ -41,6 +44,7 @@ def test_select_peer_group_returns_reason_codes_for_real_db():
     assert "selection_policy" in out
 
 
+@pytest.mark.live_data
 def test_select_peer_group_mcp_dispatch():
     out = json.loads(call_tool("select_peer_group", {"company": "005930", "peer_limit": 5}))
     assert out["peer_count"] > 0

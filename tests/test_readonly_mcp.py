@@ -95,10 +95,11 @@ def test_readonly_cache_miss_message_does_not_request_dart_key():
     assert "DART_API_KEY" not in msg
 
 
-def test_mcp_smoke_cli_works_without_dart_key():
+def test_mcp_smoke_cli_fails_closed_without_seeded_data_or_dart_key():
     environment = {
         "PATH": os.environ["PATH"],
         "KREPORTS_RUNTIME_MODE": "readonly",
+        "DART_API_KEY": "",
     }
     if db_url := os.environ.get("DB_URL"):
         environment["DB_URL"] = db_url
@@ -108,7 +109,7 @@ def test_mcp_smoke_cli_works_without_dart_key():
         capture_output=True,
         env=environment,
     )
-    assert proc.returncode == 0
-    assert "RESULT: OK" in proc.stdout
+    assert proc.returncode == 1
+    assert "RESULT: CHECK REQUIRED" in proc.stdout
     assert "DART_API_KEY" not in proc.stdout
     assert "DART_API_KEY" not in proc.stderr

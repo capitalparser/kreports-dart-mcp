@@ -16,7 +16,9 @@ def test_offline_runner_overrides_ambient_inputs_and_propagates_guard_to_child(t
         """
 import json
 import os
+from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import pytest
@@ -24,10 +26,16 @@ import pytest
 
 def test_offline_environment_and_child_guard():
     assert os.environ["DART_API_KEY"] == ""
-    assert os.environ["DB_URL"] == "sqlite:///:memory:"
+    db_path = Path(os.environ["KREPORTS_OFFLINE_DB_PATH"])
+    assert db_path.is_file()
+    assert os.environ["DB_URL"] == f"sqlite:///{db_path}"
     assert os.environ["KREPORTS_RUNTIME_MODE"] == "readonly"
     assert os.environ["KREPORTS_LIVE_DB"] == ""
     assert os.environ["KREPORTS_OFFLINE_NETWORK_BLOCK"] == "1"
+    with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='companies'"
+        ).fetchone() == (1,)
     with pytest.raises(OSError, match="offline network disabled"):
         socket.create_connection(("example.com", 443), timeout=0.1)
     child = subprocess.run(

@@ -97,6 +97,7 @@ def samsung_annual_financials():
         ]
 
 
+@pytest.mark.live_data
 class TestSamsungBeneishIntegration:
     def test_beneish_computed_for_all_years(self, samsung_annual_financials):
         """삼성전자 수집 연도 전체에 Beneish M-Score가 계산되어야 한다."""

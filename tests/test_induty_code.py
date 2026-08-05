@@ -221,6 +221,7 @@ class TestFetchRetry:
 # ---------------------------------------------------------------------------
 
 class TestGetCompanyReturnsInduty:
+    @pytest.mark.live_data
     def test_get_company_has_induty_code_key(self):
         """
         get_company 반환 dict에 induty_code 키가 포함되어야 한다.

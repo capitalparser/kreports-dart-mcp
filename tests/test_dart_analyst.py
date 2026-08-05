@@ -116,6 +116,7 @@ class TestResolveCorpCode:
         # 공백 → search 후 빈 결과 → None
         assert kreports.resolve_corp_code("") is None
 
+    @pytest.mark.live_data
     def test_corp_code_passthrough(self):
         """삼성전자 corp_code 00126380이 DB에 있으면 그대로 반환."""
         result = kreports.resolve_corp_code("00126380")
@@ -123,6 +124,7 @@ class TestResolveCorpCode:
         if result is not None:
             assert result == "00126380"
 
+    @pytest.mark.live_data
     def test_stock_code_resolution(self):
         """종목코드 005930 → corp_code 변환."""
         result = kreports.resolve_corp_code("005930")
@@ -146,6 +148,7 @@ def samsung_corp_code():
     return cc
 
 
+@pytest.mark.live_data
 class TestSamsungIntegration:
     def test_search_company_finds_samsung(self):
         results = kreports.search_company("삼성전자", limit=5)

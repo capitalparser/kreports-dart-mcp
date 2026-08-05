@@ -297,6 +297,7 @@ class TestCollectPoliciesBatch:
 # 5. 실데이터 조회 (Samsung policies가 있으면)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.live_data
 class TestRealSamsungPolicies:
     def _has_samsung_policies(self) -> bool:
         from kreports.db.engine import engine

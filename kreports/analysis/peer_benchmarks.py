@@ -174,6 +174,7 @@ def get_industry_aggregates(
           "n",  # 통계에 포함된 기업 수
           "quantiles": {"p25", "p50", "p75", "min", "max", "mean"} or None,
           "peers": [{"corp_code", "corp_name", "induty_code", "value"}, ...],
+          "peer_limit", "truncated",
           "sector_group", "confidence", "excluded_categories",
           "size_bucket_applied", "matched_prefix_len",
           "note": str,
@@ -266,6 +267,8 @@ def get_industry_aggregates(
                 "n": 0,
                 "quantiles": None,
                 "peers": [],
+                "peer_limit": peer_limit,
+                "truncated": False,
                 "sector_group": sector_group_val,
                 "confidence": confidence_band(0),
                 "excluded_categories": excluded_categories,
