@@ -137,12 +137,25 @@ def test_revenue_body_match_rejects_compound_financial_income_prefixes():
         assert _topic_match(
             {"note_title": "금융상품", "body": body}, "revenue",
         ) is None
+    for title in ("이자수익인식", "금융수익인식", "배당수익을 인식"):
+        assert _topic_match({"note_title": title, "body": ""}, "revenue") is None
     assert _topic_match(
         {"note_title": "기타", "body": "수익인식 정책을 적용합니다."}, "revenue",
     ) is not None
     assert _topic_match(
         {"note_title": "기타", "body": "고객과의 계약에서 수행의무를 식별합니다."}, "revenue",
     ) is not None
+
+
+def test_lease_match_rejects_risk_substrings_but_keeps_lease_compounds():
+    from kreports.analysis.note_comparison import _topic_match
+
+    assert _topic_match(
+        {"note_title": "기타", "body": "시장리스크 및 신용리스크를 관리합니다. 리스크를 반복합니다."},
+        "leases",
+    ) is None
+    for body in ("리스 정책을 적용합니다.", "판매후리스 거래입니다.", "리스부채를 측정합니다.", "사용권자산을 인식합니다."):
+        assert _topic_match({"note_title": "기타", "body": body}, "leases") is not None
 
 
 def test_note_comparison_marks_unbound_cached_note_summary_only_without_receipt(temp_engine):
