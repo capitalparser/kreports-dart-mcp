@@ -1,7 +1,7 @@
 """Read-only normalization of KIND's EUC-KR HTML-XLS listing export."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -9,6 +9,10 @@ import sqlite3
 
 import pytest
 from typer.testing import CliRunner
+
+
+RAW_SOURCE_URI = "https://kind.krx.co.kr/corpgeneral/corpList.do"
+RETRIEVED_AT = "2026-08-05T09:30:00+09:00"
 
 
 def _kind_xls(
@@ -39,7 +43,7 @@ def _company_snapshot_checksum() -> str:
 
 def _companies() -> list[dict[str, str]]:
     return [
-        {"corp_code": "1", "stock_code": "1", "market": "KOSPI"},
+        {"corp_code": "00000001", "stock_code": "000001", "market": "KOSPI"},
         {"corp_code": "00000002", "stock_code": "000002", "market": "KOSDAQ"},
         {"corp_code": "00000003", "stock_code": "000003", "market": "KOSPI"},
     ]
@@ -125,6 +129,57 @@ def test_alphanumeric_six_character_stock_codes_are_canonicalized_and_preserved(
         "corp_code": "00000010", "stock_code": "0010V0", "market": "KOSPI",
         "listed_from": "2024-01-02", "listed_to": "", "status": "verified",
     }]
+
+
+@pytest.mark.parametrize("company, message", [
+    ({"corp_code": "1", "stock_code": "000001", "market": "KOSPI"}, "corp_code must be exactly 8 digits"),
+    ({"corp_code": "00000001", "stock_code": "1", "market": "KOSPI"}, "stock_code must be exactly 6 uppercase ASCII alphanumeric characters"),
+    ({"corp_code": "00000001", "stock_code": "0010v0", "market": "KOSPI"}, "stock_code must be exactly 6 uppercase ASCII alphanumeric characters"),
+])
+def test_company_snapshot_binding_codes_are_exact_and_never_canonicalized(company, message):
+    from kreports.maintenance.krx_listing_normalizer import (
+        KrxListingNormalizationError,
+        normalize_krx_listing_bytes,
+    )
+
+    with pytest.raises(KrxListingNormalizationError, match=message):
+        normalize_krx_listing_bytes(
+            _kind_xls([("가나다", "000001", "유가", "2001-01-02")]),
+            [company],
+            as_of=date(2026, 8, 5),
+        )
+
+
+def test_normalized_snapshot_round_trips_to_the_same_company_master_importer(temp_engine, tmp_path: Path):
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+    from kreports.maintenance.krx_listing_normalizer import (
+        normalize_krx_listing_bytes,
+        write_normalized_listing_csv,
+    )
+    from kreports.maintenance.listing_periods import import_listing_period_snapshot
+
+    company = {"corp_code": "00000001", "stock_code": "0010V0", "market": "KOSPI"}
+    with get_session() as session:
+        session.add(Company(corp_name="Binding Corp", **company))
+    raw = _kind_xls([("바인딩", "0010v0", "유가", "2001-01-02")])
+    raw_path = tmp_path / "kind.xls"
+    raw_path.write_bytes(raw)
+    normalized = normalize_krx_listing_bytes(raw, [company], as_of=date(2026, 8, 5))
+    normalized_path = tmp_path / "normalized.csv"
+    write_normalized_listing_csv(normalized_path, normalized.csv_bytes)
+
+    imported = import_listing_period_snapshot(
+        normalized_path,
+        raw_source_path=raw_path,
+        raw_source_uri=RAW_SOURCE_URI,
+        raw_source_checksum=hashlib.sha256(raw).hexdigest(),
+        raw_source_retrieved_at=datetime(2026, 8, 5, tzinfo=UTC),
+        normalized_checksum=normalized.summary["normalized_checksum"],
+        transformation_version="krx-listing-normalize-v1",
+        as_of=date(2026, 8, 5),
+    )
+    assert imported["inserted"] == 1
 
 
 def test_company_name_is_required_and_blank_or_name_conflicting_source_rows_fail_closed():
@@ -348,6 +403,22 @@ def test_normalization_bytes_are_deterministic_for_input_and_company_order():
     assert first.summary == second.summary
 
 
+def test_rejects_empty_kind_source_or_empty_current_core_population():
+    from kreports.maintenance.krx_listing_normalizer import (
+        KrxListingNormalizationError,
+        normalize_krx_listing_bytes,
+    )
+
+    with pytest.raises(KrxListingNormalizationError, match="KIND source has no data rows"):
+        normalize_krx_listing_bytes(_kind_xls([]), _companies(), as_of=date(2026, 8, 5))
+    with pytest.raises(KrxListingNormalizationError, match="current core company population is empty"):
+        normalize_krx_listing_bytes(
+            _kind_xls([("가나다", "000001", "유가", "2001-01-02")]),
+            [],
+            as_of=date(2026, 8, 5),
+        )
+
+
 def test_reads_explicit_sqlite_snapshot_without_mutating_it_and_fails_closed_for_bad_stock_codes(tmp_path: Path):
     from kreports.maintenance.krx_listing_normalizer import (
         KrxListingNormalizationError,
@@ -360,8 +431,8 @@ def test_reads_explicit_sqlite_snapshot_without_mutating_it_and_fails_closed_for
     connection.executemany(
         "INSERT INTO companies VALUES (?, ?, ?)",
         [
-            ("00000002", "2", "KOSDAQ"),
-            ("00000001", "1", "KOSPI"),
+            ("00000002", "000002", "KOSDAQ"),
+            ("00000001", "000001", "KOSPI"),
             ("00000003", None, "KOSPI"),
             ("00000009", "9", "KONEX"),
         ],
@@ -382,7 +453,7 @@ def test_reads_explicit_sqlite_snapshot_without_mutating_it_and_fails_closed_for
     invalid_connection.execute("INSERT INTO companies VALUES ('00000004', '', 'KOSPI')")
     invalid_connection.commit()
     invalid_connection.close()
-    with pytest.raises(KrxListingNormalizationError, match="stock_code must be a 6-character uppercase alphanumeric code"):
+    with pytest.raises(KrxListingNormalizationError, match="stock_code must be exactly 6 uppercase ASCII alphanumeric characters"):
         read_current_core_companies(invalid_database)
 
 
@@ -419,10 +490,80 @@ def test_cli_normalizes_from_explicit_raw_and_db_paths_and_prints_json(tmp_path:
     result = CliRunner().invoke(app, [
         "normalize-krx-listing", "--raw-path", str(raw_path), "--db-path", str(database),
         "--output-path", str(output), "--as-of", "2026-08-05",
+        "--raw-source-uri", RAW_SOURCE_URI,
+        "--raw-source-retrieved-at", RETRIEVED_AT,
     ])
 
     assert result.exit_code == 0, result.output
     summary = json.loads(result.output)
     assert summary["row_count"] == 1
     assert summary["output_path"] == str(output)
+    assert summary["raw_source_uri"] == RAW_SOURCE_URI
+    assert summary["raw_source_retrieved_at"] == "2026-08-05T00:30:00Z"
+    assert summary["raw_source_storage_uri"] == raw_path.resolve().as_uri()
     assert output.read_text(encoding="utf-8").endswith("00000001,0010V0,KOSPI,2001-01-02,,verified\n")
+
+
+def test_cli_rejects_empty_source_or_invalid_provenance_without_creating_output(tmp_path: Path):
+    from kreports.cli.main import app
+
+    database = tmp_path / "companies.sqlite"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE companies (corp_code TEXT, stock_code TEXT, market TEXT)")
+    connection.execute("INSERT INTO companies VALUES ('00000001', '0010V0', 'KOSPI')")
+    connection.commit()
+    connection.close()
+    raw_path = tmp_path / "empty-kind.xls"
+    raw_path.write_bytes(_kind_xls([]))
+    output = tmp_path / "must-not-exist.csv"
+
+    result = CliRunner().invoke(app, [
+        "normalize-krx-listing", "--raw-path", str(raw_path), "--db-path", str(database),
+        "--output-path", str(output), "--as-of", "2026-08-06",
+        "--raw-source-uri", "https://example.com/not-krx.xls",
+        "--raw-source-retrieved-at", RETRIEVED_AT,
+    ])
+
+    assert result.exit_code == 2
+    assert not output.exists()
+    assert "official KRX" in json.loads(result.output)["error"]
+
+    future_output = tmp_path / "future-must-not-exist.csv"
+    future_result = CliRunner().invoke(app, [
+        "normalize-krx-listing", "--raw-path", str(raw_path), "--db-path", str(database),
+        "--output-path", str(future_output), "--as-of", "2026-08-06",
+        "--raw-source-uri", RAW_SOURCE_URI,
+        "--raw-source-retrieved-at", "2026-08-05T00:00:00Z",
+    ])
+    assert future_result.exit_code == 2
+    assert not future_output.exists()
+    assert "as_of cannot be after" in json.loads(future_result.output)["error"]
+
+    empty_source_output = tmp_path / "empty-source-must-not-exist.csv"
+    empty_source_result = CliRunner().invoke(app, [
+        "normalize-krx-listing", "--raw-path", str(raw_path), "--db-path", str(database),
+        "--output-path", str(empty_source_output), "--as-of", "2026-08-05",
+        "--raw-source-uri", RAW_SOURCE_URI,
+        "--raw-source-retrieved-at", "2026-08-05T00:00:00Z",
+    ])
+    assert empty_source_result.exit_code == 2
+    assert not empty_source_output.exists()
+    assert "KIND source has no data rows" in json.loads(empty_source_result.output)["error"]
+
+    empty_database = tmp_path / "empty-companies.sqlite"
+    empty_connection = sqlite3.connect(empty_database)
+    empty_connection.execute("CREATE TABLE companies (corp_code TEXT, stock_code TEXT, market TEXT)")
+    empty_connection.commit()
+    empty_connection.close()
+    nonempty_raw = tmp_path / "nonempty-kind.xls"
+    nonempty_raw.write_bytes(_kind_xls([("가나다", "0010V0", "유가", "2001-01-02")]))
+    empty_core_output = tmp_path / "empty-core-must-not-exist.csv"
+    empty_core_result = CliRunner().invoke(app, [
+        "normalize-krx-listing", "--raw-path", str(nonempty_raw), "--db-path", str(empty_database),
+        "--output-path", str(empty_core_output), "--as-of", "2026-08-05",
+        "--raw-source-uri", RAW_SOURCE_URI,
+        "--raw-source-retrieved-at", "2026-08-05T00:00:00Z",
+    ])
+    assert empty_core_result.exit_code == 2
+    assert not empty_core_output.exists()
+    assert "current core company population is empty" in json.loads(empty_core_result.output)["error"]

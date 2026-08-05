@@ -74,10 +74,15 @@ def normalize_krx_listing_cmd(
     db_path: Path = typer.Option(..., "--db-path", help="Explicit read-only SQLite snapshot"),
     output_path: Path = typer.Option(..., "--output-path", help="New UTF-8 CSV output path"),
     as_of: str = typer.Option(..., "--as-of", help="Snapshot date, YYYY-MM-DD"),
+    raw_source_uri: str = typer.Option(..., "--raw-source-uri", help="Official KRX HTTPS source URI"),
+    raw_source_retrieved_at: str = typer.Option(
+        ..., "--raw-source-retrieved-at", help="Timezone-aware ISO-8601 receipt timestamp"
+    ),
 ) -> None:
     """Normalize a local KIND receipt without network access or database writes."""
     from kreports.maintenance.krx_listing_normalizer import (
         KrxListingNormalizationError,
+        canonical_raw_source_provenance,
         normalize_krx_listing_path,
         read_current_core_companies,
         write_normalized_listing_csv,
@@ -85,13 +90,26 @@ def normalize_krx_listing_cmd(
 
     try:
         as_of_date = date.fromisoformat(as_of)
+        provenance = canonical_raw_source_provenance(
+            raw_source_uri,
+            raw_source_retrieved_at,
+            as_of=as_of_date,
+        )
+        resolved_raw_path = raw_path.expanduser().resolve(strict=True)
+        if not resolved_raw_path.is_file():
+            raise KrxListingNormalizationError("raw KIND path must be a readable file")
         companies = read_current_core_companies(db_path)
-        result = normalize_krx_listing_path(raw_path, companies, as_of=as_of_date)
+        result = normalize_krx_listing_path(resolved_raw_path, companies, as_of=as_of_date)
         write_normalized_listing_csv(output_path, result.csv_bytes)
     except (KrxListingNormalizationError, OSError, ValueError) as exc:
         typer.echo(json.dumps({"error": str(exc)}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         raise typer.Exit(code=2) from exc
-    summary = {**result.summary, "output_path": str(output_path)}
+    summary = {
+        **result.summary,
+        **provenance,
+        "raw_source_storage_uri": resolved_raw_path.as_uri(),
+        "output_path": str(output_path),
+    }
     typer.echo(json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 

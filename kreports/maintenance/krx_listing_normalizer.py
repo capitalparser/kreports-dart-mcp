@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 from html.parser import HTMLParser
 import os
@@ -18,6 +18,7 @@ import re
 import sqlite3
 import tempfile
 from typing import Iterable, Mapping, Sequence
+from urllib.parse import urlparse
 
 from kreports.db.readonly_snapshot import (
     ReadonlySQLiteSnapshotUnavailable,
@@ -35,6 +36,7 @@ CSV_COLUMNS = (
     "status",
 )
 CORE_MARKETS = frozenset({"KOSPI", "KOSDAQ"})
+OFFICIAL_KRX_HOSTS = frozenset({"data.krx.co.kr", "global.krx.co.kr", "kind.krx.co.kr"})
 _KRX_MARKETS = {"유가": "KOSPI", "코스닥": "KOSDAQ", "코넥스": "KONEX"}
 _HEADER_ALIASES = {
     "company_name": frozenset({"회사명"}),
@@ -173,11 +175,22 @@ class _HtmlTableParser(HTMLParser):
             raise KrxListingNormalizationError("unsupported table structure")
 
 
-def _normalize_corp_code(value: object) -> str:
-    normalized = str(value or "").strip()
-    if not normalized.isascii() or not normalized.isdigit() or len(normalized) > 8:
-        raise KrxListingNormalizationError("corp_code must be an 8-digit numeric code")
-    return normalized.zfill(8)
+def _validate_company_corp_code(value: object) -> str:
+    """Require the exact company-master identifier used by importer binding."""
+    code = str(value or "")
+    if not code.isascii() or not code.isdigit() or len(code) != 8:
+        raise KrxListingNormalizationError("corp_code must be exactly 8 digits")
+    return code
+
+
+def _validate_company_stock_code(value: object) -> str:
+    """Require, rather than repair, the importer-bound company stock code."""
+    code = str(value or "")
+    if re.fullmatch(r"[0-9A-Z]{6}", code) is None:
+        raise KrxListingNormalizationError(
+            "stock_code must be exactly 6 uppercase ASCII alphanumeric characters"
+        )
+    return code
 
 
 def _normalize_stock_code(value: object) -> str:
@@ -221,11 +234,11 @@ def _normalize_companies(companies: Iterable[object]) -> list[dict[str, str]]:
         market = str(_company_value(company, "market") or "").strip().upper()
         if market not in CORE_MARKETS:
             continue
-        corp_code = _normalize_corp_code(_company_value(company, "corp_code"))
+        corp_code = _validate_company_corp_code(_company_value(company, "corp_code"))
         if corp_code in seen_corp_codes:
             raise KrxListingNormalizationError("duplicate corp_code in company records")
         seen_corp_codes.add(corp_code)
-        stock_code = _normalize_stock_code(_company_value(company, "stock_code"))
+        stock_code = _validate_company_stock_code(_company_value(company, "stock_code"))
         if stock_code in seen_stock_codes:
             raise KrxListingNormalizationError("duplicate stock_code in company records")
         seen_stock_codes.add(stock_code)
@@ -313,6 +326,37 @@ def _current_company_snapshot_checksum(companies: Sequence[Mapping[str, str]]) -
     return hashlib.sha256(canonical).hexdigest()
 
 
+def canonical_raw_source_provenance(
+    raw_source_uri: str,
+    raw_source_retrieved_at: str,
+    *,
+    as_of: date,
+) -> dict[str, str]:
+    """Validate the provenance fields expected by the listing-period importer."""
+    parsed_uri = urlparse(raw_source_uri)
+    if parsed_uri.scheme != "https" or parsed_uri.hostname not in OFFICIAL_KRX_HOSTS:
+        raise KrxListingNormalizationError("raw_source_uri must be an official KRX https URI")
+    try:
+        retrieved_at = datetime.fromisoformat(raw_source_retrieved_at.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise KrxListingNormalizationError(
+            "raw_source_retrieved_at must be a timezone-aware ISO-8601 timestamp"
+        ) from exc
+    if retrieved_at.tzinfo is None or retrieved_at.utcoffset() is None:
+        raise KrxListingNormalizationError(
+            "raw_source_retrieved_at must be a timezone-aware ISO-8601 timestamp"
+        )
+    retrieved_at_utc = retrieved_at.astimezone(timezone.utc)
+    if as_of > retrieved_at_utc.date():
+        raise KrxListingNormalizationError(
+            "as_of cannot be after raw_source_retrieved_at UTC date"
+        )
+    return {
+        "raw_source_uri": raw_source_uri,
+        "raw_source_retrieved_at": retrieved_at_utc.isoformat().replace("+00:00", "Z"),
+    }
+
+
 def normalize_krx_listing_bytes(
     raw_bytes: bytes,
     companies: Iterable[object],
@@ -325,7 +369,11 @@ def normalize_krx_listing_bytes(
     if not isinstance(as_of, date) or isinstance(as_of, datetime):
         raise KrxListingNormalizationError("as_of must be a date")
     current_companies = _normalize_companies(companies)
+    if not current_companies:
+        raise KrxListingNormalizationError("current core company population is empty")
     source_rows = _parse_kind_rows(raw_bytes, as_of=as_of)
+    if not source_rows:
+        raise KrxListingNormalizationError("KIND source has no data rows")
     source_by_stock: dict[str, set[tuple[str, str, str]]] = {}
     for company_name, stock_code, market, listed_from in source_rows:
         source_by_stock.setdefault(stock_code, set()).add((company_name, market, listed_from))
