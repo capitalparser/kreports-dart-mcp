@@ -7,14 +7,16 @@ import json
 def test_note_comparison_returns_side_by_side_rows_and_explicit_absence(temp_engine):
     from kreports.analysis.note_comparison import compare_peer_accounting_notes
     from kreports.db.engine import get_session
-    from kreports.db.models import AccountingNoteChapter, Company, EvidenceDocument, SourceDocument
+    from kreports.db.models import AccountingNoteChapter, Company, Disclosure, EvidenceDocument, SourceDocument
 
     with get_session() as session:
         session.add_all([
             Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
             Company(corp_code="00000002", corp_name="Peer", induty_code="26410"),
-            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서", raw_content="<xml/>", doc_hash="a" * 40),
-            SourceDocument(rcept_no="20250301000002", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서", raw_content="<xml/>", doc_hash="b" * 40),
+            Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="Subject", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            Disclosure(rcept_no="20250301000002", corp_code="00000002", corp_name="Peer", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
+            SourceDocument(rcept_no="20250301000002", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="b" * 40),
             AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스부채를 현재가치로 측정합니다."),
             AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스기간을 재검토합니다.", full_text_uri="raw://note/peer", full_text_length=100, full_text_storage_status="externalized"),
             EvidenceDocument(corp_code="00000002", bsns_year=2024, source_type="business_report", rcept_no="20250301000002", evidence_scope="auditor_view", normalized_text="리스 증빙 요약", source_count=1),
@@ -37,7 +39,10 @@ def test_note_comparison_returns_side_by_side_rows_and_explicit_absence(temp_eng
     assert leases["rows"][1]["availability"] == "summary_only"
     assert leases["rows"][1]["source_locator"].startswith("accounting_note_chapters:")
     assert leases["rows"][1]["evidence_documents"][0]["source_locator"].startswith("evidence_documents:")
-    assert result["topics"][1]["rows"][0]["availability"] == "unavailable"
+    impairment_rows = result["topics"][1]["rows"]
+    assert impairment_rows[0]["availability"] == "unavailable"
+    assert impairment_rows[0]["verified_annual_note_cache"] is True
+    assert impairment_rows[0]["topic_match_status"] == "not_found_in_cached_scope"
     assert result["peer_selection"]["selection_mode"] == "adaptive"
 
 
@@ -50,13 +55,17 @@ def test_note_disclosure_matrix_groups_companies_by_topic_without_claiming_unava
         session.add_all([
             Company(corp_code="00000001", corp_name="Subject", induty_code="26410"),
             Company(corp_code="00000002", corp_name="Summary peer", induty_code="26410"),
-            Company(corp_code="00000003", corp_name="Uncached peer", induty_code="26410"),
+            Company(corp_code="00000003", corp_name="Cached non-match peer", induty_code="26410"),
+            Company(corp_code="00000004", corp_name="Uncached peer", induty_code="26410"),
             Disclosure(rcept_no="20250301000001", corp_code="00000001", corp_name="Subject", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
             Disclosure(rcept_no="20250301000002", corp_code="00000002", corp_name="Summary peer", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
+            Disclosure(rcept_no="20250301000003", corp_code="00000003", corp_name="Cached non-match peer", disc_date=date(2025, 3, 1), disc_type="A", report_nm="사업보고서 (2024.12)"),
             SourceDocument(rcept_no="20250301000001", corp_code="00000001", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="a" * 40),
             SourceDocument(rcept_no="20250301000002", corp_code="00000002", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="b" * 40),
+            SourceDocument(rcept_no="20250301000003", corp_code="00000003", bsns_year=2024, source_type="business_report", report_nm="사업보고서 (2024.12)", raw_content="<xml/>", doc_hash="c" * 40),
             AccountingNoteChapter(corp_code="00000001", bsns_year=2024, fs_div="CFS", rcept_no="20250301000001", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스부채를 현재가치로 측정합니다."),
             AccountingNoteChapter(corp_code="00000002", bsns_year=2024, fs_div="CFS", rcept_no="20250301000002", source_type="business_report", note_no="10", note_title="리스", section_type="policy", body="리스기간을 재검토합니다.", full_text_uri="raw://note/peer", full_text_length=100, full_text_storage_status="externalized"),
+            AccountingNoteChapter(corp_code="00000003", bsns_year=2024, fs_div="CFS", rcept_no="20250301000003", source_type="business_report", note_no="11", note_title="재고자산", section_type="policy", body="재고자산은 저가법으로 평가합니다."),
         ])
 
     result = build_note_disclosure_matrix(
@@ -67,7 +76,8 @@ def test_note_disclosure_matrix_groups_companies_by_topic_without_claiming_unava
             "subject": {"corp_code": "00000001", "corp_name": "Subject"},
             "peers": [
                 {"corp_code": "00000002", "corp_name": "Summary peer"},
-                {"corp_code": "00000003", "corp_name": "Uncached peer"},
+                {"corp_code": "00000003", "corp_name": "Cached non-match peer"},
+                {"corp_code": "00000004", "corp_name": "Uncached peer"},
             ],
             "selection_policy": {"selection_mode": "adaptive", "criteria_requested": ["industry"]},
         },
@@ -79,17 +89,26 @@ def test_note_disclosure_matrix_groups_companies_by_topic_without_claiming_unava
     topic = result["topics"][0]
     assert topic["local_evidence_rate"] == {
         "numerator": 2,
-        "denominator": 3,
-        "pct": 66.7,
-        "reviewable_denominator": 2,
+        "denominator": 4,
+        "pct": 50.0,
+        "reviewable_denominator": 3,
         "unavailable_count": 1,
+        "matched_count": 2,
+        "all_company_count": 4,
+        "reviewable_company_count": 3,
+        "matched_within_reviewable_pct": 66.7,
     }
     assert [cell["status"] for cell in topic["companies"]] == [
-        "disclosed", "summary_only", "unavailable_raw",
+        "disclosed", "summary_only", "not_found_in_cached_scope", "unavailable_raw",
     ]
     assert topic["companies"][0]["rcept_no"] == "20250301000001"
     assert topic["companies"][0]["match_evidence"]["keyword"] == "리스"
-    unavailable = topic["companies"][2]
+    not_found = topic["companies"][2]
+    assert not_found["disclosure_assessment"] == (
+        "topic_not_found_in_cached_scope_not_non_disclosure"
+    )
+    assert not_found["rcept_no"] == "20250301000003"
+    unavailable = topic["companies"][3]
     assert unavailable["unavailable_reason"] == "local_topic_cache_missing"
     assert unavailable["disclosure_assessment"] == "not_assessed"
 

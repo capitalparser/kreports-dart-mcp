@@ -1353,8 +1353,11 @@ def test_policy_pack_renders_topic_to_company_disclosure_matrix_without_absence_
             "topics": [{
                 "topic": "leases",
                 "local_evidence_rate": {
-                    "numerator": 1, "denominator": 2, "pct": 50.0,
-                    "reviewable_denominator": 1, "unavailable_count": 1,
+                    "numerator": 1, "denominator": 3, "pct": 33.3,
+                    "reviewable_denominator": 2, "unavailable_count": 1,
+                    "matched_count": 1, "all_company_count": 3,
+                    "reviewable_company_count": 2,
+                    "matched_within_reviewable_pct": 50.0,
                 },
                 "companies": [
                     {
@@ -1365,6 +1368,12 @@ def test_policy_pack_renders_topic_to_company_disclosure_matrix_without_absence_
                         "match_evidence": {"keyword": "리스부채", "location": "body", "strength": "body_single_signal_reference"},
                         "rcept_no": "20250301000001",
                         "provenance_status": "proven_annual_filing",
+                    },
+                    {
+                        "company": {"corp_code": "002", "corp_name": "범위내미일치회사"},
+                        "status": "not_found_in_cached_scope",
+                        "rcept_no": "20250301000002",
+                        "disclosure_assessment": "topic_not_found_in_cached_scope_not_non_disclosure",
                     },
                     {
                         "company": {"corp_code": "002", "corp_name": "미확보회사"},
@@ -1379,6 +1388,11 @@ def test_policy_pack_renders_topic_to_company_disclosure_matrix_without_absence_
     assert pack is not None
     table = next(table for table in pack["tables"] if table["id"] == "topic_company_disclosure_matrix")
     assert table["title"] == "주제별 회사 주석 로컬 확인 매트릭스"
-    assert table["rows"][1]["status"] == "unavailable_raw"
-    assert table["rows"][1]["disclosure_assessment"] == "not_assessed"
-    assert "공시 부재는 not_assessed" in table["note"]
+    assert table["rows"][1]["status"] == "not_found_in_cached_scope"
+    assert table["rows"][1]["disclosure_assessment"] == (
+        "topic_not_found_in_cached_scope_not_non_disclosure"
+    )
+    assert table["rows"][2]["status"] == "unavailable_raw"
+    assert table["rows"][2]["disclosure_assessment"] == "not_assessed"
+    assert table["rows"][0]["matched_within_reviewable_pct"] == 50.0
+    assert "공시 부재 판단이 not_assessed" in table["note"]

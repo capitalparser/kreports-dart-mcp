@@ -2125,6 +2125,10 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
                     "rate_pct": rate.get("pct"),
                     "reviewable_denominator": rate.get("reviewable_denominator"),
                     "unavailable_count": rate.get("unavailable_count"),
+                    "matched_count": rate.get("matched_count"),
+                    "all_company_count": rate.get("all_company_count"),
+                    "reviewable_company_count": rate.get("reviewable_company_count"),
+                    "matched_within_reviewable_pct": rate.get("matched_within_reviewable_pct"),
                 })
     if matrix_rows:
         pack["tables"].append(_table(
@@ -2136,9 +2140,12 @@ def _build_peer_policy_presentation_pack(result: dict[str, Any]) -> dict[str, An
              ("provenance_status", "출처 상태"), ("disclosure_assessment", "공시 판단 상태"),
              ("unavailable_reason", "미확보 사유"), ("rate_numerator", "로컬 확인 분자"),
              ("rate_denominator", "전체 회사 분모"), ("rate_pct", "로컬 확인률"),
-             ("reviewable_denominator", "검토 가능 분모"), ("unavailable_count", "원문 미확보 수")],
+             ("reviewable_denominator", "검토 가능 분모"), ("unavailable_count", "원문 미확보 수"),
+             ("matched_count", "일치 회사 수"), ("all_company_count", "전체 회사 수"),
+             ("reviewable_company_count", "검토 가능 회사 수"),
+             ("matched_within_reviewable_pct", "검토 가능 범위 내 일치율")],
             matrix_rows,
-            note="unavailable_raw는 로컬 원문·주제 캐시 미확보이며, 공시 부재는 not_assessed입니다.",
+            note="not_found_in_cached_scope는 검증된 연간 note cache에서 주제를 찾지 못한 상태이며 공시 부재가 아닙니다. unavailable_raw는 검증된 연간 note cache 미확보로 공시 부재 판단이 not_assessed입니다.",
         ))
     coverage_rows = [row for row in result.get("topic_coverage") or [] if isinstance(row, dict)]
     if coverage_rows:

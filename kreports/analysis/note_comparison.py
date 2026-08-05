@@ -515,10 +515,10 @@ def _select_note_row(
         return min(
             candidates,
             key=lambda row: (
-                int(row["_topic_match"]["priority"]),
-                -int(row["_topic_match"]["matched_keyword_count"]),
-                int(row["_topic_match"]["keyword_priority"]),
-                int(row["_topic_match"]["match_offset"]),
+                int((row.get("_topic_match") or {}).get("priority", 0)),
+                -int((row.get("_topic_match") or {}).get("matched_keyword_count", 0)),
+                int((row.get("_topic_match") or {}).get("keyword_priority", 0)),
+                int((row.get("_topic_match") or {}).get("match_offset", 0)),
                 str(row.get("note_no") or ""),
                 int(row.get("id") or 0),
             ),
@@ -647,6 +647,7 @@ def compare_peer_accounting_notes(
         note_rows = [dict(row) for row in conn.execute(note_stmt, {"corp_codes": codes, "year": year}).mappings().all()]
         evidence_rows = [dict(row) for row in conn.execute(evidence_stmt, {"corp_codes": codes, "year": year}).mappings().all()]
     notes_by_key: dict[tuple[str, str], list[dict]] = {}
+    verified_notes_by_code: dict[str, list[dict]] = {}
     for row in note_rows:
         cached_receipt = row.get("rcept_no")
         receipt = canonical_annual_filing_source_binding(
@@ -658,6 +659,8 @@ def compare_peer_accounting_notes(
             "proven_annual_filing" if receipt else "unproven_source_binding"
         )
         row["canonical_source_binding"] = receipt is not None
+        if receipt is not None:
+            verified_notes_by_code.setdefault(str(row["corp_code"]), []).append(row)
         for topic in requested_topics:
             match = _topic_match(row, topic)
             if match is None:
@@ -714,8 +717,17 @@ def compare_peer_accounting_notes(
                     "evidence_documents": evidence_documents,
                     "evidence_documents_truncated": evidence_documents_truncated,
                     "comparison_note": "cached_note_present",
+                    "verified_annual_note_cache": True,
+                    "topic_match_status": "matched",
                 })
             else:
+                verified_scope_rows = verified_notes_by_code.get(code, [])
+                scope_row, scope_fs_div_selection = _select_note_row(
+                    verified_scope_rows, requested_fs_div,
+                )
+                topic_match_status = (
+                    "not_found_in_cached_scope" if scope_row else "unavailable_raw"
+                )
                 comparison_rows.append({
                     "company": {"corp_code": code, "corp_name": names.get(code)},
                     "value_or_excerpt": None,
@@ -739,9 +751,16 @@ def compare_peer_accounting_notes(
                         "unicode_separators_escaped": False,
                     },
                     "availability": "unavailable",
-                    "source_locator": None,
-                    "source_document_id": None,
-                    "rcept_no": None,
+                    "source_locator": (
+                        f"accounting_note_chapters:{scope_row['id']}"
+                        if scope_row else None
+                    ),
+                    "source_document_id": scope_row.get("source_document_id") if scope_row else None,
+                    "source_type": scope_row.get("source_type") if scope_row else None,
+                    "rcept_no": scope_row.get("rcept_no") if scope_row else None,
+                    "cached_rcept_no": scope_row.get("cached_rcept_no") if scope_row else None,
+                    "provenance_status": scope_row.get("provenance_status") if scope_row else None,
+                    "canonical_source_binding": bool(scope_row),
                     "note_title": None,
                     "match_keyword": None,
                     "match_location": None,
@@ -751,10 +770,15 @@ def compare_peer_accounting_notes(
                     "excerpt_start": None,
                     "excerpt_end": None,
                     "full_text_hash": None,
-                    "fs_div_selection": fs_div_selection,
+                    "fs_div_selection": scope_fs_div_selection,
                     "evidence_documents": [],
                     "evidence_documents_truncated": False,
-                    "comparison_note": "no_cached_note_for_exact_business_year",
+                    "comparison_note": (
+                        "topic_not_found_in_verified_cached_scope"
+                        if scope_row else "no_verified_annual_note_cache_for_exact_business_year"
+                    ),
+                    "verified_annual_note_cache": bool(scope_row),
+                    "topic_match_status": topic_match_status,
                 })
         subject_row = comparison_rows[0]
         for peer_row in comparison_rows[1:]:
@@ -925,10 +949,13 @@ def build_note_disclosure_matrix(
         ):
             availability = row["availability"]
             status = {
-                "available": "disclosed",
-                "summary_only": "summary_only",
-                "unavailable": "unavailable_raw",
-            }[availability]
+                "matched": {
+                    "available": "disclosed",
+                    "summary_only": "summary_only",
+                }.get(availability, "unavailable_raw"),
+                "not_found_in_cached_scope": "not_found_in_cached_scope",
+                "unavailable_raw": "unavailable_raw",
+            }[row.get("topic_match_status", "matched")]
             unavailable = status == "unavailable_raw"
             companies.append({
                 "company": row["company"],
@@ -953,6 +980,7 @@ def build_note_disclosure_matrix(
                 "raw_availability": (
                     "locally_available" if status == "disclosed"
                     else "summary_only" if status == "summary_only"
+                    else "verified_annual_note_cache" if status == "not_found_in_cached_scope"
                     else "not_locally_available"
                 ),
                 "unavailable_reason": (
@@ -960,23 +988,37 @@ def build_note_disclosure_matrix(
                 ),
                 "disclosure_assessment": (
                     "not_assessed" if unavailable
+                    else "topic_not_found_in_cached_scope_not_non_disclosure"
+                    if status == "not_found_in_cached_scope"
                     else "matched_local_topic_evidence"
                 ),
             })
-        numerator = sum(cell["status"] in {"disclosed", "summary_only"} for cell in companies)
-        denominator = len(companies)
-        reviewable_denominator = sum(
+        matched_count = sum(
             cell["status"] in {"disclosed", "summary_only"} for cell in companies
+        )
+        all_company_count = len(companies)
+        reviewable_company_count = sum(
+            cell["status"] in {
+                "disclosed", "summary_only", "not_found_in_cached_scope",
+            }
+            for cell in companies
         )
         topic_results.append({
             "topic": topic_result["topic"],
             "companies": companies,
             "local_evidence_rate": {
-                "numerator": numerator,
-                "denominator": denominator,
-                "pct": round(100.0 * numerator / denominator, 1) if denominator else 0.0,
-                "reviewable_denominator": reviewable_denominator,
-                "unavailable_count": denominator - reviewable_denominator,
+                "numerator": matched_count,
+                "denominator": all_company_count,
+                "pct": round(100.0 * matched_count / all_company_count, 1) if all_company_count else 0.0,
+                "reviewable_denominator": reviewable_company_count,
+                "unavailable_count": all_company_count - reviewable_company_count,
+                "matched_count": matched_count,
+                "all_company_count": all_company_count,
+                "reviewable_company_count": reviewable_company_count,
+                "matched_within_reviewable_pct": (
+                    round(100.0 * matched_count / reviewable_company_count, 1)
+                    if reviewable_company_count else 0.0
+                ),
             },
         })
     selection_policy = dict(comparison.get("selection_policy") or {})
@@ -1008,7 +1050,8 @@ def build_note_disclosure_matrix(
         "read_only": True,
         "limitations": [
             "local_evidence_rate is local matched-evidence coverage, not a regulatory disclosure rate or completeness conclusion.",
-            "unavailable_raw means local raw topic evidence was not available; non-disclosure is not assessed.",
+            "not_found_in_cached_scope means a verified annual note cache was reviewed without a topic match; it is not non-disclosure.",
+            "unavailable_raw means no verified annual note cache was available; non-disclosure is not assessed.",
             "A matrix contains the subject plus at most 199 peers, so a response never exceeds 200 companies.",
         ],
     }
