@@ -2470,6 +2470,28 @@ def quality_release_gate_cmd(
         raise typer.Exit(1)
 
 
+@app.command("feature-readiness")
+def feature_readiness_cmd(
+    db_path: Path = typer.Option(..., "--db", help="검사할 runtime SQLite DB 경로"),
+    manifest_path: Optional[Path] = typer.Option(None, "--manifest"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
+) -> None:
+    """기능별 usable evidence bundle과 적재 우선순위를 평가한다."""
+    from kreports.quality.feature_readiness import evaluate_feature_readiness
+
+    report = evaluate_feature_readiness(db_path, manifest_path)
+    if json_output:
+        _json_print(report)
+        return
+    typer.echo(f"Dataset: {report['dataset_version']}")
+    typer.echo("Feature evidence readiness:")
+    for name, feature in report["features"].items():
+        coverage = feature.get("coverage") or {}
+        pct = coverage.get("coverage_pct", "n/a")
+        typer.echo(f"- {name}: {feature['status']} ({pct}%)")
+        typer.echo(f"  next: {feature['next_action']}")
+
+
 @app.command("plan-investor-core-backfill")
 def plan_investor_core_backfill_cmd(
     db_path: Path = typer.Option(..., "--db", help="읽기 전용으로 검사할 SQLite DB 경로"),
