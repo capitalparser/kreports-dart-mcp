@@ -1749,6 +1749,37 @@ def test_verified_writer_open_rejects_replacement_inode_before_sqlite_connects(
     assert (current.st_dev, current.st_ino) != (identity.device, identity.inode)
 
 
+def test_verified_writer_allows_reused_authenticated_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Descriptor-number reuse must not fail an otherwise pinned connection."""
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    _create_runner_db(database)
+    identity = runner._capture_database_identity(database)
+    descriptor = os.open(database, os.O_RDONLY)
+    try:
+        authenticated = {descriptor: (identity.device, identity.inode)}
+        monkeypatch.setattr(
+            runner,
+            "_open_file_identities",
+            lambda: dict(authenticated),
+        )
+        connection = sqlite3.connect(database)
+        try:
+            runner._verify_sqlite_descriptor_delta(
+                connection,
+                identity,
+                descriptors_before=authenticated,
+            )
+        finally:
+            connection.close()
+    finally:
+        os.close(descriptor)
+
+
 def test_default_writer_creator_verifies_each_new_dbapi_connection(
     tmp_path: Path,
     monkeypatch,

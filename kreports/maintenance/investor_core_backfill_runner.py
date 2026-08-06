@@ -259,12 +259,33 @@ def _verify_sqlite_descriptor_delta(
             "database connection opened an unexpected database path",
         )
     expected = (identity.device, identity.inode)
-    sqlite_descriptors = [
-        descriptor
+    newly_opened = {
+        descriptor: descriptor_identity
         for descriptor, descriptor_identity in descriptors_after.items()
-        if descriptor not in descriptors_before and descriptor_identity == expected
-    ]
-    if len(sqlite_descriptors) != 1:
+        if descriptor not in descriptors_before
+    }
+    # SQLite may reuse an already-open descriptor when a SQLAlchemy writer
+    # connection is created.  In that case there is no descriptor-number delta
+    # even though the connection still points at the authenticated inode.  Do
+    # not require an exact ``+1`` delta; reject any newly visible descriptor
+    # for a different inode, and require either a new authenticated descriptor
+    # or an authenticated descriptor that was already present and remains so.
+    if any(descriptor_identity != expected for descriptor_identity in newly_opened.values()):
+        raise _fail(
+            "database_connection_identity_mismatch",
+            "database connection did not retain the authenticated descriptor",
+        )
+    retained_expected = any(
+        descriptor_identity == expected
+        for descriptor_identity in descriptors_before.values()
+    ) and any(
+        descriptor_identity == expected
+        for descriptor_identity in descriptors_after.values()
+    )
+    opened_expected = any(
+        descriptor_identity == expected for descriptor_identity in newly_opened.values()
+    )
+    if not opened_expected and not retained_expected:
         raise _fail(
             "database_connection_identity_mismatch",
             "database connection did not retain the authenticated descriptor",
