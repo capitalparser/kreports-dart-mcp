@@ -2171,6 +2171,32 @@ def _recover_kam_items(
             )
         )
     )
+    # DART attachments often yield a short KAM index section plus a separate
+    # full_text section.  A successfully parsed short index must not prevent
+    # us from using the receipt's longer body to recover procedure steps.
+    if derived_summaries and full_text_sections:
+        short_limit = max(
+            300,
+            max(len(body) for _section, body in derived_summaries) * 3,
+        )
+        for section in full_text_sections:
+            body = (section.body_text or "").strip()
+            if len(body) < short_limit:
+                continue
+            before_limitations = len(limitations)
+            items = _parse_kam_candidate(
+                body,
+                "report_sections.full_text",
+                limitations,
+            )
+            if items:
+                return (
+                    items,
+                    "report_sections.full_text",
+                    limitations,
+                    section.fetched_at,
+                )
+            del limitations[before_limitations:]
     if upstream_parse_failure:
         for section in full_text_sections:
             body = (section.body_text or "").strip()
