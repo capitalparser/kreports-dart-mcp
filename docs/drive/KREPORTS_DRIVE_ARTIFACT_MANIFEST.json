@@ -1,0 +1,33 @@
+{
+  "schema": "kreports_drive_artifact_manifest",
+  "schema_version": "1",
+  "dataset_version": "investor-core-r5-20260806-v4",
+  "folder_id": "1FIOMpJMQaZ9ElIMPSLa6pFolYHHNQEsj",
+  "compressed_database": {
+    "filename": "kreports-runtime-2021-2025-v4.db.gz",
+    "bytes": 853486097,
+    "sha256": "3592df5d9c64e0bb04215b106b5f4db4fb07b0de346db296a205b1b579c86f0b",
+    "uncompressed_bytes": 3220713472,
+    "uncompressed_sha256": "7c98a242a4552469fe67283cc651b0ac8eef3dd393294353d2e8792a480a5740",
+    "chunk_bytes": 83886080,
+    "chunks": [
+      {"order": 0, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-00", "drive_file_id": "1pyTRLfEztPGgIykFS_CXLYrvYbbLqi71"},
+      {"order": 1, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-01", "drive_file_id": "1DjiRorfu89wyDeJq62Q7wHU212CYww2b"},
+      {"order": 2, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-02", "drive_file_id": "1CNtyr9LoGeZXd-jsDf7swvpg5LaiLUAx"},
+      {"order": 3, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-03", "drive_file_id": "1mWK74NRGAskkfTCrkzT1nVTR5QBchWp-"},
+      {"order": 4, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-04", "drive_file_id": "1_icmDOdpefbja_dKvlgz2Mhs9CCukcAO"},
+      {"order": 5, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-05", "drive_file_id": "1XN9jnpBqdH_6dUT24iy0usn1gfsrsgLO"},
+      {"order": 6, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-06", "drive_file_id": "1Ptnr-LT6Vd1uKU8BGfOiejEqfP2Eeja"},
+      {"order": 7, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-07", "drive_file_id": "1fxxGgQyDCh3Hcig5R8KVP8KnmcibbzvG"},
+      {"order": 8, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-08", "drive_file_id": "1b1EOItIv5RDrYaZBimSOnx1YgUTiYvZ_"},
+      {"order": 9, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-09", "drive_file_id": "183F6U_q4uTO98p7C2_fIqJ8_kfHvX0eU"},
+      {"order": 10, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-10", "drive_file_id": "1vUaX7N_qhYw5VP00V0s_A4rEehR1FyaP"}
+    ]
+  },
+  "release_manifest_drive_file_id": "1T-2STTU9zqiK81P9JDcrdl817UTT5tc7",
+  "raw_archive": {
+    "filename": "kreports-audit-raw-2025-v1.tar.gz",
+    "drive_file_id": "1RYoAhOl5rby6UjOnIn0NJpkln0jOrZo5",
+    "sha256": "4cb7996883eb7e1c8c71bddb660aa66d4c254b215406397742760b886f4604ba"
+  }
+}
