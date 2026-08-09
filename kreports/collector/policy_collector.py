@@ -78,6 +78,7 @@ def collect_policies_for_company(
         "items_changed": 0,
         "items_unchanged": 0,
         "chapters_stored": 0,
+        "error_class": None,
         "error": None,
     }
 
@@ -86,10 +87,14 @@ def collect_policies_for_company(
             corp_code, bsns_year, fs_div=fs_div
         )
     except Exception as e:
+        from kreports.maintenance.backfill_runs import classify_backfill_error
+
+        result["error_class"] = classify_backfill_error(e)
         result["error"] = f"추출 실패: {type(e).__name__}: {e}"
         return result
 
     if policy_data is None:
+        result["error_class"] = "no_data"
         result["error"] = "사업보고서 또는 주석 파일을 찾지 못했습니다."
         return result
 
@@ -97,6 +102,7 @@ def collect_policies_for_company(
     items = policy_data.get("items") or {}
     chapters = policy_data.get("chapters") or []
     if not rcept_no or not items:
+        result["error_class"] = "no_data"
         result["error"] = "추출된 item이 없습니다."
         result["rcept_no"] = rcept_no
         return result
@@ -151,6 +157,7 @@ def collect_policies_for_company(
         })
 
     if not upsert_rows:
+        result["error_class"] = "parse_error"
         result["error"] = "유효한 body가 있는 item이 없습니다."
         return result
 
@@ -234,6 +241,7 @@ def collect_policies_batch(
           "total": int,
           "ok": int,
           "failed": int,
+          "no_data": int,
           "items_total": int,
           "items_new": int,
           "items_changed": int,
@@ -244,9 +252,12 @@ def collect_policies_batch(
         "total": len(targets),
         "ok": 0,
         "failed": 0,
+        "no_data": 0,
         "items_total": 0,
         "items_new": 0,
         "items_changed": 0,
+        "error_class": None,
+        "no_data_targets": [],
         "errors": [],
     }
 
@@ -256,11 +267,26 @@ def collect_policies_batch(
 
         r = collect_policies_for_company(corp_code, bsns_year, fs_div)
         if r.get("error"):
+            if r.get("error_class") == "no_data":
+                agg["no_data"] += 1
+                agg["no_data_targets"].append({
+                    "corp_code": corp_code,
+                    "bsns_year": bsns_year,
+                    "fs_div": fs_div,
+                    "reason": r["error"],
+                })
+                continue
             agg["failed"] += 1
+            error_class = r.get("error_class") or "storage_error"
+            if agg["error_class"] is None:
+                agg["error_class"] = error_class
+            elif agg["error_class"] != error_class:
+                agg["error_class"] = "storage_error"
             agg["errors"].append({
                 "corp_code": corp_code,
                 "bsns_year": bsns_year,
                 "fs_div": fs_div,
+                "error_class": error_class,
                 "error": r["error"],
             })
         else:

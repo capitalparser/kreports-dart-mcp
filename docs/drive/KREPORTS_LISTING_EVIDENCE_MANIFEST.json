@@ -1,0 +1,38 @@
+{
+  "schema": "kreports_listing_evidence_manifest",
+  "schema_version": "1",
+  "source": {
+    "provider": "KRX KIND",
+    "url": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13",
+    "retrieved_at_utc": "2026-08-09T17:11:45Z",
+    "listing_as_of": "2026-08-09"
+  },
+  "raw_receipt": {
+    "local_path": "data/raw_documents/krx_listing/2026-08-09/kind-corp-list.xls",
+    "bytes": 1263359,
+    "sha256": "120e50d319a7e7498a801f59f82165aa246c07439ce1dee0aaeed15295c41783",
+    "drive_file_id": "15KK3dis2YiG7pvMIEDPEBYOwrIuW-lis",
+    "drive_parent_folder_id": "1FIOMpJMQaZ9ElIMPSLa6pFolYHHNQEsj"
+  },
+  "normalized_artifact": {
+    "local_path": "data/raw_documents/krx_listing/2026-08-09/normalized-listing.csv",
+    "bytes": 115797,
+    "sha256": "8204973f2d01678b3d102f23e07f95121eb4aabd81aa0821cdb0f2c8356e8ebe",
+    "transformation_version": "krx-listing-normalize-v1",
+    "company_snapshot_sha256": "90ffabc5e885b2bdca6cab97dfdbbd14b16e2b3a267df3c84037e3f696b2e9b5",
+    "rows": 2655,
+    "verified_rows": 2633,
+    "unknown_rows": 22,
+    "conflict_rows": 0,
+    "drive_file_id": "1TXVDSBAz43R3nXsyvpX-28NqqLaB2EKd",
+    "drive_parent_folder_id": "1FIOMpJMQaZ9ElIMPSLa6pFolYHHNQEsj"
+  },
+  "quality_policy": {
+    "release_denominator_effect": "diagnostic_only_not_activated",
+    "current_core_population": 2655,
+    "verified_full_year_2025": 2495,
+    "verified_partial_year_2025": 138,
+    "unknown_2025": 22,
+    "uncovered_2025": 0
+  }
+}

@@ -230,6 +230,7 @@ class TestCollectPoliciesForCompany:
         with patch("kreports.analysis.queries.get_accounting_policy", return_value=None):
             r = collect_policies_for_company("00000001", 2024, "CFS")
         assert r["error"] is not None
+        assert r["error_class"] == "no_data"
         assert r["items_stored"] == 0
 
     def test_empty_items_returns_error(self, temp_engine):
@@ -237,6 +238,7 @@ class TestCollectPoliciesForCompany:
                    return_value={"rcept_no": "X", "items": {}, "raw_html": ""}):
             r = collect_policies_for_company("00000001", 2024, "CFS")
         assert r["error"] is not None
+        assert r["error_class"] == "no_data"
 
     def test_empty_body_skipped(self, temp_engine):
         """body가 빈 문자열인 item은 저장되지 않는다."""
@@ -284,13 +286,27 @@ class TestCollectPoliciesBatch:
         assert calls[0][:2] == (1, 2)
         assert calls[1][:2] == (2, 2)
 
-    def test_batch_collects_errors(self, temp_engine):
+    def test_batch_classifies_missing_policy_as_no_data(self, temp_engine):
         with patch("kreports.analysis.queries.get_accounting_policy", return_value=None):
             result = collect_policies_batch([
                 ("00000001", 2024, "CFS"),
             ])
+        assert result["failed"] == 0
+        assert result["no_data"] == 1
+        assert len(result["no_data_targets"]) == 1
+        assert result["errors"] == []
+
+    def test_batch_preserves_transport_failure_taxonomy(self, temp_engine):
+        with patch(
+            "kreports.analysis.queries.get_accounting_policy",
+            side_effect=TimeoutError("network timeout"),
+        ):
+            result = collect_policies_batch([
+                ("00000001", 2024, "CFS"),
+            ])
         assert result["failed"] == 1
-        assert len(result["errors"]) == 1
+        assert result["no_data"] == 0
+        assert result["errors"][0]["error_class"] == "transport_error"
 
 
 # ---------------------------------------------------------------------------

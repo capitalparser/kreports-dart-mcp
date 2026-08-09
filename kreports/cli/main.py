@@ -317,10 +317,29 @@ def _backfill_run_guard(
 
 
 def _finish_backfill_run(run_id: int, result: dict[str, object]) -> None:
+    from kreports.maintenance.backfill_runs import BackfillRunError
+
     lease = _ACTIVE_BACKFILL_LEASES.get(run_id)
     if lease is None:
         raise RuntimeError(f"backfill run {run_id} is not owned by this process")
-    lease.succeed(result)
+    try:
+        lease.succeed(result)
+    except BackfillRunError as exc:
+        counts = []
+        for key in ("failed", "errors"):
+            value = result.get(key)
+            if isinstance(value, bool) or value in (None, 0, "", [], {}):
+                continue
+            count = len(value) if isinstance(value, (list, dict)) else value
+            if isinstance(count, int) and count > 0:
+                counts.append(f"{key}={count}")
+        detail = f"collector summary failed: outcome={exc.outcome}"
+        if counts:
+            detail += "; " + "; ".join(counts)
+        lease.fail(exc.outcome, detail)
+        _ACTIVE_BACKFILL_LEASES.pop(run_id, None)
+        typer.echo(f"오류: {detail}", err=True)
+        raise typer.Exit(1) from None
     _ACTIVE_BACKFILL_LEASES.pop(run_id, None)
 
 
@@ -1443,6 +1462,7 @@ def collect_golden_cmd(
         "audit_fees_saved": 0,
         "audit_fees_error": 0,
         "policy_ok": 0,
+        "policy_no_data": 0,
         "policy_failed": 0,
         "policy_items_total": 0,
     }
@@ -1480,6 +1500,7 @@ def collect_golden_cmd(
             policy_targets = [(corp_code, year, "CFS") for year in range(y_from, y_to + 1)]
             policy_result = collect_policies_batch(policy_targets)
             totals["policy_ok"] += policy_result["ok"]
+            totals["policy_no_data"] += policy_result["no_data"]
             totals["policy_failed"] += policy_result["failed"]
             totals["policy_items_total"] += policy_result["items_total"]
 
@@ -1491,7 +1512,8 @@ def collect_golden_cmd(
         f"disclosures {totals['disclosures_saved']} (error {totals['disclosures_error']}) | "
         f"auditors {totals['auditors_saved']} | "
         f"audit_fees {totals['audit_fees_saved']} (error {totals['audit_fees_error']}) | "
-        f"policies ok {totals['policy_ok']} failed {totals['policy_failed']} "
+        f"policies ok {totals['policy_ok']} no_data {totals['policy_no_data']} "
+        f"failed {totals['policy_failed']} "
         f"items {totals['policy_items_total']}"
     )
 
@@ -1652,7 +1674,8 @@ def collect_policies_cmd(
         _finish_backfill_run(run_id, agg)
 
     typer.echo(
-        f"\n완료 - 처리 {agg['total']} | 성공 {agg['ok']} | 실패 {agg['failed']} | "
+        f"\n완료 - 처리 {agg['total']} | 성공 {agg['ok']} | "
+        f"데이터없음 {agg['no_data']} | 실패 {agg['failed']} | "
         f"items {agg['items_total']} (신규 {agg['items_new']} · 변경 {agg['items_changed']})"
     )
 

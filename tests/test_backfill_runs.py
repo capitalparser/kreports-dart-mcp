@@ -483,6 +483,50 @@ def test_succeed_rejects_summary_with_errors(temp_engine):
     assert _load_run(lease.id).status == "running"
 
 
+def test_finish_backfill_run_records_failed_summary_without_traceback_or_secret(
+    monkeypatch,
+    capsys,
+):
+    import typer
+
+    import kreports.cli.main as cli
+    from kreports.maintenance.backfill_runs import BackfillRunError
+
+    calls = []
+
+    class FailedSummaryLease:
+        def succeed(self, summary):
+            raise BackfillRunError(
+                "storage_error",
+                "cannot succeed a backfill whose summary contains errors",
+            )
+
+        def fail(self, outcome, message):
+            calls.append((outcome, message))
+
+    run_id = 987654
+    monkeypatch.setitem(cli._ACTIVE_BACKFILL_LEASES, run_id, FailedSummaryLease())
+    summary = {
+        "failed": 1,
+        "errors": [{"error": "api_key=must-not-be-rendered"}],
+    }
+
+    with pytest.raises(typer.Exit) as raised:
+        cli._finish_backfill_run(run_id, summary)
+
+    assert raised.value.exit_code == 1
+    assert calls == [
+        (
+            "storage_error",
+            "collector summary failed: outcome=storage_error; failed=1; errors=1",
+        )
+    ]
+    assert run_id not in cli._ACTIVE_BACKFILL_LEASES
+    output = capsys.readouterr().err
+    assert "storage_error" in output
+    assert "api_key" not in output
+
+
 @pytest.mark.parametrize(
     ("exc", "outcome"),
     [
