@@ -657,6 +657,41 @@ def test_default_cache_accepts_complete_annual_summary(
     ) is True
 
 
+def test_default_cache_accepts_complete_exact_scope_summary_enrichment(
+    tmp_path: Path,
+):
+    from kreports.maintenance import investor_core_backfill_runner as runner
+
+    database = tmp_path / "runner.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE financials (
+                corp_code TEXT, year INTEGER, quarter INTEGER, fs_div TEXT,
+                revenue INTEGER, operating_profit INTEGER, net_income INTEGER,
+                total_assets INTEGER, total_debt INTEGER, total_equity INTEGER,
+                operating_cf INTEGER, source TEXT
+            );
+            CREATE TABLE financial_facts (
+                corp_code TEXT, bsns_year INTEGER, reprt_code TEXT, fs_div TEXT,
+                sj_div TEXT, account_id TEXT, account_nm TEXT,
+                thstrm_amount INTEGER
+            );
+            INSERT INTO financials VALUES (
+                '00000001', 2025, 4, 'CFS', 1, 1, 1, 1, 1, 1, 1,
+                'acnt_enrichment'
+            );
+            """
+        )
+
+    assert runner._annual_core_source_cached(
+        database,
+        "00000001",
+        2025,
+        4,
+    ) is True
+
+
 def _create_runner_db(path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")

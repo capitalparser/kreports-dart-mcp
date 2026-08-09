@@ -67,7 +67,7 @@ def fresh_db(tmp_path, monkeypatch):
 
 
 def _make_acntall_response_full():
-    """acntall 정상 응답 (6개 요약 추출 가능)."""
+    """acntall 정상 응답 (투자자 core 7개 지표 추출 가능)."""
     return {
         "status": "000",
         "list": [
@@ -83,8 +83,40 @@ def _make_acntall_response_full():
              "thstrm_amount": "40,000,000,000", "ord": "2"},
             {"sj_div": "BS", "account_id": "ifrs-full_Equity", "account_nm": "자본총계",
              "thstrm_amount": "110,000,000,000", "ord": "3"},
+            {"sj_div": "CF", "account_id": "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+             "account_nm": "영업활동현금흐름", "thstrm_amount": "5,000,000,000", "ord": "1"},
         ],
     }
+
+
+def _make_acntall_response_missing_revenue(fs_div="CFS"):
+    response = _make_acntall_response_full()
+    response["list"] = [
+        {"fs_div": fs_div, **row}
+        for row in response["list"]
+        if row["account_id"] != "ifrs-full_Revenue"
+    ]
+    return response
+
+
+def _make_acntall_response_for_fs(fs_div="CFS"):
+    response = _make_acntall_response_full()
+    response["list"] = [{"fs_div": fs_div, **row} for row in response["list"]]
+    return response
+
+
+def _make_mixed_acnt_summary_response():
+    response = _make_acnt_summary_response()
+    cfs_rows = [{"fs_div": "CFS", **row} for row in response["list"]]
+    ofs_rows = [
+        {
+            "fs_div": "OFS",
+            **row,
+            "thstrm_amount": "999,000,000,000",
+        }
+        for row in response["list"]
+    ]
+    return {"status": "000", "list": ofs_rows + cfs_rows}
 
 
 def _make_acnt_summary_response():
@@ -123,6 +155,68 @@ class TestSummaryFallbackChain:
             row = s.query(Financial).filter_by(corp_code=CORP_CODE).first()
             assert row is not None
             assert row.source == "acntall"
+
+    def test_incomplete_cfs_retries_full_ofs_scope(self, fresh_db):
+        eng, fc, _ = fresh_db
+        responses = iter([
+            _make_acntall_response_missing_revenue("CFS"),
+            _make_acntall_response_for_fs("OFS"),
+        ])
+        with patch.object(
+            fc,
+            "fetch_financial_statements",
+            side_effect=lambda *args: next(responses),
+        ), patch.object(fc, "fetch_financial_summary") as m_acnt, patch(
+            "kreports.config.settings.request_delay", 0
+        ):
+            status = fc.collect_financial(STOCK_CODE, YEAR, QUARTER)
+
+        assert status == "success"
+        assert m_acnt.call_count == 0
+        with eng.get_session() as session:
+            ofs_facts = session.query(FinancialFact).filter_by(
+                corp_code=CORP_CODE,
+                bsns_year=YEAR,
+                fs_div="OFS",
+            ).all()
+            assert {row.account_id for row in ofs_facts} >= {
+                "ifrs-full_Revenue",
+                "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+            }
+
+    def test_incomplete_full_scopes_use_exact_summary_enrichment(self, fresh_db):
+        eng, fc, _ = fresh_db
+        full_responses = iter([
+            _make_acntall_response_missing_revenue("CFS"),
+            NO_DATA,
+        ])
+        with patch.object(
+            fc,
+            "fetch_financial_statements",
+            side_effect=lambda *args: next(full_responses),
+        ), patch.object(
+            fc,
+            "fetch_financial_summary",
+            return_value=_make_mixed_acnt_summary_response(),
+        ), patch("kreports.config.settings.request_delay", 0):
+            status = fc.collect_financial(STOCK_CODE, YEAR, QUARTER)
+
+        assert status == "success"
+        with eng.get_session() as session:
+            row = session.query(Financial).filter_by(
+                corp_code=CORP_CODE,
+                year=YEAR,
+                quarter=QUARTER,
+                fs_div="CFS",
+            ).one()
+            assert row.revenue == 75_000_000_000
+            assert row.source == "acnt_enrichment"
+            assert session.query(FinancialFact).filter_by(
+                corp_code=CORP_CODE,
+                bsns_year=YEAR,
+                fs_div="CFS",
+                account_id="ifrs-full_CashFlowsFromUsedInOperatingActivities",
+            ).count() == 1
 
     def test_acntall_both_fail_acnt_cfs_success(self, fresh_db):
         eng, fc, _ = fresh_db

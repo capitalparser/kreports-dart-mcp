@@ -29,11 +29,13 @@ from kreports.db.models import Company, Financial, FinancialFact, FetchLog
 from kreports.security import redact_external_error
 from kreports.processor.fin_parser import (
     parse_all_accounts,
+    core_financial_metric_keys_from_facts,
     compute_summary_from_facts,
     parse_financials,
     parse_summary_response,
     REPRT_TO_QUARTER,
 )
+from kreports.semantic.metrics import CORE_FINANCIAL_METRICS
 from kreports.judge.flags import (
     compute_record_flags, compute_gap_flags,
     compute_trend_flags, compute_cf_flags,
@@ -154,11 +156,101 @@ def collect_financial(
 
     if listed:
         status = _process_listed(response, corp_code, year, reprt_code, fs_div, quarter)
+        successful_scopes = [fs_div] if status == "success" else []
+        complete = status == "success" and _response_has_core_bundle(
+            response, corp_code, year, reprt_code, fs_div
+        )
+        if status == "success" and not complete and fs_div == "CFS":
+            try:
+                ofs_response = fetch_financial_statements(
+                    corp_code, year, reprt_code, "OFS"
+                )
+                time.sleep(settings.request_delay)
+            except DartBoundedStop:
+                raise
+            except Exception:
+                ofs_response = None
+            if _is_dart_limit_response(ofs_response):
+                message = ofs_response.get("message") or "DART API limit exceeded"
+                raise DartApiLimitExceeded(str(message))
+            if _is_dart_auth_response(ofs_response):
+                message = ofs_response.get("message") or "DART API key rejected"
+                raise DartApiAuthError(str(message))
+            if ofs_response and ofs_response.get("status") == "000":
+                ofs_status = _process_listed(
+                    ofs_response, corp_code, year, reprt_code, "OFS", quarter
+                )
+                if ofs_status == "success":
+                    successful_scopes.append("OFS")
+                    complete = _response_has_core_bundle(
+                        ofs_response, corp_code, year, reprt_code, "OFS"
+                    )
+        if status == "success" and not complete:
+            _try_summary_enrichment(
+                corp_code,
+                year,
+                reprt_code,
+                quarter,
+                successful_scopes,
+            )
     else:
         status = _process_unlisted(response, corp_code, year, reprt_code, fs_div, quarter)
 
     _log_fetch(corp_code, year, quarter, status, None)
     return status
+
+
+def _response_has_core_bundle(
+    response: dict,
+    corp_code: str,
+    year: int,
+    reprt_code: str,
+    fs_div: str,
+) -> bool:
+    facts = parse_all_accounts(response, corp_code, year, reprt_code, fs_div) or []
+    return set(CORE_FINANCIAL_METRICS).issubset(
+        core_financial_metric_keys_from_facts(facts)
+    )
+
+
+def _try_summary_enrichment(
+    corp_code: str,
+    year: int,
+    reprt_code: str,
+    quarter: int,
+    fs_divs: list[str],
+) -> bool:
+    """Persist exact-scope summary rows only when full facts stay incomplete."""
+    enriched = False
+    for fs_div in dict.fromkeys(fs_divs):
+        try:
+            response = fetch_financial_summary(corp_code, year, reprt_code, fs_div)
+            time.sleep(settings.request_delay)
+        except DartBoundedStop:
+            raise
+        except Exception:
+            continue
+        if _is_dart_limit_response(response):
+            message = response.get("message") or "DART API limit exceeded"
+            raise DartApiLimitExceeded(str(message))
+        if _is_dart_auth_response(response):
+            message = response.get("message") or "DART API key rejected"
+            raise DartApiAuthError(str(message))
+        if response.get("status") != "000":
+            continue
+        parsed = parse_summary_response(
+            response, corp_code, year, reprt_code, fs_div
+        )
+        if parsed is None:
+            continue
+        parsed["source"] = "acnt_enrichment"
+        flags = compute_record_flags(parsed)
+        _upsert_financial({**parsed, **flags})
+        compute_gap_flags(corp_code, year, quarter)
+        compute_trend_flags(corp_code, year, quarter, fs_div)
+        compute_cf_flags(corp_code, year, quarter, fs_div)
+        enriched = True
+    return enriched
 
 
 def _try_summary_fallback(

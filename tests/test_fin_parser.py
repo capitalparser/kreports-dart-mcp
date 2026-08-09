@@ -252,3 +252,30 @@ class TestParseSummaryResponse:
         assert result is not None
         assert result["revenue"] == 300_869_340_000_000
         assert result["source"] == "acnt"
+
+    def test_filters_mixed_response_to_requested_fs_div(self):
+        response = {
+            "status": "000",
+            "list": [
+                {
+                    "fs_div": "OFS",
+                    "sj_div": "IS",
+                    "account_nm": "매출액",
+                    "thstrm_amount": "200",
+                },
+                {
+                    "fs_div": "CFS",
+                    "sj_div": "IS",
+                    "account_nm": "매출액",
+                    "thstrm_amount": "100",
+                },
+            ],
+        }
+
+        result = parse_summary_response(
+            response, CORP_CODE, YEAR, REPRT_CODE, "CFS"
+        )
+
+        assert result is not None
+        assert result["fs_div"] == "CFS"
+        assert result["revenue"] == 100

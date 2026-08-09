@@ -1,6 +1,10 @@
 import logging
 from kreports.processor.account_map import normalize_account
-from kreports.semantic.metrics import financial_summary_account_map
+from kreports.semantic.metrics import (
+    CORE_FINANCIAL_METRICS,
+    compact_metric_definitions,
+    financial_summary_account_map,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +22,12 @@ REPRT_TO_QUARTER = {
 
 # XBRL element ID → 요약 필드는 semantic registry에서 파생한다.
 _XBRL_TO_SUMMARY: dict[str, str] = financial_summary_account_map()
+_XBRL_TO_CORE_METRIC: dict[str, str] = {
+    account_id: definition.key
+    for definition in compact_metric_definitions()
+    if definition.key in CORE_FINANCIAL_METRICS
+    for account_id in definition.source_account_ids
+}
 
 # 요약 필드가 속하는 재무제표 종류
 _SUMMARY_SJ = {
@@ -109,6 +119,17 @@ def parse_all_accounts(
         })
 
     return results if results else None
+
+
+def core_financial_metric_keys_from_facts(facts: list[dict]) -> set[str]:
+    """Return core metrics that can survive the compact XBRL mapping contract."""
+    return {
+        metric_key
+        for fact in facts
+        if fact.get("thstrm_amount") is not None
+        and (metric_key := _XBRL_TO_CORE_METRIC.get(fact.get("account_id", "")))
+        is not None
+    }
 
 
 def compute_summary_from_facts(
@@ -258,6 +279,9 @@ def parse_summary_response(
     filled: set[str] = set()
 
     for row in rows:
+        row_fs_div = (row.get("fs_div") or "").strip()
+        if row_fs_div and row_fs_div != fs_div:
+            continue
         nm = (row.get("account_nm") or "").strip()
         sj = (row.get("sj_div") or "").strip()
         field = normalize_account(nm)

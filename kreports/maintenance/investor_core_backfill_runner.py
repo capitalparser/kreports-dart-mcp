@@ -668,7 +668,7 @@ def _annual_core_source_cached(
             (corp_code, year),
         ).fetchall()
         if any(
-            row["source"] in {"acnt", "acntall"}
+            row["source"] in {"acnt", "acntall", "acnt_enrichment"}
             and all(row[field] is not None for field in (
                 "revenue",
                 "operating_profit",
