@@ -1,6 +1,6 @@
 {
   "schema": "kreports_drive_artifact_manifest",
-  "schema_version": "1",
+  "schema_version": "2",
   "dataset_version": "investor-core-r5-20260806-v4",
   "folder_id": "1FIOMpJMQaZ9ElIMPSLa6pFolYHHNQEsj",
   "compressed_database": {
@@ -11,23 +11,30 @@
     "uncompressed_sha256": "7c98a242a4552469fe67283cc651b0ac8eef3dd393294353d2e8792a480a5740",
     "chunk_bytes": 83886080,
     "chunks": [
-      {"order": 0, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-00", "drive_file_id": "1pyTRLfEztPGgIykFS_CXLYrvYbbLqi71"},
-      {"order": 1, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-01", "drive_file_id": "1DjiRorfu89wyDeJq62Q7wHU212CYww2b"},
-      {"order": 2, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-02", "drive_file_id": "1CNtyr9LoGeZXd-jsDf7swvpg5LaiLUAx"},
-      {"order": 3, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-03", "drive_file_id": "1mWK74NRGAskkfTCrkzT1nVTR5QBchWp-"},
-      {"order": 4, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-04", "drive_file_id": "1_icmDOdpefbja_dKvlgz2Mhs9CCukcAO"},
-      {"order": 5, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-05", "drive_file_id": "1XN9jnpBqdH_6dUT24iy0usn1gfsrsgLO"},
-      {"order": 6, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-06", "drive_file_id": "1Ptnr-LT6Vd1uKU8BGfOiejEqfP2Eeja"},
-      {"order": 7, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-07", "drive_file_id": "1fxxGgQyDCh3Hcig5R8KVP8KnmcibbzvG"},
-      {"order": 8, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-08", "drive_file_id": "1b1EOItIv5RDrYaZBimSOnx1YgUTiYvZ_"},
-      {"order": 9, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-09", "drive_file_id": "183F6U_q4uTO98p7C2_fIqJ8_kfHvX0eU"},
-      {"order": 10, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-10", "drive_file_id": "1vUaX7N_qhYw5VP00V0s_A4rEehR1FyaP"}
-    ]
+      {"order": 0, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-00", "bytes": 83886080, "sha256": "2a148203b1fe4cd75dea044985170296f5d0cdd938b7df873875b65e2115ba14", "drive_file_id": "1pyTRLfEztPGgIykFS_CXLYrvYbbLqi71"},
+      {"order": 1, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-01", "bytes": 83886080, "sha256": "1ddb16e6836909cd5ca18448ddc2b619d08319a79fc9127eb000c905fc712f74", "drive_file_id": "1DjiRorfu89wyDeJq62Q7wHU212CYww2b"},
+      {"order": 2, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-02", "bytes": 83886080, "sha256": "9b251c390f5aabced3f634e29bedaa9ea0be75cb1c36a5aece111f4b13255c42", "drive_file_id": "1CNtyr9LoGeZXd-jsDf7swvpg5LaiLUAx"},
+      {"order": 3, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-03", "bytes": 83886080, "sha256": "a11b20b60360f7e005bc93df217e4ff816bdee1a4279375a9e2e45af5f20eac1", "drive_file_id": "1mWK74NRGAskkfTCrkzT1nVTR5QBchWp-"},
+      {"order": 4, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-04", "bytes": 83886080, "sha256": "b6f58afc2853d7e1f3615a97ec4b73c12a0a99982da98b23e521b220fee59f04", "drive_file_id": "1_icmDOdpefbja_dKvlgz2Mhs9CCukcAO"},
+      {"order": 5, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-05", "bytes": 83886080, "sha256": "22ccf451a9bbe27173a1351aab556411bd50edd5d0fd82d227506e2d9d8df38a", "drive_file_id": "1XN9jnpBqdH_6dUT24iy0usn1gfsrsgLO"},
+      {"order": 6, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-06", "bytes": 83886080, "sha256": "ad2804ac9d56ed33551ed649e2a3471102c9846a0eacb62d3325a412e97d5075", "drive_file_id": "1Ptnr-LT6Vd1uKU8BGfOiejEqfP2Eejea"},
+      {"order": 7, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-07", "bytes": 83886080, "sha256": "e900c7cb00c47b0f2bcc6e04b0bf0d0105dace110c34da3b4f65217db058842f", "drive_file_id": "1fxxGgQyDCh3Hcig5R8KVP8KnmcibbzvG"},
+      {"order": 8, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-08", "bytes": 83886080, "sha256": "1d2c26ceface43e791eb2623d641ef1e6e7fc3fcfd8e2b455a92e13af9522a35", "drive_file_id": "1b1EOItIv5RDrYaZBimSOnx1YgUTiYvZ_"},
+      {"order": 9, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-09", "bytes": 83886080, "sha256": "cbd8d8e80f3e19b7723fa7cc500283ec118a0d8185f83275a1c182113e46f3c2", "drive_file_id": "183F6U_q4uTO98p7C2_fIqJ8_kfHvX0eU"},
+      {"order": 10, "filename": "kreports-runtime-2021-2025-v4.db.gz.chunk-10", "bytes": 14625297, "sha256": "889af373f51b351e9456db02bfc72a9dfdab384bcb5e4dafa78a456c3694cf6a", "drive_file_id": "1vUaX7N_qhYw5VP00V0s_A4rEehR1FyaP"}
+    ],
+    "restore": {
+      "join_command": "cat kreports-runtime-2021-2025-v4.db.gz.chunk-* > kreports-runtime-2021-2025-v4.db.gz",
+      "verify_compressed_command": "shasum -a 256 kreports-runtime-2021-2025-v4.db.gz",
+      "decompress_command": "gzip -dk kreports-runtime-2021-2025-v4.db.gz",
+      "verify_database_command": "shasum -a 256 kreports-runtime-2021-2025-v4.db"
+    }
   },
   "release_manifest_drive_file_id": "1T-2STTU9zqiK81P9JDcrdl817UTT5tc7",
   "raw_archive": {
     "filename": "kreports-audit-raw-2025-v1.tar.gz",
     "drive_file_id": "1RYoAhOl5rby6UjOnIn0NJpkln0jOrZo5",
+    "bytes": 29508191,
     "sha256": "4cb7996883eb7e1c8c71bddb660aa66d4c254b215406397742760b886f4604ba"
   }
 }
