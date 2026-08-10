@@ -1,4 +1,6 @@
 from datetime import date
+from pathlib import Path
+import tempfile
 
 from kreports.analysis.readiness import (
     audit_kam_quality_snapshot,
@@ -14,12 +16,12 @@ from kreports.db.models import (
     AccountingPolicyItem,
     AuditProcedureItem,
     Company,
-    CompanyYearListingMembership,
     Disclosure,
     EvidenceDocument,
     ReportSection,
     SourceDocument,
 )
+from tests.historical_membership_fixture import verified_membership
 
 
 def test_backfill_preflight_rejects_low_free_disk_space():
@@ -315,26 +317,16 @@ def test_select_policy_targets_by_market_and_limit(temp_engine):
                     induty_code="264",
                 )
             )
-            session.add(
-                CompanyYearListingMembership(
-                    corp_code=corp_code,
-                    stock_code=stock_code,
-                    bsns_year=2025,
-                    market="KOSPI",
-                    status="verified",
-                    evidence_basis="current_open_interval",
-                    as_of=date(2026, 8, 10),
-                    manifest_checksum="a" * 64,
-                    manifest_storage_uri="file:///tmp/test-manifest.json",
-                    manifest_size_bytes=2,
-                    manifest_raw_receipt_count=1,
-                    normalized_checksum="b" * 64,
-                    normalized_storage_uri="file:///tmp/test-memberships.csv",
-                    normalized_size_bytes=2,
-                    transformation_version="krx-year-end-listing-membership-v1",
-                    source_row_no=idx + 2,
-                )
+            membership, _raw_path = verified_membership(
+                root=(
+                    Path(tempfile.mkdtemp(prefix="kreports-auditor-membership-test-"))
+                ),
+                corp_code=corp_code,
+                stock_code=stock_code,
+                year=2025,
+                market="KOSPI",
             )
+            session.add(membership)
 
     targets = _select_policy_targets(year=2025, fs_div="CFS", market="KOSPI", limit=10, missing_only=False)
     assert len(targets) == 10

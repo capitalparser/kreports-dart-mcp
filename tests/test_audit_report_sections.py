@@ -576,7 +576,10 @@ def test_collect_business_report_collects_summary_and_attached_audit_reports(tem
 
 def test_collect_report_sections_falls_back_to_source_document_when_disclosure_missing(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
+    from kreports.config import settings
     from kreports.db.engine import get_session
+
+    monkeypatch.setattr(settings, "dart_api_key", "")
 
     with get_session() as session:
         session.add(SourceDocument(

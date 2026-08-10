@@ -12,6 +12,8 @@ test_policy_persistence.py — AccountingPolicyItem 모델·collector·idempoten
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
+import tempfile
 from unittest.mock import patch
 
 import pytest
@@ -25,7 +27,6 @@ from kreports.db.models import (
     Base,
     Company,
     CompanyListingPeriod,
-    CompanyYearListingMembership,
     FetchLog,
 )
 from kreports.collector.policy_collector import (
@@ -33,6 +34,7 @@ from kreports.collector.policy_collector import (
     collect_policies_for_company,
     collect_policies_batch,
 )
+from tests.historical_membership_fixture import verified_membership
 
 
 def _verified_year_membership(
@@ -41,25 +43,16 @@ def _verified_year_membership(
     market: str,
     *,
     year: int = 2024,
-) -> CompanyYearListingMembership:
-    return CompanyYearListingMembership(
+):
+    evidence_root = Path(tempfile.mkdtemp(prefix="kreports-policy-membership-test-"))
+    membership, _raw_path = verified_membership(
+        root=evidence_root,
         corp_code=corp_code,
         stock_code=stock_code,
-        bsns_year=year,
+        year=year,
         market=market,
-        status="verified",
-        evidence_basis="current_open_interval",
-        as_of=date(2026, 8, 10),
-        manifest_checksum="a" * 64,
-        manifest_storage_uri="file:///tmp/test-manifest.json",
-        manifest_size_bytes=2,
-        manifest_raw_receipt_count=1,
-        normalized_checksum="b" * 64,
-        normalized_storage_uri="file:///tmp/test-memberships.csv",
-        normalized_size_bytes=2,
-        transformation_version="krx-year-end-listing-membership-v1",
-        source_row_no=int(corp_code) * 10 + year,
     )
+    return membership
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +438,7 @@ def test_collect_policies_all_selects_every_verified_core_market_company(
     assert corp_codes == ["00000001", "00000002"]
 
 
-def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
+def test_collect_policies_market_skips_durable_no_data_on_the_next_batch(
     temp_engine,
     mock_policy_data,
     monkeypatch,
@@ -469,7 +462,7 @@ def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
     ):
         first = CliRunner().invoke(
             cli.app,
-            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+            ["collect-policies", "--market", "KOSPI", "--year", "2024", "--fs-div", "CFS"],
         )
 
     assert first.exit_code == 0, first.output
@@ -489,7 +482,7 @@ def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
     ):
         second = CliRunner().invoke(
             cli.app,
-            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+            ["collect-policies", "--market", "KOSPI", "--year", "2024", "--fs-div", "CFS"],
         )
 
     assert second.exit_code == 0, second.output
@@ -500,7 +493,7 @@ def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
         ).scalar_one() == 0
 
 
-def test_collect_policies_all_can_explicitly_retry_durable_no_data(
+def test_collect_policies_market_can_explicitly_retry_durable_no_data(
     temp_engine,
     mock_policy_data,
     monkeypatch,
@@ -524,7 +517,7 @@ def test_collect_policies_all_can_explicitly_retry_durable_no_data(
     ):
         first = CliRunner().invoke(
             cli.app,
-            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+            ["collect-policies", "--market", "KOSPI", "--year", "2024", "--fs-div", "CFS"],
         )
     assert first.exit_code == 0, first.output
 
@@ -536,7 +529,8 @@ def test_collect_policies_all_can_explicitly_retry_durable_no_data(
             cli.app,
             [
                 "collect-policies",
-                "--all",
+                "--market",
+                "KOSPI",
                 "--year",
                 "2024",
                 "--fs-div",
@@ -591,7 +585,7 @@ def test_collect_policies_all_dry_run_needs_no_key_and_writes_nothing(
         ).scalar_one() == 0
 
 
-def test_collect_policies_all_excludes_companies_not_yet_listed_in_target_year(
+def test_collect_policies_market_excludes_companies_not_listed_in_target_year(
     temp_engine,
     monkeypatch,
 ):
@@ -641,7 +635,8 @@ def test_collect_policies_all_excludes_companies_not_yet_listed_in_target_year(
         cli.app,
         [
             "collect-policies",
-            "--all",
+            "--market",
+            "KOSPI",
             "--year",
             "2024",
             "--fs-div",
@@ -654,7 +649,7 @@ def test_collect_policies_all_excludes_companies_not_yet_listed_in_target_year(
     assert "targets=1" in result.output
 
 
-def test_collect_policies_all_quarantines_durable_parse_failure_by_default(
+def test_collect_policies_market_quarantines_durable_parse_failure_by_default(
     temp_engine,
     mock_policy_data,
     monkeypatch,
@@ -689,7 +684,7 @@ def test_collect_policies_all_quarantines_durable_parse_failure_by_default(
     ):
         result = CliRunner().invoke(
             cli.app,
-            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+            ["collect-policies", "--market", "KOSPI", "--year", "2024", "--fs-div", "CFS"],
         )
 
     assert result.exit_code == 0, result.output
@@ -700,7 +695,7 @@ def test_collect_policies_all_quarantines_durable_parse_failure_by_default(
         ).scalar_one() == 0
 
 
-def test_collect_policies_all_can_explicitly_retry_durable_failure(
+def test_collect_policies_market_can_explicitly_retry_durable_failure(
     temp_engine,
     mock_policy_data,
     monkeypatch,
@@ -737,7 +732,8 @@ def test_collect_policies_all_can_explicitly_retry_durable_failure(
             cli.app,
             [
                 "collect-policies",
-                "--all",
+                "--market",
+                "KOSPI",
                 "--year",
                 "2024",
                 "--fs-div",

@@ -26,10 +26,13 @@ from kreports.maintenance.krx_listing_normalizer import (
     _validate_company_corp_code,
     _validate_company_stock_code,
 )
+from kreports.maintenance.krx_request_receipt_ledger import (
+    load_verified_request_receipt_ledger,
+)
 
 
 TRANSFORMATION_VERSION = "krx-year-end-listing-membership-v1"
-MANIFEST_SCHEMA_VERSION = "krx-year-end-listing-membership-manifest-v1"
+MANIFEST_SCHEMA_VERSION = "krx-year-end-listing-membership-manifest-v2"
 CSV_COLUMNS = (
     "corp_code",
     "stock_code",
@@ -62,6 +65,8 @@ class HistoricalListingReceipt:
 
     market: str
     payload: bytes
+    window_from: date | None = None
+    window_to: date | None = None
 
 
 @dataclass(frozen=True)
@@ -72,7 +77,10 @@ class RawReceiptProvenance:
     uri: str
     retrieved_at: datetime
     role: str
+    request_ledger_path: str | Path | None = None
     market: str | None = None
+    window_from: date | None = None
+    window_to: date | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,7 @@ def build_historical_membership_manifest(
     manifest_receipts: list[dict[str, object]] = []
     actual_digests: list[str] = []
     signatures: set[tuple[str, str]] = set()
+    ledgers: dict[Path, tuple[bytes, dict[str, object]]] = {}
     for receipt in raw_receipts:
         path = Path(receipt.path)
         if not path.is_file():
@@ -130,8 +139,59 @@ def build_historical_membership_manifest(
             raise HistoricalListingNormalizationError("current listing receipt must not assert one market")
         if role != "current_listing" and market not in CORE_MARKETS:
             raise HistoricalListingNormalizationError("history receipt must assert a core market")
+        if role == "current_listing":
+            if receipt.window_from is not None or receipt.window_to is not None:
+                raise HistoricalListingNormalizationError(
+                    "current listing receipt must not assert a history window"
+                )
+            window_from = window_to = None
+        else:
+            window_from = receipt.window_from
+            window_to = receipt.window_to
+            if (
+                not isinstance(window_from, date)
+                or isinstance(window_from, datetime)
+                or not isinstance(window_to, date)
+                or isinstance(window_to, datetime)
+                or window_from > window_to
+            ):
+                raise HistoricalListingNormalizationError(
+                    "history receipt must assert a valid inclusive window"
+                )
         checksum = hashlib.sha256(payload).hexdigest()
         storage_uri = path.resolve().as_uri()
+        if receipt.request_ledger_path is None:
+            raise HistoricalListingNormalizationError(
+                "capture-time request receipt ledger is required"
+            )
+        try:
+            ledger_path = Path(receipt.request_ledger_path).expanduser().resolve(strict=True)
+            if ledger_path not in ledgers:
+                ledger_payload = ledger_path.read_bytes()
+                ledgers[ledger_path] = (
+                    ledger_payload,
+                    load_verified_request_receipt_ledger(ledger_path),
+                )
+            ledger_payload, ledger_entries = ledgers[ledger_path]
+            captured = ledger_entries.get(storage_uri)
+        except (OSError, ValueError) as exc:
+            raise HistoricalListingNormalizationError(str(exc)) from exc
+        if captured is None:
+            raise HistoricalListingNormalizationError(
+                "raw receipt is not bound to a captured request envelope"
+            )
+        if (
+            getattr(captured, "role") != role
+            or getattr(captured, "market") != market
+            or getattr(captured, "window_from") != window_from
+            or getattr(captured, "window_to") != window_to
+            or getattr(captured, "uri") != receipt.uri
+            or getattr(captured, "retrieved_at") != retrieved_at
+            or getattr(captured, "response_checksum") != checksum
+        ):
+            raise HistoricalListingNormalizationError(
+                "raw receipt provenance does not match captured request envelope"
+            )
         signature = (storage_uri, checksum)
         if signature in signatures:
             raise HistoricalListingNormalizationError("duplicate raw receipt provenance")
@@ -145,6 +205,13 @@ def build_historical_membership_manifest(
             "retrieved_at": retrieved_at.isoformat(),
             "role": role,
             "market": market,
+            "window_from": window_from.isoformat() if window_from else None,
+            "window_to": window_to.isoformat() if window_to else None,
+            "request_method": getattr(captured, "request_method"),
+            "request_params": getattr(captured, "request_params"),
+            "request_ledger_storage_uri": ledger_path.as_uri(),
+            "request_ledger_checksum": hashlib.sha256(ledger_payload).hexdigest(),
+            "request_ledger_size_bytes": len(ledger_payload),
         })
 
     expected_digests = result.summary.get("source_receipt_checksums")
@@ -306,6 +373,47 @@ def _validate_receipt(receipt: HistoricalListingReceipt) -> str:
     return market
 
 
+def _validate_complete_history_coverage(
+    receipts: Sequence[HistoricalListingReceipt],
+    *,
+    role: str,
+    required_from: date,
+    required_to: date,
+) -> None:
+    """Require an unbroken inclusive export-window chain for both core markets."""
+    for market in sorted(CORE_MARKETS):
+        windows: list[tuple[date, date]] = []
+        for receipt in receipts:
+            receipt_market = _validate_receipt(receipt)
+            if receipt_market != market:
+                continue
+            if (
+                not isinstance(receipt.window_from, date)
+                or isinstance(receipt.window_from, datetime)
+                or not isinstance(receipt.window_to, date)
+                or isinstance(receipt.window_to, datetime)
+                or receipt.window_from > receipt.window_to
+            ):
+                raise HistoricalListingNormalizationError(
+                    f"complete {role} coverage requires valid receipt windows"
+                )
+            windows.append((receipt.window_from, receipt.window_to))
+        cursor = required_from
+        for window_from, window_to in sorted(windows):
+            if window_to < cursor:
+                continue
+            if window_from > cursor:
+                break
+            if window_to >= required_to:
+                cursor = date.fromordinal(required_to.toordinal() + 1)
+                break
+            cursor = date.fromordinal(window_to.toordinal() + 1)
+        if cursor <= required_to:
+            raise HistoricalListingNormalizationError(
+                f"complete {role} coverage is missing for {market}"
+            )
+
+
 def _csv_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
     output = StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS, lineterminator="\n")
@@ -344,6 +452,19 @@ def normalize_krx_year_end_memberships(
         raise HistoricalListingNormalizationError(
             "event history must begin before the earliest requested year end"
         )
+
+    _validate_complete_history_coverage(
+        listing_receipts,
+        role="listing_event",
+        required_from=event_history_from,
+        required_to=as_of,
+    )
+    _validate_complete_history_coverage(
+        delisting_receipts,
+        role="delisting_event",
+        required_from=date(normalized_years[0], 1, 1),
+        required_to=as_of,
+    )
 
     company_by_stock = _company_by_stock(companies)
     try:

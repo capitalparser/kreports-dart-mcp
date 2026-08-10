@@ -1,4 +1,5 @@
-from datetime import date
+from pathlib import Path
+import tempfile
 
 import pytest
 from typer.testing import CliRunner
@@ -8,7 +9,8 @@ from kreports.cli.main import (
     app,
 )
 from kreports.db.engine import get_session
-from kreports.db.models import Company, CompanyYearListingMembership
+from kreports.db.models import Company
+from tests.historical_membership_fixture import verified_membership
 
 
 def _create_year_membership_table() -> None:
@@ -28,31 +30,21 @@ def _seed_company(*, corp_code: str, stock_code: str, market: str | None) -> Non
         )
 
 
-def _seed_membership(*, corp_code: str, year: int, market: str, status: str = "verified") -> None:
+def _seed_membership(
+    *, corp_code: str, year: int, market: str
+) -> Path:
+    evidence_root = Path(tempfile.mkdtemp(prefix="kreports-membership-test-"))
     with get_session() as session:
         stock_code = session.get(Company, corp_code).stock_code
-        session.add(
-            CompanyYearListingMembership(
-                corp_code=corp_code,
-                stock_code=stock_code,
-                bsns_year=year,
-                market=market,
-                status=status,
-                evidence_basis=(
-                    "current_open_interval" if status == "verified" else "source_gap"
-                ),
-                as_of=date(2026, 8, 10),
-                manifest_checksum="a" * 64,
-                manifest_storage_uri="file:///tmp/test-manifest.json",
-                manifest_size_bytes=2,
-                manifest_raw_receipt_count=1,
-                normalized_checksum="b" * 64,
-                normalized_storage_uri="file:///tmp/test-memberships.csv",
-                normalized_size_bytes=2,
-                transformation_version="krx-year-end-listing-membership-v1",
-                source_row_no=int(corp_code) * 10 + year,
-            )
+        membership, raw_path = verified_membership(
+            root=evidence_root,
+            corp_code=corp_code,
+            stock_code=stock_code,
+            year=year,
+            market=market,
         )
+        session.add(membership)
+    return raw_path
 
 
 def test_historical_membership_selects_delisted_company_and_excludes_future_survivor(temp_engine):
@@ -141,3 +133,54 @@ def test_collect_policies_dry_run_reports_clear_error_when_membership_evidence_i
 
     assert result.exit_code == 1
     assert "historical year-end membership evidence" in result.output
+
+
+def test_all_scope_fails_closed_when_only_one_core_market_is_present(temp_engine):
+    _seed_company(corp_code="00000001", stock_code="000001", market="KOSPI")
+    _seed_membership(corp_code="00000001", year=2021, market="KOSPI")
+
+    with pytest.raises(RuntimeError, match="missing KOSDAQ"):
+        _select_policy_targets(
+            year=2021,
+            fs_div="CFS",
+            market=None,
+            limit=None,
+            missing_only=False,
+        )
+
+
+def test_membership_scope_rejects_company_master_stock_code_drift(temp_engine):
+    from sqlalchemy import text
+
+    _seed_company(corp_code="00000001", stock_code="000001", market="KOSPI")
+    _seed_membership(corp_code="00000001", year=2021, market="KOSPI")
+    with get_session() as session:
+        session.execute(text(
+            "UPDATE companies SET stock_code='999999' WHERE corp_code='00000001'"
+        ))
+
+    with pytest.raises(RuntimeError, match="historical year-end membership evidence"):
+        _select_policy_targets(
+            year=2021,
+            fs_div="CFS",
+            market="KOSPI",
+            limit=None,
+            missing_only=False,
+        )
+
+
+def test_membership_scope_rejects_deleted_retained_raw_receipt(temp_engine):
+    _seed_company(corp_code="00000001", stock_code="000001", market="KOSPI")
+    raw_path = _seed_membership(
+        corp_code="00000001", year=2021, market="KOSPI"
+    )
+    raw_path.unlink()
+
+    with pytest.raises(RuntimeError, match="raw receipt artifact"):
+        _select_policy_targets(
+            year=2021,
+            fs_div="CFS",
+            market="KOSPI",
+            limit=None,
+            missing_only=False,
+        )

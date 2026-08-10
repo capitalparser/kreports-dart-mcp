@@ -113,6 +113,319 @@ def normalize_krx_listing_cmd(
     typer.echo(json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
+@app.command("capture-krx-membership-receipts")
+def capture_krx_membership_receipts_cmd(
+    current_path: Path = typer.Option(..., "--current-path"),
+    listing_kospi_dir: Path = typer.Option(..., "--listing-kospi-dir"),
+    listing_kosdaq_dir: Path = typer.Option(..., "--listing-kosdaq-dir"),
+    delisting_kospi_path: Path = typer.Option(..., "--delisting-kospi-path"),
+    delisting_kosdaq_path: Path = typer.Option(..., "--delisting-kosdaq-path"),
+    output_path: Path = typer.Option(..., "--output-path"),
+    year_from: int = typer.Option(..., "--year-from"),
+    event_history_from: str = typer.Option(..., "--event-history-from"),
+    as_of: str = typer.Option(..., "--as-of"),
+) -> None:
+    """Replay KIND downloads and bind exact request envelopes to raw bytes."""
+    import re
+
+    from kreports.maintenance.krx_request_receipt_ledger import (
+        RequestReceiptSpec,
+        capture_verified_request_receipt_ledger,
+    )
+    from kreports.runtime import require_runtime_write
+
+    try:
+        require_runtime_write("capture KRX membership request receipts")
+        as_of_date = date.fromisoformat(as_of)
+        event_history_from_date = date.fromisoformat(event_history_from)
+        specs = [RequestReceiptSpec(
+            response_path=current_path.expanduser().resolve(strict=True),
+            role="current_listing",
+        )]
+        for market, directory in (
+            ("KOSPI", listing_kospi_dir),
+            ("KOSDAQ", listing_kosdaq_dir),
+        ):
+            resolved_dir = directory.expanduser().resolve(strict=True)
+            if not resolved_dir.is_dir():
+                raise ValueError(f"{market} listing path must be a directory")
+            for path in sorted(resolved_dir.glob("*.xls")):
+                match = re.fullmatch(r"(\d{4})-(\d{4})\.xls", path.name)
+                if match is None:
+                    raise ValueError(f"listing receipt filename is invalid: {path.name}")
+                start_year, end_year = (int(value) for value in match.groups())
+                window_from = date(start_year, 1, 1)
+                window_to = min(date(end_year, 12, 31), as_of_date)
+                if (
+                    start_year > end_year
+                    or window_from > window_to
+                    or window_to < event_history_from_date
+                ):
+                    raise ValueError(f"listing receipt window is invalid: {path.name}")
+                specs.append(RequestReceiptSpec(
+                    response_path=path.resolve(strict=True),
+                    role="listing_event",
+                    market=market,
+                    window_from=window_from,
+                    window_to=window_to,
+                ))
+        for market, path in (
+            ("KOSPI", delisting_kospi_path),
+            ("KOSDAQ", delisting_kosdaq_path),
+        ):
+            specs.append(RequestReceiptSpec(
+                response_path=path.expanduser().resolve(strict=True),
+                role="delisting_event",
+                market=market,
+                window_from=date(year_from, 1, 1),
+                window_to=as_of_date,
+            ))
+        result = capture_verified_request_receipt_ledger(
+            specs, output_path=output_path
+        )
+    except (FileExistsError, OSError, RuntimeError, ValueError) as exc:
+        typer.echo(json.dumps(
+            {"error": str(exc)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        raise typer.Exit(code=2) from exc
+    typer.echo(json.dumps(
+        result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ))
+
+
+@app.command("import-krx-year-memberships")
+def import_krx_year_memberships_cmd(
+    current_path: Path = typer.Option(..., "--current-path"),
+    listing_kospi_dir: Path = typer.Option(..., "--listing-kospi-dir"),
+    listing_kosdaq_dir: Path = typer.Option(..., "--listing-kosdaq-dir"),
+    delisting_kospi_path: Path = typer.Option(..., "--delisting-kospi-path"),
+    delisting_kosdaq_path: Path = typer.Option(..., "--delisting-kosdaq-path"),
+    receipt_ledger: Path = typer.Option(..., "--receipt-ledger"),
+    output_dir: Path = typer.Option(..., "--output-dir"),
+    year_from: int = typer.Option(..., "--year-from"),
+    year_to: int = typer.Option(..., "--year-to"),
+    event_history_from: str = typer.Option(..., "--event-history-from"),
+    as_of: str = typer.Option(..., "--as-of"),
+    replace_existing: bool = typer.Option(False, "--replace-existing"),
+) -> None:
+    """Rebuild and import provenance-bound historical KRX populations."""
+    import hashlib
+    import re
+
+    from sqlalchemy import select
+
+    from kreports.maintenance.company_year_listing_memberships import (
+        import_company_year_listing_membership_snapshot,
+    )
+    from kreports.maintenance.krx_historical_listing_normalizer import (
+        HistoricalListingNormalizationError,
+        HistoricalListingReceipt,
+        RawReceiptProvenance,
+        TRANSFORMATION_VERSION,
+        build_historical_membership_manifest,
+        normalize_krx_year_end_memberships,
+    )
+    from kreports.maintenance.krx_listing_normalizer import (
+        write_normalized_listing_csv,
+    )
+    from kreports.maintenance.krx_request_receipt_ledger import (
+        load_verified_request_receipt_ledger,
+    )
+    from kreports.runtime import require_runtime_write
+
+    def resolved_file(path: Path, *, label: str) -> Path:
+        resolved = path.expanduser().resolve(strict=True)
+        if not resolved.is_file():
+            raise ValueError(f"{label} must be a readable file")
+        return resolved
+
+    def history_receipts(directory: Path, market: str, cutoff: date):
+        resolved = directory.expanduser().resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError(f"{market} listing path must be a directory")
+        receipts = []
+        paths = []
+        for path in sorted(resolved.glob("*.xls")):
+            match = re.fullmatch(r"(\d{4})-(\d{4})\.xls", path.name)
+            if match is None:
+                raise ValueError(f"listing receipt filename is invalid: {path.name}")
+            start_year, end_year = (int(value) for value in match.groups())
+            if start_year > end_year:
+                raise ValueError(f"listing receipt window is invalid: {path.name}")
+            window_from = date(start_year, 1, 1)
+            window_to = min(date(end_year, 12, 31), cutoff)
+            if window_from > window_to:
+                raise ValueError(f"listing receipt is after as_of: {path.name}")
+            payload = path.read_bytes()
+            receipts.append(HistoricalListingReceipt(
+                market=market,
+                payload=payload,
+                window_from=window_from,
+                window_to=window_to,
+            ))
+            paths.append((path, window_from, window_to))
+        if not receipts:
+            raise ValueError(f"{market} listing receipts are required")
+        return receipts, paths
+
+    def retain(path: Path, payload: bytes) -> None:
+        if path.exists():
+            if not path.is_file() or path.read_bytes() != payload:
+                raise FileExistsError(f"output artifact already exists with different content: {path}")
+            return
+        write_normalized_listing_csv(path, payload)
+
+    try:
+        require_runtime_write("import KRX year-end memberships")
+        if year_from > year_to:
+            raise ValueError("year_from must not exceed year_to")
+        as_of_date = date.fromisoformat(as_of)
+        event_history_from_date = date.fromisoformat(event_history_from)
+        resolved_ledger = receipt_ledger.expanduser().resolve(strict=True)
+        captured_receipts = load_verified_request_receipt_ledger(resolved_ledger)
+        current_file = resolved_file(current_path, label="current listing path")
+        delisting_files = {
+            "KOSPI": resolved_file(
+                delisting_kospi_path, label="KOSPI delisting path"
+            ),
+            "KOSDAQ": resolved_file(
+                delisting_kosdaq_path, label="KOSDAQ delisting path"
+            ),
+        }
+        resolved_output_dir = output_dir.expanduser().resolve(strict=True)
+        if not resolved_output_dir.is_dir():
+            raise ValueError("output_dir must be a directory")
+
+        listing_receipts = []
+        listing_paths = {}
+        for market, directory in (
+            ("KOSPI", listing_kospi_dir),
+            ("KOSDAQ", listing_kosdaq_dir),
+        ):
+            receipts, paths = history_receipts(directory, market, as_of_date)
+            listing_receipts.extend(receipts)
+            listing_paths[market] = paths
+        delisting_receipts = [
+            HistoricalListingReceipt(
+                market=market,
+                payload=path.read_bytes(),
+                window_from=date(year_from, 1, 1),
+                window_to=as_of_date,
+            )
+            for market, path in delisting_files.items()
+        ]
+
+        init_db()
+        with get_session() as session:
+            companies = [
+                {
+                    "corp_code": str(corp_code),
+                    "stock_code": str(stock_code),
+                    "market": market,
+                }
+                for corp_code, stock_code, market in session.execute(
+                    select(Company.corp_code, Company.stock_code, Company.market).where(
+                        Company.stock_code.isnot(None)
+                    )
+                )
+            ]
+        normalized = normalize_krx_year_end_memberships(
+            current_listing_bytes=current_file.read_bytes(),
+            listing_receipts=listing_receipts,
+            delisting_receipts=delisting_receipts,
+            companies=companies,
+            years=list(range(year_from, year_to + 1)),
+            event_history_from=event_history_from_date,
+            as_of=as_of_date,
+        )
+
+        current_capture = captured_receipts.get(current_file.as_uri())
+        if current_capture is None:
+            raise ValueError("current listing response is absent from request ledger")
+        provenance = [RawReceiptProvenance(
+            path=current_file,
+            uri=current_capture.uri,
+            retrieved_at=current_capture.retrieved_at,
+            role="current_listing",
+            request_ledger_path=resolved_ledger,
+        )]
+        for market, paths in listing_paths.items():
+            for path, window_from, window_to in paths:
+                capture = captured_receipts.get(path.as_uri())
+                if capture is None:
+                    raise ValueError("listing response is absent from request ledger")
+                provenance.append(RawReceiptProvenance(
+                    path=path,
+                    uri=capture.uri,
+                    retrieved_at=capture.retrieved_at,
+                    role="listing_event",
+                    request_ledger_path=resolved_ledger,
+                    market=market,
+                    window_from=window_from,
+                    window_to=window_to,
+                ))
+        for market, path in delisting_files.items():
+            capture = captured_receipts.get(path.as_uri())
+            if capture is None:
+                raise ValueError("delisting response is absent from request ledger")
+            provenance.append(RawReceiptProvenance(
+                path=path,
+                uri=capture.uri,
+                retrieved_at=capture.retrieved_at,
+                role="delisting_event",
+                request_ledger_path=resolved_ledger,
+                market=market,
+                window_from=date(year_from, 1, 1),
+                window_to=as_of_date,
+            ))
+        manifest = build_historical_membership_manifest(
+            normalized, raw_receipts=provenance
+        )
+        stem = f"year-end-memberships-{year_from}-{year_to}-v2"
+        normalized_path = resolved_output_dir / f"{stem}.csv"
+        manifest_path = resolved_output_dir / f"{stem}.manifest.json"
+        retain(normalized_path, normalized.csv_bytes)
+        retain(manifest_path, manifest)
+        result = import_company_year_listing_membership_snapshot(
+            normalized_path,
+            manifest_path=manifest_path,
+            manifest_checksum=hashlib.sha256(manifest).hexdigest(),
+            normalized_checksum=hashlib.sha256(normalized.csv_bytes).hexdigest(),
+            transformation_version=TRANSFORMATION_VERSION,
+            replace_existing=replace_existing,
+        )
+    except (
+        HistoricalListingNormalizationError,
+        FileExistsError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        typer.echo(
+            json.dumps(
+                {"error": str(exc)},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        " ".join((
+            f"inserted={result['inserted']}",
+            f"deleted={result['deleted']}",
+            f"reused={result['reused']}",
+            f"rows={normalized.summary['row_count']}",
+            f"normalized_checksum={result['normalized_checksum']}",
+            f"manifest_checksum={result['manifest_checksum']}",
+        ))
+    )
+
+
 @app.command("backfill-audit-fee-observations")
 def backfill_audit_fee_observations_cmd(
     year_from: Optional[int] = typer.Option(None, "--year-from"),
@@ -1533,6 +1846,15 @@ _HISTORICAL_LISTING_MEMBERSHIP_COLUMNS = {
     "bsns_year",
     "market",
     "status",
+    "manifest_checksum",
+    "manifest_storage_uri",
+    "manifest_size_bytes",
+    "normalized_checksum",
+    "normalized_storage_uri",
+    "normalized_size_bytes",
+    "as_of",
+    "manifest_raw_receipt_count",
+    "transformation_version",
 }
 _LISTED_MARKETS = ("KOSPI", "KOSDAQ")
 
@@ -1564,6 +1886,12 @@ def _select_policy_targets_with_population(
     """
     from sqlalchemy import inspect, text
 
+    if market is not None and market not in _LISTED_MARKETS:
+        raise PolicyTargetPopulationError(
+            "historical year-end membership evidence is unavailable: "
+            f"unsupported market={market}"
+        )
+
     membership_filter = (
         "m.market = :market"
         if market
@@ -1592,11 +1920,40 @@ def _select_policy_targets_with_population(
                 f"{','.join(missing_columns)}"
             )
 
+        evidence_rows = [
+            dict(row)
+            for row in session.execute(
+                text(
+                    "SELECT DISTINCT manifest_checksum, manifest_storage_uri, "
+                    "manifest_size_bytes, manifest_raw_receipt_count, "
+                    "normalized_checksum, normalized_storage_uri, "
+                    "normalized_size_bytes, as_of, transformation_version "
+                    "FROM company_year_listing_memberships m "
+                    "WHERE m.bsns_year=:year AND m.status='verified' AND "
+                    f"{membership_filter}"
+                ),
+                membership_params,
+            ).mappings()
+        ]
+        if evidence_rows:
+            from kreports.maintenance.company_year_listing_memberships import (
+                validate_retained_membership_artifacts,
+            )
+
+            try:
+                validate_retained_membership_artifacts(evidence_rows)
+            except ValueError as exc:
+                raise PolicyTargetPopulationError(
+                    "historical year-end membership evidence is unavailable: "
+                    f"{exc}"
+                ) from exc
+
         market_count_rows = session.execute(
             text(
                 "SELECT m.market, COUNT(DISTINCT m.corp_code) "
                 "FROM company_year_listing_memberships m "
                 "JOIN companies c ON c.corp_code=m.corp_code "
+                "AND c.stock_code=m.stock_code "
                 "WHERE m.bsns_year=:year AND m.status='verified' "
                 "AND c.stock_code IS NOT NULL AND "
                 f"{membership_filter} "
@@ -1611,6 +1968,13 @@ def _select_policy_targets_with_population(
                 "historical year-end membership evidence is unavailable: "
                 f"no verified {scope} population for year={year}"
             )
+        if market is None:
+            missing_markets = sorted(set(_LISTED_MARKETS) - set(market_counts))
+            if missing_markets:
+                raise PolicyTargetPopulationError(
+                    "historical year-end membership evidence is unavailable: "
+                    f"year={year} is missing {','.join(missing_markets)}"
+                )
 
         population_company_count = int(
             session.execute(
@@ -1618,6 +1982,7 @@ def _select_policy_targets_with_population(
                     "SELECT COUNT(DISTINCT m.corp_code) "
                     "FROM company_year_listing_memberships m "
                     "JOIN companies c ON c.corp_code=m.corp_code "
+                    "AND c.stock_code=m.stock_code "
                     "WHERE m.bsns_year=:year AND m.status='verified' "
                     "AND c.stock_code IS NOT NULL AND "
                     f"{membership_filter}"
@@ -1630,6 +1995,7 @@ def _select_policy_targets_with_population(
             "SELECT DISTINCT c.corp_code "
             "FROM company_year_listing_memberships m "
             "JOIN companies c ON c.corp_code=m.corp_code "
+            "AND c.stock_code=m.stock_code "
             "WHERE m.bsns_year=:year AND m.status='verified' "
             "AND c.stock_code IS NOT NULL AND "
             f"{membership_filter} "
