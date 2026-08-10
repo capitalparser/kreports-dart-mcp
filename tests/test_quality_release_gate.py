@@ -10,6 +10,7 @@ from kreports.db.migrations import MIGRATIONS, apply_schema_migrations
 from kreports.db.quality_snapshot import QUALITY_VERSION
 from kreports.db.models import (
     Company,
+    CompanyYearListingMembership,
     CompanyYearQuality,
     DatasetManifest,
     Disclosure,
@@ -138,6 +139,7 @@ def _seed_quality_row(
     policy_status: str = "full_body",
     procedure_status: str = "available",
     kam_status: str = "full_body",
+    membership_years: tuple[int, ...] | None = (2021, 2022, 2023, 2024, 2025),
 ) -> None:
     with get_session() as session:
         session.add(
@@ -175,6 +177,68 @@ def _seed_quality_row(
                 updated_at=datetime.now(UTC),
             )
         )
+        if (
+            membership_years is not None
+            and stock_code is not None
+            and market in {"KOSPI", "KOSDAQ"}
+        ):
+            session.add_all([
+                CompanyYearListingMembership(
+                    corp_code=corp_code,
+                    stock_code=stock_code,
+                    bsns_year=year,
+                    market=market,
+                    status="verified",
+                    evidence_basis="current_open_interval",
+                    as_of=date(2026, 8, 10),
+                    manifest_checksum=hashlib.sha256(
+                        f"manifest:{corp_code}".encode()
+                    ).hexdigest(),
+                    manifest_storage_uri="file:///test-membership-manifest.json",
+                    manifest_size_bytes=1,
+                    manifest_raw_receipt_count=1,
+                    normalized_checksum=hashlib.sha256(
+                        f"normalized:{corp_code}".encode()
+                    ).hexdigest(),
+                    normalized_storage_uri="file:///test-membership-normalized.csv",
+                    normalized_size_bytes=1,
+                    transformation_version="krx-year-end-listing-membership-v1",
+                    source_row_no=year,
+                )
+                for year in membership_years
+            ])
+            for year in membership_years:
+                companion_market = "KOSDAQ" if market == "KOSPI" else "KOSPI"
+                if session.query(CompanyYearListingMembership.id).filter_by(
+                    bsns_year=year,
+                    market=companion_market,
+                    status="verified",
+                ).first() is None:
+                    marker_corp_code = f"9{year:04d}001"
+                    session.add(
+                        CompanyYearListingMembership(
+                            corp_code=marker_corp_code,
+                            stock_code=f"{year:06d}"[-6:],
+                            bsns_year=year,
+                            market=companion_market,
+                            status="verified",
+                            evidence_basis="current_open_interval",
+                            as_of=date(2026, 8, 10),
+                            manifest_checksum=hashlib.sha256(
+                                f"market-marker-manifest:{year}".encode()
+                            ).hexdigest(),
+                            manifest_storage_uri="file:///test-membership-manifest.json",
+                            manifest_size_bytes=1,
+                            manifest_raw_receipt_count=1,
+                            normalized_checksum=hashlib.sha256(
+                                f"market-marker-normalized:{year}".encode()
+                            ).hexdigest(),
+                            normalized_storage_uri="file:///test-membership-normalized.csv",
+                            normalized_size_bytes=1,
+                            transformation_version="krx-year-end-listing-membership-v1",
+                            source_row_no=1,
+                        )
+                    )
 
 
 def _seed_materiality_fact_years(
@@ -367,8 +431,10 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
         "threshold_pct": 95.0,
     }
     assert report["excluded_populations"]["investor_core"] == {
-        "not_listed": 1,
-        "outside_core_markets": 1,
+        "historical_membership_evidence_unavailable": 0,
+        "missing_required_membership_year": 0,
+        "missing_market_year": 0,
+        "unverified_membership_observation": 0,
     }
     assert "investor_core_coverage" not in report["required_failures"]
 
@@ -412,6 +478,13 @@ def test_public_runtime_separates_three_year_release_from_five_year_timeseries(
         "current_year_disclosure_list_required": False,
         "annual_core_source": "exact_company_year_annual_filing",
         "grade_policy": "A_or_B",
+        "population_source": "verified_company_year_listing_memberships",
+        "membership_status": "verified",
+        "membership_market_scope": ["KOSPI", "KOSDAQ"],
+        "membership_required_years": [2023, 2024, 2025],
+        "membership_evidence_available": True,
+        "membership_rule": "company_must_be_member_in_every_required_year",
+        "eligible_company_count": 20,
     }
     assert report["coverage_metadata"]["investor_timeseries_5y"] == {
         "window_years": 5,
@@ -420,9 +493,143 @@ def test_public_runtime_separates_three_year_release_from_five_year_timeseries(
         "current_year_disclosure_list_required": False,
         "annual_core_source": "exact_company_year_annual_filing",
         "grade_policy": "A_only",
+        "population_source": "verified_company_year_listing_memberships",
+        "membership_status": "verified",
+        "membership_market_scope": ["KOSPI", "KOSDAQ"],
+        "membership_required_years": [2021, 2022, 2023, 2024, 2025],
+        "membership_evidence_available": True,
+        "membership_rule": "company_must_be_member_in_every_required_year",
+        "eligible_company_count": 20,
     }
     assert "investor_timeseries_5y" in report["degraded_features"]
     assert "investor_core_3y_coverage" not in report["required_failures"]
+
+
+def test_release_coverage_uses_verified_historical_membership_windows(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a survivor denominator that requires a newly listed company retroactively."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    for corp_code, stock_code, market in (
+        ("00000001", "000001", "KOSPI"),
+        ("00000002", "000002", "KOSDAQ"),
+    ):
+        _seed_quality_row(
+            corp_code=corp_code,
+            grade="A",
+            stock_code=stock_code,
+            market=market,
+        )
+        _seed_materiality_fact_years(corp_code, (2023, 2024, 2025))
+    _seed_quality_row(
+        corp_code="00000003",
+        grade="A",
+        stock_code="000003",
+        membership_years=(2025,),
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("auditor_full")
+
+    assert report["coverage"]["investor_core_3y"]["denominator"] == 2
+    assert report["coverage"]["investor_timeseries_5y"]["denominator"] == 2
+    assert report["coverage"]["accounting_policy"]["denominator"] == 3
+    assert report["coverage"]["materiality_benchmark"] == {
+        "numerator": 2,
+        "denominator": 2,
+        "coverage_pct": 100.0,
+        "threshold_pct": 95.0,
+    }
+    assert report["excluded_populations"]["investor_core_3y"][
+        "missing_required_membership_year"
+    ] == 1
+    assert report["coverage_metadata"]["investor_core_3y"][
+        "population_source"
+    ] == "verified_company_year_listing_memberships"
+
+
+def test_release_coverage_fails_closed_when_required_memberships_are_unavailable(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a release gate that falls back to the current company master."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00000001",
+        grade="A",
+        stock_code="000001",
+        membership_years=None,
+    )
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert report["coverage"]["investor_core_3y"]["denominator"] == 0
+    assert report["coverage_metadata"]["investor_core_3y"][
+        "membership_evidence_available"
+    ] is False
+    assert report["excluded_populations"]["investor_core_3y"][
+        "historical_membership_evidence_unavailable"
+    ] == 1
+    assert "investor_core_3y_coverage" in report["required_failures"]
+
+
+def test_release_coverage_fails_closed_when_kosdaq_memberships_are_missing(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a historical population that silently omits one core market."""
+    from kreports.quality.release_gate import evaluate_release_gate
+
+    _seed_quality_row(
+        corp_code="00000001",
+        grade="A",
+        stock_code="000001",
+        membership_years=None,
+    )
+    with get_session() as session:
+        session.add_all([
+            CompanyYearListingMembership(
+                corp_code="00000001",
+                stock_code="000001",
+                bsns_year=year,
+                market="KOSPI",
+                status="verified",
+                evidence_basis="current_open_interval",
+                as_of=date(2026, 8, 10),
+                manifest_checksum=hashlib.sha256(
+                    f"kospi-only-manifest:{year}".encode()
+                ).hexdigest(),
+                manifest_storage_uri="file:///test-membership-manifest.json",
+                manifest_size_bytes=1,
+                manifest_raw_receipt_count=1,
+                normalized_checksum=hashlib.sha256(
+                    f"kospi-only-normalized:{year}".encode()
+                ).hexdigest(),
+                normalized_storage_uri="file:///test-membership-normalized.csv",
+                normalized_size_bytes=1,
+                transformation_version="krx-year-end-listing-membership-v1",
+                source_row_no=1,
+            )
+            for year in (2023, 2024, 2025)
+        ])
+    _seed_valid_manifest(temp_engine)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    report = evaluate_release_gate("public_runtime")
+
+    assert report["coverage"]["investor_core_3y"]["denominator"] == 0
+    assert report["coverage_metadata"]["investor_core_3y"][
+        "membership_evidence_available"
+    ] is False
+    assert report["excluded_populations"]["investor_core_3y"][
+        "missing_market_year"
+    ] == 3
 
 
 @pytest.mark.parametrize("financial_core_status", ("missing", "partial"))
@@ -523,8 +730,10 @@ def test_zero_materiality_benchmark_coverage_degrades_public_and_blocks_auditor_
         "threshold_pct": 95.0,
     }
     assert auditor["excluded_populations"]["materiality_benchmark"] == {
-        "not_listed": 0,
-        "outside_core_markets": 0,
+        "historical_membership_evidence_unavailable": 0,
+        "missing_required_membership_year": 0,
+        "missing_market_year": 0,
+        "unverified_membership_observation": 0,
         "zero_proven_years": 1,
         "one_proven_year": 0,
         "two_proven_years": 0,
@@ -589,6 +798,13 @@ def test_three_exact_proven_years_pass_materiality_benchmark_coverage(
         "duplicate_policy": "value_and_provenance_identical_only",
         "amount_policy": "finite_sqlite_integer_or_real",
         "pbt_policy": "direct_or_profit_loss_plus_tax_expense",
+        "population_source": "verified_company_year_listing_memberships",
+        "membership_status": "verified",
+        "membership_market_scope": ["KOSPI", "KOSDAQ"],
+        "membership_required_years": [2023, 2024, 2025],
+        "membership_evidence_available": True,
+        "membership_rule": "company_must_be_member_in_every_required_year",
+        "eligible_company_count": 1,
     }
 
 
@@ -1577,6 +1793,57 @@ def test_public_runtime_does_not_round_1899_of_1999_up_to_threshold(
                 for index in range(1999)
             ]
         )
+        session.add_all([
+            CompanyYearListingMembership(
+                corp_code=f"{index + 1:08d}",
+                stock_code=f"{index + 1:06d}",
+                bsns_year=year,
+                market="KOSPI",
+                status="verified",
+                evidence_basis="current_open_interval",
+                as_of=date(2026, 8, 10),
+                manifest_checksum=hashlib.sha256(
+                    f"threshold-manifest:{index}".encode()
+                ).hexdigest(),
+                manifest_storage_uri="file:///test-membership-manifest.json",
+                manifest_size_bytes=1,
+                manifest_raw_receipt_count=1,
+                normalized_checksum=hashlib.sha256(
+                    f"threshold-normalized:{index}".encode()
+                ).hexdigest(),
+                normalized_storage_uri="file:///test-membership-normalized.csv",
+                normalized_size_bytes=1,
+                transformation_version="krx-year-end-listing-membership-v1",
+                source_row_no=year,
+            )
+            for index in range(1999)
+            for year in (2021, 2022, 2023, 2024, 2025)
+        ])
+        session.add_all([
+            CompanyYearListingMembership(
+                corp_code="99000001",
+                stock_code=f"{year:06d}"[-6:],
+                bsns_year=year,
+                market="KOSDAQ",
+                status="verified",
+                evidence_basis="current_open_interval",
+                as_of=date(2026, 8, 10),
+                manifest_checksum=hashlib.sha256(
+                    f"threshold-kosdaq-manifest:{year}".encode()
+                ).hexdigest(),
+                manifest_storage_uri="file:///test-membership-manifest.json",
+                manifest_size_bytes=1,
+                manifest_raw_receipt_count=1,
+                normalized_checksum=hashlib.sha256(
+                    f"threshold-kosdaq-normalized:{year}".encode()
+                ).hexdigest(),
+                normalized_storage_uri="file:///test-membership-normalized.csv",
+                normalized_size_bytes=1,
+                transformation_version="krx-year-end-listing-membership-v1",
+                source_row_no=1,
+            )
+            for year in (2021, 2022, 2023, 2024, 2025)
+        ])
     _seed_valid_manifest(temp_engine)
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 

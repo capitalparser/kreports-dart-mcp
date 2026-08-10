@@ -74,6 +74,13 @@ _INVESTOR_CORE_COMPATIBILITY_ALIAS_METADATA = {
 }
 STALE_BACKFILL_AGE = timedelta(hours=1)
 CORE_MARKETS = ("KOSPI", "KOSDAQ")
+_HISTORICAL_MEMBERSHIP_TABLE = "company_year_listing_memberships"
+_HISTORICAL_MEMBERSHIP_REQUIRED_COLUMNS = {
+    "corp_code",
+    "bsns_year",
+    "market",
+    "status",
+}
 REQUIRED_TABLES = (
     "companies",
     "disclosures",
@@ -465,12 +472,197 @@ def _coverage_result(numerator: int, denominator: int) -> CoverageResult:
     }
 
 
+def _verified_membership_population(
+    session: Any,
+    *,
+    table_names: set[str],
+    required_years: tuple[int, ...],
+) -> tuple[list[str], dict[str, Any], dict[str, int]]:
+    """Return only companies proved listed at every required year end.
+
+    Current ``companies.market`` and ``companies.stock_code`` values are
+    intentionally absent from the eligibility predicate: they cannot establish
+    whether a company was listed in an earlier fiscal year. The company join
+    only rejects orphaned membership rows. Historical membership rows are
+    written only after their KRX provenance is validated by the importer, and
+    the release gate accepts only ``verified`` KOSPI/KOSDAQ observations.
+    """
+    years = tuple(sorted(set(int(year) for year in required_years)))
+    unavailable = {
+        "historical_membership_evidence_unavailable": 1,
+        "missing_required_membership_year": 0,
+        "missing_market_year": len(years) * len(CORE_MARKETS),
+        "unverified_membership_observation": 0,
+    }
+    metadata: dict[str, Any] = {
+        "population_source": "verified_company_year_listing_memberships",
+        "membership_status": "verified",
+        "membership_market_scope": list(CORE_MARKETS),
+        "membership_required_years": list(years),
+        "membership_evidence_available": False,
+        "membership_rule": "company_must_be_member_in_every_required_year",
+    }
+    if not years or _HISTORICAL_MEMBERSHIP_TABLE not in table_names:
+        return [], metadata, unavailable
+    columns = {
+        str(column["name"])
+        for column in inspect(session.get_bind()).get_columns(
+            _HISTORICAL_MEMBERSHIP_TABLE
+        )
+    }
+    if not _HISTORICAL_MEMBERSHIP_REQUIRED_COLUMNS.issubset(columns):
+        return [], metadata, unavailable
+
+    year_params = {
+        f"membership_year_{index}": year
+        for index, year in enumerate(years)
+    }
+    year_bindings = ", ".join(f":{key}" for key in year_params)
+    verified_rows = session.execute(
+        text(
+            f"""
+            SELECT m.corp_code
+            FROM {_HISTORICAL_MEMBERSHIP_TABLE} AS m
+            JOIN companies AS c ON c.corp_code=m.corp_code
+            WHERE m.bsns_year IN ({year_bindings})
+              AND m.market IN ('KOSPI', 'KOSDAQ')
+              AND m.status='verified'
+            GROUP BY m.corp_code
+            HAVING COUNT(DISTINCT m.bsns_year)=:membership_year_count
+            ORDER BY m.corp_code
+            """
+        ),
+        {**year_params, "membership_year_count": len(years)},
+    ).scalars().all()
+    verified_year_count = int(
+        session.execute(
+            text(
+                f"""
+                SELECT COUNT(DISTINCT m.bsns_year)
+                FROM {_HISTORICAL_MEMBERSHIP_TABLE} AS m
+                WHERE m.bsns_year IN ({year_bindings})
+                  AND m.market IN ('KOSPI', 'KOSDAQ')
+                  AND m.status='verified'
+                """
+            ),
+            year_params,
+        ).scalar()
+        or 0
+    )
+    candidate_count = int(
+        session.execute(
+            text(
+                f"""
+                SELECT COUNT(DISTINCT m.corp_code)
+                FROM {_HISTORICAL_MEMBERSHIP_TABLE} AS m
+                JOIN companies AS c ON c.corp_code=m.corp_code
+                WHERE m.bsns_year IN ({year_bindings})
+                  AND m.market IN ('KOSPI', 'KOSDAQ')
+                  AND m.status='verified'
+                """
+            ),
+            year_params,
+        ).scalar()
+        or 0
+    )
+    verified_market_years = {
+        (int(row["bsns_year"]), str(row["market"]))
+        for row in session.execute(
+            text(
+                f"""
+                SELECT DISTINCT m.bsns_year, m.market
+                FROM {_HISTORICAL_MEMBERSHIP_TABLE} AS m
+                WHERE m.bsns_year IN ({year_bindings})
+                  AND m.market IN ('KOSPI', 'KOSDAQ')
+                  AND m.status='verified'
+                """
+            ),
+            year_params,
+        ).mappings()
+    }
+    missing_market_year = sum(
+        (year, market) not in verified_market_years
+        for year in years
+        for market in CORE_MARKETS
+    )
+    unverified_count = int(
+        session.execute(
+            text(
+                f"""
+                SELECT COUNT(DISTINCT m.corp_code)
+                FROM {_HISTORICAL_MEMBERSHIP_TABLE} AS m
+                WHERE m.bsns_year IN ({year_bindings})
+                  AND m.market IN ('KOSPI', 'KOSDAQ')
+                  AND m.status!='verified'
+                """
+            ),
+            year_params,
+        ).scalar()
+        or 0
+    )
+    evidence_available = (
+        verified_year_count == len(years)
+        and missing_market_year == 0
+    )
+    metadata["membership_evidence_available"] = evidence_available
+    metadata["eligible_company_count"] = (
+        len(verified_rows) if evidence_available else 0
+    )
+    return (
+        [str(corp_code) for corp_code in verified_rows] if evidence_available else [],
+        metadata,
+        {
+            "historical_membership_evidence_unavailable": int(
+                not evidence_available
+            ),
+            "missing_required_membership_year": max(
+                candidate_count - len(verified_rows), 0
+            ),
+            "missing_market_year": missing_market_year,
+            "unverified_membership_observation": unverified_count,
+        },
+    )
+
+
+def _quality_population_count(
+    session: Any,
+    *,
+    corp_codes: list[str],
+    coverage_year: int,
+    condition: str,
+) -> int:
+    """Count coverage-year quality rows within a historical population."""
+    if not corp_codes:
+        return 0
+    corp_bindings = ", ".join(
+        f":quality_corp_{index}" for index in range(len(corp_codes))
+    )
+    return int(
+        session.execute(
+            text(
+                "SELECT COUNT(*) FROM company_year_quality q "
+                f"WHERE q.corp_code IN ({corp_bindings}) "
+                "AND q.bsns_year=:quality_coverage_year "
+                f"AND ({condition})"
+            ),
+            {
+                "quality_coverage_year": coverage_year,
+                **{
+                    f"quality_corp_{index}": corp_code
+                    for index, corp_code in enumerate(corp_codes)
+                },
+            },
+        ).scalar()
+        or 0
+    )
+
+
 def _materiality_benchmark_coverage(
     session: Any,
     *,
     table_names: set[str],
     coverage_year: int,
-    core_denominator: int,
+    eligible_corp_codes: list[str],
 ) -> tuple[CoverageResult, dict[str, int]]:
     """Count only one-metric, one-statement three-year proven series.
 
@@ -479,7 +671,7 @@ def _materiality_benchmark_coverage(
     receipt equals a matching annual disclosure for the same company and year.
     """
     excluded = {
-        "zero_proven_years": core_denominator,
+        "zero_proven_years": len(eligible_corp_codes),
         "one_proven_year": 0,
         "two_proven_years": 0,
     }
@@ -500,7 +692,7 @@ def _materiality_benchmark_coverage(
         "quality_status",
     }
     if not required_tables.issubset(table_names):
-        return _coverage_result(0, core_denominator), excluded
+        return _coverage_result(0, len(eligible_corp_codes)), excluded
     columns = {
         str(column["name"])
         for column in inspect(session.get_bind()).get_columns(
@@ -508,27 +700,30 @@ def _materiality_benchmark_coverage(
         )
     }
     if not required_columns.issubset(columns):
-        return _coverage_result(0, core_denominator), excluded
+        return _coverage_result(0, len(eligible_corp_codes)), excluded
+    if not eligible_corp_codes:
+        return _coverage_result(0, 0), excluded
 
     start_year = coverage_year - MATERIALITY_BENCHMARK_WINDOW_YEARS + 1
     metrics = ", ".join(
         f":materiality_metric_{index}"
         for index in range(len(MATERIALITY_BENCHMARK_METRICS) + 2)
     )
+    eligible_values = ", ".join(
+        f"(:materiality_corp_{index})"
+        for index in range(len(eligible_corp_codes))
+    )
     result = session.execute(
         text(
             f"""
-            WITH listed AS (
-                SELECT corp_code
-                FROM companies
-                WHERE stock_code IS NOT NULL
-                  AND market IN ('KOSPI', 'KOSDAQ')
+            WITH eligible(corp_code) AS (
+                VALUES {eligible_values}
             ),
             fact_scopes AS (
                 SELECT DISTINCT
                        f.corp_code, f.bsns_year, f.fs_div
                 FROM financial_facts_compact AS f
-                JOIN listed AS l ON l.corp_code=f.corp_code
+                JOIN eligible AS l ON l.corp_code=f.corp_code
                 WHERE f.bsns_year BETWEEN :materiality_start_year
                     AND :materiality_coverage_year
                   AND f.fs_div IN ('CFS', 'OFS')
@@ -595,7 +790,7 @@ def _materiality_benchmark_coverage(
                            THEN 1 ELSE 0
                        END AS row_admissible
                 FROM financial_facts_compact AS f
-                JOIN listed AS l ON l.corp_code=f.corp_code
+                JOIN eligible AS l ON l.corp_code=f.corp_code
                 LEFT JOIN latest_annual AS a
                   ON a.corp_code=f.corp_code
                  AND a.bsns_year=f.bsns_year
@@ -658,7 +853,7 @@ def _materiality_benchmark_coverage(
                 SELECT l.corp_code,
                        COALESCE(MAX(m.proven_year_count), 0)
                            AS proven_year_count
-                FROM listed AS l
+                FROM eligible AS l
                 LEFT JOIN metric_support AS m ON m.corp_code=l.corp_code
                 GROUP BY l.corp_code
             )
@@ -689,6 +884,10 @@ def _materiality_benchmark_coverage(
                     (*MATERIALITY_BENCHMARK_METRICS, "profit_loss", "tax_expense")
                 )
             },
+            **{
+                f"materiality_corp_{index}": corp_code
+                for index, corp_code in enumerate(eligible_corp_codes)
+            },
         },
     ).mappings().one()
     numerator = int(result["numerator"] or 0)
@@ -697,7 +896,7 @@ def _materiality_benchmark_coverage(
         "one_proven_year": int(result["one_proven_year"] or 0),
         "two_proven_years": int(result["two_proven_years"] or 0),
     }
-    return _coverage_result(numerator, core_denominator), excluded
+    return _coverage_result(numerator, len(eligible_corp_codes)), excluded
 
 
 def _quality_coverage(
@@ -724,147 +923,91 @@ def _quality_coverage(
         if coverage_year is None:
             return _empty_quality_contract()
 
-        core_denominator = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies "
-                    "WHERE stock_code IS NOT NULL "
-                    "AND market IN ('KOSPI', 'KOSDAQ')"
-                )
-            ).scalar()
-            or 0
+        core_3y_population, core_3y_metadata, core_3y_exclusions = (
+            _verified_membership_population(
+                session,
+                table_names=table_names,
+                required_years=(coverage_year - 2, coverage_year - 1, coverage_year),
+            )
         )
-        not_listed = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies "
-                    "WHERE stock_code IS NULL"
-                )
-            ).scalar()
-            or 0
+        timeseries_population, timeseries_metadata, timeseries_exclusions = (
+            _verified_membership_population(
+                session,
+                table_names=table_names,
+                required_years=tuple(range(coverage_year - 4, coverage_year + 1)),
+            )
         )
-        outside_core_markets = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies "
-                    "WHERE stock_code IS NOT NULL "
-                    "AND (market IS NULL "
-                    "OR market NOT IN ('KOSPI', 'KOSDAQ'))"
-                )
-            ).scalar()
-            or 0
+        current_population, current_metadata, current_exclusions = (
+            _verified_membership_population(
+                session,
+                table_names=table_names,
+                required_years=(coverage_year,),
+            )
         )
-        investor_core_3y_numerator = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies c "
-                    "JOIN company_year_quality q "
-                    "ON q.corp_code=c.corp_code "
-                    "AND q.bsns_year=:year "
-                    "WHERE c.stock_code IS NOT NULL "
-                    "AND c.market IN ('KOSPI', 'KOSDAQ') "
-                    "AND q.investor_grade IN ('A', 'B') "
-                    "AND q.financial_core_status='available'"
-                ),
-                {"year": coverage_year},
-            ).scalar()
-            or 0
+        investor_core_3y_numerator = _quality_population_count(
+            session,
+            corp_codes=core_3y_population,
+            coverage_year=coverage_year,
+            condition=(
+                "q.investor_grade IN ('A', 'B') "
+                "AND q.financial_core_status='available'"
+            ),
         )
-        investor_timeseries_5y_numerator = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies c "
-                    "JOIN company_year_quality q "
-                    "ON q.corp_code=c.corp_code "
-                    "AND q.bsns_year=:year "
-                    "WHERE c.stock_code IS NOT NULL "
-                    "AND c.market IN ('KOSPI', 'KOSDAQ') "
-                    "AND q.investor_grade='A'"
-                ),
-                {"year": coverage_year},
-            ).scalar()
-            or 0
+        investor_timeseries_5y_numerator = _quality_population_count(
+            session,
+            corp_codes=timeseries_population,
+            coverage_year=coverage_year,
+            condition="q.investor_grade='A'",
         )
-        policy_numerator = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies c "
-                    "JOIN company_year_quality q "
-                    "ON q.corp_code=c.corp_code "
-                    "AND q.bsns_year=:year "
-                    "WHERE c.stock_code IS NOT NULL "
-                    "AND c.market IN ('KOSPI', 'KOSDAQ') "
-                    "AND q.policy_status IN ('full_body', 'summary_only')"
-                ),
-                {"year": coverage_year},
-            ).scalar()
-            or 0
+        policy_numerator = _quality_population_count(
+            session,
+            corp_codes=current_population,
+            coverage_year=coverage_year,
+            condition="q.policy_status IN ('full_body', 'summary_only')",
         )
-        procedure_not_applicable = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies c "
-                    "JOIN company_year_quality q "
-                    "ON q.corp_code=c.corp_code "
-                    "AND q.bsns_year=:year "
-                    "WHERE c.stock_code IS NOT NULL "
-                    "AND c.market IN ('KOSPI', 'KOSDAQ') "
-                    "AND q.audit_procedure_status='not_applicable'"
-                ),
-                {"year": coverage_year},
-            ).scalar()
-            or 0
+        procedure_not_applicable = _quality_population_count(
+            session,
+            corp_codes=current_population,
+            coverage_year=coverage_year,
+            condition="q.audit_procedure_status='not_applicable'",
         )
         procedure_denominator = max(
-            core_denominator - procedure_not_applicable,
+            len(current_population) - procedure_not_applicable,
             0,
         )
-        procedure_numerator = int(
-            session.execute(
-                text(
-                    "SELECT COUNT(*) FROM companies c "
-                    "JOIN company_year_quality q "
-                    "ON q.corp_code=c.corp_code "
-                    "AND q.bsns_year=:year "
-                    "WHERE c.stock_code IS NOT NULL "
-                    "AND c.market IN ('KOSPI', 'KOSDAQ') "
-                    "AND q.audit_procedure_status='available'"
-                ),
-                {"year": coverage_year},
-            ).scalar()
-            or 0
+        procedure_numerator = _quality_population_count(
+            session,
+            corp_codes=current_population,
+            coverage_year=coverage_year,
+            condition="q.audit_procedure_status='available'",
         )
         materiality_coverage, materiality_exclusions = (
             _materiality_benchmark_coverage(
                 session,
                 table_names=table_names,
                 coverage_year=coverage_year,
-                core_denominator=core_denominator,
+                eligible_corp_codes=core_3y_population,
             )
         )
 
-    common_exclusions = {
-        "not_listed": not_listed,
-        "outside_core_markets": outside_core_markets,
-    }
     coverage = {
         INVESTOR_CORE_3Y: _coverage_result(
             investor_core_3y_numerator,
-            core_denominator,
+            len(core_3y_population),
         ),
         INVESTOR_TIMESERIES_5Y: _coverage_result(
             investor_timeseries_5y_numerator,
-            core_denominator,
+            len(timeseries_population),
         ),
         # The historical key is an explicit alias rather than a five-year
         # claim. New consumers must use the named windows above.
         INVESTOR_CORE_COMPATIBILITY_ALIAS: _coverage_result(
             investor_core_3y_numerator,
-            core_denominator,
+            len(core_3y_population),
         ),
         "accounting_policy": _coverage_result(
             policy_numerator,
-            core_denominator,
+            len(current_population),
         ),
         "audit_procedure": _coverage_result(
             procedure_numerator,
@@ -877,16 +1020,16 @@ def _quality_coverage(
         for feature, result in coverage.items()
     }
     excluded_populations = {
-        INVESTOR_CORE_3Y: dict(common_exclusions),
-        INVESTOR_TIMESERIES_5Y: dict(common_exclusions),
-        INVESTOR_CORE_COMPATIBILITY_ALIAS: dict(common_exclusions),
-        "accounting_policy": dict(common_exclusions),
+        INVESTOR_CORE_3Y: dict(core_3y_exclusions),
+        INVESTOR_TIMESERIES_5Y: dict(timeseries_exclusions),
+        INVESTOR_CORE_COMPATIBILITY_ALIAS: dict(core_3y_exclusions),
+        "accounting_policy": dict(current_exclusions),
         "audit_procedure": {
-            **common_exclusions,
+            **current_exclusions,
             "explicit_no_kam": procedure_not_applicable,
         },
         "materiality_benchmark": {
-            **common_exclusions,
+            **core_3y_exclusions,
             **materiality_exclusions,
         },
     }
@@ -898,15 +1041,24 @@ def _quality_coverage(
         coverage_year,
         coverage,
         {
-            INVESTOR_CORE_3Y: dict(_INVESTOR_CORE_3Y_COVERAGE_METADATA),
-            INVESTOR_TIMESERIES_5Y: dict(
-                _INVESTOR_TIMESERIES_5Y_COVERAGE_METADATA
-            ),
+            INVESTOR_CORE_3Y: {
+                **_INVESTOR_CORE_3Y_COVERAGE_METADATA,
+                **core_3y_metadata,
+            },
+            INVESTOR_TIMESERIES_5Y: {
+                **_INVESTOR_TIMESERIES_5Y_COVERAGE_METADATA,
+                **timeseries_metadata,
+            },
             INVESTOR_CORE_COMPATIBILITY_ALIAS: dict(
                 _INVESTOR_CORE_COMPATIBILITY_ALIAS_METADATA
             ),
+            "accounting_policy": dict(current_metadata),
+            "audit_procedure": dict(current_metadata),
             "listing_eligibility": listing_metadata,
-            "materiality_benchmark": dict(_MATERIALITY_COVERAGE_METADATA),
+            "materiality_benchmark": {
+                **_MATERIALITY_COVERAGE_METADATA,
+                **core_3y_metadata,
+            },
         },
         denominators,
         excluded_populations,

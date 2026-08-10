@@ -87,6 +87,19 @@ Typical named blockers include missing schema tables or indexes, dataset
 manifest mismatch, inline or quality drift, duplicate keys, insufficient
 investor coverage, catalog drift, and golden-contract drift.
 
+### Historical listed-company denominators
+
+Feature coverage is calculated from `company_year_listing_memberships`, never
+from the current `companies.market` value. A release denominator includes only
+`verified` KOSPI/KOSDAQ memberships, and the gate fails closed if either market
+has no verified observation for any required year. The required membership
+window is 3 years for `investor_core_3y` and `materiality_benchmark`, 5 years
+for `investor_timeseries_5y`, and the coverage year only for
+`accounting_policy` and `audit_procedure`. This prevents a newly listed company
+from being retroactively required in a pre-listing year while retaining explicit
+metadata and exclusions for unavailable, incomplete-window, and unverified
+membership evidence.
+
 ## Investor-core backfill preflight
 
 When `investor_core_3y_coverage` is blocked, maintainers can create a
