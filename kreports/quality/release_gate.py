@@ -135,6 +135,10 @@ _EXACT_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
         "dataset_release_maintainer",
         "write a validated dataset manifest from the prepared runtime DB",
     ),
+    "quality_input_stale": (
+        "dataset_backfill_maintainer",
+        "rebuild company-year quality after newer policy or note evidence",
+    ),
     "schema_migration_contract_mismatch": (
         "database_schema_maintainer",
         "migrate the release DB to the approved schema revision before release",
@@ -182,6 +186,83 @@ def _empty_quality_contract() -> tuple[
     dict[str, dict[str, int]],
 ]:
     return None, {}, {}, {}, {}
+
+
+def _quality_inputs_are_newer_than_ledger(
+    session: Any,
+    *,
+    table_names: set[str],
+) -> bool:
+    """Detect policy inputs written after their derived quality rows.
+
+    The ledger fingerprint proves persisted quality content, while source
+    receipt timestamps prove whether that content was derived after the policy
+    evidence it summarizes.  This bounded indexed query deliberately checks
+    only the policy and policy-note sources consumed by ``_policy_status``.
+    """
+    quality_columns = {
+        str(column["name"])
+        for column in inspect(session.get_bind()).get_columns(
+            "company_year_quality"
+        )
+    }
+    if "updated_at" not in quality_columns:
+        return False
+
+    sources: list[str] = []
+    if "accounting_policy_items" in table_names:
+        policy_columns = {
+            str(column["name"])
+            for column in inspect(session.get_bind()).get_columns(
+                "accounting_policy_items"
+            )
+        }
+        if {"corp_code", "bsns_year", "fetched_at"} <= policy_columns:
+            sources.append(
+                """
+                SELECT 1
+                FROM accounting_policy_items AS p
+                WHERE p.corp_code=q.corp_code
+                  AND p.bsns_year=q.bsns_year
+                  AND p.fetched_at > q.updated_at
+                """
+            )
+    if "accounting_note_chapters" in table_names:
+        note_columns = {
+            str(column["name"])
+            for column in inspect(session.get_bind()).get_columns(
+                "accounting_note_chapters"
+            )
+        }
+        if {
+            "corp_code",
+            "bsns_year",
+            "section_type",
+            "fetched_at",
+        } <= note_columns:
+            sources.append(
+                """
+                SELECT 1
+                FROM accounting_note_chapters AS n
+                WHERE n.corp_code=q.corp_code
+                  AND n.bsns_year=q.bsns_year
+                  AND n.section_type='policy'
+                  AND n.fetched_at > q.updated_at
+                """
+            )
+    if not sources:
+        return False
+    query = " UNION ALL ".join(sources)
+    return bool(
+        session.execute(
+            text(
+                "SELECT EXISTS("
+                "SELECT 1 FROM company_year_quality AS q WHERE EXISTS("
+                + query
+                + ") LIMIT 1)"
+            )
+        ).scalar()
+    )
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -398,6 +479,11 @@ def _runtime_schema_state(
                 )
                 if manifest_row and not quality_snapshot_valid:
                     failures.append("quality_snapshot_mismatch")
+                if _quality_inputs_are_newer_than_ledger(
+                    session,
+                    table_names=table_names,
+                ):
+                    failures.append("quality_input_stale")
                 manifest_year = (
                     int(manifest_row["year_to"])
                     if manifest_row

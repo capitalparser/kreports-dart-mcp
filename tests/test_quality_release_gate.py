@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from typer.testing import CliRunner
@@ -15,6 +15,7 @@ from kreports.db.models import (
     DatasetManifest,
     Disclosure,
     FinancialFactCompact,
+    AccountingPolicyItem,
 )
 from kreports.quality.company_year_fingerprint import (
     build_quality_evidence_summary,
@@ -1530,6 +1531,50 @@ def test_release_gate_rejects_quality_content_tamper_without_count_change(
 
     assert "quality_snapshot_mismatch" in report["required_failures"]
     assert "release_manifest_unavailable" in report["required_failures"]
+
+
+def test_quality_release_gate_cli_rejects_policy_evidence_newer_than_ledger(
+    temp_engine,
+    monkeypatch,
+):
+    """A manifest cannot call a pre-policy quality row current."""
+    from kreports.cli.main import app
+
+    quality_updated_at = datetime.now(UTC) - timedelta(minutes=1)
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+        policy_status="missing",
+    )
+    with get_session() as session:
+        quality_row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert quality_row is not None
+        quality_row.updated_at = quality_updated_at
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        session.add(
+            AccountingPolicyItem(
+                corp_code="00126380",
+                bsns_year=2025,
+                fs_div="CFS",
+                rcept_no="20260318000001",
+                item_key="revenue_recognition",
+                body="수익 인식 정책 원문 " * 100,
+                fetched_at=quality_updated_at + timedelta(seconds=1),
+            )
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    result = CliRunner().invoke(
+        app,
+        ["quality-release-gate", "--profile", "public_runtime", "--json"],
+    )
+
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert "quality_input_stale" in report["required_failures"]
 
 
 def test_release_gate_rejects_matching_snapshot_for_unsupported_version(
