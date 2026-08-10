@@ -1529,6 +1529,8 @@ def _select_policy_targets(
     market: str | None,
     limit: int | None,
     missing_only: bool,
+    retry_no_data: bool = False,
+    retry_failed: bool = False,
 ) -> list[tuple[str, int, str]]:
     from sqlalchemy import text
 
@@ -1540,6 +1542,26 @@ def _select_policy_targets(
     if market:
         stmt += "AND c.market = :market "
         params["market"] = market
+    else:
+        stmt += "AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX') "
+    # A current company master is not historical listing evidence.  For past
+    # years, exclude companies with a verified listing date after year-end.
+    # Companies without decisive verified evidence remain in scope so an
+    # evidence gap cannot silently shrink the collection denominator.
+    stmt += (
+        "AND ("
+        "NOT EXISTS ("
+        "SELECT 1 FROM company_listing_periods lp "
+        "WHERE lp.corp_code=c.corp_code AND lp.status='verified'"
+        ") OR EXISTS ("
+        "SELECT 1 FROM company_listing_periods lp "
+        "WHERE lp.corp_code=c.corp_code AND lp.status='verified' "
+        "AND lp.listed_from <= :year_end "
+        "AND (lp.listed_to IS NULL OR lp.listed_to >= :year_end)"
+        ")"
+        ") "
+    )
+    params["year_end"] = date(year, 12, 31)
     if missing_only:
         stmt += (
             "AND NOT EXISTS ("
@@ -1549,6 +1571,23 @@ def _select_policy_targets(
         )
         params["year"] = year
         params["fs_div"] = fs_div
+        params["policy_task_type"] = f"policy_{fs_div.lower()}"
+        if not retry_failed:
+            stmt += (
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM fetch_log f "
+                "WHERE f.corp_code=c.corp_code AND f.year=:year "
+                "AND f.task_type=:policy_task_type AND f.status='error'"
+                ") "
+            )
+        if not retry_no_data:
+            stmt += (
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM fetch_log f "
+                "WHERE f.corp_code=c.corp_code AND f.year=:year "
+                "AND f.task_type=:policy_task_type AND f.status='no_data'"
+                ") "
+            )
     stmt += "ORDER BY c.market, c.corp_code "
     if limit:
         stmt += "LIMIT :limit"
@@ -1568,11 +1607,28 @@ def collect_policies_cmd(
     ),
     fs_div: str = typer.Option("CFS", "--fs-div", help="CFS/OFS"),
     all_corps: bool = typer.Option(
-        False, "--all", help="AccountingPolicyItem에 이미 있는 기업 전체 재수집."
+        False,
+        "--all",
+        help="해당 연도 말 상장 근거가 있는 전체 기업 수집(근거 미확정 기업 포함).",
     ),
     market: Optional[str] = typer.Option(None, "--market", help="KOSPI/KOSDAQ/KONEX 대상 일괄 수집"),
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 회사 수"),
     missing_only: bool = typer.Option(True, "--missing-only/--include-existing", help="이미 캐시된 정책 제외"),
+    retry_no_data: bool = typer.Option(
+        False,
+        "--retry-no-data",
+        help="이전에 데이터없음으로 확인된 회사-연도-CFS/OFS도 다시 시도",
+    ),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="이전에 파싱·전송·저장 실패한 회사-연도-CFS/OFS도 다시 시도",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="네트워크·DB 쓰기 없이 선택될 대상 수만 확인",
+    ),
     force: bool = typer.Option(False, "--force", help="동일 백필 running 기록이 있어도 강제 실행"),
 ):
     """
@@ -1585,10 +1641,11 @@ def collect_policies_cmd(
     """
     from kreports.runtime import require_collector_mode
 
-    require_collector_mode("collect-policies")
-    if not settings.dart_api_key:
-        typer.echo("오류: DART_API_KEY 미설정", err=True)
-        raise typer.Exit(1)
+    if not dry_run:
+        require_collector_mode("collect-policies")
+        if not settings.dart_api_key:
+            typer.echo("오류: DART_API_KEY 미설정", err=True)
+            raise typer.Exit(1)
 
     if not stock and not all_corps and not market:
         typer.echo("종목코드 또는 --all/--market 플래그 필요", err=True)
@@ -1630,7 +1687,26 @@ def collect_policies_cmd(
             f"{len(targets)}개 (사업연도={','.join(str(t[1]) for t in targets)}) · fs_div={fs_div}"
         )
 
-    if market:
+    if all_corps:
+        if year is None:
+            typer.echo("--all 사용 시 --year 필요", err=True)
+            raise typer.Exit(1)
+        targets.extend(
+            _select_policy_targets(
+                year=year,
+                fs_div=fs_div,
+                market=None,
+                limit=limit,
+                missing_only=missing_only,
+                retry_no_data=retry_no_data,
+                retry_failed=retry_failed,
+            )
+        )
+        typer.echo(
+            f"정책 수집 대상: all-listed year={year} "
+            f"fs_div={fs_div} targets={len(targets)}"
+        )
+    elif market:
         if year is None:
             typer.echo("--market 사용 시 --year 필요", err=True)
             raise typer.Exit(1)
@@ -1641,9 +1717,19 @@ def collect_policies_cmd(
                 market=market,
                 limit=limit,
                 missing_only=missing_only,
+                retry_no_data=retry_no_data,
+                retry_failed=retry_failed,
             )
         )
         typer.echo(f"정책 수집 대상: market={market} year={year} fs_div={fs_div} targets={len(targets)}")
+
+    if dry_run:
+        typer.echo(
+            f"정책 백필 DRY-RUN: year={year} fs_div={fs_div} "
+            f"targets={len(targets)} retry_no_data={str(retry_no_data).lower()} "
+            f"retry_failed={str(retry_failed).lower()}"
+        )
+        return
 
     if not targets:
         typer.echo("대상 없음. 종료.")
@@ -1667,6 +1753,8 @@ def collect_policies_cmd(
             "market": market,
             "limit": limit,
             "missing_only": missing_only,
+            "retry_no_data": retry_no_data,
+            "retry_failed": retry_failed,
         },
         force=force,
     ) as run_id:

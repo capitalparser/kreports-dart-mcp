@@ -20,7 +20,11 @@ from datetime import datetime
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from kreports.db.engine import get_session
-from kreports.db.models import AccountingNoteChapter, AccountingPolicyItem
+from kreports.db.models import (
+    AccountingNoteChapter,
+    AccountingPolicyItem,
+    FetchLog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,28 @@ _register_legacy_aliases()
 
 def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _policy_fetch_task(fs_div: str) -> str:
+    return f"policy_{fs_div.lower()}"
+
+
+def _record_policy_fetch(
+    corp_code: str,
+    bsns_year: int,
+    fs_div: str,
+    status: str,
+    error_msg: str | None = None,
+) -> None:
+    with get_session() as session:
+        session.add(FetchLog(
+            task_type=_policy_fetch_task(fs_div),
+            corp_code=corp_code,
+            year=bsns_year,
+            quarter=None,
+            status=status,
+            error_msg=error_msg,
+        ))
 
 
 def collect_policies_for_company(
@@ -91,11 +117,21 @@ def collect_policies_for_company(
 
         result["error_class"] = classify_backfill_error(e)
         result["error"] = f"추출 실패: {type(e).__name__}: {e}"
+        _record_policy_fetch(
+            corp_code,
+            bsns_year,
+            fs_div,
+            "error",
+            f"{result['error_class']}: policy extraction failed",
+        )
         return result
 
     if policy_data is None:
         result["error_class"] = "no_data"
         result["error"] = "사업보고서 또는 주석 파일을 찾지 못했습니다."
+        _record_policy_fetch(
+            corp_code, bsns_year, fs_div, "no_data", result["error"]
+        )
         return result
 
     rcept_no = policy_data.get("rcept_no")
@@ -105,6 +141,9 @@ def collect_policies_for_company(
         result["error_class"] = "no_data"
         result["error"] = "추출된 item이 없습니다."
         result["rcept_no"] = rcept_no
+        _record_policy_fetch(
+            corp_code, bsns_year, fs_div, "no_data", result["error"]
+        )
         return result
 
     result["rcept_no"] = rcept_no
@@ -159,6 +198,13 @@ def collect_policies_for_company(
     if not upsert_rows:
         result["error_class"] = "parse_error"
         result["error"] = "유효한 body가 있는 item이 없습니다."
+        _record_policy_fetch(
+            corp_code,
+            bsns_year,
+            fs_div,
+            "error",
+            "parse_error: no valid policy item body",
+        )
         return result
 
     chapter_rows: list[dict] = []
@@ -217,6 +263,14 @@ def collect_policies_for_company(
                 },
             )
             session.execute(chapter_stmt)
+        session.add(FetchLog(
+            task_type=_policy_fetch_task(fs_div),
+            corp_code=corp_code,
+            year=bsns_year,
+            quarter=None,
+            status="success",
+            error_msg=None,
+        ))
 
     result["items_stored"] = len(upsert_rows)
     result["chapters_stored"] = len(chapter_rows)
@@ -250,6 +304,8 @@ def collect_policies_batch(
     """
     agg = {
         "total": len(targets),
+        "attempted": 0,
+        "unattempted": len(targets),
         "ok": 0,
         "failed": 0,
         "no_data": 0,
@@ -257,6 +313,8 @@ def collect_policies_batch(
         "items_new": 0,
         "items_changed": 0,
         "error_class": None,
+        "stopped": False,
+        "stop_reason": None,
         "no_data_targets": [],
         "errors": [],
     }
@@ -265,6 +323,8 @@ def collect_policies_batch(
         if progress_callback:
             progress_callback(idx, agg["total"], corp_code, bsns_year, fs_div)
 
+        agg["attempted"] += 1
+        agg["unattempted"] = agg["total"] - agg["attempted"]
         r = collect_policies_for_company(corp_code, bsns_year, fs_div)
         if r.get("error"):
             if r.get("error_class") == "no_data":
@@ -289,6 +349,10 @@ def collect_policies_batch(
                 "error_class": error_class,
                 "error": r["error"],
             })
+            if error_class == "quota_exceeded":
+                agg["stopped"] = True
+                agg["stop_reason"] = error_class
+                break
         else:
             agg["ok"] += 1
             agg["items_total"] += r["items_stored"]

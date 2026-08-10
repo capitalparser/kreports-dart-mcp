@@ -11,14 +11,22 @@ test_policy_persistence.py — AccountingPolicyItem 모델·collector·idempoten
 """
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from typer.testing import CliRunner
 
 from kreports.db import engine as engine_module
-from kreports.db.models import AccountingPolicyItem, Base
+from kreports.db.models import (
+    AccountingPolicyItem,
+    Base,
+    Company,
+    CompanyListingPeriod,
+    FetchLog,
+)
 from kreports.collector.policy_collector import (
     _sha1,
     collect_policies_for_company,
@@ -307,6 +315,403 @@ class TestCollectPoliciesBatch:
         assert result["failed"] == 1
         assert result["no_data"] == 0
         assert result["errors"][0]["error_class"] == "transport_error"
+
+    def test_batch_stops_after_first_quota_failure(self, temp_engine):
+        class DailyLimitError(RuntimeError):
+            pass
+
+        with patch(
+            "kreports.analysis.queries.get_accounting_policy",
+            side_effect=DailyLimitError("daily quota exhausted"),
+        ):
+            result = collect_policies_batch([
+                ("00000001", 2024, "CFS"),
+                ("00000002", 2024, "CFS"),
+            ])
+
+        assert result["attempted"] == 1
+        assert result["failed"] == 1
+        assert result["stopped"] is True
+        assert result["stop_reason"] == "quota_exceeded"
+        assert result["unattempted"] == 1
+
+
+def test_collect_policies_cli_returns_failure_when_quota_stops_batch(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    class DailyLimitError(RuntimeError):
+        pass
+
+    with engine_module.get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", stock_code="000001", corp_name="회사1", market="KOSPI"),
+            Company(corp_code="00000002", stock_code="000002", corp_name="회사2", market="KOSDAQ"),
+        ])
+    monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        side_effect=DailyLimitError("daily quota exhausted"),
+    ):
+        result = CliRunner().invoke(
+            cli.app,
+            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "quota_exceeded" in result.output
+    with temp_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT COUNT(*) FROM fetch_log "
+                "WHERE task_type='policy_cfs' AND status='error'"
+            )
+        ).scalar_one() == 1
+
+
+def test_collect_policies_all_selects_every_current_listed_market_company(
+    temp_engine,
+    mock_policy_data,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    with engine_module.get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", stock_code="000001", corp_name="코스피", market="KOSPI"),
+            Company(corp_code="00000002", stock_code="000002", corp_name="코스닥", market="KOSDAQ"),
+            Company(corp_code="00000003", stock_code="000003", corp_name="코넥스", market="KONEX"),
+            Company(corp_code="00000004", stock_code="000004", corp_name="시장미확인", market=None),
+        ])
+    monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=mock_policy_data,
+    ):
+        result = CliRunner().invoke(
+            cli.app,
+            [
+                "collect-policies",
+                "--all",
+                "--year",
+                "2024",
+                "--fs-div",
+                "CFS",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    with temp_engine.connect() as connection:
+        corp_codes = connection.execute(
+            text(
+                "SELECT DISTINCT corp_code FROM accounting_policy_items "
+                "ORDER BY corp_code"
+            )
+        ).scalars().all()
+    assert corp_codes == ["00000001", "00000002", "00000003"]
+
+
+def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
+    temp_engine,
+    mock_policy_data,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    with engine_module.get_session() as session:
+        session.add(
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="정책없음",
+                market="KOSPI",
+            )
+        )
+    monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=None,
+    ):
+        first = CliRunner().invoke(
+            cli.app,
+            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+        )
+
+    assert first.exit_code == 0, first.output
+    with temp_engine.connect() as connection:
+        durable = connection.execute(
+            text(
+                "SELECT status FROM fetch_log "
+                "WHERE task_type='policy_cfs' AND corp_code='00000001' "
+                "AND year=2024 ORDER BY id DESC LIMIT 1"
+            )
+        ).scalar_one()
+    assert durable == "no_data"
+
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=mock_policy_data,
+    ):
+        second = CliRunner().invoke(
+            cli.app,
+            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+        )
+
+    assert second.exit_code == 0, second.output
+    assert "대상 없음" in second.output
+    with temp_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM accounting_policy_items")
+        ).scalar_one() == 0
+
+
+def test_collect_policies_all_can_explicitly_retry_durable_no_data(
+    temp_engine,
+    mock_policy_data,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    with engine_module.get_session() as session:
+        session.add(
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="재시도회사",
+                market="KOSPI",
+            )
+        )
+    monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=None,
+    ):
+        first = CliRunner().invoke(
+            cli.app,
+            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+        )
+    assert first.exit_code == 0, first.output
+
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=mock_policy_data,
+    ):
+        retried = CliRunner().invoke(
+            cli.app,
+            [
+                "collect-policies",
+                "--all",
+                "--year",
+                "2024",
+                "--fs-div",
+                "CFS",
+                "--retry-no-data",
+            ],
+        )
+
+    assert retried.exit_code == 0, retried.output
+    with temp_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM accounting_policy_items")
+        ).scalar_one() == 3
+
+
+def test_collect_policies_all_dry_run_needs_no_key_and_writes_nothing(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    with engine_module.get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", stock_code="000001", corp_name="회사1", market="KOSPI"),
+            Company(corp_code="00000002", stock_code="000002", corp_name="회사2", market="KOSDAQ"),
+        ])
+    monkeypatch.setattr(cli.settings, "dart_api_key", "")
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "collect-policies",
+            "--all",
+            "--year",
+            "2024",
+            "--fs-div",
+            "CFS",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "targets=2" in result.output
+    with temp_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM accounting_policy_items")
+        ).scalar_one() == 0
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM backfill_runs")
+        ).scalar_one() == 0
+
+
+def test_collect_policies_all_excludes_companies_not_yet_listed_in_target_year(
+    temp_engine,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    provenance = {
+        "status": "verified",
+        "as_of": date(2026, 8, 10),
+        "raw_source_uri": "https://kind.krx.co.kr/example",
+        "raw_source_checksum": "a" * 64,
+        "raw_source_retrieved_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+        "raw_source_storage_uri": "file:///tmp/raw.xls",
+        "raw_source_size_bytes": 1,
+        "normalized_checksum": "b" * 64,
+        "normalized_storage_uri": "file:///tmp/normalized.csv",
+        "normalized_size_bytes": 1,
+        "transformation_version": "test-v1",
+        "source_type": "normalized_listing_period_csv",
+    }
+    with engine_module.get_session() as session:
+        session.add_all([
+            Company(corp_code="00000001", stock_code="000001", corp_name="기존상장", market="KOSPI"),
+            Company(corp_code="00000002", stock_code="000002", corp_name="미상장", market="KOSDAQ"),
+            CompanyListingPeriod(
+                corp_code="00000001",
+                stock_code="000001",
+                market="KOSPI",
+                listed_from=date(2020, 1, 2),
+                listed_to=None,
+                source_row_no=2,
+                **provenance,
+            ),
+            CompanyListingPeriod(
+                corp_code="00000002",
+                stock_code="000002",
+                market="KOSDAQ",
+                listed_from=date(2025, 1, 2),
+                listed_to=None,
+                source_row_no=3,
+                **provenance,
+            ),
+        ])
+    monkeypatch.setattr(cli.settings, "dart_api_key", "")
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "collect-policies",
+            "--all",
+            "--year",
+            "2024",
+            "--fs-div",
+            "CFS",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "targets=1" in result.output
+
+
+def test_collect_policies_all_quarantines_durable_parse_failure_by_default(
+    temp_engine,
+    mock_policy_data,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    with engine_module.get_session() as session:
+        session.add(
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="파싱격리",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            FetchLog(
+                task_type="policy_cfs",
+                corp_code="00000001",
+                year=2024,
+                quarter=None,
+                status="error",
+                error_msg="parse_error: no valid policy item body",
+            )
+        )
+    monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
+
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=mock_policy_data,
+    ):
+        result = CliRunner().invoke(
+            cli.app,
+            ["collect-policies", "--all", "--year", "2024", "--fs-div", "CFS"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "대상 없음" in result.output
+    with temp_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM accounting_policy_items")
+        ).scalar_one() == 0
+
+
+def test_collect_policies_all_can_explicitly_retry_durable_failure(
+    temp_engine,
+    mock_policy_data,
+    monkeypatch,
+):
+    import kreports.cli.main as cli
+
+    with engine_module.get_session() as session:
+        session.add(
+            Company(
+                corp_code="00000001",
+                stock_code="000001",
+                corp_name="파싱재시도",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            FetchLog(
+                task_type="policy_cfs",
+                corp_code="00000001",
+                year=2024,
+                quarter=None,
+                status="error",
+                error_msg="parse_error: no valid policy item body",
+            )
+        )
+    monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
+
+    with patch(
+        "kreports.analysis.queries.get_accounting_policy",
+        return_value=mock_policy_data,
+    ):
+        result = CliRunner().invoke(
+            cli.app,
+            [
+                "collect-policies",
+                "--all",
+                "--year",
+                "2024",
+                "--fs-div",
+                "CFS",
+                "--retry-failed",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    with temp_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM accounting_policy_items")
+        ).scalar_one() == 3
 
 
 # ---------------------------------------------------------------------------
