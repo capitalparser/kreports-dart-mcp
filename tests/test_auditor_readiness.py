@@ -299,9 +299,17 @@ def test_backfill_plan_returns_actionable_commands_for_coverage_gaps():
 
 
 def test_select_policy_targets_by_market_and_limit(temp_engine):
+    from sqlalchemy import text
     from kreports.db.engine import get_session
 
     with get_session() as session:
+        session.execute(
+            text(
+                "CREATE TABLE company_year_listing_memberships ("
+                "corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL, "
+                "market TEXT NOT NULL, status TEXT NOT NULL)"
+            )
+        )
         for idx in range(12):
             session.add(
                 Company(
@@ -311,6 +319,14 @@ def test_select_policy_targets_by_market_and_limit(temp_engine):
                     market="KOSPI",
                     induty_code="264",
                 )
+            )
+            session.execute(
+                text(
+                    "INSERT INTO company_year_listing_memberships "
+                    "(corp_code, bsns_year, market, status) "
+                    "VALUES (:corp_code, 2025, 'KOSPI', 'verified')"
+                ),
+                {"corp_code": f"{idx:08d}"},
             )
 
     targets = _select_policy_targets(year=2025, fs_div="CFS", market="KOSPI", limit=10, missing_only=False)

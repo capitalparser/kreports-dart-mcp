@@ -1522,6 +1522,157 @@ def collect_golden_cmd(
 # collect-policies — 사업보고서 주석 회계정책 영속화
 # ---------------------------------------------------------------------------
 
+
+class PolicyTargetPopulationError(RuntimeError):
+    """The requested historical listed-company denominator is not verifiable."""
+
+
+_HISTORICAL_LISTING_MEMBERSHIP_TABLE = "company_year_listing_memberships"
+_HISTORICAL_LISTING_MEMBERSHIP_COLUMNS = {
+    "corp_code",
+    "bsns_year",
+    "market",
+    "status",
+}
+_LISTED_MARKETS = ("KOSPI", "KOSDAQ", "KONEX")
+
+
+def _format_historical_market_counts(market_counts: dict[str, int]) -> str:
+    return ",".join(
+        f"{market_name}:{market_counts[market_name]}"
+        for market_name in sorted(market_counts)
+    )
+
+
+def _select_policy_targets_with_population(
+    *,
+    year: int,
+    fs_div: str,
+    market: str | None,
+    limit: int | None,
+    missing_only: bool,
+    retry_no_data: bool = False,
+    retry_failed: bool = False,
+) -> tuple[list[tuple[str, int, str]], dict[str, object]]:
+    """Select policy targets from verified year-end listing membership only.
+
+    ``companies.market`` is a current-state field and cannot establish a past
+    listed-company denominator.  Historical company-year membership remains
+    the sole population source for both past and current/future requested
+    years, so an unbackfilled year fails closed instead of silently becoming a
+    survivor cohort.
+    """
+    from sqlalchemy import inspect, text
+
+    membership_filter = "m.market = :market" if market else "m.market IN ('KOSPI', 'KOSDAQ', 'KONEX')"
+    membership_params: dict[str, object] = {"year": year}
+    if market:
+        membership_params["market"] = market
+
+    with get_session() as session:
+        inspector = inspect(session.bind)
+        if not inspector.has_table(_HISTORICAL_LISTING_MEMBERSHIP_TABLE):
+            raise PolicyTargetPopulationError(
+                "historical year-end membership evidence is unavailable: "
+                "company_year_listing_memberships has not been installed"
+            )
+        table_columns = {
+            column["name"]
+            for column in inspector.get_columns(_HISTORICAL_LISTING_MEMBERSHIP_TABLE)
+        }
+        missing_columns = sorted(_HISTORICAL_LISTING_MEMBERSHIP_COLUMNS - table_columns)
+        if missing_columns:
+            raise PolicyTargetPopulationError(
+                "historical year-end membership evidence is unavailable: "
+                "company_year_listing_memberships is missing "
+                f"{','.join(missing_columns)}"
+            )
+
+        market_count_rows = session.execute(
+            text(
+                "SELECT m.market, COUNT(DISTINCT m.corp_code) "
+                "FROM company_year_listing_memberships m "
+                "JOIN companies c ON c.corp_code=m.corp_code "
+                "WHERE m.bsns_year=:year AND m.status='verified' "
+                "AND c.stock_code IS NOT NULL AND "
+                f"{membership_filter} "
+                "GROUP BY m.market ORDER BY m.market"
+            ),
+            membership_params,
+        ).all()
+        market_counts = {str(row[0]): int(row[1]) for row in market_count_rows}
+        if not market_counts:
+            scope = market or "/".join(_LISTED_MARKETS)
+            raise PolicyTargetPopulationError(
+                "historical year-end membership evidence is unavailable: "
+                f"no verified {scope} population for year={year}"
+            )
+
+        population_company_count = int(
+            session.execute(
+                text(
+                    "SELECT COUNT(DISTINCT m.corp_code) "
+                    "FROM company_year_listing_memberships m "
+                    "JOIN companies c ON c.corp_code=m.corp_code "
+                    "WHERE m.bsns_year=:year AND m.status='verified' "
+                    "AND c.stock_code IS NOT NULL AND "
+                    f"{membership_filter}"
+                ),
+                membership_params,
+            ).scalar_one()
+        )
+
+        stmt = (
+            "SELECT DISTINCT c.corp_code "
+            "FROM company_year_listing_memberships m "
+            "JOIN companies c ON c.corp_code=m.corp_code "
+            "WHERE m.bsns_year=:year AND m.status='verified' "
+            "AND c.stock_code IS NOT NULL AND "
+            f"{membership_filter} "
+        )
+        params = dict(membership_params)
+        if missing_only:
+            stmt += (
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM accounting_policy_items p "
+                "WHERE p.corp_code=c.corp_code AND p.bsns_year=:year AND p.fs_div=:fs_div"
+                ") "
+            )
+            params["fs_div"] = fs_div
+            params["policy_task_type"] = f"policy_{fs_div.lower()}"
+            if not retry_failed:
+                stmt += (
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM fetch_log f "
+                    "WHERE f.corp_code=c.corp_code AND f.year=:year "
+                    "AND f.task_type=:policy_task_type AND f.status='error'"
+                    ") "
+                )
+            if not retry_no_data:
+                stmt += (
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM fetch_log f "
+                    "WHERE f.corp_code=c.corp_code AND f.year=:year "
+                    "AND f.task_type=:policy_task_type AND f.status='no_data'"
+                    ") "
+                )
+        stmt += "ORDER BY c.corp_code "
+        if limit:
+            stmt += "LIMIT :limit"
+            params["limit"] = limit
+        rows = session.execute(text(stmt), params).all()
+
+    targets = [(row[0], year, fs_div) for row in rows]
+    population = {
+        "source": "historical_year_end_membership",
+        "year": year,
+        "market_counts": market_counts,
+        "company_count": population_company_count,
+        "target_count": len(targets),
+    }
+    return targets, population
+
+
 def _select_policy_targets(
     *,
     year: int,
@@ -1532,69 +1683,16 @@ def _select_policy_targets(
     retry_no_data: bool = False,
     retry_failed: bool = False,
 ) -> list[tuple[str, int, str]]:
-    from sqlalchemy import text
-
-    stmt = (
-        "SELECT c.corp_code FROM companies c "
-        "WHERE c.stock_code IS NOT NULL "
+    targets, _population = _select_policy_targets_with_population(
+        year=year,
+        fs_div=fs_div,
+        market=market,
+        limit=limit,
+        missing_only=missing_only,
+        retry_no_data=retry_no_data,
+        retry_failed=retry_failed,
     )
-    params: dict[str, object] = {}
-    if market:
-        stmt += "AND c.market = :market "
-        params["market"] = market
-    else:
-        stmt += "AND c.market IN ('KOSPI', 'KOSDAQ', 'KONEX') "
-    # A current company master is not historical listing evidence.  For past
-    # years, exclude companies with a verified listing date after year-end.
-    # Companies without decisive verified evidence remain in scope so an
-    # evidence gap cannot silently shrink the collection denominator.
-    stmt += (
-        "AND ("
-        "NOT EXISTS ("
-        "SELECT 1 FROM company_listing_periods lp "
-        "WHERE lp.corp_code=c.corp_code AND lp.status='verified'"
-        ") OR EXISTS ("
-        "SELECT 1 FROM company_listing_periods lp "
-        "WHERE lp.corp_code=c.corp_code AND lp.status='verified' "
-        "AND lp.listed_from <= :year_end "
-        "AND (lp.listed_to IS NULL OR lp.listed_to >= :year_end)"
-        ")"
-        ") "
-    )
-    params["year_end"] = date(year, 12, 31)
-    if missing_only:
-        stmt += (
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM accounting_policy_items p "
-            "WHERE p.corp_code=c.corp_code AND p.bsns_year=:year AND p.fs_div=:fs_div"
-            ") "
-        )
-        params["year"] = year
-        params["fs_div"] = fs_div
-        params["policy_task_type"] = f"policy_{fs_div.lower()}"
-        if not retry_failed:
-            stmt += (
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM fetch_log f "
-                "WHERE f.corp_code=c.corp_code AND f.year=:year "
-                "AND f.task_type=:policy_task_type AND f.status='error'"
-                ") "
-            )
-        if not retry_no_data:
-            stmt += (
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM fetch_log f "
-                "WHERE f.corp_code=c.corp_code AND f.year=:year "
-                "AND f.task_type=:policy_task_type AND f.status='no_data'"
-                ") "
-            )
-    stmt += "ORDER BY c.market, c.corp_code "
-    if limit:
-        stmt += "LIMIT :limit"
-        params["limit"] = limit
-    with get_session() as session:
-        rows = session.execute(text(stmt), params).all()
-    return [(row[0], year, fs_div) for row in rows]
+    return targets
 
 
 @app.command("collect-policies")
@@ -1657,6 +1755,7 @@ def collect_policies_cmd(
 
     # 대상 수집: (corp_code, bsns_year, fs_div) 튜플 리스트
     targets: list[tuple[str, int, str]] = []
+    historical_population: dict[str, object] | None = None
 
     if stock:
         with get_session() as session:
@@ -1691,8 +1790,8 @@ def collect_policies_cmd(
         if year is None:
             typer.echo("--all 사용 시 --year 필요", err=True)
             raise typer.Exit(1)
-        targets.extend(
-            _select_policy_targets(
+        try:
+            selected_targets, historical_population = _select_policy_targets_with_population(
                 year=year,
                 fs_div=fs_div,
                 market=None,
@@ -1701,7 +1800,10 @@ def collect_policies_cmd(
                 retry_no_data=retry_no_data,
                 retry_failed=retry_failed,
             )
-        )
+        except PolicyTargetPopulationError as exc:
+            typer.echo(f"오류: {exc}", err=True)
+            raise typer.Exit(1)
+        targets.extend(selected_targets)
         typer.echo(
             f"정책 수집 대상: all-listed year={year} "
             f"fs_div={fs_div} targets={len(targets)}"
@@ -1710,8 +1812,8 @@ def collect_policies_cmd(
         if year is None:
             typer.echo("--market 사용 시 --year 필요", err=True)
             raise typer.Exit(1)
-        targets.extend(
-            _select_policy_targets(
+        try:
+            selected_targets, historical_population = _select_policy_targets_with_population(
                 year=year,
                 fs_div=fs_div,
                 market=market,
@@ -1720,10 +1822,25 @@ def collect_policies_cmd(
                 retry_no_data=retry_no_data,
                 retry_failed=retry_failed,
             )
-        )
+        except PolicyTargetPopulationError as exc:
+            typer.echo(f"오류: {exc}", err=True)
+            raise typer.Exit(1)
+        targets.extend(selected_targets)
         typer.echo(f"정책 수집 대상: market={market} year={year} fs_div={fs_div} targets={len(targets)}")
 
     if dry_run:
+        if historical_population is not None:
+            market_counts = historical_population["market_counts"]
+            assert isinstance(market_counts, dict)
+            typer.echo(
+                "정책 백필 모집단: "
+                f"population_source={historical_population['source']} "
+                f"population_year={historical_population['year']} "
+                "population_market_counts="
+                f"{_format_historical_market_counts(market_counts)} "
+                f"population_companies={historical_population['company_count']} "
+                f"population_targets={historical_population['target_count']}"
+            )
         typer.echo(
             f"정책 백필 DRY-RUN: year={year} fs_div={fs_div} "
             f"targets={len(targets)} retry_no_data={str(retry_no_data).lower()} "
