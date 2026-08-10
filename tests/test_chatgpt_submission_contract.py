@@ -68,6 +68,7 @@ def test_credential_tool_requires_explicit_operator_opt_in(monkeypatch):
     from kreports.mcp.dispatch import dispatch_tool, list_mcp_tools
 
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
     assert "fetch_disclosure_on_demand" in {
         tool.name for tool in list_mcp_tools()
@@ -78,6 +79,26 @@ def test_credential_tool_requires_explicit_operator_opt_in(monkeypatch):
     )
     assert result.tool_name == "fetch_disclosure_on_demand"
     assert "user_dart_api_key is required" in result.data_quality.limitations
+
+
+def test_credential_tool_never_exposes_from_write_capable_collector(monkeypatch):
+    from kreports.mcp.dispatch import dispatch_tool, list_mcp_tools
+
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
+
+    assert "fetch_disclosure_on_demand" not in {
+        tool.name for tool in list_mcp_tools()
+    }
+    result = dispatch_tool(
+        "fetch_disclosure_on_demand",
+        {
+            "rcept_no": "20250101000001",
+            "user_dart_api_key": "must-not-reach-handler",
+        },
+    )
+    assert result.verdict == "error"
+    assert "Unknown tool" in result.answer
 
 
 def test_submission_json_covers_exact_public_catalog_and_review_cases(monkeypatch):

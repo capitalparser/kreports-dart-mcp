@@ -113,8 +113,10 @@ filing absence; an uncached local result does not prove that DART has no filing.
 
 The hosted public endpoint does not expose `fetch_disclosure_on_demand` and must
 leave `KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS` unset. A self-hosted operator may
-set that variable to the exact value `1` to expose the additional tool, only
-under this contract:
+set that variable to the exact value `1` in `readonly` runtime mode to expose
+the additional ephemeral tool, only under this contract. Collector mode never
+exposes it through MCP; persistent collection remains a private maintainer
+command/path:
 
 - the user supplies their own OpenDART API key for that request,
 - the server-side collector `DART_API_KEY` is never used by the public endpoint,

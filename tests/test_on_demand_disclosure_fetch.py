@@ -15,6 +15,7 @@ from kreports.mcp.tools import call_tool
 def _enable_operator_credential_tool(monkeypatch):
     """This module verifies the explicitly opted-in self-hosted capability."""
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
 
 
 def _zip_bytes(name: str, content: str) -> bytes:
@@ -112,19 +113,17 @@ def test_on_demand_fetch_uses_user_key_and_caches_document(temp_engine, monkeypa
             report_nm="주요사항보고서",
         ))
 
-    out = json.loads(call_tool(
-        "fetch_disclosure_on_demand",
-        {
-            "rcept_no": "20250101000001",
-            "user_dart_api_key": "user-key",
-            "cache_policy": "refresh",
-        },
-    ))
+    out = on_demand.fetch_disclosure_on_demand(
+        rcept_no="20250101000001",
+        user_dart_api_key="user-key",
+        cache_policy="refresh",
+    )
 
     assert captured == {"key": "user-key", "rcept_no": "20250101000001"}
     assert out["data_quality"]["source"] == "user_keyed_dart_fetch"
     assert "user-key" not in json.dumps(out, ensure_ascii=False)
-    assert out["answer"].startswith("판정:")
+    assert out["persisted"] is True
+    assert out["cache_policy_applied"] == "refresh_persisted"
 
     with get_session() as session:
         cached = session.query(SourceDocument).filter_by(rcept_no="20250101000001").one()
@@ -176,6 +175,7 @@ def test_on_demand_cache_first_does_not_call_dart(temp_engine, monkeypatch):
             doc_hash="x",
         ))
 
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     out = json.loads(call_tool(
         "fetch_disclosure_on_demand",
         {
@@ -224,6 +224,7 @@ def test_on_demand_cache_first_reads_externalized_raw_document(temp_engine, tmp_
             storage_status="externalized",
         ))
 
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     out = json.loads(call_tool(
         "fetch_disclosure_on_demand",
         {

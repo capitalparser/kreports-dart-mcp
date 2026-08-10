@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from kreports.mcp import input_models as models
 from kreports.mcp.contracts import AnswerEnvelopeV1
 from kreports.mcp.handlers import HANDLERS
+from kreports.runtime import is_readonly_mode
 
 
 def _legacy_compatible_schema(model: type[BaseModel], name: str) -> dict:
@@ -104,8 +105,12 @@ class ToolSpec:
 
 
 def credential_tools_enabled() -> bool:
-    """Require an explicit operator opt-in before exposing credential inputs."""
-    return os.environ.get("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "").strip() == "1"
+    """Expose credential input only in an explicit, non-persistent runtime."""
+    return (
+        is_readonly_mode()
+        and os.environ.get("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "").strip()
+        == "1"
+    )
 
 
 def is_tool_exposed(name: str) -> bool:
