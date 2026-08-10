@@ -179,6 +179,7 @@ def test_user_api_key_is_write_only_in_the_opt_in_tool_schema(monkeypatch):
     from kreports.mcp.input_models import FetchDisclosureOnDemandInput
 
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     model_schema = FetchDisclosureOnDemandInput.model_json_schema()
     published_schema = next(
         tool.inputSchema
@@ -208,6 +209,7 @@ def test_user_api_key_is_redacted_on_every_compatibility_surface(
     from kreports.mcp.tools import call_tool
 
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     normalized_secret = "task7-dependency-echo-secret"
     supplied_secret = (
         f"  {normalized_secret}  " if padded else normalized_secret
@@ -264,6 +266,7 @@ def test_handler_failure_hides_unrelated_exception_for_empty_or_short_secret(
     from kreports.mcp.dispatch import dispatch_tool
 
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     original = TOOL_CATALOG["fetch_disclosure_on_demand"]
 
     def unrelated_failure(_validated_args):

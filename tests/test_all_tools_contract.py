@@ -159,6 +159,7 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
     from kreports.mcp.tools import call_tool
 
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     secret = "task17-network-api-key-canary"
     original = TOOL_CATALOG["fetch_disclosure_on_demand"]
 
@@ -255,6 +256,7 @@ def test_release_no_key_contract_bypasses_cache_and_fails_closed(
     )
 
     monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
     db_path = tmp_path / "runtime.db"
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
