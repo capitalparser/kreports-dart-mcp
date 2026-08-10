@@ -978,7 +978,7 @@ def investor_dataset_readiness_snapshot(
         "recommended_next": [
             "Backfill disclosures list metadata for years with disclosure_list gaps; do not preload all ad-hoc disclosure bodies.",
             "Run rebuild-disclosure-events for years with disclosure_event_index gaps.",
-            "Use fetch_disclosure_on_demand with the caller's DART API key only when a receipt body needs source review.",
+            "Use search_dataset with dataset=evidence_documents for locally indexed receipt evidence, then follow the DART source link when needed.",
         ],
     }
 

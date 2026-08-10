@@ -39,7 +39,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 1. Unit: tools.call_tool
 # ---------------------------------------------------------------------------
 
-EXPECTED_TOOL_COUNT = 34  # approved catalog with consolidated semantic peer context
+EXPECTED_TOOL_COUNT = 33  # approved public catalog; credential tool is opt-in
 
 
 class TestToolRegistryConsistency:
@@ -49,7 +49,8 @@ class TestToolRegistryConsistency:
     def test_all_tools_have_handlers(self):
         tool_names = {t.name for t in ALL_TOOLS}
         handler_names = set(HANDLERS.keys())
-        assert tool_names == handler_names
+        assert tool_names <= handler_names
+        assert handler_names - tool_names == {"fetch_disclosure_on_demand"}
 
     def test_all_tools_have_description(self):
         for tool in ALL_TOOLS:

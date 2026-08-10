@@ -67,7 +67,7 @@ def search_disclosure_events(
             "storage_policy": "list_only_preload_body_on_demand",
             "interpretation": (
                 "Events are classified from cached DART disclosure-list metadata, not preloaded source bodies. "
-                "Use fetch_disclosure_on_demand with the caller's DART API key for source-body review."
+                "Use search_dataset with dataset=evidence_documents for locally indexed source-body evidence, then follow the DART source link when needed."
             ),
         },
     }

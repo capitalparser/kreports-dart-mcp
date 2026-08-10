@@ -1,0 +1,344 @@
+{
+  "$schema": "https://developers.openai.com/apps-sdk/schemas/chatgpt-app-submission.v1.json",
+  "schema_version": 1,
+  "app_info": {
+    "display_name": "KReports",
+    "subtitle": "Korean filing intelligence",
+    "description": "KReports helps investors and auditors search Korean public-company filings, review financial and audit evidence, compare peers and accounting notes, and prepare evidence-backed analysis in ChatGPT.",
+    "category": "FINANCE"
+  },
+  "tools": {
+    "search_company": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Searches the verified local company registry and returns matching identifiers without changing records.",
+        "open_world_justification": "Does not publish content or modify any external system.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "get_financial_snapshot": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Reads normalized filing facts and computes a multi-year company financial snapshot.",
+        "open_world_justification": "Uses the verified local release database and does not change internet state.",
+        "destructive_justification": "Does not delete or overwrite data."
+      }
+    },
+    "score_going_concern": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes a going-concern screening score from stored financial and audit evidence.",
+        "open_world_justification": "Does not transmit or publish the computed assessment to third parties.",
+        "destructive_justification": "Performs no deletion, overwrite, or irreversible transaction."
+      }
+    },
+    "detect_restatement": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Compares stored filing facts to identify possible prior-period restatement evidence.",
+        "open_world_justification": "Does not update filings or any public record.",
+        "destructive_justification": "Does not remove or alter source data."
+      }
+    },
+    "get_accounting_policy": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Retrieves receipt-bound accounting-policy note evidence from the local release database.",
+        "open_world_justification": "Does not post, submit, or modify external disclosure content.",
+        "destructive_justification": "Does not delete or overwrite policy evidence."
+      }
+    },
+    "get_audit_history": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Retrieves stored auditor, opinion, fee, and engagement history for a company.",
+        "open_world_justification": "Does not contact audit firms or change external records.",
+        "destructive_justification": "Does not revoke, delete, or overwrite anything."
+      }
+    },
+    "get_subsidiary_auditors": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Reads group-company and subsidiary auditor evidence to build an audit matrix.",
+        "open_world_justification": "Does not communicate with subsidiaries or external systems.",
+        "destructive_justification": "Does not modify group or auditor data."
+      }
+    },
+    "compare_to_industry": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes an industry comparison from stored company and peer financial facts.",
+        "open_world_justification": "Does not publish rankings or alter third-party information.",
+        "destructive_justification": "Performs no destructive operation."
+      }
+    },
+    "get_business_overview": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Retrieves locally indexed business-overview disclosure evidence for the selected company.",
+        "open_world_justification": "Does not browse with credentials or modify public content.",
+        "destructive_justification": "Does not delete or overwrite disclosure evidence."
+      }
+    },
+    "get_investor_signals": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes investor screening signals from stored financial, audit, and disclosure facts.",
+        "open_world_justification": "Does not place trades, publish advice, or change external systems.",
+        "destructive_justification": "Does not execute transactions or alter records."
+      }
+    },
+    "select_peer_group": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Ranks candidate peers from stored industry and financial attributes using caller-selected criteria.",
+        "open_world_justification": "Does not create public lists or update third-party company profiles.",
+        "destructive_justification": "Does not remove or overwrite company data."
+      }
+    },
+    "compare_to_industry_multi": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes multi-metric peer comparisons from the verified local dataset.",
+        "open_world_justification": "Does not transmit results to external services or publish them.",
+        "destructive_justification": "Does not alter stored facts or peer definitions."
+      }
+    },
+    "compare_peer_audit_fees": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Reads and compares stored audit fee, hour, and non-audit-service evidence across peers.",
+        "open_world_justification": "Does not contact auditors or modify fee disclosures.",
+        "destructive_justification": "Does not delete, overwrite, or commit any transaction."
+      }
+    },
+    "prepare_standard_audit_hours_inputs": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Assembles stored three-year financial and audit-hour inputs without determining a regulated conclusion.",
+        "open_world_justification": "Does not submit calculations to regulators, audit firms, or public systems.",
+        "destructive_justification": "Does not modify engagement or filing data."
+      }
+    },
+    "prepare_audit_materiality_inputs": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Assembles and analyzes stored benchmark trends for auditor materiality planning inputs.",
+        "open_world_justification": "Does not finalize or publish an audit materiality decision.",
+        "destructive_justification": "Does not overwrite methodology or company evidence."
+      }
+    },
+    "compare_peer_risk_profile": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes a peer risk-profile comparison from local financial and audit evidence.",
+        "open_world_justification": "Does not publish risk ratings or update outside systems.",
+        "destructive_justification": "Does not alter the underlying evidence."
+      }
+    },
+    "compare_peer_accounting_policies": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Compares receipt-bound accounting-note text and disclosure matrices across a selected peer group.",
+        "open_world_justification": "Does not edit company filings or publish comparison results.",
+        "destructive_justification": "Does not delete or overwrite note excerpts."
+      }
+    },
+    "compare_peer_kam_topics": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Compares locally extracted key audit matter topics across selected peers.",
+        "open_world_justification": "Does not modify audit reports or external records.",
+        "destructive_justification": "Performs no deletion or irreversible action."
+      }
+    },
+    "compare_peer_audit_report_matters": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Reads and compares audit-report matter evidence across selected peer companies.",
+        "open_world_justification": "Does not send, file, or publish audit-report content.",
+        "destructive_justification": "Does not change or remove report evidence."
+      }
+    },
+    "search_dataset": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Searches supported tables and evidence-document indexes in the verified local database.",
+        "open_world_justification": "Does not query credentialed external systems or publish results.",
+        "destructive_justification": "Does not insert, update, or delete dataset rows."
+      }
+    },
+    "search_audit_report_matters": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Searches locally indexed key audit matters and other audit-report sections.",
+        "open_world_justification": "Does not edit or submit audit-report information.",
+        "destructive_justification": "Does not modify indexed report sections."
+      }
+    },
+    "search_audit_procedures": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Retrieves audit procedures extracted from stored audit-report evidence.",
+        "open_world_justification": "Does not instruct or trigger external audit work.",
+        "destructive_justification": "Does not alter procedure evidence or engagement records."
+      }
+    },
+    "compare_peer_audit_procedures": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Compares extracted audit procedures across the selected local peer set.",
+        "open_world_justification": "Does not send instructions or change any external audit system.",
+        "destructive_justification": "Does not delete or overwrite procedure data."
+      }
+    },
+    "get_kam_lifecycle": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Builds a year-by-year lifecycle from stored key audit matter evidence.",
+        "open_world_justification": "Does not update audit reports or public timelines.",
+        "destructive_justification": "Does not alter historical records."
+      }
+    },
+    "get_accounting_policy_changes": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Compares stored accounting-policy notes across periods to surface change candidates.",
+        "open_world_justification": "Does not edit filing notes or notify outside parties.",
+        "destructive_justification": "Does not change or remove policy history."
+      }
+    },
+    "get_quality_of_earnings_pack": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes an evidence-backed quality-of-earnings review from stored filing facts.",
+        "open_world_justification": "Does not place trades, publish ratings, or modify third-party data.",
+        "destructive_justification": "Does not execute transactions or overwrite evidence."
+      }
+    },
+    "get_dcf_input_candidates": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Retrieves and classifies stored filing facts that may support DCF inputs.",
+        "open_world_justification": "Does not publish valuations or change market data.",
+        "destructive_justification": "Does not alter source facts or execute investments."
+      }
+    },
+    "search_disclosure_events": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Searches locally indexed corporate disclosure events by company, period, and event type.",
+        "open_world_justification": "Does not fetch with user credentials or change public disclosure systems.",
+        "destructive_justification": "Does not delete or overwrite event records."
+      }
+    },
+    "get_audit_report_sections": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Retrieves receipt-bound audit-report sections and their evidence metadata.",
+        "open_world_justification": "Does not submit or modify audit reports.",
+        "destructive_justification": "Does not remove or overwrite report sections."
+      }
+    },
+    "estimate_audit_hours_proxy": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes a clearly labeled audit-hours proxy from stored company and peer inputs.",
+        "open_world_justification": "Does not submit staffing plans or alter engagement systems.",
+        "destructive_justification": "Does not change audit records or make irreversible decisions."
+      }
+    },
+    "build_audit_acceptance_pack": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Assembles stored company, financial, audit, and disclosure evidence for acceptance review.",
+        "open_world_justification": "Does not accept an engagement, contact a client, or update external systems.",
+        "destructive_justification": "Does not commit decisions or modify engagement data."
+      }
+    },
+    "get_industry_audit_landscape": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Aggregates stored industry auditor, opinion, fee, and concentration evidence.",
+        "open_world_justification": "Does not publish rankings or contact firms.",
+        "destructive_justification": "Does not alter industry or audit records."
+      }
+    },
+    "build_dcf_model_pack": {
+      "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false},
+      "justifications": {
+        "read_only_justification": "Computes a DCF scenario pack from stored actuals and explicit caller assumptions.",
+        "open_world_justification": "Does not place trades, publish valuations, or change external market systems.",
+        "destructive_justification": "Does not execute financial transactions or overwrite source evidence."
+      }
+    }
+  },
+  "test_cases": [
+    {
+      "description": "Resolve a Korean listed company before deeper analysis.",
+      "user_prompt": "삼성전자의 정확한 회사 식별자와 시장 정보를 찾아줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": "search_company",
+      "expected_output": "Returns matching company identifiers, market information, and ambiguity guidance when needed.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Review a three-year company financial trend with filing evidence.",
+      "user_prompt": "SK하이닉스의 최근 3개년 총자산, 매출, 영업이익 추이를 표로 보여줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_financial_snapshot",
+      "expected_output": "Returns a concise multi-year table with units, coverage limitations, and filing evidence references.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Compare an accounting note against explainable peers.",
+      "user_prompt": "삼성전자의 수익인식 주석을 동종회사와 비교하고, 각 회사가 어떤 내용을 공시했는지 매트릭스로 보여줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": "compare_peer_accounting_policies",
+      "expected_output": "Returns the peer-selection basis, company-by-company disclosure matrix, note excerpts, and source references.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Prepare standard audit hours inputs without overstating a conclusion.",
+      "user_prompt": "카카오의 표준감사시간 검토에 필요한 최근 3개년 총자산과 매출, 감사시간 입력자료를 준비해줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": "prepare_standard_audit_hours_inputs",
+      "expected_output": "Returns the available three-year inputs, volatility observations, provenance, and an explicit not-assessed boundary.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Run an investor screening workflow with explicit evidence limits.",
+      "user_prompt": "셀트리온의 이익의 질, 회계 위험, 최근 공시 신호를 투자자 관점에서 요약해줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_investor_signals",
+      "expected_output": "Returns evidence-backed investor signals, data-quality status, warnings, and suggested follow-up checks without investment execution.",
+      "expected_output_url": null
+    }
+  ],
+  "negative_test_cases": [
+    {
+      "description": "Do not trigger for unrelated calendar requests.",
+      "user_prompt": "내일 회의 일정을 정리해줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because calendar management is outside its supported workflows.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not trigger to execute an investment transaction.",
+      "user_prompt": "내 증권계좌에서 삼성전자 100주를 지금 시장가로 매수해줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because it analyzes filings and does not access brokerage accounts or place trades.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not request credentials or trigger a hidden live-fetch capability.",
+      "user_prompt": "내 DART API 키를 받아서 아직 저장되지 않은 공시 원문을 실시간으로 가져와줘.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The public app should not be invoked for credential collection or hidden on-demand network fetching.",
+      "expected_output_url": null
+    }
+  ]
+}

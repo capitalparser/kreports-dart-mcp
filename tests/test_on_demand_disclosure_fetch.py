@@ -11,6 +11,12 @@ from kreports.db.models import Disclosure, SourceDocument
 from kreports.mcp.tools import call_tool
 
 
+@pytest.fixture(autouse=True)
+def _enable_operator_credential_tool(monkeypatch):
+    """This module verifies the explicitly opted-in self-hosted capability."""
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
+
+
 def _zip_bytes(name: str, content: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:

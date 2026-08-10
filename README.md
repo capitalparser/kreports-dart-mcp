@@ -158,9 +158,11 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Beneish M-Score for this company — earnings manipulation risk"
 ```
 
-### MCP Tools (34)
+### MCP Tools (33 public)
 
-KReports exposes 34 catalog-bound MCP tools. The tools are grouped around the
+KReports exposes 33 credential-free, read-only MCP tools. One additional
+`fetch_disclosure_on_demand` tool remains available only to explicitly opted-in
+self-hosted operators. The public tools are grouped around the
 maintenance questions that usually force analysts and auditors back into DART:
 
 | Area | Representative tools | What it returns |
@@ -168,7 +170,7 @@ maintenance questions that usually force analysts and auditors back into DART:
 | Company lookup | `search_company` | Corp code, market, stock code, name disambiguation |
 | Investor first pass | `get_investor_signals`, `get_quality_of_earnings_pack`, `get_dcf_input_candidates` | Quality checks, accounting risk, disclosure events, DCF input candidates |
 | Financials and peer benchmarking | `get_financial_snapshot`, `compare_to_industry`, `compare_to_industry_multi`, `select_peer_group` | Multi-year financial facts, KSIC peer percentiles, peer group selection |
-| Disclosure monitoring | `search_disclosure_events`, `fetch_disclosure_on_demand`, `search_dataset` | Indexed event search plus optional user-keyed live DART fetches |
+| Disclosure monitoring | `search_disclosure_events`, `search_dataset` | Indexed event and evidence-document search from the verified local release DB |
 | Audit risk | `score_going_concern`, `detect_restatement`, `build_audit_acceptance_pack`, `estimate_audit_hours_proxy` | Going-concern score, restatement candidates, acceptance risk pack, audit-hour proxy |
 | Auditor and group audit | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | Auditor tenure, opinion history, group auditor matrix, audit fee/NAS peer view |
 | Audit report evidence | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | Audit report sections, KAM matters, audit procedures, year-to-year KAM lifecycle |
@@ -276,9 +278,9 @@ kreports verify-release-artifact --db artifacts/kreports-runtime.db
 
 Build exits successfully after writing a valid proof whose
 `release_gate.passed` value may be false. Verify returns non-zero for DB drift,
-contract drift, or any current named release blocker. The 34-tool smoke executes
-legacy handlers in an isolated process and forces the request-scoped DART fetch
-through its no-key `refresh` fail-closed state. `/readyz` reads the pre-verified
+contract drift, or any current named release blocker. The 33-tool public smoke
+executes handlers in an isolated process without credentials or network writes.
+`/readyz` reads the pre-verified
 artifact and performs cheap WAL/file/static-contract drift checks; it does not
 rehash the full DB or rerun all tools for every health probe.
 
@@ -295,7 +297,7 @@ turn missing inputs into inferred actuals.
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP servers (34 tools)
+├── mcp/         MCP stdio + HTTP servers (33 public tools)
 ├── analysis/    Public Python API and evidence-grounded answer layer
 ├── collector/   DART API collectors and document-first backfill runners
 ├── processor/   XBRL/XML parsers
@@ -476,17 +478,19 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
 ```
 
-### MCP 도구 (34개)
+### MCP 도구 (공개 33개)
 
-KReports는 catalog에 고정된 MCP 도구 34개를 제공합니다. 투자자와 감사인이
-DART에서 반복적으로 확인하던 질문을 기준으로 묶었습니다.
+KReports는 자격증명 없이 읽기 전용으로 동작하는 공개 MCP 도구 33개를
+제공합니다. `fetch_disclosure_on_demand` 1개는 명시적으로 활성화한 셀프호스트
+운영자에게만 제공됩니다. 공개 도구는 투자자와 감사인이 DART에서 반복적으로
+확인하던 질문을 기준으로 묶었습니다.
 
 | 영역 | 대표 도구 | 반환 |
 |------|-----------|------|
 | 회사 검색 | `search_company` | corp_code, 시장, 종목코드, 동명이인 후보 |
 | 투자자 1차 점검 | `get_investor_signals`, `get_quality_of_earnings_pack`, `get_dcf_input_candidates` | 퀄리티 체크, 회계 리스크, 공시 이벤트, DCF 입력 후보 |
 | 재무·피어 비교 | `get_financial_snapshot`, `compare_to_industry`, `compare_to_industry_multi`, `select_peer_group` | 다개년 재무 fact, KSIC 피어 분위수, 피어그룹 |
-| 공시 모니터링 | `search_disclosure_events`, `fetch_disclosure_on_demand`, `search_dataset` | 공시 이벤트 검색, 사용자 API 키 기반 실시간 DART 조회 |
+| 공시 모니터링 | `search_disclosure_events`, `search_dataset` | 검증된 로컬 릴리스 DB의 공시 이벤트·근거 문서 검색 |
 | 감사 위험 | `score_going_concern`, `detect_restatement`, `build_audit_acceptance_pack`, `estimate_audit_hours_proxy` | 계속기업 점수, 전기재작성 후보, 감사수임 위험 pack, 감사시간 proxy |
 | 감사인·그룹감사 | `get_audit_history`, `get_subsidiary_auditors`, `get_industry_audit_landscape`, `compare_peer_audit_fees` | 감사인 연속연수, 의견 이력, 그룹 감사인 매트릭스, 보수/NAS 피어 비교 |
 | 감사보고서 근거 | `get_audit_report_sections`, `search_audit_report_matters`, `search_audit_procedures`, `get_kam_lifecycle` | 감사보고서 본문, KAM, 감사절차, KAM 연도별 변화 |
@@ -559,12 +563,11 @@ kreports verify-release-artifact --db artifacts/kreports-runtime.db
 build는 blocker가 있어도 `release_gate.passed=false`와 정확한 blocker를
 기록하고 0으로 종료합니다. verify는 현재 DB의 해시·스키마·인덱스·raw
 count·catalog·golden contract·release gate를 다시 계산하며 drift나
-blocker가 있으면 non-zero로 종료합니다. 34개 도구 smoke는 격리 프로세스에서
-실제 handler를 실행하고, 사용자 키 기반 DART 조회는 cache hit를 허용하지
-않는 `refresh` 모드에서 키가 없는 fail-closed 상태를 검증합니다.
+blocker가 있으면 non-zero로 종료합니다. 공개 33개 도구 smoke는 격리
+프로세스에서 자격증명과 네트워크 쓰기 없이 실제 handler를 실행합니다.
 `/readyz`는 사전 검증된 artifact와 WAL·파일·정적 계약 drift를 빠르게
 확인합니다. 전체 DB 해시는 파일 identity가 바뀔 때만 다시 계산하고,
-34개 도구는 health probe에서 다시 실행하지 않습니다.
+공개 33개 도구는 health probe에서 다시 실행하지 않습니다.
 
 투자자 기능은 `investor_core` gate가 통과한 데이터에서만 ready입니다.
 회계정책·감사절차·그룹감사 등 감사인 기능은 artifact의 개별 등급에 따라
@@ -575,7 +578,7 @@ conditional일 수 있습니다. DCF는 공시 실제값, 명시적 가정, 모�
 
 ```
 kreports/
-├── mcp/         MCP stdio + HTTP 서버 (34개 도구)
+├── mcp/         MCP stdio + HTTP 서버 (공개 33개 도구)
 ├── analysis/    Python 공개 API와 근거 기반 응답 레이어
 ├── collector/   DART API 수집기와 문서 우선 백필 러너
 ├── processor/   XBRL/XML 파서

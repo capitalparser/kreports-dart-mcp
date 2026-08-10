@@ -25,8 +25,8 @@ _BLOCKER_ACTIONS_KO = {
     "migrate the release DB to the approved schema revision before release": (
         "배포 전에 승인된 스키마 개정으로 데이터베이스를 이전해야 합니다."
     ),
-    "restore the approved 34-tool catalog before release": (
-        "배포 전에 승인된 34개 도구 목록을 복원해야 합니다."
+    "restore the approved 33-tool public catalog before release": (
+        "배포 전에 승인된 33개 공개 도구 목록을 복원해야 합니다."
     ),
     "run release verification with KREPORTS_RUNTIME_MODE=readonly": (
         "읽기 전용 실행 환경에서 배포 검증을 다시 수행해야 합니다."

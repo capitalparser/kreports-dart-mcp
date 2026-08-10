@@ -47,7 +47,11 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "8966caf648d2c7c6d2de4768fce679b85779f091228a8b0cb762658eb8d30220"
+EXPECTED_INTERFACE_SHA256 = "cda74732e55d5215a0b14ac9520be1353d39921fc25c2ad68ff0589869c197d2"
+PUBLIC_TOOL_NAMES = [
+    name for name in EXPECTED_TOOL_NAMES
+    if name != "fetch_disclosure_on_demand"
+]
 
 
 MINIMAL_ARGUMENTS = {
@@ -99,7 +103,7 @@ def test_catalog_is_complete_ordered_and_immutable():
     from kreports.mcp.dispatch import list_mcp_tools
 
     assert list(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
-    assert [tool.name for tool in list_mcp_tools()] == EXPECTED_TOOL_NAMES
+    assert [tool.name for tool in list_mcp_tools()] == PUBLIC_TOOL_NAMES
     assert len({id(spec.input_model) for spec in TOOL_CATALOG.values()}) == 34
     assert all(
         spec.input_model.model_config.get("extra") == "forbid"
@@ -109,7 +113,7 @@ def test_catalog_is_complete_ordered_and_immutable():
         TOOL_CATALOG["search_company"].name = "changed"
 
 
-def test_generated_tool_interface_keeps_the_approved_34_tool_snapshot_hash():
+def test_generated_tool_interface_keeps_the_approved_public_snapshot_hash():
     from kreports.mcp.dispatch import list_mcp_tools
 
     snapshot = []
@@ -119,6 +123,7 @@ def test_generated_tool_interface_keeps_the_approved_34_tool_snapshot_hash():
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": tool.inputSchema,
+                "outputSchema": tool.outputSchema,
                 "annotations": (
                     tool.annotations.model_dump(mode="json", exclude_none=False)
                     if tool.annotations
@@ -168,11 +173,12 @@ def test_user_api_key_is_secret_and_not_disclosed():
     assert model.user_dart_api_key.get_secret_value() == raw_secret
 
 
-def test_user_api_key_is_write_only_in_the_published_tool_schema():
+def test_user_api_key_is_write_only_in_the_opt_in_tool_schema(monkeypatch):
     """Catches MCP clients being told that a caller DART key is ordinary data."""
     from kreports.mcp.dispatch import list_mcp_tools
     from kreports.mcp.input_models import FetchDisclosureOnDemandInput
 
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
     model_schema = FetchDisclosureOnDemandInput.model_json_schema()
     published_schema = next(
         tool.inputSchema
@@ -201,6 +207,7 @@ def test_user_api_key_is_redacted_on_every_compatibility_surface(
     from kreports.mcp.server import handle_call_tool
     from kreports.mcp.tools import call_tool
 
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
     normalized_secret = "task7-dependency-echo-secret"
     supplied_secret = (
         f"  {normalized_secret}  " if padded else normalized_secret
@@ -256,6 +263,7 @@ def test_handler_failure_hides_unrelated_exception_for_empty_or_short_secret(
     from kreports.mcp.catalog import TOOL_CATALOG
     from kreports.mcp.dispatch import dispatch_tool
 
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
     original = TOOL_CATALOG["fetch_disclosure_on_demand"]
 
     def unrelated_failure(_validated_args):

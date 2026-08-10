@@ -142,6 +142,7 @@ def test_role_separated_templates_never_offer_collector_credentials_to_public_mc
     assert "DB_URL=sqlite:////data/kreports.db" in public
     assert "DART_API_KEY" not in public
     assert "RAW_STORAGE_" not in public
+    assert "KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS" not in public
 
     assert "KREPORTS_RUNTIME_MODE=collector" in collector
     assert "DART_API_KEY=replace_with_opendart_key" in collector
@@ -157,7 +158,7 @@ def test_deployment_guide_preserves_ephemeral_fetch_and_evidence_readiness_bound
     """Catches documentation that promises cache persistence or calls HTTP healthy data-ready."""
     guide = (REPO_ROOT / "docs" / "deploy-http-mcp.md").read_text()
 
-    assert "34 public tools" in guide
+    assert "33 public tools" in guide
     assert "inseparable deployment pair" in guide
     assert "ephemeral" in guide
     assert "does not persist or cache" in guide

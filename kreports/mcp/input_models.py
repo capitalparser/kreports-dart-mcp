@@ -1,4 +1,4 @@
-"""Strict typed arguments for the 34 public MCP tools."""
+"""Strict typed arguments for 33 public and one operator-opt-in MCP tool."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation

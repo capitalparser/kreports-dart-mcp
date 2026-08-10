@@ -39,10 +39,10 @@ from kreports.db.schema_contract import (
 
 
 ARTIFACT_VERSION = "1.0"
-TOOL_CONTRACT_VERSION = "1.2"
-FROZEN_TOOL_COUNT = 34
+TOOL_CONTRACT_VERSION = "1.3"
+FROZEN_TOOL_COUNT = 33
 FROZEN_TOOL_WIRE_SHA256 = (
-    "8966caf648d2c7c6d2de4768fce679b85779f091228a8b0cb762658eb8d30220"
+    "cda74732e55d5215a0b14ac9520be1353d39921fc25c2ad68ff0589869c197d2"
 )
 APPROVED_GOLDEN_CONTRACT_SHA256 = (
     "c6552ed45c0fb5032d45e337e2e75fae92b0bda6854b4b0aa97ebff11b0dd617"
@@ -223,11 +223,11 @@ class VerificationResult(_StrictModel):
 _VERIFICATION_DIAGNOSTIC_OVERRIDES: dict[str, tuple[str, str]] = {
     "tool_contract_evidence_mismatch": (
         "dataset_release_maintainer",
-        "rebuild the release manifest from the current approved 34-tool catalog",
+        "rebuild the release manifest from the current approved 33-tool public catalog",
     ),
     "tool_contract_drift": (
         "dataset_release_maintainer",
-        "rebuild the release manifest from the current approved 34-tool catalog",
+        "rebuild the release manifest from the current approved 33-tool public catalog",
     ),
     "contracts_evidence_mismatch": (
         "dataset_release_maintainer",
@@ -281,6 +281,7 @@ def _tool_wire_sha256() -> str:
             "name": tool.name,
             "description": tool.description,
             "inputSchema": tool.inputSchema,
+            "outputSchema": tool.outputSchema,
             "annotations": (
                 tool.annotations.model_dump(mode="json", exclude_none=False)
                 if tool.annotations
@@ -339,7 +340,7 @@ def _run_catalog_dispatch_contract(
 
     Explicit-DB callers run this helper only in the isolated runner process.
     """
-    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.catalog import exposed_tool_catalog
     from kreports.mcp.contracts import AnswerEnvelopeV1
     from kreports.mcp.dispatch import dispatch_tool
 
@@ -350,7 +351,7 @@ def _run_catalog_dispatch_contract(
     )
     try:
         with context:
-            for name, spec in TOOL_CATALOG.items():
+            for name, spec in exposed_tool_catalog().items():
                 arguments = (
                     _valid_tool_arguments(name, spec.input_model)
                     if db_path is not None
@@ -368,15 +369,6 @@ def _run_catalog_dispatch_contract(
                     and envelope.answer.strip()
                     and envelope.data_quality.status in expected_status
                 )
-                if (
-                    db_path is not None
-                    and name == "fetch_disclosure_on_demand"
-                    and isinstance(envelope, AnswerEnvelopeV1)
-                    and envelope.data_quality.status == "error"
-                    and "user_dart_api_key is required"
-                    in envelope.data_quality.limitations
-                ):
-                    valid_envelope = True
                 if not valid_envelope:
                     return False
     except Exception:
@@ -412,13 +404,15 @@ def run_all_tool_contract(
     db_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, bool | int]:
     """Recompute static wire checks and catalog dispatches without DB leakage."""
-    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.catalog import exposed_tool_catalog
+
+    public_catalog = exposed_tool_catalog()
 
     passed = (
-        len(TOOL_CATALOG) == FROZEN_TOOL_COUNT
+        len(public_catalog) == FROZEN_TOOL_COUNT
         and all(
             spec.input_model.model_config.get("extra") == "forbid"
-            for spec in TOOL_CATALOG.values()
+            for spec in public_catalog.values()
         )
         and _tool_wire_sha256() == FROZEN_TOOL_WIRE_SHA256
     )
@@ -430,7 +424,7 @@ def run_all_tool_contract(
         )
     )
     passed = passed and dispatch_passed
-    return {"passed": passed, "checks": len(TOOL_CATALOG)}
+    return {"passed": passed, "checks": len(public_catalog)}
 
 
 def _safe_existing_db_path(db_path: str | os.PathLike[str]) -> Path:

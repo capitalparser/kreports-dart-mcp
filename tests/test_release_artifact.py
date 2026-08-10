@@ -34,7 +34,7 @@ def _minimal_manifest_payload() -> dict:
             "manifest_state": {"manifest_id": "fixture-v1"},
         },
         "tool_contract": {
-            "version": "1.2",
+            "version": "1.3",
             "tool_count": FROZEN_TOOL_COUNT,
             "wire_sha256": FROZEN_TOOL_WIRE_SHA256,
         },
@@ -350,7 +350,7 @@ def test_verify_recomputes_current_gate_and_ignores_tampered_pass(
     assert "release_gate_evidence_mismatch" in result.failures
 
 
-def test_verify_explains_stale_32_tool_proof_against_current_34_tool_contract(
+def test_verify_explains_stale_32_tool_proof_against_current_33_tool_contract(
     tmp_path,
     monkeypatch,
 ):
@@ -399,7 +399,7 @@ def test_verify_explains_stale_32_tool_proof_against_current_34_tool_contract(
     assert diagnostics["tool_contract_evidence_mismatch"] == {
         "failure": "tool_contract_evidence_mismatch",
         "owner": "dataset_release_maintainer",
-        "action": "rebuild the release manifest from the current approved 34-tool catalog",
+        "action": "rebuild the release manifest from the current approved 33-tool public catalog",
     }
 
 
@@ -1278,7 +1278,7 @@ def test_release_gate_readiness_predicate_requires_ok_and_no_failures():
         "dataset_version": "fixture",
         "required_failures": [],
         "degraded_features": [],
-        "tool_count": 34,
+        "tool_count": 33,
     }
     assert release_gate_is_ready(ambiguous) is False
 
@@ -1461,7 +1461,7 @@ def test_readyz_and_manifest_share_the_same_fail_closed_predicate(monkeypatch):
         "dataset_version": "fixture",
         "required_failures": [],
         "degraded_features": [],
-        "tool_count": 34,
+        "tool_count": 33,
     }
     monkeypatch.setattr(
         http_server,

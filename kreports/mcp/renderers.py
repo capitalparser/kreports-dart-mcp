@@ -816,7 +816,7 @@ def _render_disclosure_events(result: dict) -> str:
         lines.append("- 현재 조건에 맞는 이벤트를 찾지 못했습니다.")
     lines.append("")
     lines.append("다음 행동:")
-    lines.append("- 중요한 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문을 확인하세요.")
+    lines.append("- 중요한 이벤트는 접수번호 기준으로 search_dataset의 evidence_documents를 조회하고 필요하면 DART 원문 링크를 확인하세요.")
     evidence = _render_evidence_grounded_sections(result)
     if evidence:
         lines.append(evidence)

@@ -501,7 +501,7 @@ def test_exported_compact_runtime_preserves_all_tool_public_contract(
         "detect_restatement": "missing",
         "get_investor_signals": "limited",
     }
-    assert run_all_tool_contract(runtime_db) == {"passed": True, "checks": 34}
+    assert run_all_tool_contract(runtime_db) == {"passed": True, "checks": 33}
 
 
 def test_export_runtime_db_retains_all_audit_observation_history(temp_engine, tmp_path):

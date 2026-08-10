@@ -26,11 +26,11 @@ def test_semantic_workflow_docs_preserve_read_only_source_and_peer_boundaries():
         assert expected in text
 
 
-def test_readme_has_no_stale_32_tool_reference():
+def test_readme_describes_the_33_tool_public_catalog():
     text = Path("README.md").read_text(encoding="utf-8")
 
     assert "32 catalog-bound MCP tools" not in text
     assert "32개 도구" not in text
     assert "32-tool" not in text
-    assert "MCP Tools (34)" in text
-    assert "MCP 도구 (34개)" in text
+    assert "MCP Tools (33 public)" in text
+    assert "MCP 도구 (공개 33개)" in text

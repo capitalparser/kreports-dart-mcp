@@ -12,6 +12,7 @@ def test_compatibility_exports_are_generated_from_the_single_catalog():
     from kreports.mcp.dispatch import list_mcp_tools
 
     assert ALL_TOOLS == list_mcp_tools()
+    assert set(tool.name for tool in ALL_TOOLS) <= set(HANDLERS)
     assert list(HANDLERS) == list(TOOL_CATALOG)
 
 
@@ -86,9 +87,9 @@ def test_search_dataset_schema_exposes_evidence_documents():
     assert "evidence_documents" in tool.inputSchema["properties"]["dataset"]["enum"]
 
 
-def test_fetch_disclosure_on_demand_registered():
+def test_fetch_disclosure_on_demand_is_internal_only_by_default():
     names = [t.name for t in ALL_TOOLS]
-    assert "fetch_disclosure_on_demand" in names
+    assert "fetch_disclosure_on_demand" not in names
     assert "fetch_disclosure_on_demand" in HANDLERS
 
 

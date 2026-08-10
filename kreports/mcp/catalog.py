@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Callable
 
-from mcp.types import Tool
+from mcp.types import Tool, ToolAnnotations
 from pydantic import BaseModel
 
 from kreports.mcp import input_models as models
+from kreports.mcp.contracts import AnswerEnvelopeV1
 from kreports.mcp.handlers import HANDLERS
 
 
@@ -84,13 +86,39 @@ class ToolSpec:
     handler: Callable[[BaseModel], dict]
     read_only: bool
     professional: bool
+    public: bool = True
 
     def to_mcp_tool(self) -> Tool:
         return Tool(
             name=self.name,
             description=self.description,
             inputSchema=_legacy_compatible_schema(self.input_model, self.name),
+            outputSchema=AnswerEnvelopeV1.model_json_schema(),
+            annotations=ToolAnnotations(
+                readOnlyHint=self.read_only,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
         )
+
+
+def credential_tools_enabled() -> bool:
+    """Require an explicit operator opt-in before exposing credential inputs."""
+    return os.environ.get("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "").strip() == "1"
+
+
+def is_tool_exposed(name: str) -> bool:
+    spec = TOOL_CATALOG.get(name)
+    return bool(spec and (spec.public or credential_tools_enabled()))
+
+
+def exposed_tool_catalog() -> dict[str, ToolSpec]:
+    return {
+        name: spec
+        for name, spec in TOOL_CATALOG.items()
+        if spec.public or credential_tools_enabled()
+    }
 
 
 _DESCRIPTIONS = {
@@ -122,7 +150,7 @@ _DESCRIPTIONS = {
     "get_accounting_policy_changes": "사업보고서 주석 2/3/4의 회계정책·추정판단 문구 변화를 5개년으로 비교한다. 정책 변경 후보, 추정 불확실성 변화, 전년 대비 문구 변경을 검토할 때 사용한다.",
     "get_quality_of_earnings_pack": "투자자 관점에서 5개년 이익의 질을 점검한다. 순이익-영업현금흐름 전환율, 영업마진 변동성, 음의 영업현금흐름, 감사보고서 matter 신호를 함께 반환한다.",
     "get_dcf_input_candidates": "5개년 재무 실제값에서 DCF 입력 후보를 산출한다. 매출성장률, 영업마진, 현금전환율 등 관측값 기반 후보와 WACC/세율/CAPEX 등 별도 판단이 필요한 누락 입력을 분리한다.",
-    "search_disclosure_events": "유상증자, 전환사채, 소송, 최대주주 변경, 횡령배임, 주요 계약, 자산거래, 감사관련 공시 이벤트를 회사/기간/시장/이벤트 유형으로 검색한다. 원문 확인은 fetch_disclosure_on_demand와 연결한다.",
+    "search_disclosure_events": "유상증자, 전환사채, 소송, 최대주주 변경, 횡령배임, 주요 계약, 자산거래, 감사관련 공시 이벤트를 회사/기간/시장/이벤트 유형으로 검색한다. 원문 근거는 접수번호로 search_dataset의 evidence_documents를 조회하거나 DART 원문 링크에서 확인한다.",
     "get_audit_report_sections": "로컬 DB에 저장된 감사보고서 본문 섹션 조회. collect-audit-report-sections로 영속화한 감사의견, 핵심감사사항/KAM, 강조사항, 계속기업, 감사인의 책임 문단을 반환한다. KAM에는 topic, 선정 이유 hint, 감사절차 hint를 함께 반환한다.",
     "estimate_audit_hours_proxy": "표준감사시간 산정 전단계의 public-data 감사난이도 proxy. 자산규모, 감사시간 peer percentile, 현금흐름 괴리, 계속기업/Beneish signal을 종합해 complexity score를 제공한다. 표준감사시간 결론이나 법정 산정값은 아니다.",
     "build_audit_acceptance_pack": "수임/유지 검토용 DART 외부근거 pack. peer 선정, 감사보수·감사시간, 재무 risk signal, 회계정책 cache coverage, 감사보고서 event를 한 번에 묶어 반환한다. 독립성 확인·수임승인·감사판단을 대체하지 않는다.",
@@ -177,6 +205,7 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         handler=HANDLERS[name],
         read_only=name != "fetch_disclosure_on_demand",
         professional=True,
+        public=name != "fetch_disclosure_on_demand",
     )
     for name, input_model in _INPUT_MODELS.items()
 }

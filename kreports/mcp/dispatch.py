@@ -426,10 +426,10 @@ def _invoke_handler(
     *,
     capture_failure: bool,
 ) -> dict[str, Any]:
-    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.catalog import TOOL_CATALOG, is_tool_exposed
 
     spec = TOOL_CATALOG.get(name)
-    if spec is None:
+    if spec is None or not is_tool_exposed(name):
         raise LookupError(f"Unknown tool: {_bounded_tool_name(name)}")
     try:
         validated = spec.input_model.model_validate(arguments or {})
@@ -488,11 +488,11 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
     try:
         return _enriched_result(name, arguments)
     except LookupError:
-        from kreports.mcp.catalog import TOOL_CATALOG
+        from kreports.mcp.catalog import exposed_tool_catalog
 
         return {
             "error": f"Unknown tool: {_bounded_tool_name(name)}",
-            "available": list(TOOL_CATALOG),
+            "available": list(exposed_tool_catalog()),
         }
     except ArgumentValidationError as exc:
         return {"error": str(exc)}
@@ -503,6 +503,6 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
 
 
 def list_mcp_tools() -> list[Tool]:
-    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.catalog import exposed_tool_catalog
 
-    return [spec.to_mcp_tool() for spec in TOOL_CATALOG.values()]
+    return [spec.to_mcp_tool() for spec in exposed_tool_catalog().values()]

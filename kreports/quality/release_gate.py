@@ -27,7 +27,7 @@ from kreports.runtime import is_readonly_mode
 PROFILE_PUBLIC_RUNTIME = "public_runtime"
 PROFILE_AUDITOR_FULL = "auditor_full"
 SUPPORTED_PROFILES = (PROFILE_PUBLIC_RUNTIME, PROFILE_AUDITOR_FULL)
-EXPECTED_TOOL_COUNT = 34
+EXPECTED_TOOL_COUNT = 33
 FEATURE_COVERAGE_THRESHOLD_PCT = 95.0
 FEATURE_COVERAGE_THRESHOLD_BASIS_POINTS = 9500
 INVESTOR_CORE_3Y = "investor_core_3y"
@@ -134,7 +134,7 @@ _EXACT_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
     ),
     "unexpected_tool_count": (
         "mcp_contract_maintainer",
-        "restore the approved 34-tool catalog before release",
+        "restore the approved 33-tool public catalog before release",
     ),
     "runtime_not_readonly": (
         "runtime_operator",

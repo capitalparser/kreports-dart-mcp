@@ -43,6 +43,10 @@ EXPECTED_TOOL_NAMES = (
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 )
+PUBLIC_TOOL_NAMES = tuple(
+    name for name in EXPECTED_TOOL_NAMES
+    if name != "fetch_disclosure_on_demand"
+)
 
 
 def _fixture_arguments(tool_name, model) -> dict:
@@ -82,7 +86,7 @@ def _fixture_arguments(tool_name, model) -> dict:
     return values
 
 
-def test_all_tool_contract_is_derived_from_catalog_and_covers_all_34_tools(
+def test_all_tool_contract_is_derived_from_public_catalog_and_covers_33_tools(
     temp_engine,
 ):
     from kreports.release_artifact import (
@@ -92,19 +96,19 @@ def test_all_tool_contract_is_derived_from_catalog_and_covers_all_34_tools(
 
     result = run_all_tool_contract()
 
-    assert result == {"passed": True, "checks": 34}
+    assert result == {"passed": True, "checks": 33}
     assert FROZEN_TOOL_WIRE_SHA256 == (
-        "8966caf648d2c7c6d2de4768fce679b85779f091228a8b0cb762658eb8d30220"
+        "cda74732e55d5215a0b14ac9520be1353d39921fc25c2ad68ff0589869c197d2"
     )
 
 
-def test_all_34_catalog_tools_have_strict_inputs_and_answer_envelopes(
+def test_all_33_public_tools_have_strict_inputs_and_answer_envelopes(
     temp_engine,
 ):
     from sqlalchemy.orm import Session
 
     from kreports.db.models import Company
-    from kreports.mcp.catalog import TOOL_CATALOG
+    from kreports.mcp.catalog import TOOL_CATALOG, exposed_tool_catalog
     from kreports.mcp.dispatch import dispatch_tool
 
     with Session(temp_engine) as session:
@@ -120,7 +124,8 @@ def test_all_34_catalog_tools_have_strict_inputs_and_answer_envelopes(
         session.commit()
 
     assert tuple(TOOL_CATALOG) == EXPECTED_TOOL_NAMES
-    for name, spec in TOOL_CATALOG.items():
+    assert tuple(exposed_tool_catalog()) == PUBLIC_TOOL_NAMES
+    for name, spec in exposed_tool_catalog().items():
         arguments = _fixture_arguments(name, spec.input_model)
         strict = dispatch_tool(name, {**arguments, "task17_unknown": True})
         assert strict.data_quality.status == "error"
@@ -130,13 +135,6 @@ def test_all_34_catalog_tools_have_strict_inputs_and_answer_envelopes(
         assert isinstance(result, AnswerEnvelopeV1)
         assert result.tool_name == name
         assert result.answer.strip()
-        if name == "fetch_disclosure_on_demand":
-            assert result.data_quality.status == "error"
-            assert (
-                "user_dart_api_key is required"
-                in result.data_quality.limitations
-            )
-            continue
         assert result.data_quality.status in {
             "usable",
             "limited",
@@ -160,6 +158,7 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
     from kreports.mcp.server import handle_call_tool
     from kreports.mcp.tools import call_tool
 
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
     secret = "task17-network-api-key-canary"
     original = TOOL_CATALOG["fetch_disclosure_on_demand"]
 
@@ -192,7 +191,7 @@ def test_api_key_canary_never_crosses_any_public_or_manifest_surface(
             {
                 "tool_contract": {
                     "version": "1.0",
-                    "tool_count": 34,
+                    "tool_count": 33,
                 }
             }
         ),
@@ -242,6 +241,7 @@ def test_all_tool_contract_fails_when_any_valid_fixture_invocation_errors(
 
 def test_release_no_key_contract_bypasses_cache_and_fails_closed(
     tmp_path,
+    monkeypatch,
 ):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
@@ -254,6 +254,7 @@ def test_release_no_key_contract_bypasses_cache_and_fails_closed(
         _valid_tool_arguments,
     )
 
+    monkeypatch.setenv("KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS", "1")
     db_path = tmp_path / "runtime.db"
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)

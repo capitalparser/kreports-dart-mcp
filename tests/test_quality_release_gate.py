@@ -358,7 +358,7 @@ def test_public_runtime_accepts_exact_95_percent_with_exact_denominator(
     report = release_gate.evaluate_release_gate("public_runtime")
 
     assert report["ok"] is True
-    assert report["tool_count"] == 34
+    assert report["tool_count"] == 33
     assert report["denominators"]["investor_core"] == 20
     assert report["coverage"]["investor_core"] == {
         "numerator": 19,
@@ -1062,7 +1062,7 @@ def test_quality_release_gate_cli_supports_json_and_human_output(monkeypatch):
         "dataset_version": "release-v1",
         "required_failures": ["audit_procedure_coverage"],
         "degraded_features": ["audit_procedure"],
-        "tool_count": 34,
+        "tool_count": 33,
         "coverage_year": 2025,
         "coverage": {
             "audit_procedure": {

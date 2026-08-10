@@ -13,7 +13,7 @@ and verification, atomic deployment of the DB and matching release JSON pair,
 and an MCP service restart or reload. Until that promotion completes, the
 running endpoint continues to serve its previously verified release.
 
-The endpoint exposes **34 public tools**. Its database and the matching
+The endpoint exposes **33 public tools**. Its database and the matching
 `kreports.db.release.json` are an inseparable deployment pair: mount both
 read-only at `/data/` from the same verified release. `/readyz` remains the
 authenticated release health gate and cannot report ready without matching
@@ -109,11 +109,12 @@ separate from question usability: a release warning cannot downgrade or upgrade
 the evidence status of a particular answer. Also distinguish cache absence from
 filing absence; an uncached local result does not prove that DART has no filing.
 
-## On-Demand Disclosure Fetch Contract
+## Operator-Opt-In On-Demand Disclosure Fetch Contract
 
-The hosted endpoint is cache-first for release data. If a public MCP user
-requests an uncached ad-hoc disclosure, the endpoint may support on-demand DART
-fetch only under this contract:
+The hosted public endpoint does not expose `fetch_disclosure_on_demand` and must
+leave `KREPORTS_MCP_ENABLE_CREDENTIAL_TOOLS` unset. A self-hosted operator may
+set that variable to the exact value `1` to expose the additional tool, only
+under this contract:
 
 - the user supplies their own OpenDART API key for that request,
 - the server-side collector `DART_API_KEY` is never used by the public endpoint,
@@ -297,10 +298,10 @@ rather than an in-place DB mutation.
 The build command is evidence-producing: it writes atomically and may record
 `release_gate.passed=false` with named blockers. The verify command is
 deployment-gating: it recomputes the DB size/hash, schema and required indexes,
-dataset manifest, inline raw count, current release gate, 34-tool wire contract,
-isolated real-dispatch catalog smoke, and the approved packaged golden contract
-hash. The user-keyed network fetch is forced to `refresh` and checked in its
-no-key fail-closed state, so an existing cache row cannot satisfy that check.
+dataset manifest, inline raw count, current release gate, 33-tool public wire
+contract, isolated real-dispatch public-catalog smoke, and the approved packaged
+golden contract hash. The operator-opt-in user-keyed network fetch is outside
+the public release contract.
 Verify exits non-zero on drift or any current blocker. Runtime `/readyz` reads
 this pre-verified artifact and performs cheap WAL/file/static-contract drift
 checks. It hashes the DB once per process and file identity, rehashes after

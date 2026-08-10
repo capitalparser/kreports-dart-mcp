@@ -368,7 +368,7 @@ def _disclosure_event_evidence(result: dict) -> dict:
         "statement": "event_type은 캐시된 공시 제목 기반 KReports 스크리닝 분류이며, 원문 확인 또는 확정된 지배구조 변경 판단이 아닙니다.",
     }]
     next_checks = [
-        "중요 이벤트는 접수번호 기준으로 fetch_disclosure_on_demand를 호출해 원문 본문을 확인하세요.",
+        "중요 이벤트는 접수번호 기준으로 search_dataset의 evidence_documents를 조회하고 필요하면 DART 원문 링크를 확인하세요.",
         "자본조달, 전환사채, 최대주주 변경, 소송, 횡령·배임 이벤트는 희석·지배구조·현금흐름 리스크로 연결해 검토하세요.",
     ]
     return {"confirmed_facts": _dedupe_confirmed_facts(facts), "analysis": analysis, "next_checks": next_checks}
