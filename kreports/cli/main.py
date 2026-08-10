@@ -1534,7 +1534,7 @@ _HISTORICAL_LISTING_MEMBERSHIP_COLUMNS = {
     "market",
     "status",
 }
-_LISTED_MARKETS = ("KOSPI", "KOSDAQ", "KONEX")
+_LISTED_MARKETS = ("KOSPI", "KOSDAQ")
 
 
 def _format_historical_market_counts(market_counts: dict[str, int]) -> str:
@@ -1564,7 +1564,11 @@ def _select_policy_targets_with_population(
     """
     from sqlalchemy import inspect, text
 
-    membership_filter = "m.market = :market" if market else "m.market IN ('KOSPI', 'KOSDAQ', 'KONEX')"
+    membership_filter = (
+        "m.market = :market"
+        if market
+        else "m.market IN ('KOSPI', 'KOSDAQ')"
+    )
     membership_params: dict[str, object] = {"year": year}
     if market:
         membership_params["market"] = market
@@ -1707,9 +1711,9 @@ def collect_policies_cmd(
     all_corps: bool = typer.Option(
         False,
         "--all",
-        help="해당 연도 말 상장 근거가 있는 전체 기업 수집(근거 미확정 기업 포함).",
+        help="해당 연도 말 verified KOSPI/KOSDAQ 모집단 전체 수집.",
     ),
-    market: Optional[str] = typer.Option(None, "--market", help="KOSPI/KOSDAQ/KONEX 대상 일괄 수집"),
+    market: Optional[str] = typer.Option(None, "--market", help="KOSPI/KOSDAQ 대상 일괄 수집"),
     limit: Optional[int] = typer.Option(None, "--limit", help="최대 처리 회사 수"),
     missing_only: bool = typer.Option(True, "--missing-only/--include-existing", help="이미 캐시된 정책 제외"),
     retry_no_data: bool = typer.Option(

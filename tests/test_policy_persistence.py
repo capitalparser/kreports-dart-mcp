@@ -25,6 +25,7 @@ from kreports.db.models import (
     Base,
     Company,
     CompanyListingPeriod,
+    CompanyYearListingMembership,
     FetchLog,
 )
 from kreports.collector.policy_collector import (
@@ -32,6 +33,33 @@ from kreports.collector.policy_collector import (
     collect_policies_for_company,
     collect_policies_batch,
 )
+
+
+def _verified_year_membership(
+    corp_code: str,
+    stock_code: str,
+    market: str,
+    *,
+    year: int = 2024,
+) -> CompanyYearListingMembership:
+    return CompanyYearListingMembership(
+        corp_code=corp_code,
+        stock_code=stock_code,
+        bsns_year=year,
+        market=market,
+        status="verified",
+        evidence_basis="current_open_interval",
+        as_of=date(2026, 8, 10),
+        manifest_checksum="a" * 64,
+        manifest_storage_uri="file:///tmp/test-manifest.json",
+        manifest_size_bytes=2,
+        manifest_raw_receipt_count=1,
+        normalized_checksum="b" * 64,
+        normalized_storage_uri="file:///tmp/test-memberships.csv",
+        normalized_size_bytes=2,
+        transformation_version="krx-year-end-listing-membership-v1",
+        source_row_no=int(corp_code) * 10 + year,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +377,8 @@ def test_collect_policies_cli_returns_failure_when_quota_stops_batch(
         session.add_all([
             Company(corp_code="00000001", stock_code="000001", corp_name="회사1", market="KOSPI"),
             Company(corp_code="00000002", stock_code="000002", corp_name="회사2", market="KOSDAQ"),
+            _verified_year_membership("00000001", "000001", "KOSPI"),
+            _verified_year_membership("00000002", "000002", "KOSDAQ"),
         ])
     monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
     with patch(
@@ -371,7 +401,7 @@ def test_collect_policies_cli_returns_failure_when_quota_stops_batch(
         ).scalar_one() == 1
 
 
-def test_collect_policies_all_selects_every_current_listed_market_company(
+def test_collect_policies_all_selects_every_verified_core_market_company(
     temp_engine,
     mock_policy_data,
     monkeypatch,
@@ -384,6 +414,8 @@ def test_collect_policies_all_selects_every_current_listed_market_company(
             Company(corp_code="00000002", stock_code="000002", corp_name="코스닥", market="KOSDAQ"),
             Company(corp_code="00000003", stock_code="000003", corp_name="코넥스", market="KONEX"),
             Company(corp_code="00000004", stock_code="000004", corp_name="시장미확인", market=None),
+            _verified_year_membership("00000001", "000001", "KOSPI"),
+            _verified_year_membership("00000002", "000002", "KOSDAQ"),
         ])
     monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
     with patch(
@@ -410,7 +442,7 @@ def test_collect_policies_all_selects_every_current_listed_market_company(
                 "ORDER BY corp_code"
             )
         ).scalars().all()
-    assert corp_codes == ["00000001", "00000002", "00000003"]
+    assert corp_codes == ["00000001", "00000002"]
 
 
 def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
@@ -429,6 +461,7 @@ def test_collect_policies_all_skips_durable_no_data_on_the_next_batch(
                 market="KOSPI",
             )
         )
+        session.add(_verified_year_membership("00000001", "000001", "KOSPI"))
     monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
     with patch(
         "kreports.analysis.queries.get_accounting_policy",
@@ -483,6 +516,7 @@ def test_collect_policies_all_can_explicitly_retry_durable_no_data(
                 market="KOSPI",
             )
         )
+        session.add(_verified_year_membership("00000001", "000001", "KOSPI"))
     monkeypatch.setattr(cli.settings, "dart_api_key", "fixture-key")
     with patch(
         "kreports.analysis.queries.get_accounting_policy",
@@ -528,6 +562,8 @@ def test_collect_policies_all_dry_run_needs_no_key_and_writes_nothing(
         session.add_all([
             Company(corp_code="00000001", stock_code="000001", corp_name="회사1", market="KOSPI"),
             Company(corp_code="00000002", stock_code="000002", corp_name="회사2", market="KOSDAQ"),
+            _verified_year_membership("00000001", "000001", "KOSPI"),
+            _verified_year_membership("00000002", "000002", "KOSDAQ"),
         ])
     monkeypatch.setattr(cli.settings, "dart_api_key", "")
 
@@ -597,6 +633,7 @@ def test_collect_policies_all_excludes_companies_not_yet_listed_in_target_year(
                 source_row_no=3,
                 **provenance,
             ),
+            _verified_year_membership("00000001", "000001", "KOSPI"),
         ])
     monkeypatch.setattr(cli.settings, "dart_api_key", "")
 
@@ -633,6 +670,7 @@ def test_collect_policies_all_quarantines_durable_parse_failure_by_default(
                 market="KOSPI",
             )
         )
+        session.add(_verified_year_membership("00000001", "000001", "KOSPI"))
         session.add(
             FetchLog(
                 task_type="policy_cfs",
@@ -678,6 +716,7 @@ def test_collect_policies_all_can_explicitly_retry_durable_failure(
                 market="KOSPI",
             )
         )
+        session.add(_verified_year_membership("00000001", "000001", "KOSPI"))
         session.add(
             FetchLog(
                 task_type="policy_cfs",

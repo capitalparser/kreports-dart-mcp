@@ -1,5 +1,6 @@
+from datetime import date
+
 import pytest
-from sqlalchemy import text
 from typer.testing import CliRunner
 
 from kreports.cli.main import (
@@ -7,23 +8,11 @@ from kreports.cli.main import (
     app,
 )
 from kreports.db.engine import get_session
-from kreports.db.models import Company
+from kreports.db.models import Company, CompanyYearListingMembership
 
 
 def _create_year_membership_table() -> None:
-    """Create the integration-owned historical-membership contract for this test."""
-    with get_session() as session:
-        session.execute(
-            text(
-                "CREATE TABLE company_year_listing_memberships ("
-                "corp_code TEXT NOT NULL, "
-                "bsns_year INTEGER NOT NULL, "
-                "market TEXT NOT NULL, "
-                "status TEXT NOT NULL"
-                ")"
-            )
-        )
-        session.commit()
+    """The shared fixture creates the integration-owned ORM contract."""
 
 
 def _seed_company(*, corp_code: str, stock_code: str, market: str | None) -> None:
@@ -41,15 +30,29 @@ def _seed_company(*, corp_code: str, stock_code: str, market: str | None) -> Non
 
 def _seed_membership(*, corp_code: str, year: int, market: str, status: str = "verified") -> None:
     with get_session() as session:
-        session.execute(
-            text(
-                "INSERT INTO company_year_listing_memberships "
-                "(corp_code, bsns_year, market, status) "
-                "VALUES (:corp_code, :year, :market, :status)"
-            ),
-            {"corp_code": corp_code, "year": year, "market": market, "status": status},
+        stock_code = session.get(Company, corp_code).stock_code
+        session.add(
+            CompanyYearListingMembership(
+                corp_code=corp_code,
+                stock_code=stock_code,
+                bsns_year=year,
+                market=market,
+                status=status,
+                evidence_basis=(
+                    "current_open_interval" if status == "verified" else "source_gap"
+                ),
+                as_of=date(2026, 8, 10),
+                manifest_checksum="a" * 64,
+                manifest_storage_uri="file:///tmp/test-manifest.json",
+                manifest_size_bytes=2,
+                manifest_raw_receipt_count=1,
+                normalized_checksum="b" * 64,
+                normalized_storage_uri="file:///tmp/test-memberships.csv",
+                normalized_size_bytes=2,
+                transformation_version="krx-year-end-listing-membership-v1",
+                source_row_no=int(corp_code) * 10 + year,
+            )
         )
-        session.commit()
 
 
 def test_historical_membership_selects_delisted_company_and_excludes_future_survivor(temp_engine):
@@ -62,10 +65,8 @@ def test_historical_membership_selects_delisted_company_and_excludes_future_surv
     _seed_membership(corp_code="00000001", year=2021, market="KOSPI")
     # A current survivor that listed after 2021 has no 2021 membership row.
     _seed_membership(corp_code="00000002", year=2022, market="KOSPI")
-    # A transfer can have duplicated raw records; a company-year target must
-    # still be emitted once when selecting the all-market population.
+    # A market transfer is represented by exactly one year-end market.
     _seed_membership(corp_code="00000003", year=2021, market="KOSDAQ")
-    _seed_membership(corp_code="00000003", year=2021, market="KOSPI")
 
     targets = _select_policy_targets(
         year=2021,
@@ -89,7 +90,6 @@ def test_historical_membership_selects_delisted_company_and_excludes_future_surv
     )
     assert kospi_targets == [
         ("00000001", 2021, "CFS"),
-        ("00000003", 2021, "CFS"),
     ]
 
 
