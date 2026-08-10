@@ -24,7 +24,17 @@ from kreports.quality.company_year_fingerprint import (
 )
 
 WINDOW_YEARS = 5
+MEMBERSHIP_WINDOW_YEARS = 3
 MAX_REJECTED_PROOF_DIAGNOSTICS = 20
+CORE_MARKETS = ("KOSPI", "KOSDAQ")
+_HISTORICAL_MEMBERSHIP_TABLE = "company_year_listing_memberships"
+_HISTORICAL_MEMBERSHIP_REQUIRED_COLUMNS = {
+    "corp_code",
+    "stock_code",
+    "bsns_year",
+    "market",
+    "status",
+}
 
 
 @dataclass
@@ -65,6 +75,84 @@ def _target_numerator(denominator: int, threshold_pct: float) -> int:
             rounding=ROUND_CEILING
         )
     )
+
+
+def _verified_historical_population(
+    connection: sqlite3.Connection,
+    *,
+    coverage_year: int,
+) -> tuple[list[str], tuple[int, ...]]:
+    """Return the same verified three-year listed population as the release gate.
+
+    Current company-market values are not an eligibility predicate. They are
+    used only to reject orphaned membership rows; membership status and market
+    come from the retained company-year observations.
+    """
+    required_years = tuple(
+        range(
+            coverage_year - MEMBERSHIP_WINDOW_YEARS + 1,
+            coverage_year + 1,
+        )
+    )
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (_HISTORICAL_MEMBERSHIP_TABLE,),
+    ).fetchone()
+    if table is None:
+        raise ValueError(
+            "historical listing membership evidence is unavailable: "
+            "company_year_listing_memberships is not installed"
+        )
+    columns = {
+        str(row["name"])
+        for row in connection.execute(
+            f"PRAGMA table_info({_HISTORICAL_MEMBERSHIP_TABLE})"
+        ).fetchall()
+    }
+    missing_columns = sorted(_HISTORICAL_MEMBERSHIP_REQUIRED_COLUMNS - columns)
+    if missing_columns:
+        raise ValueError(
+            "historical listing membership evidence is unavailable: "
+            "company_year_listing_memberships is missing "
+            f"{','.join(missing_columns)}"
+        )
+
+    year_bindings = ", ".join("?" for _ in required_years)
+    verified_pairs = {
+        (int(row["bsns_year"]), str(row["market"]))
+        for row in connection.execute(
+            "SELECT DISTINCT bsns_year, market "
+            f"FROM {_HISTORICAL_MEMBERSHIP_TABLE} "
+            f"WHERE bsns_year IN ({year_bindings}) "
+            "AND market IN ('KOSPI', 'KOSDAQ') AND status='verified'",
+            required_years,
+        ).fetchall()
+    }
+    missing_pairs = [
+        f"{year}:{market}"
+        for year in required_years
+        for market in CORE_MARKETS
+        if (year, market) not in verified_pairs
+    ]
+    if missing_pairs:
+        raise ValueError(
+            "historical listing membership evidence is unavailable: "
+            "missing verified market-year "
+            f"{','.join(missing_pairs)}"
+        )
+
+    rows = connection.execute(
+        "SELECT m.corp_code "
+        f"FROM {_HISTORICAL_MEMBERSHIP_TABLE} AS m "
+        "JOIN companies AS c ON c.corp_code=m.corp_code "
+        f"WHERE m.bsns_year IN ({year_bindings}) "
+        "AND m.market IN ('KOSPI', 'KOSDAQ') AND m.status='verified' "
+        "GROUP BY m.corp_code "
+        "HAVING COUNT(DISTINCT m.bsns_year)=? "
+        "ORDER BY m.corp_code",
+        (*required_years, len(required_years)),
+    ).fetchall()
+    return [str(row["corp_code"]) for row in rows], required_years
 
 
 def _annual_anchor(
@@ -225,32 +313,47 @@ def plan_investor_core_backfill(
             if value is None:
                 raise ValueError("coverage_year is unavailable")
             coverage_year = int(value)
-        denominator = int(connection.execute(
-            "SELECT COUNT(*) FROM companies "
-            "WHERE stock_code IS NOT NULL AND market IN ('KOSPI', 'KOSDAQ')"
-        ).fetchone()[0])
-        numerator = int(connection.execute(
-            "SELECT COUNT(*) FROM companies c JOIN company_year_quality q "
-            "ON q.corp_code=c.corp_code AND q.bsns_year=? "
-            "WHERE c.stock_code IS NOT NULL AND c.market IN ('KOSPI', 'KOSDAQ') "
-            "AND q.investor_grade IN ('A', 'B') "
-            "AND q.financial_core_status='available'",
-            (coverage_year,),
-        ).fetchone()[0])
+        eligible_corp_codes, membership_years = _verified_historical_population(
+            connection,
+            coverage_year=coverage_year,
+        )
+        denominator = len(eligible_corp_codes)
+        eligible_bindings = ", ".join("?" for _ in eligible_corp_codes)
+        numerator = (
+            int(connection.execute(
+                "SELECT COUNT(*) FROM company_year_quality q "
+                f"WHERE q.corp_code IN ({eligible_bindings}) "
+                "AND q.bsns_year=? "
+                "AND q.investor_grade IN ('A', 'B') "
+                "AND q.financial_core_status='available'",
+                (*eligible_corp_codes, coverage_year),
+            ).fetchone()[0])
+            if eligible_corp_codes
+            else 0
+        )
         window_start = coverage_year - WINDOW_YEARS + 1
         diagnostics = _RejectedProofDiagnostics()
         candidates: list[dict[str, Any]] = []
-        rows = connection.execute(
-            "SELECT c.corp_code, c.stock_code, c.corp_name, q.investor_grade, "
-            "q.financial_core_status, q.quality_version, q.evidence_summary_json "
-            "FROM companies c JOIN company_year_quality q "
-            "ON q.corp_code=c.corp_code AND q.bsns_year=? "
-            "WHERE c.stock_code IS NOT NULL AND c.market IN ('KOSPI', 'KOSDAQ') "
-            "AND ((q.investor_grade IN ('A', 'B') "
-            "AND q.financial_core_status != 'available') OR q.investor_grade='D') "
-            "ORDER BY c.corp_code",
-            (coverage_year,),
-        ).fetchall()
+        rows = (
+            connection.execute(
+                "SELECT c.corp_code, m.stock_code, c.corp_name, q.investor_grade, "
+                "q.financial_core_status, q.quality_version, q.evidence_summary_json "
+                "FROM companies c "
+                f"JOIN {_HISTORICAL_MEMBERSHIP_TABLE} m "
+                "ON m.corp_code=c.corp_code AND m.bsns_year=? "
+                "AND m.market IN ('KOSPI', 'KOSDAQ') AND m.status='verified' "
+                "LEFT JOIN company_year_quality q "
+                "ON q.corp_code=c.corp_code AND q.bsns_year=? "
+                f"WHERE c.corp_code IN ({eligible_bindings}) "
+                "AND (q.corp_code IS NULL "
+                "OR COALESCE(q.investor_grade, '') NOT IN ('A', 'B') "
+                "OR COALESCE(q.financial_core_status, '') != 'available') "
+                "ORDER BY c.corp_code",
+                (coverage_year, coverage_year, *eligible_corp_codes),
+            ).fetchall()
+            if eligible_corp_codes
+            else []
+        )
         for row in rows:
             corp_code = str(row["corp_code"])
             proven_years = _valid_proven_years(
@@ -280,8 +383,8 @@ def plan_investor_core_backfill(
                 if anchor is not None
             }
             required, selected_years, _missing_years, source_ready = _candidate_selection(
-                grade=str(row["investor_grade"]),
-                financial_core_status=str(row["financial_core_status"]),
+                grade=str(row["investor_grade"] or "D"),
+                financial_core_status=str(row["financial_core_status"] or "missing"),
                 proven_years=proven_years,
                 anchors=available_anchors,
                 window_start=window_start,
@@ -291,8 +394,10 @@ def plan_investor_core_backfill(
                 "corp_code": corp_code,
                 "stock_code": str(row["stock_code"]),
                 "corp_name": str(row["corp_name"]),
-                "current_investor_grade": str(row["investor_grade"]),
-                "current_financial_core_status": str(row["financial_core_status"]),
+                "current_investor_grade": str(row["investor_grade"] or "D"),
+                "current_financial_core_status": str(
+                    row["financial_core_status"] or "missing"
+                ),
                 "proven_years": proven_years,
                 "required_successful_year_count": required,
                 "selected_years": selected_years,
@@ -334,6 +439,9 @@ def plan_investor_core_backfill(
     return {
         "coverage_year": coverage_year,
         "threshold_pct": float(threshold_pct),
+        "population_source": "verified_company_year_listing_memberships",
+        "membership_required_years": list(membership_years),
+        "membership_market_scope": list(CORE_MARKETS),
         "denominator": denominator,
         "numerator": numerator,
         "target_numerator": target_numerator,
@@ -383,7 +491,8 @@ def plan_investor_core_backfill(
         "limitations": [
             "No-network preflight only; it does not prove DART availability.",
             "This plan does not prove DART API quota or request success.",
-            "This plan does not prove listing-period eligibility.",
+            "Historical listed-company eligibility is limited to verified "
+            "KOSPI/KOSDAQ membership observations for the required years.",
             "This plan does not prove release readiness.",
             "Source readiness requires a strict latest annual-filing anchor; "
             "a business-year matching row with an invalid anchor is not filing absence.",

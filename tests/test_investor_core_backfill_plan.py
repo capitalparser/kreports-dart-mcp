@@ -38,7 +38,33 @@ def _create_plan_database(path: Path) -> None:
                 disc_type TEXT NOT NULL,
                 report_nm TEXT NOT NULL
             );
+            CREATE TABLE company_year_listing_memberships (
+                corp_code TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                bsns_year INTEGER NOT NULL,
+                market TEXT NOT NULL,
+                status TEXT NOT NULL,
+                PRIMARY KEY (corp_code, bsns_year)
+            );
             """
+        )
+
+
+def _add_memberships(
+    path: Path,
+    *,
+    corp_code: str,
+    years: tuple[int, ...],
+    market: str = "KOSPI",
+) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            "INSERT OR IGNORE INTO company_year_listing_memberships "
+            "VALUES (?, ?, ?, ?, 'verified')",
+            [
+                (corp_code, corp_code[-6:], year, market)
+                for year in years
+            ],
         )
 
 
@@ -92,6 +118,7 @@ def _add_company(
     grade: str,
     status: str,
     proven_years: tuple[int, ...] = (),
+    membership_years: tuple[int, ...] = (2023, 2024, 2025),
 ) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -101,6 +128,18 @@ def _add_company(
         connection.execute(
             "INSERT INTO company_year_quality VALUES (?, 2025, ?, ?, 'v2', ?)",
             (corp_code, status, grade, _proof(proven_years, corp_code=corp_code)),
+        )
+    _add_memberships(
+        path,
+        corp_code=corp_code,
+        years=membership_years,
+    )
+    for year in membership_years:
+        _add_memberships(
+            path,
+            corp_code=f"9{year:04d}001",
+            years=(year,),
+            market="KOSDAQ",
         )
 
 
@@ -147,6 +186,110 @@ def test_plan_uses_exact_ceiling_threshold_math(tmp_path):
     assert plan["numerator"] == 3
     assert plan["target_numerator"] == 3
     assert plan["shortfall"] == 0
+
+
+def test_plan_excludes_newly_listed_company_from_historical_three_year_population(
+    tmp_path,
+):
+    """Catch a planner that targets a current survivor before its listing year."""
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(
+        database,
+        corp_code="000001",
+        grade="A",
+        status="available",
+        membership_years=(),
+    )
+    _add_company(
+        database,
+        corp_code="000002",
+        grade="D",
+        status="available",
+        membership_years=(),
+    )
+    _add_memberships(database, corp_code="000001", years=(2023, 2024, 2025))
+    _add_memberships(database, corp_code="000002", years=(2025,))
+    _add_memberships(
+        database,
+        corp_code="90000001",
+        years=(2023,),
+        market="KOSDAQ",
+    )
+    _add_memberships(
+        database,
+        corp_code="90000002",
+        years=(2024,),
+        market="KOSDAQ",
+    )
+    _add_memberships(
+        database,
+        corp_code="90000003",
+        years=(2025,),
+        market="KOSDAQ",
+    )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    assert plan["denominator"] == 1
+    assert plan["numerator"] == 1
+    assert plan["shortfall"] == 0
+    assert plan["selected_companies"] == []
+    assert plan["unselected_candidate_count"] == 0
+
+
+def test_plan_fails_closed_when_a_core_market_has_no_verified_year_membership(
+    tmp_path,
+):
+    """Catch a plan that accepts KOSPI-only evidence as the whole population."""
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(
+        database,
+        corp_code="000001",
+        grade="A",
+        status="available",
+        membership_years=(),
+    )
+    _add_memberships(database, corp_code="000001", years=(2023, 2024, 2025))
+
+    with pytest.raises(ValueError, match="historical listing membership evidence"):
+        plan_investor_core_backfill(database)
+
+
+def test_plan_candidates_cover_every_historical_member_not_counted_by_gate(tmp_path):
+    """Catch a planner that drops C-grade or missing-quality denominator members."""
+    from kreports.maintenance.investor_core_backfill_plan import (
+        plan_investor_core_backfill,
+    )
+
+    database = tmp_path / "planner.db"
+    _create_plan_database(database)
+    _add_company(database, corp_code="000001", grade="A", status="available")
+    _add_company(database, corp_code="000002", grade="C", status="available")
+    _add_company(database, corp_code="000003", grade="D", status="available")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "DELETE FROM company_year_quality WHERE corp_code='000003'"
+        )
+
+    plan = plan_investor_core_backfill(database, threshold_pct=100)
+
+    assert plan["denominator"] == 3
+    assert plan["numerator"] == 1
+    assert plan["shortfall"] == 2
+    assert [candidate["corp_code"] for candidate in plan["selected_companies"]] == [
+        "000002",
+        "000003",
+    ]
 
 
 @pytest.mark.parametrize("threshold_pct", [0, 100.01, float("nan")])
@@ -692,7 +835,12 @@ def test_plan_denominator_and_numerator_match_the_release_gate_fixture(tmp_path)
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
-    from kreports.db.models import Base, Company, CompanyYearQuality
+    from kreports.db.models import (
+        Base,
+        Company,
+        CompanyYearListingMembership,
+        CompanyYearQuality,
+    )
     from kreports.maintenance.investor_core_backfill_plan import (
         plan_investor_core_backfill,
     )
@@ -733,6 +881,36 @@ def test_plan_denominator_and_numerator_match_the_release_gate_fixture(tmp_path)
                 input_fingerprint="",
                 evidence_summary_json=summary,
             ))
+        for corp_code, stock_code, market, years in (
+            ("000001", "000001", "KOSPI", (2023, 2024, 2025)),
+            ("000002", "000002", "KOSDAQ", (2023, 2024, 2025)),
+            ("000003", "000003", "KOSPI", (2025,)),
+        ):
+            session.add_all([
+                CompanyYearListingMembership(
+                    corp_code=corp_code,
+                    stock_code=stock_code,
+                    bsns_year=year,
+                    market=market,
+                    status="verified",
+                    evidence_basis="current_open_interval",
+                    as_of=date(2026, 8, 10),
+                    manifest_checksum=hashlib.sha256(
+                        f"parity-manifest:{corp_code}".encode()
+                    ).hexdigest(),
+                    manifest_storage_uri="file:///test-membership-manifest.json",
+                    manifest_size_bytes=1,
+                    manifest_raw_receipt_count=1,
+                    normalized_checksum=hashlib.sha256(
+                        f"parity-normalized:{corp_code}".encode()
+                    ).hexdigest(),
+                    normalized_storage_uri="file:///test-membership-normalized.csv",
+                    normalized_size_bytes=1,
+                    transformation_version="krx-year-end-listing-membership-v1",
+                    source_row_no=year,
+                )
+                for year in years
+            ])
         session.commit()
 
     def session_scope():

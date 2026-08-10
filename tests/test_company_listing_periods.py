@@ -392,7 +392,7 @@ def test_listing_snapshot_hashes_each_shared_artifact_once(temp_engine, tmp_path
     assert reads[normalized_path.resolve()] == 1
 
 
-def test_release_coverage_metadata_keeps_listing_history_diagnostic_only(temp_engine, tmp_path):
+def test_release_coverage_fails_closed_without_year_membership_evidence(temp_engine, tmp_path):
     from kreports.quality.release_gate import _quality_coverage
 
     _seed_companies()
@@ -404,8 +404,9 @@ def test_release_coverage_metadata_keeps_listing_history_diagnostic_only(temp_en
     )
 
     _, coverage, metadata, denominators, _ = _quality_coverage(2025)
-    assert denominators["investor_core"] == 3
-    assert coverage["investor_core"]["denominator"] == 3
+    assert denominators["investor_core"] == 0
+    assert coverage["investor_core"]["denominator"] == 0
+    assert metadata["investor_core_3y"]["membership_evidence_available"] is False
     assert metadata["listing_eligibility"]["verified_full_year"] == 1
 
 

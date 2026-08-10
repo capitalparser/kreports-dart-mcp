@@ -115,10 +115,12 @@ rejected because immutable reads could otherwise be stale. A standalone `-shm`
 sidecar is allowed and never modified. The command reports the exact 95% target
 (or `--threshold-pct`), deterministic company-year requests, annual filing
 anchors, proof-row rejections, and missing disclosure metadata. It is a
-no-network preflight: it does not prove DART availability,
-API quota or request success, historical listing eligibility, or release
-readiness. Run the actual authorized backfill and then the full release gate
-separately; this command never weakens the gate or writes the DB.
+no-network preflight: it does not prove DART availability, API quota or
+request success, or release readiness. It requires the same verified
+KOSPI/KOSDAQ three-year membership population as the release gate and fails
+closed if an annual market membership observation is missing. Run the actual
+authorized backfill and then the full release gate separately; this command
+never weakens the gate or writes the DB.
 
 The bounded execution is deliberately split into two commands. First repair
 only the annual-filing metadata needed by non-source-ready planner candidates:
