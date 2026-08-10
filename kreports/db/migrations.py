@@ -651,6 +651,66 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260810_18_year_listing_membership",
+        description="Add provenance-bound historical year-end listing membership",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS company_year_listing_memberships (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              corp_code VARCHAR(8) NOT NULL,
+              stock_code VARCHAR(6) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              market VARCHAR(10) NOT NULL
+                CHECK (market IN ('KOSPI', 'KOSDAQ')),
+              status VARCHAR(16) NOT NULL
+                CHECK (status IN ('verified', 'unknown', 'conflict')),
+              evidence_basis VARCHAR(80) NOT NULL,
+              as_of DATE NOT NULL,
+              manifest_checksum VARCHAR(64) NOT NULL,
+              manifest_storage_uri VARCHAR(1000) NOT NULL,
+              manifest_size_bytes BIGINT NOT NULL,
+              manifest_raw_receipt_count INTEGER NOT NULL,
+              normalized_checksum VARCHAR(64) NOT NULL,
+              normalized_storage_uri VARCHAR(1000) NOT NULL,
+              normalized_size_bytes BIGINT NOT NULL,
+              transformation_version VARCHAR(80) NOT NULL,
+              source_row_no INTEGER NOT NULL,
+              CONSTRAINT uq_company_year_listing_membership_company_year
+                UNIQUE (corp_code, bsns_year),
+              CONSTRAINT uq_company_year_listing_membership_normalized_row
+                UNIQUE (normalized_checksum, source_row_no),
+              CHECK (bsns_year BETWEEN 1900 AND 2100),
+              CHECK (source_row_no >= 2),
+              CHECK (manifest_size_bytes >= 2),
+              CHECK (manifest_raw_receipt_count >= 1),
+              CHECK (normalized_size_bytes >= 1)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_company_year_listing_membership_corp_year
+            ON company_year_listing_memberships (corp_code, bsns_year)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_company_year_listing_membership_year_market
+            ON company_year_listing_memberships (bsns_year, market, status)
+            """,
+        ),
+    ),
+    Migration(
+        revision="20260810_19_year_membership_indexes",
+        description="Materialize year-end membership uniqueness contract indexes",
+        statements=(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_company_year_listing_membership_company_year
+            ON company_year_listing_memberships (corp_code, bsns_year)
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_company_year_listing_membership_normalized_row
+            ON company_year_listing_memberships (normalized_checksum, source_row_no)
+            """,
+        ),
+    ),
 )
 
 

@@ -265,6 +265,8 @@ def test_migration_only_listing_contract_accepts_orm_import(tmp_path, monkeypatc
         assert apply_schema_migrations(connection) == [
             "20260805_16_company_listing_period_contract",
             "20260805_17_listing_period_named_unique_index",
+            "20260810_18_year_listing_membership",
+            "20260810_19_year_membership_indexes",
         ]
         columns = {
             column["name"]

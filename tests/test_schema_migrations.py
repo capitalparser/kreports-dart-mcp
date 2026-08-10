@@ -62,6 +62,8 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260805_15_disclosure_lookup_index",
         "20260805_16_company_listing_period_contract",
         "20260805_17_listing_period_named_unique_index",
+        "20260810_18_year_listing_membership",
+        "20260810_19_year_membership_indexes",
     ]
     assert second == []
 
@@ -118,6 +120,8 @@ def test_disclosure_lookup_index_migrates_legacy_db_and_serves_corp_scoped_annua
             "20260805_15_disclosure_lookup_index",
             "20260805_16_company_listing_period_contract",
             "20260805_17_listing_period_named_unique_index",
+            "20260810_18_year_listing_membership",
+            "20260810_19_year_membership_indexes",
         ]
         assert apply_schema_migrations(conn) == []
         indexes = {
@@ -325,6 +329,8 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         "20260805_15_disclosure_lookup_index",
         "20260805_16_company_listing_period_contract",
         "20260805_17_listing_period_named_unique_index",
+        "20260810_18_year_listing_membership",
+        "20260810_19_year_membership_indexes",
     ]
     assert second_applied == []
     assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)

@@ -8,6 +8,7 @@ import re
 REQUIRED_TABLES = (
     "companies",
     "company_listing_periods",
+    "company_year_listing_memberships",
     "disclosures",
     "financials",
     "financial_facts_compact",
@@ -37,6 +38,14 @@ REQUIRED_COLUMN_SPECS = {
         "raw_source_size_bytes", "normalized_checksum",
         "normalized_storage_uri", "normalized_size_bytes",
         "transformation_version", "source_type", "source_row_no",
+    ),
+    "company_year_listing_memberships": (
+        "corp_code", "stock_code", "bsns_year", "market", "status",
+        "evidence_basis", "as_of", "manifest_checksum",
+        "manifest_storage_uri", "manifest_size_bytes",
+        "manifest_raw_receipt_count", "normalized_checksum",
+        "normalized_storage_uri", "normalized_size_bytes",
+        "transformation_version", "source_row_no",
     ),
     "audit_fees": (
         "contract_fee_m", "contract_hours", "actual_fee_m", "actual_hours",
@@ -85,6 +94,18 @@ REQUIRED_INDEX_SPECS = {
     ),
     "uq_listing_period_normalized_row": (
         "company_listing_periods", ("normalized_checksum", "source_row_no"), True, None
+    ),
+    "idx_company_year_listing_membership_corp_year": (
+        "company_year_listing_memberships", ("corp_code", "bsns_year"), False, None
+    ),
+    "idx_company_year_listing_membership_year_market": (
+        "company_year_listing_memberships", ("bsns_year", "market", "status"), False, None
+    ),
+    "uq_company_year_listing_membership_company_year": (
+        "company_year_listing_memberships", ("corp_code", "bsns_year"), True, None
+    ),
+    "uq_company_year_listing_membership_normalized_row": (
+        "company_year_listing_memberships", ("normalized_checksum", "source_row_no"), True, None
     ),
     "idx_disclosure_corp_date_receipt": (
         "disclosures", ("corp_code", "disc_date", "rcept_no"), False, None

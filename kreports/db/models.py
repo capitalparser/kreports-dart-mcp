@@ -132,6 +132,56 @@ class CompanyListingPeriod(Base):
     )
 
 
+class CompanyYearListingMembership(Base):
+    """Provenance-bound KOSPI/KOSDAQ membership at a specific year end.
+
+    This fact is intentionally distinct from an inferred listing interval:
+    a company may be provably listed at an historical year end even where the
+    KRX event history does not provide its original (pre-history) listing
+    date.  The retained manifest binds the normalized membership fact to every
+    raw KRX receipt used to reconstruct it.
+    """
+
+    __tablename__ = "company_year_listing_memberships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    corp_code = Column(String(8), nullable=False)
+    stock_code = Column(String(6), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    market = Column(String(10), nullable=False)
+    status = Column(String(16), nullable=False)
+    evidence_basis = Column(String(80), nullable=False)
+    as_of = Column(Date, nullable=False)
+    manifest_checksum = Column(String(64), nullable=False)
+    manifest_storage_uri = Column(String(1000), nullable=False)
+    manifest_size_bytes = Column(BigInteger, nullable=False)
+    manifest_raw_receipt_count = Column(Integer, nullable=False)
+    normalized_checksum = Column(String(64), nullable=False)
+    normalized_storage_uri = Column(String(1000), nullable=False)
+    normalized_size_bytes = Column(BigInteger, nullable=False)
+    transformation_version = Column(String(80), nullable=False)
+    source_row_no = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "corp_code", "bsns_year",
+            name="uq_company_year_listing_membership_company_year",
+        ),
+        UniqueConstraint(
+            "normalized_checksum", "source_row_no",
+            name="uq_company_year_listing_membership_normalized_row",
+        ),
+        Index(
+            "idx_company_year_listing_membership_corp_year",
+            "corp_code", "bsns_year",
+        ),
+        Index(
+            "idx_company_year_listing_membership_year_market",
+            "bsns_year", "market", "status",
+        ),
+    )
+
+
 class Financial(Base):
     __tablename__ = "financials"
 
