@@ -1,5 +1,7 @@
 # Database
 kreports.db
+kreports.db-shm
+kreports.db-wal
 dart_platform.db
 *.db-journal
 
@@ -39,6 +41,9 @@ Thumbs.db
 # DART API cache
 .cache/
 
+# Local raw disclosure document store
+data/raw_documents/
+
 # Streamlit
 .streamlit/secrets.toml
 
@@ -50,3 +55,13 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Local export artifacts
+artifacts/
+
+# Local backfill process markers
+*.pid
+.dart-backfill.lock/
+
+# Isolated implementation worktrees
+.worktrees/
