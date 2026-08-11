@@ -205,6 +205,47 @@ def select_audit_procedure_recovery_targets(
     }
 
 
+def _canonical_business_report_fallback(
+    *,
+    year: int,
+    target: Mapping[str, str],
+) -> dict[str, str] | None:
+    """Return the newest same-company annual business-report root, if any."""
+    corp_code = str(target["corp_code"])
+    with get_session() as session:
+        rows = session.execute(text("""
+            SELECT d.rcept_no, d.corp_code,
+                   COALESCE(c.corp_name, d.corp_name) AS corp_name,
+                   d.report_nm, d.disc_date
+            FROM disclosures AS d
+            LEFT JOIN companies AS c ON c.corp_code=d.corp_code
+            WHERE d.corp_code=:corp_code
+              AND d.report_nm LIKE '%사업보고서%'
+              AND length(d.rcept_no)=14
+              AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+        """), {"corp_code": corp_code}).mappings().all()
+    candidates = [
+        row
+        for row in rows
+        if _is_target_recovery_root(
+            report_nm=row["report_nm"],
+            rcept_no=row["rcept_no"],
+            year=int(year),
+        )
+    ]
+    if not candidates:
+        return None
+    selected = max(
+        candidates,
+        key=lambda row: (str(row["disc_date"]), str(row["rcept_no"])),
+    )
+    return {
+        "corp_code": str(selected["corp_code"]),
+        "rcept_no": str(selected["rcept_no"]),
+        "corp_name": str(selected["corp_name"] or ""),
+    }
+
+
 def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) -> dict[str, str] | None:
     """Recover the last verified prefix from this exact terminal run scope.
 
@@ -280,7 +321,7 @@ def _checkpoint(
                 "success": int(totals["ok"]),
                 "failed": int(totals["failed"]),
                 "sections": int(totals["sections"]),
-                "api_receipt_fetches": int(totals["processed"]),
+                "api_receipt_fetches": int(totals["api_receipt_fetches"]),
                 "storage_backend": settings.raw_storage_backend,
             },
         },
@@ -343,6 +384,7 @@ def run_audit_procedure_recovery_batch(
         "ok": 0,
         "failed": 0,
         "sections": 0,
+        "api_receipt_fetches": 0,
         "errors": [],
     }
     next_cursor = cursor_start
@@ -351,7 +393,27 @@ def run_audit_procedure_recovery_batch(
         receipt = str(target["rcept_no"])
         if progress_callback:
             progress_callback(index, len(targets), str(target["corp_name"]), receipt)
+        effective_target = target
         result = collect_report_sections_for_disclosure(receipt)
+        totals["api_receipt_fetches"] = int(totals["api_receipt_fetches"]) + 1
+        if (
+            not result.get("ok")
+            and result.get("error") == "audit report attachment not found"
+        ):
+            fallback = _canonical_business_report_fallback(
+                year=int(year),
+                target=target,
+            )
+            if fallback is not None:
+                fallback_result = collect_report_sections_for_disclosure(
+                    fallback["rcept_no"]
+                )
+                totals["api_receipt_fetches"] = (
+                    int(totals["api_receipt_fetches"]) + 1
+                )
+                if fallback_result.get("ok"):
+                    result = fallback_result
+                    effective_target = fallback
         totals["processed"] = int(totals["processed"]) + 1
         if not result.get("ok"):
             totals["failed"] = int(totals["failed"]) + 1
@@ -375,7 +437,9 @@ def run_audit_procedure_recovery_batch(
         # Do not let a successfully fetched raw receipt become resumably
         # skipped until KAM, procedures, and quality have all been persisted.
         try:
-            derived_receipts.append(_rebuild_derived_receipt(year=year, target=target))
+            derived_receipts.append(
+                _rebuild_derived_receipt(year=year, target=effective_target)
+            )
         except Exception as exc:  # noqa: BLE001 - receipt is retryable after durable checkpoint
             totals["failed"] = int(totals["failed"]) + 1
             error = {
@@ -423,7 +487,7 @@ def run_audit_procedure_recovery_batch(
         "next_cursor": next_cursor,
         "exhausted": exhausted,
         "targets": targets,
-        "api_receipt_fetches": int(totals["processed"]),
+        "api_receipt_fetches": int(totals["api_receipt_fetches"]),
         "storage_backend": settings.raw_storage_backend,
         "derived": {"receipts": derived_receipts},
     }

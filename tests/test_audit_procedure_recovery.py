@@ -312,6 +312,76 @@ def test_selector_prefers_direct_audit_root_over_later_business_report_fallback(
     ]
 
 
+def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch an empty corrected audit root blocking its business-report attachment."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    corp_code = "00000017"
+    corrected_receipt = "20260428800599"
+    business_receipt = "20260428000679"
+    _seed_target(
+        corp_code,
+        corrected_receipt,
+        report_nm="[기재정정]감사보고서제출",
+        disc_date=date(2026, 4, 28),
+    )
+    _seed_target(
+        corp_code,
+        business_receipt,
+        report_nm="사업보고서 (2025.12)",
+        disc_date=date(2026, 4, 28),
+    )
+    fetched: list[str] = []
+    rebuilt: list[str] = []
+
+    def fetch(receipt: str) -> dict[str, object]:
+        fetched.append(receipt)
+        if receipt == corrected_receipt:
+            return {
+                "ok": 0,
+                "sections": 0,
+                "error": "audit report attachment not found",
+            }
+        return {"ok": 1, "sections": 2}
+
+    monkeypatch.setattr(recovery, "collect_report_sections_for_disclosure", fetch)
+    monkeypatch.setattr(
+        recovery,
+        "_rebuild_derived_receipt",
+        lambda *, year, target: rebuilt.append(str(target["rcept_no"])) or {
+            "rcept_no": str(target["rcept_no"]),
+        },
+    )
+    params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+
+    result = recovery.run_audit_procedure_recovery_batch(
+        lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    assert result["targets"] == [{
+        "corp_code": corp_code,
+        "rcept_no": corrected_receipt,
+        "corp_name": f"회사{corp_code}",
+    }]
+    assert fetched == [corrected_receipt, business_receipt]
+    assert rebuilt == [business_receipt]
+    assert result["ok"] == 1
+    assert result["failed"] == 0
+    assert result["api_receipt_fetches"] == 2
+    assert result["next_cursor"] == {
+        "corp_code": corp_code,
+        "rcept_no": corrected_receipt,
+    }
+
+
 def test_successful_batch_resumes_after_saved_prefix_and_failure_retries(temp_engine, monkeypatch):
     """Catch a lease checkpoint that refetches successes or skips a failed receipt."""
     from kreports.collector import audit_procedure_recovery as recovery
