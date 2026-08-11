@@ -211,31 +211,15 @@ def _timestamp_is_newer_than_ledger(
     return bool(input_at and ledger_at and input_at > ledger_at)
 
 
-def _source_rows_are_newer_than_ledger(
+def _quality_input_timestamp_pairs(
     session: Any,
-    query: str,
-) -> bool:
-    """Read source/ledger timestamp pairs without dialect-dependent coercion."""
-    for row in session.execute(text(query)).mappings():
-        if _timestamp_is_newer_than_ledger(
-            row["input_fetched_at"],
-            row["quality_updated_at"],
-        ):
-            return True
-    return False
-
-
-def _quality_inputs_are_newer_than_ledger(
-    session: Any,
-    *,
     table_names: set[str],
-) -> bool:
-    """Detect policy inputs written after their derived quality rows.
+) -> Iterable[Any]:
+    """Yield at most one latest policy-input timestamp per source and ledger row.
 
-    The ledger fingerprint proves persisted quality content, while source
-    receipt timestamps prove whether that content was derived after the policy
-    evidence it summarizes.  The source families mirror ``_policy_status``:
-    policy items, policy note chapters, and policy fetch outcomes.
+    Aggregation keeps release evaluation bounded by company-year rows, not raw
+    evidence rows. Timestamp comparison remains in Python so SQLite and
+    PostgreSQL cannot apply different naive-datetime session-timezone rules.
     """
     quality_columns = {
         str(column["name"])
@@ -258,11 +242,12 @@ def _quality_inputs_are_newer_than_ledger(
             sources.append(
                 """
                 SELECT q.updated_at AS quality_updated_at,
-                       p.fetched_at AS input_fetched_at
+                       MAX(p.fetched_at) AS input_fetched_at
                 FROM company_year_quality AS q
                 JOIN accounting_policy_items AS p
                   ON p.corp_code=q.corp_code
                  AND p.bsns_year=q.bsns_year
+                GROUP BY q.corp_code, q.bsns_year, q.updated_at
                 """
             )
     if "accounting_note_chapters" in table_names:
@@ -281,12 +266,13 @@ def _quality_inputs_are_newer_than_ledger(
             sources.append(
                 """
                 SELECT q.updated_at AS quality_updated_at,
-                       n.fetched_at AS input_fetched_at
+                       MAX(n.fetched_at) AS input_fetched_at
                 FROM company_year_quality AS q
                 JOIN accounting_note_chapters AS n
                   ON n.corp_code=q.corp_code
                  AND n.bsns_year=q.bsns_year
                 WHERE n.section_type='policy'
+                GROUP BY q.corp_code, q.bsns_year, q.updated_at
                 """
             )
     if "fetch_log" in table_names:
@@ -302,22 +288,46 @@ def _quality_inputs_are_newer_than_ledger(
         } <= fetch_columns:
             sources.append(
                 """
+                WITH latest_policy_fetch AS (
+                    SELECT f.corp_code, f.year, f.status, f.fetched_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY f.corp_code, f.year
+                               ORDER BY f.fetched_at DESC, f.id DESC
+                           ) AS source_rank
+                    FROM fetch_log AS f
+                    WHERE f.task_type IN (
+                        'policy', 'policy_items', 'accounting_policy'
+                    )
+                )
                 SELECT q.updated_at AS quality_updated_at,
                        f.fetched_at AS input_fetched_at
                 FROM company_year_quality AS q
-                JOIN fetch_log AS f
+                JOIN latest_policy_fetch AS f
                   ON f.corp_code=q.corp_code
                  AND f.year=q.bsns_year
-                WHERE f.task_type IN (
-                    'policy', 'policy_items', 'accounting_policy'
-                )
+                WHERE f.source_rank=1
+                  AND f.status IN ('error', 'no_data')
                 """
             )
-    if not sources:
-        return False
+    for source in sources:
+        yield from session.execute(text(source)).mappings()
+
+
+def _quality_inputs_are_newer_than_ledger(
+    session: Any,
+    *,
+    table_names: set[str],
+) -> bool:
+    """Detect policy inputs written after their derived quality rows."""
     return any(
-        _source_rows_are_newer_than_ledger(session, source)
-        for source in sources
+        _timestamp_is_newer_than_ledger(
+            row["input_fetched_at"],
+            row["quality_updated_at"],
+        )
+        for row in _quality_input_timestamp_pairs(
+            session,
+            table_names=table_names,
+        )
     )
 
 
