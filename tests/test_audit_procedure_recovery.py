@@ -226,6 +226,31 @@ def test_batch_checkpoint_counts_each_processed_receipt_once(temp_engine, monkey
         assert (row.attempted_count, row.saved_count, row.error_count) == (2, 2, 0)
 
 
+def test_scoped_kam_rebuild_includes_collector_attachment_receipts(temp_engine):
+    """Catch a post-fetch rebuild that ignores DART attachment receipt suffixes."""
+    from kreports.collector.report_document_collector import rebuild_kam_items_for_receipts
+    from kreports.db.engine import get_session
+    from kreports.db.models import ReportSection
+
+    root_receipt = "20260320000040"
+    attachment_receipt = f"{root_receipt}_11100001"
+    _seed_target("00000040", root_receipt)
+    with get_session() as session:
+        session.add(ReportSection(
+            rcept_no=attachment_receipt,
+            corp_code="00000040",
+            bsns_year=2025,
+            source_type="audit_report",
+            section_key="kam",
+            body_text="핵심감사사항 수익인식 감사절차를 수행하였습니다.",
+            ordinal=0,
+        ))
+
+    result = rebuild_kam_items_for_receipts(year=2025, rcept_nos=[root_receipt])
+
+    assert [row["rcept_no"] for row in result["receipts"]] == [attachment_receipt]
+
+
 def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch):
     """Catch removal of the public collector boundary around the durable selector."""
     from typer.testing import CliRunner

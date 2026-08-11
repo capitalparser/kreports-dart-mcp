@@ -1859,12 +1859,14 @@ def index_audit_procedures_from_sections(
         params["year"] = year
     normalized_receipts = sorted({str(value) for value in (rcept_nos or []) if str(value)})
     if normalized_receipts:
-        receipt_bindings = []
+        receipt_conditions = []
         for index, receipt in enumerate(normalized_receipts):
             key = f"receipt_{index}"
-            receipt_bindings.append(f":{key}")
+            receipt_conditions.append(
+                f"(rcept_no=:{key} OR rcept_no LIKE :{key} || '_%')"
+            )
             params[key] = receipt
-        sql += " AND rcept_no IN (" + ", ".join(receipt_bindings) + ")"
+        sql += " AND (" + " OR ".join(receipt_conditions) + ")"
     sql += """
         UNION
         SELECT rcept_no, corp_code, bsns_year, source_type,
@@ -1875,7 +1877,7 @@ def index_audit_procedures_from_sections(
     if year is not None:
         sql += " AND bsns_year=:year"
     if normalized_receipts:
-        sql += " AND rcept_no IN (" + ", ".join(receipt_bindings) + ")"
+        sql += " AND (" + " OR ".join(receipt_conditions) + ")"
     sql += " ORDER BY bsns_year, rcept_no, ordinal"
     if limit is not None:
         sql += " LIMIT :limit"
@@ -1989,12 +1991,30 @@ def _kam_rebuild_targets(
         section_query = section_query.filter(Company.market == market)
         report_query = report_query.filter(Company.market == market)
     if rcept_no:
-        source_query = source_query.filter(SourceDocument.rcept_no == rcept_no)
-        evidence_query = evidence_query.filter(
-            EvidenceDocument.rcept_no == rcept_no
+        source_query = source_query.filter(
+            or_(
+                SourceDocument.rcept_no == rcept_no,
+                SourceDocument.rcept_no.like(f"{rcept_no}_%"),
+            )
         )
-        section_query = section_query.filter(ReportSection.rcept_no == rcept_no)
-        report_query = report_query.filter(ReportDocument.rcept_no == rcept_no)
+        evidence_query = evidence_query.filter(
+            or_(
+                EvidenceDocument.rcept_no == rcept_no,
+                EvidenceDocument.rcept_no.like(f"{rcept_no}_%"),
+            )
+        )
+        section_query = section_query.filter(
+            or_(
+                ReportSection.rcept_no == rcept_no,
+                ReportSection.rcept_no.like(f"{rcept_no}_%"),
+            )
+        )
+        report_query = report_query.filter(
+            or_(
+                ReportDocument.rcept_no == rcept_no,
+                ReportDocument.rcept_no.like(f"{rcept_no}_%"),
+            )
+        )
     for row in source_query.order_by(SourceDocument.rcept_no, SourceDocument.id).all():
         add_target(row, candidate_type="source_documents")
     for row in evidence_query.order_by(EvidenceDocument.rcept_no, EvidenceDocument.id).all():
@@ -2497,8 +2517,20 @@ def rebuild_kam_items_for_receipts(*, year: int, rcept_nos: list[str]) -> dict:
     avoids the year-wide ``rebuild_kam_items`` scan after a bounded live batch.
     """
     receipts = sorted({str(value) for value in rcept_nos if str(value)})
+    attachment_receipts: set[str] = set()
+    with get_session() as session:
+        for receipt in receipts:
+            attachment_receipts.update(
+                str(target["rcept_no"])
+                for target in _kam_rebuild_targets(
+                    session,
+                    year=int(year),
+                    market=None,
+                    rcept_no=receipt,
+                )
+            )
     results = []
-    for receipt in receipts:
+    for receipt in sorted(attachment_receipts):
         result = _rebuild_kam_receipt({
             "rcept_no": receipt,
             "bsns_year": int(year),
@@ -2507,7 +2539,7 @@ def rebuild_kam_items_for_receipts(*, year: int, rcept_nos: list[str]) -> dict:
         results.append({"rcept_no": receipt, **result})
     return {
         "year": int(year),
-        "total": len(receipts),
+        "total": len(results),
         "rows_written": sum(int(row["kam_items"]) for row in results),
         "procedure_items": sum(int(row["procedure_items"]) for row in results),
         "receipts": results,
