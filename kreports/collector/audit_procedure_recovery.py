@@ -140,8 +140,14 @@ def select_audit_procedure_recovery_targets(
     }
 
 
-def _latest_success_cursor(*, year: int, market: str, params: dict[str, object]) -> dict[str, str] | None:
-    """Recover only the final successful cursor for this exact selector scope."""
+def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) -> dict[str, str] | None:
+    """Recover the last verified prefix from this exact terminal run scope.
+
+    A failed run can still have a successfully persisted prefix.  Its
+    checkpoint cursor points at that prefix while ``last_error`` names the next
+    receipt, so resuming after the cursor retries the failure without refetching
+    the successful work before it.
+    """
     canonical_params = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     with get_session() as session:
         runs = (
@@ -150,7 +156,7 @@ def _latest_success_cursor(*, year: int, market: str, params: dict[str, object])
                 BackfillRun.task_type == TASK_TYPE,
                 BackfillRun.year == year,
                 BackfillRun.market == market,
-                BackfillRun.status == "success",
+                BackfillRun.status != "running",
                 BackfillRun.params_json == canonical_params,
             )
             .order_by(BackfillRun.finished_at.desc(), BackfillRun.id.desc())
@@ -235,7 +241,7 @@ def run_audit_procedure_recovery_batch(
     """
     normalized_market = _market(market)
     params = recovery_backfill_params(year=year, market=normalized_market)
-    cursor_start = _latest_success_cursor(
+    cursor_start = _latest_resume_cursor(
         year=int(year), market=normalized_market, params=params,
     )
     selected = select_audit_procedure_recovery_targets(

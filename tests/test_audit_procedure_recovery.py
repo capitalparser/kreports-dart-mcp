@@ -226,6 +226,51 @@ def test_batch_checkpoint_counts_each_processed_receipt_once(temp_engine, monkey
         assert (row.attempted_count, row.saved_count, row.error_count) == (2, 2, 0)
 
 
+def test_partial_success_failure_retries_only_the_failed_receipt(temp_engine, monkeypatch):
+    """Catch a retry that refetches a saved prefix after a later receipt fails."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    _seed_target("00000050", "20260320000050")
+    _seed_target("00000051", "20260320000051")
+    params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    first_attempts: list[str] = []
+
+    def partial_failure(receipt: str) -> dict:
+        first_attempts.append(receipt)
+        if receipt.endswith("51"):
+            return {"ok": 0, "sections": 0, "error": "transport timeout"}
+        return {"ok": 1, "sections": 1}
+
+    monkeypatch.setattr(recovery, "collect_report_sections_for_disclosure", partial_failure)
+    failed_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+    failed = recovery.run_audit_procedure_recovery_batch(
+        failed_lease,
+        year=2025,
+        market="KOSPI",
+        limit=2,
+    )
+    failed_lease.fail("transport_error", "transport timeout")
+    retry_attempts: list[str] = []
+    monkeypatch.setattr(
+        recovery,
+        "collect_report_sections_for_disclosure",
+        lambda receipt: retry_attempts.append(receipt) or {"ok": 1, "sections": 1},
+    )
+    retry_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+    retry = recovery.run_audit_procedure_recovery_batch(
+        retry_lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    assert first_attempts == ["20260320000050", "20260320000051"]
+    assert failed["next_cursor"] == {"corp_code": "00000050", "rcept_no": "20260320000050"}
+    assert retry_attempts == ["20260320000051"]
+    assert retry["next_cursor"] == {"corp_code": "00000051", "rcept_no": "20260320000051"}
+
+
 def test_scoped_kam_rebuild_includes_collector_attachment_receipts(temp_engine):
     """Catch a post-fetch rebuild that ignores DART attachment receipt suffixes."""
     from kreports.collector.report_document_collector import rebuild_kam_items_for_receipts
