@@ -38,6 +38,8 @@ def _seed_target(
     current_market: str = "KOSPI",
     full_kam: bool = False,
     procedure: bool = False,
+    report_nm: str = "감사보고서제출",
+    disc_date: date = date(2026, 3, 20),
 ) -> None:
     from kreports.db.engine import get_session
     from kreports.db.models import AuditProcedureItem, Company, Disclosure, KamItem
@@ -64,9 +66,9 @@ def _seed_target(
             rcept_no=rcept_no,
             corp_code=corp_code,
             corp_name=f"회사{corp_code}",
-            disc_date=date(2026, 3, 20),
+            disc_date=disc_date,
             disc_type="F",
-            report_nm="감사보고서 (2025.12)",
+            report_nm=report_nm,
         ))
         if full_kam:
             session.add(KamItem(
@@ -132,9 +134,9 @@ def test_selector_is_stably_paginated_by_company_and_receipt(temp_engine):
     """Catch a target query whose pagination changes order or repeats its prefix."""
     from kreports.collector.audit_procedure_recovery import select_audit_procedure_recovery_targets
 
-    _seed_target("00000010", "20260320000002")
     _seed_target("00000010", "20260320000001")
-    _seed_target("00000011", "20260320000003")
+    _seed_target("00000011", "20260320000002")
+    _seed_target("00000012", "20260320000003")
 
     first = select_audit_procedure_recovery_targets(year=2025, market="KOSPI", limit=2)
     second = select_audit_procedure_recovery_targets(
@@ -143,10 +145,41 @@ def test_selector_is_stably_paginated_by_company_and_receipt(temp_engine):
 
     assert [(row["corp_code"], row["rcept_no"]) for row in first["targets"]] == [
         ("00000010", "20260320000001"),
-        ("00000010", "20260320000002"),
+        ("00000011", "20260320000002"),
     ]
     assert [(row["corp_code"], row["rcept_no"]) for row in second["targets"]] == [
-        ("00000011", "20260320000003"),
+        ("00000012", "20260320000003"),
+    ]
+
+
+def test_selector_uses_one_own_company_target_year_root_per_company(temp_engine):
+    """Catch a selector that spends a 2025 lease on child or prior-year filings."""
+    from kreports.collector.audit_procedure_recovery import select_audit_procedure_recovery_targets
+
+    _seed_target("00000012", "20260320000012")
+    _seed_target(
+        "00000012",
+        "20260420000012",
+        report_nm="[첨부정정]감사보고서제출 (2025 사업연도)",
+        disc_date=date(2026, 4, 20),
+    )
+    _seed_target(
+        "00000012",
+        "20260520000012",
+        report_nm="[첨부정정]감사보고서제출 (2024 사업연도)",
+        disc_date=date(2026, 5, 20),
+    )
+    _seed_target(
+        "00000012",
+        "20260620000012",
+        report_nm="감사보고서제출(자회사의 주요경영사항)",
+        disc_date=date(2026, 6, 20),
+    )
+
+    result = select_audit_procedure_recovery_targets(year=2025, market="KOSPI", limit=20)
+
+    assert [(row["corp_code"], row["rcept_no"]) for row in result["targets"]] == [
+        ("00000012", "20260420000012"),
     ]
 
 
@@ -269,6 +302,57 @@ def test_partial_success_failure_retries_only_the_failed_receipt(temp_engine, mo
     assert failed["next_cursor"] == {"corp_code": "00000050", "rcept_no": "20260320000050"}
     assert retry_attempts == ["20260320000051"]
     assert retry["next_cursor"] == {"corp_code": "00000051", "rcept_no": "20260320000051"}
+
+
+def test_derived_failure_does_not_advance_the_fetch_cursor(temp_engine, monkeypatch):
+    """Catch a checkpoint that skips a fetched receipt when its derived rebuild fails."""
+    import pytest
+
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    _seed_target("00000060", "20260320000060")
+    params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    monkeypatch.setattr(
+        recovery,
+        "collect_report_sections_for_disclosure",
+        lambda _receipt: {"ok": 1, "sections": 1},
+    )
+    monkeypatch.setattr(
+        recovery,
+        "rebuild_kam_items_for_receipts",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("derived rebuild failed")),
+    )
+    failed_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+    with pytest.raises(RuntimeError, match="derived rebuild failed"):
+        recovery.run_audit_procedure_recovery_batch(
+            failed_lease,
+            year=2025,
+            market="KOSPI",
+            limit=1,
+        )
+    failed_lease.fail("storage_error", "derived rebuild failed")
+
+    retried: list[str] = []
+    monkeypatch.setattr(
+        recovery,
+        "collect_report_sections_for_disclosure",
+        lambda receipt: retried.append(receipt) or {"ok": 1, "sections": 1},
+    )
+    monkeypatch.setattr(
+        recovery,
+        "rebuild_kam_items_for_receipts",
+        lambda **_kwargs: {"total": 0, "rows_written": 0, "procedure_items": 0, "receipts": []},
+    )
+    retry_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+    recovery.run_audit_procedure_recovery_batch(
+        retry_lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    assert retried == ["20260320000060"]
 
 
 def test_scoped_kam_rebuild_includes_collector_attachment_receipts(temp_engine):

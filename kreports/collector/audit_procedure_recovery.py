@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping
 
 from sqlalchemy import text
@@ -19,7 +20,8 @@ from kreports.quality.company_year import rebuild_company_year_quality
 
 
 TASK_TYPE = "audit_procedure_recovery"
-SELECTOR_VERSION = 1
+SELECTOR_VERSION = 2
+_EXPLICIT_BUSINESS_YEAR = re.compile(r"(?<!\d)(20\d{2})\s*사업연도")
 
 
 def recovery_backfill_params(*, year: int, market: str) -> dict[str, object]:
@@ -51,6 +53,12 @@ def _cursor(value: Mapping[str, Any] | None) -> tuple[str, str] | None:
     return corp_code, rcept_no
 
 
+def _matches_target_business_year(report_nm: object, year: int) -> bool:
+    """Accept an unmarked report or one explicitly marked for this year only."""
+    markers = {int(value) for value in _EXPLICIT_BUSINESS_YEAR.findall(str(report_nm or ""))}
+    return not markers or markers == {int(year)}
+
+
 def select_audit_procedure_recovery_targets(
     *,
     year: int,
@@ -76,17 +84,9 @@ def select_audit_procedure_recovery_targets(
         "end_date": f"{int(year) + 1}-12-31",
         "limit": limit,
     }
-    cursor_sql = ""
-    if cursor is not None:
-        params["after_corp_code"], params["after_rcept_no"] = cursor
-        cursor_sql = """
-          AND (
-                m.corp_code > :after_corp_code
-             OR (m.corp_code = :after_corp_code AND d.rcept_no > :after_rcept_no)
-          )
-        """
-    sql = f"""
+    sql = """
         SELECT d.rcept_no, m.corp_code, COALESCE(c.corp_name, d.corp_name) AS corp_name
+             , d.report_nm, d.disc_date
         FROM company_year_listing_memberships AS m
         JOIN disclosures AS d ON d.corp_code=m.corp_code
         LEFT JOIN companies AS c ON c.corp_code=m.corp_code
@@ -96,38 +96,69 @@ def select_audit_procedure_recovery_targets(
           AND length(d.rcept_no)=14
           AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
           AND substr(d.rcept_no, 1, 4)=strftime('%Y', d.disc_date)
-          AND d.report_nm LIKE '%감사보고서%'
+          AND d.report_nm LIKE '%감사보고서제출%'
+          AND d.report_nm NOT LIKE '%자회사의 주요경영사항%'
           AND d.report_nm NOT LIKE '%제출 지연%'
           AND d.report_nm NOT LIKE '%제출지연%'
           AND d.disc_date BETWEEN :start_date AND :end_date
-          AND (
-                NOT EXISTS (
-                    SELECT 1 FROM kam_items AS ki
-                    WHERE (ki.rcept_no=d.rcept_no OR ki.rcept_no LIKE d.rcept_no || '_%')
-                      AND ki.source_type='audit_report'
-                      AND ki.quality_status='full_body'
-                      AND ki.full_body_length > 0
-                )
-             OR NOT EXISTS (
-                    SELECT 1 FROM audit_procedure_items AS api
-                    WHERE (api.rcept_no=d.rcept_no OR api.rcept_no LIKE d.rcept_no || '_%')
-                      AND api.source_type='audit_report'
-                      AND length(trim(api.procedure_text)) > 0
-                )
-          )
-          {cursor_sql}
-        ORDER BY m.corp_code ASC, d.rcept_no ASC
-        LIMIT :limit
     """
     with get_session() as session:
         rows = session.execute(text(sql), params).mappings().all()
+        full_kams = session.execute(text("""
+            SELECT rcept_no, corp_code FROM kam_items
+            WHERE bsns_year=:year AND source_type='audit_report'
+              AND quality_status='full_body' AND full_body_length > 0
+        """), {"year": int(year)}).mappings().all()
+        procedures = session.execute(text("""
+            SELECT rcept_no, corp_code FROM audit_procedure_items
+            WHERE bsns_year=:year AND source_type='audit_report'
+              AND length(trim(procedure_text)) > 0
+        """), {"year": int(year)}).mappings().all()
+
+    canonical: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if not _matches_target_business_year(row["report_nm"], int(year)):
+            continue
+        corp_code = str(row["corp_code"])
+        existing = canonical.get(corp_code)
+        candidate_order = (str(row["disc_date"]), str(row["rcept_no"]))
+        existing_order = (
+            (str(existing["disc_date"]), str(existing["rcept_no"]))
+            if existing is not None else None
+        )
+        if existing_order is None or candidate_order > existing_order:
+            canonical[corp_code] = dict(row)
+
+    def _has_attachment_evidence(receipt: str, corp_code: str, evidence_rows) -> bool:
+        return any(
+            str(row["corp_code"]) == corp_code
+            and (
+                str(row["rcept_no"]) == receipt
+                or str(row["rcept_no"]).startswith(f"{receipt}_")
+            )
+            for row in evidence_rows
+        )
+
+    candidates = sorted(canonical.values(), key=lambda row: (str(row["corp_code"]), str(row["rcept_no"])))
+    inadequate = [
+        row for row in candidates
+        if not (
+            _has_attachment_evidence(str(row["rcept_no"]), str(row["corp_code"]), full_kams)
+            and _has_attachment_evidence(str(row["rcept_no"]), str(row["corp_code"]), procedures)
+        )
+    ]
+    if cursor is not None:
+        inadequate = [
+            row for row in inadequate
+            if (str(row["corp_code"]), str(row["rcept_no"])) > cursor
+        ]
     targets = [
         {
             "corp_code": str(row["corp_code"]),
             "rcept_no": str(row["rcept_no"]),
             "corp_name": str(row["corp_name"] or ""),
         }
-        for row in rows
+        for row in inadequate[:limit]
     ]
     return {
         "year": int(year),
@@ -136,6 +167,8 @@ def select_audit_procedure_recovery_targets(
             {"corp_code": cursor[0], "rcept_no": cursor[1]}
             if cursor is not None else None
         ),
+        "canonical_roots": len(candidates),
+        "inadequate_roots": len(inadequate),
         "targets": targets,
     }
 
@@ -226,6 +259,26 @@ def _checkpoint(
     )
 
 
+def _rebuild_derived_receipt(*, year: int, target: Mapping[str, str]) -> dict[str, object]:
+    """Finish all derived evidence for one root receipt before cursor advance."""
+    receipt = str(target["rcept_no"])
+    corp_code = str(target["corp_code"])
+    return {
+        "rcept_no": receipt,
+        "corp_code": corp_code,
+        "kam": rebuild_kam_items_for_receipts(year=year, rcept_nos=[receipt]),
+        "procedures": index_audit_procedures_from_sections(
+            year=year,
+            rcept_nos=[receipt],
+        ),
+        "quality": rebuild_company_year_quality(
+            year_from=year,
+            year_to=year,
+            corp_codes=[corp_code],
+        ),
+    }
+
+
 def run_audit_procedure_recovery_batch(
     lease: BackfillLease,
     *,
@@ -261,7 +314,7 @@ def run_audit_procedure_recovery_batch(
         "errors": [],
     }
     next_cursor = cursor_start
-    successful_targets: list[dict[str, str]] = []
+    derived_receipts: list[dict[str, object]] = []
     for index, target in enumerate(targets, 1):
         receipt = str(target["rcept_no"])
         if progress_callback:
@@ -288,8 +341,10 @@ def run_audit_procedure_recovery_batch(
             break
         totals["ok"] = int(totals["ok"]) + 1
         totals["sections"] = int(totals["sections"]) + int(result.get("sections") or 0)
+        # Do not let a successfully fetched raw receipt become resumably
+        # skipped until KAM, procedures, and quality have all been persisted.
+        derived_receipts.append(_rebuild_derived_receipt(year=year, target=target))
         next_cursor = {"corp_code": str(target["corp_code"]), "rcept_no": receipt}
-        successful_targets.append({"corp_code": str(target["corp_code"]), "rcept_no": receipt})
         _checkpoint(
             lease,
             base_counts=base_counts,
@@ -297,21 +352,6 @@ def run_audit_procedure_recovery_batch(
             next_cursor=next_cursor,
             totals=totals,
             exhausted=False,
-        )
-
-    derived = {"kam": None, "procedures": None, "quality": None}
-    if successful_targets:
-        receipts = [target["rcept_no"] for target in successful_targets]
-        corp_codes = sorted({target["corp_code"] for target in successful_targets})
-        derived["kam"] = rebuild_kam_items_for_receipts(year=year, rcept_nos=receipts)
-        derived["procedures"] = index_audit_procedures_from_sections(
-            year=year,
-            rcept_nos=receipts,
-        )
-        derived["quality"] = rebuild_company_year_quality(
-            year_from=year,
-            year_to=year,
-            corp_codes=corp_codes,
         )
 
     exhausted = not targets
@@ -334,5 +374,5 @@ def run_audit_procedure_recovery_batch(
         "targets": targets,
         "api_receipt_fetches": int(totals["processed"]),
         "storage_backend": settings.raw_storage_backend,
-        "derived": derived,
+        "derived": {"receipts": derived_receipts},
     }
