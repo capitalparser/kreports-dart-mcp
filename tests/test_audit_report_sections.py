@@ -269,6 +269,37 @@ def test_extract_audit_report_sections_recovers_detail_after_short_kam_intro():
     assert sections["kam"]["length"] > 120
 
 
+def test_extract_audit_report_sections_accepts_same_line_kam_intro_after_emphasis():
+    """A sentence-terminal emphasis body can run into the repeated KAM intro."""
+    xml = """
+    <DOCUMENT>
+      <P>강조사항</P>
+      <P>회사는 불확실성을 충분히 반영하지 않았습니다. 핵심감사사항 핵심감사사항은 우리의 전문가적 판단에 따라 당기 재무제표감사에서 가장 유의적인 사항입니다.</P>
+      <P>수익인식</P>
+      <P>핵심감사사항으로 결정한 이유</P>
+      <P>계약 조건과 기간귀속 판단에는 중요한 왜곡표시위험이 존재합니다.</P>
+      <P>핵심감사사항이 감사에서 다루어진 방법</P>
+      <P>ㆍ계약서와 세금계산서 대사를 수행하였습니다.</P>
+      <P>ㆍ보고기간 전후 매출의 기간귀속 테스트를 수행하였습니다.</P>
+      <P>재무제표감사에 대한 감사인의 책임</P>
+      <P>감사인은 감사기준에 따라 감사를 수행합니다.</P>
+    </DOCUMENT>
+    """
+
+    sections = extract_audit_report_sections(xml)
+
+    assert "kam" in sections
+    kam_body = sections["kam"]["body_text"]
+    assert kam_body.startswith("핵심감사사항 핵심감사사항은")
+    assert "기간귀속 테스트" in kam_body
+    assert "감사인은 감사기준" not in kam_body
+    procedures = extract_audit_procedure_items(kam_body)
+    assert [item["procedure_text"] for item in procedures] == [
+        "계약서와 세금계산서 대사를 수행하였습니다.",
+        "보고기간 전후 매출의 기간귀속 테스트를 수행하였습니다.",
+    ]
+
+
 def test_extract_audit_report_sections_does_not_treat_auditor_responsibility_phrase_as_kam():
     xml = """
     <DOCUMENT>

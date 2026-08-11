@@ -2076,6 +2076,42 @@ def _recover_kam_items(
             ],
             None,
         )
+    # A historical section extraction can miss a KAM whose heading was joined
+    # to the preceding section.  When no structured KAM exists, prefer the
+    # receipt's persisted full body before attempting any external raw-store
+    # read.  Do not surface failed speculative parses as limitations: the
+    # normal source/evidence recovery below retains the existing semantics.
+    has_structured_kam = any(
+        section.section_key == "kam" for section in target["report_sections"]
+    )
+    if not has_structured_kam:
+        for section in target["report_sections"]:
+            if section.section_key != "full_text":
+                continue
+            body = (section.body_text or "").strip()
+            if not body or "핵심감사사항" not in re.sub(r"\s+", "", body):
+                continue
+            extracted = extract_audit_report_sections(body)
+            kam_body = str(extracted.get("kam", {}).get("body_text") or "").strip()
+            if not kam_body:
+                continue
+            probe_limitations: list[str] = []
+            items = _parse_kam_candidate(
+                kam_body,
+                "report_sections.full_text",
+                probe_limitations,
+            )
+            if not items:
+                collapsed = parse_collapsed_kam_items(kam_body)
+                if collapsed.status == "complete":
+                    items = collapsed.items
+            if items:
+                return (
+                    items,
+                    "report_sections.full_text",
+                    limitations,
+                    section.fetched_at,
+                )
     for source in target["source_documents"]:
         try:
             if source.storage_uri:

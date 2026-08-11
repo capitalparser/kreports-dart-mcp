@@ -316,8 +316,26 @@ def _find_heading_candidate(text: str, section_key: str, keyword: str) -> int:
         prefix = text[max(0, pos - 20):pos]
         suffix = text[pos:pos + 40]
         compact_suffix = re.sub(r"\s+", "", suffix)
-        if section_key == "kam" and compact_suffix.startswith(f"{compact_keyword}으로결정"):
-            continue
+        if section_key == "kam":
+            if compact_suffix.startswith(
+                (
+                    f"{compact_keyword}으로결정",
+                    f"{compact_keyword}으로선정",
+                    f"{compact_keyword}이감사에서",
+                )
+            ):
+                continue
+            # Some attachments concatenate the last emphasis sentence and a
+            # repeated KAM introduction.  The sentence terminal plus exact
+            # doubled heading/intro signature is strong enough to distinguish
+            # it from a prose mention of a KAM.
+            if (
+                compact_suffix.startswith(
+                    f"{compact_keyword}{compact_keyword}은"
+                )
+                and text[:pos].rstrip().endswith((".", "!", "?", "。"))
+            ):
+                return pos
         if pos == 0 or "\n" in prefix or len(prefix.strip()) <= 3:
             return pos
         if section_key != "kam":

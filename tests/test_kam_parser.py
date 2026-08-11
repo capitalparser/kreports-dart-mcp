@@ -2947,6 +2947,84 @@ def test_rebuild_continues_from_failed_raw_read_to_normalized_evidence(
     )
 
 
+def test_rebuild_recovers_same_line_kam_from_persisted_full_text_before_raw_read(
+    temp_engine,
+    monkeypatch,
+):
+    """A missing KAM section must not force an external read of complete cached text."""
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+    from kreports.storage.raw_documents import RawDocumentStore
+
+    raw_reads: list[str] = []
+
+    def record_raw_read(_self, storage_uri, **_kwargs):
+        raw_reads.append(storage_uri)
+        return ""
+
+    full_text = """
+    강조사항
+    회사는 불확실성을 충분히 반영하지 않았습니다. 핵심감사사항 핵심감사사항은 우리의 전문가적 판단에 따라 당기 재무제표감사에서 가장 유의적인 사항입니다.
+    수익인식
+    핵심감사사항으로 결정한 이유
+    계약 조건과 기간귀속 판단에는 중요한 왜곡표시위험이 존재합니다.
+    핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.
+    ㆍ계약서와 세금계산서 대사를 수행하였습니다.
+    ㆍ보고기간 전후 매출의 기간귀속 테스트를 수행하였습니다.
+    재무제표감사에 대한 감사인의 책임
+    감사인은 감사기준에 따라 감사를 수행합니다.
+    """
+    monkeypatch.setattr(RawDocumentStore, "read", record_raw_read)
+    with get_session() as session:
+        session.add(
+            Company(
+                corp_code="00164782",
+                stock_code="035423",
+                corp_name="저장본문회사",
+                market="KOSPI",
+            )
+        )
+        session.add(
+            SourceDocument(
+                rcept_no="20250318000005",
+                dcm_no="500",
+                corp_code="00164782",
+                bsns_year=2024,
+                source_type="audit_report",
+                report_nm="감사보고서",
+                content_type="xml",
+                raw_content="",
+                doc_hash="5" * 40,
+                storage_uri="raw://external/20250318000005.xml.gz",
+                storage_status="externalized",
+            )
+        )
+        session.add(
+            ReportSection(
+                rcept_no="20250318000005",
+                dcm_no="500",
+                corp_code="00164782",
+                bsns_year=2024,
+                source_type="audit_report",
+                section_key="full_text",
+                section_title="감사보고서 본문",
+                body_text=full_text,
+                body_hash="f" * 40,
+                body_length=len(full_text),
+                ordinal=0,
+            )
+        )
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert raw_reads == []
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "report_sections.full_text"
+    assert receipt["item_count"] == 1
+    assert receipt["has_audit_response"] == [True]
+
+
 def test_rebuild_recovers_hash_verified_gcs_raw(
     temp_engine,
     monkeypatch,

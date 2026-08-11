@@ -1,0 +1,34 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-08-11-complete-runtime-data-remediation.md
+
+Baseline: `codex/final-kreports-integration@4bdf57c`
+Baseline tests: `238 passed in 17.68s`
+Runtime candidate: `/private/tmp/kreports-investor-r5.KVjjJj/kreports-rehearsal.db`
+
+Task 1: fix round 1/5 (3 addressed, 2 new open; commits `be7c4c6..d54ccaa`)
+Task 1: fix round 2/5 (1 addressed, 1 open; commits `d54ccaa..fd12896`)
+Task 1: fix round 3/5 (1 addressed, 0 open; commits `fd12896..77510e9`)
+Task 1: complete (commits `e4fb8e5..77510e9`, review clean)
+Task 1 candidate: `/private/tmp/kreports-investor-r5.KVjjJj/kreports-rehearsal-quality-refresh.db`
+Task 1 data: 19,815 quality rows rebuilt; policy coverage 87.51%; public PASS; auditor_full expected FAIL.
+Task 2: review round 1/5 (3 open; commits `e8d2c13..1842742`)
+Task 2 candidate: `/private/tmp/kreports-investor-r5.KVjjJj/kreports-rehearsal-audit-procedure.db`
+Task 2 data: selector v3 canonical roots 2,601; live run 407 2/2; evidence-map procedure coverage 77.2%; full backfill held for review fixes.
+Task 2 review: HIGH non-calendar fiscal-year business-report roots omitted; HIGH GCS/batch/disk boundary not enforced; MEDIUM derived-failure counters incomplete.
+Task 2: review round 2/5 addressed (commit `1e2091d`; v4 fallback/direct priority/GCS+25+actual-DB disk guard/derived-failure checkpoint)
+Task 2 data: v4 canonical roots 2,659 (KOSPI 841, KOSDAQ 1,818); inadequate 2,630; 15 verified companies have no accepted root; live run 408 KOSPI 2/2, GCS, durable v4 cursor saved.
+Task 2 evidence: recovery tests 18 passed; focused suite 107 passed; ruff pass; full v4 backfill remains held for independent review.
+Task 2 parser QA: `f13bf3f` recognizes explicit collapsed `핵심감사사항이 감사에서 다뤄진 방법`; 235 parser/indexer/recovery tests passed and Ruff passed.
+Task 2 candidate repair: existing-GCS-only exact attachment `20260323800743_11162971` changed error/0/0 procedures to full_body/956/3 procedures; corp `00109514` 2025 quality rebuilt to kam full_body and audit-procedure available; no DART API call.
+Task 2 parser QA follow-up: `1ee0014` removes management/governance response leakage, excludes generic procedure lead-ins, and preserves explicit bullet noun-ending steps; 277 focused parser/indexer/recovery tests and Ruff passed.
+Task 2 candidate reindex: existing-GCS-only exact receipt `20260323800743_11162971` now has response 634 chars with no management/governance text and 6 procedures (`controls_test`, `inspection`, `other`, `analytical_procedure`, `inspection`, `sampling`); exact persisted-cache-only reindex wrote 6/failed 0 and made no DART API call.
+Task 2 forensic parser QA: `dff6eff` parses explicit inline `ㆍ`, circled-number, and immediate lead-in hyphen audit-procedure lists while rejecting lexical middle dots and responsibility prose; 283 focused parser/indexer/recovery tests and Ruff passed.
+Task 2 candidate cache reindex: dynamically selected 42 recoverable full-body/no-procedure identities (40 receipts, 26 companies); persisted-KAM-only reindex reconciled 44 identities, wrote 217 procedure rows, failed 0, and rebuilt 26 quality rows with no GCS read or DART API call. Full-body procedure support became 179/182; evidence map passed at 98.2% with three collapsed-prose cases remaining fail-closed.
+Task 2 parser QA hardening: `dbdf161` restricts `ㆍ` list provenance to real response boundaries/spacing, preserving `내ㆍ외부`, `현ㆍ전기`, and `손익ㆍ공정가치` as prose; 286 focused tests and Ruff passed.
+Task 2 exact cache reindex after hardening: reconstructed 43 receipts covering the original 45 forensic identities; persisted-KAM-only reconcile handled 47 identities, wrote 215 rows, failed 0, rebuilt 28 quality rows, and kept 179/182 full-body procedure support. Final evidence map PASS: 98.2%, no required gaps; no GCS read or DART API call.
+Task 2 residual recovery: `d84b95c` carries standalone-bullet provenance and parses glued hyphens only after explicit audit-procedure lead-ins; full-response responsibility boilerplate now fail-closes across every artificial fragment. 294 focused tests and Ruff passed.
+Task 2 exact residual reindex: persisted-KAM-only 3-receipt reconcile wrote 12 rows with failed 0 and rebuilt 2 quality rows; full-body procedure support is 182/182 and evidence map PASS at 100.0%, no GCS read/DART API. Independent re-review remains required before closure.
+Task 2 run414 parser QA: `60fc8a9` preserves inline `1)` procedure provenance only after explicit audit-procedure lead-in and recovers bounded risk-only omitted-reason titles; 297 focused tests and Ruff passed.
+Task 2 run414 exact candidate repair: 4 persisted-only receipts (대한해운 2, 대현, 디와이) reconciled 4 identities/19 procedures/failed 0 and rebuilt 3 quality rows. DY changed error/0 to full_body/877/6; candidate full-body support reached 241/241 and evidence map PASS 100.0%, without GCS read or DART API.
+Task 2 positional provenance fix: `ccd4d14` limits numeric/glued list boundaries to positions at or after the explicit audit-procedure lead-in; 298 focused tests and Ruff passed.
+Task 2 run415 exact cache reindex: after collector completion, read-only candidate scan found 266 full-body/0 errors/0 missing procedures and no pre-lead marker hits. Reindexing only the three numeric receipts wrote 13 rows/failed 0 and rebuilt 2 quality rows; evidence map PASS 266/266 at 100.0%, no GCS read or DART API. Independent re-review remains required before closure.
+Task 2 run417 same-line heading repair: `20260319801468_11151139` (삼익THK) had a complete 95,391-character persisted full_text but no KAM section because emphasis prose ran into `핵심감사사항 핵심감사사항은 ...`. The extractor accepts that sentence-terminal doubled-intro signature only; persisted full_text recovery now runs before external raw reads when no structured KAM exists, and the observed `핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.` response heading is parsed. Focused suite 259 passed/Ruff pass. Exact cache-only rebuild, with DART/Google credentials unset and RawDocumentStore.read assertion-guarded, performed 0 raw reads and changed the receipt from error/none/0 procedures to full_body/report_sections.full_text/565 with 3 procedures.
