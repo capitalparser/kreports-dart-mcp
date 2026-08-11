@@ -202,6 +202,34 @@ def test_extract_procedure_steps_preserves_glued_hyphen_list_after_audit_lead_in
     ]
 
 
+def test_extract_procedure_steps_preserves_inline_numbered_list_after_audit_lead_in():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다. 1) 계약서 검토 "
+            "2) 외부조회 확인 3) 분석적 절차 수행"
+        )
+    )
+
+    assert [step.procedure_text for step in steps] == [
+        "계약서 검토",
+        "외부조회 확인",
+        "분석적 절차 수행",
+    ]
+    assert [step.method for step in steps] == [
+        "inspection",
+        "confirmation",
+        "analytical_procedure",
+    ]
+
+
+def test_extract_procedure_steps_does_not_treat_numeric_prose_as_a_list_without_audit_lead_in():
+    steps = extract_procedure_steps(
+        _kam_item("투자지표는 1) 계약서 검토 2) 외부조회 확인으로 구성됩니다.")
+    )
+
+    assert steps == []
+
+
 @pytest.mark.parametrize(
     "text_value",
     [

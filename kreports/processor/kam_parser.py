@@ -141,6 +141,9 @@ _COLLAPSED_TITLE_ENDING_RE = re.compile(
     r"(?:적정성|회수가능성|발생사실|실재성|손상평가|손상검사|"
     r"공정가치측정|매수가격배분|평가|검사|인식|측정|배분|표시)"
 )
+_OMITTED_REASON_RISK_TITLE_ENDING_RE = re.compile(
+    r"(?:손상평가|손상검사|공정가치측정|매수가격배분|회수가능성)\s*$"
+)
 _COLLAPSED_TITLE_MARKER_START_RE = re.compile(
     r"(?:^|\s)(?:\(?\d{1,2}\)?[.)]|[가-하]\s*[.)]|[IVX]{1,5}[.)])\s*",
     flags=re.IGNORECASE,
@@ -1782,7 +1785,16 @@ def _inject_omitted_collapsed_reason_heading(
             candidate is None
             and len(lines[index]) <= 80
             and not lines[index].endswith((".", "。"))
-            and _title_evidence_score(lines[index]) >= 3
+            and (
+                _title_evidence_score(lines[index]) >= 3
+                or (
+                    _title_evidence_score(lines[index]) >= 1
+                    and _OMITTED_REASON_RISK_TITLE_ENDING_RE.search(
+                        _normalize_title(lines[index]),
+                    )
+                    is not None
+                )
+            )
         ):
             candidate = ("", lines[index])
         if candidate is None:
@@ -1792,7 +1804,16 @@ def _inject_omitted_collapsed_reason_heading(
         if (
             len(normalized_title) > 80
             or normalized_title.endswith((".", "。"))
-            or _title_evidence_score(normalized_title) < 3
+            or (
+                _title_evidence_score(normalized_title) < 3
+                and not (
+                    _title_evidence_score(normalized_title) >= 1
+                    and _OMITTED_REASON_RISK_TITLE_ENDING_RE.search(
+                        normalized_title,
+                    )
+                    is not None
+                )
+            )
         ):
             continue
         if (

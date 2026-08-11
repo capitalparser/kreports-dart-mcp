@@ -317,6 +317,35 @@ def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_only_with_
     )
 
 
+def test_parse_collapsed_audit_report_recovers_risk_only_title_with_omitted_reason_heading():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 우리의 전문가적 판단에 따라 당기 "
+        "연결재무제표감사에서 가장 유의적인 사항들입니다. 우리는 이런 사항에 "
+        "대하여 별도의 의견을 제공하지는 않습니다.\n"
+        "DY AUTO INDIA Pvt.의 현금창출단위 손상평가\n"
+        "연결회사는 해당 현금창출단위에 손상징후가 존재한다고 판단하고 "
+        "손상검사를 수행하였습니다.\n"
+        "우리는 미래 현금흐름과 할인율에 대한 경영진의 유의적인 판단을 고려하여 "
+        "회수가능가액 검토를 핵심감사사항에 포함하였습니다.\n"
+        "핵심감사사항이 감사에서 다루어진 방법\n"
+        "- 외부 전문가의 적격성 및 독립성 평가\n"
+        "- 가치평가 모델의 적절성을 평가\n"
+        "- 주요 가정의 합리성 검토\n"
+        "연결재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "DY AUTO INDIA Pvt.의 현금창출단위 손상평가"
+    ]
+    assert len(extract_procedure_steps(outcome.items[0])) == 3
+
+
 def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_after_intro_tail_title():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 

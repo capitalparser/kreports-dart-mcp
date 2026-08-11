@@ -220,6 +220,7 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
     ]
     if _AUDIT_PROCEDURE_LIST_LEAD_IN.search(bounded):
         boundaries.append(r"(?<=\S)(?=-\s*\S)")
+        boundaries.append(r"(?<=\s)(?=\(?\d{1,3}\)?[.)]\s+)")
     pattern = re.compile("(?:" + "|".join(boundaries) + ")")
     clauses: list[tuple[str, int, int, bool, bool]] = []
 
@@ -235,7 +236,11 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
             return False
         bullet_context = bool(
-            re.match(r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw)
+            re.match(
+                r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*|"
+                r"\(?\d{1,3}\)?[.)]\s*)",
+                raw,
+            )
         ) or pending_bullet_context
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
