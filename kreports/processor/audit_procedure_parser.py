@@ -218,10 +218,22 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
         r"(?<=\s)(?=[•·▪◦]\s+)",
         r"(?<=\s)(?=-\s+)",
     ]
-    if _AUDIT_PROCEDURE_LIST_LEAD_IN.search(bounded):
-        boundaries.append(r"(?<=\S)(?=-\s*\S)")
-        boundaries.append(r"(?<=\s)(?=\(?\d{1,3}\)?[.)]\s+)")
-    pattern = re.compile("(?:" + "|".join(boundaries) + ")")
+    base_pattern = re.compile("(?:" + "|".join(boundaries) + ")")
+    boundary_positions = {
+        (match.start(), match.end())
+        for match in base_pattern.finditer(bounded)
+    }
+    lead_in = _AUDIT_PROCEDURE_LIST_LEAD_IN.search(bounded)
+    if lead_in is not None:
+        list_pattern = re.compile(
+            r"(?:(?<=\S)(?=-\s*\S)|"
+            r"(?<=\s)(?=\(?\d{1,3}\)?[.)]\s+))"
+        )
+        boundary_positions.update(
+            (match.start(), match.end())
+            for match in list_pattern.finditer(bounded)
+            if match.start() >= lead_in.end()
+        )
     clauses: list[tuple[str, int, int, bool, bool]] = []
 
     def append_raw(
@@ -331,13 +343,13 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
 
     start = 0
     pending_bullet_context = False
-    for match in pattern.finditer(bounded):
+    for boundary_start, boundary_end in sorted(boundary_positions):
         pending_bullet_context = append_raw(
-            bounded[start:match.start()],
+            bounded[start:boundary_start],
             start,
             pending_bullet_context=pending_bullet_context,
         )
-        start = match.end()
+        start = boundary_end
     append_raw(
         bounded[start:],
         start,

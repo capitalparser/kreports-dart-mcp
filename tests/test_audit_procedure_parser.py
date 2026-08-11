@@ -230,6 +230,17 @@ def test_extract_procedure_steps_does_not_treat_numeric_prose_as_a_list_without_
     assert steps == []
 
 
+def test_extract_procedure_steps_ignores_numeric_prose_before_audit_lead_in():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "투자지표는 1) 계약서 검토 2) 외부조회 확인으로 구성됩니다.\n"
+            "주요 감사절차는 다음과 같습니다. - 자산을 검토하였습니다."
+        )
+    )
+
+    assert [step.procedure_text for step in steps] == ["자산을 검토하였습니다."]
+
+
 @pytest.mark.parametrize(
     "text_value",
     [
