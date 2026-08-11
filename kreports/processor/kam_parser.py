@@ -170,7 +170,7 @@ _COLLAPSED_TITLE_ENDING_RE = re.compile(
     r"공정가치측정|매수가격배분|평가|검사|인식|측정|배분|표시)"
 )
 _OMITTED_REASON_RISK_TITLE_ENDING_RE = re.compile(
-    r"(?:손상\s*평가|손상\s*검사|손상\s*검토|공정가치\s*측정|"
+    r"(?:손상\s*평가|손상\s*검사|공정가치\s*측정|"
     r"매수가격\s*배분|회수\s*가능성)\s*$"
 )
 _COLLAPSED_TITLE_MARKER_START_RE = re.compile(

@@ -260,3 +260,10 @@ After the selector exists, resume with one bounded deterministic batch, persist 
 - The Futurenet response contains a sixth explicit bullet ending in `전문가를 활용`. `활용` is therefore accepted only under the existing explicit-bullet noun-ending provenance; prose still must satisfy the existing action-clause rules.
 - RED produced the three missing positive recoveries while both new malformed-boundary negatives stayed rejected. GREEN: seven targeted tests passed. Full parser/indexer/recovery validation passed **335 tests**; Ruff and `git diff --check` passed.
 - Read-only post-change probe: Futurenet is complete/1 (`화장품ㆍ의약품 원료제조사업부문에 배부된 영업권의 손상검토`) with 6 procedures; Home Shopping is complete/1 (`(주)한섬 부문 현금창출단위에 대한 손상 검사`) with 6; Sejin is complete/1 (`수익의 기간귀속 및 측정`) with 4. No candidate mutation occurred.
+
+### Run 434 independent-review follow-up: keep impairment review cue-specific
+
+- Review found that placing `손상검토` in the generic omitted-reason risk-title-ending fallback could promote a bare `손상 검토` title when it had only a sufficiently long generic reason and one response frame. That fallback does not independently establish the note or year boundary required for this vocabulary.
+- `손상검토` remains in the bounded financial-statement-note matcher and the intro-tail risk matcher, which are the only forms required by the Hyundai Futurenet and Hyundai Home Shopping recoveries. It was removed from the generic fallback used by separator and standalone omitted-reason title admission.
+- RED: a single-response `손상 검토` form with a compact reason length greater than 50 incorrectly returned `complete`. GREEN: it remains `error` with no items. The actual three read-only receipts remain complete/1 with 6, 6, and 4 procedures respectively.
+- Full parser/indexer/recovery validation passed **336 tests**; Ruff and `git diff --check` passed. This was code/test/read-only only: no candidate DB mutation, raw-store read, DART API, or GCS call.

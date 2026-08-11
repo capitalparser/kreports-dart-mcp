@@ -489,6 +489,27 @@ def test_collapsed_parser_rejects_intro_tail_risk_title_without_note_cue():
     assert outcome.items == []
 
 
+def test_collapsed_parser_rejects_bare_impairment_review_without_cue():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    reason = (
+        "경영진은 사업계획과 시장전망을 검토하여 회수가능액을 추정하였으며, "
+        "해당 추정에는 다양한 판단과 불확실성이 포함되어 있습니다."
+    )
+    assert len("".join(reason.split())) > 50
+    body = f"""핵심감사사항
+손상 검토
+{reason}
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ영업권 관련 내부통제를 평가
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
 def test_collapsed_parser_recovers_standalone_risk_title_before_year_reason():
     from kreports.processor.audit_procedure_parser import extract_procedure_steps
     from kreports.processor.kam_parser import parse_collapsed_kam_items
