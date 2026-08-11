@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 
 
@@ -93,6 +94,37 @@ def _seed_target(
                 section_ordinal=0,
                 procedure_ordinal=0,
             ))
+
+
+def _empty_recovery_result() -> dict[str, object]:
+    return {
+        "processed": 0,
+        "ok": 0,
+        "failed": 0,
+        "sections": 0,
+        "errors": [],
+        "next_cursor": None,
+        "exhausted": True,
+    }
+
+
+def _seed_target_year_audit_attachment(corp_code: str, root_rcept_no: str) -> None:
+    from kreports.db.engine import get_session
+    from kreports.db.models import SourceDocument
+
+    with get_session() as session:
+        session.add(SourceDocument(
+            rcept_no=f"{root_rcept_no}_11100001",
+            dcm_no="11100001",
+            corp_code=corp_code,
+            bsns_year=2025,
+            source_type="audit_report",
+            report_nm="감사보고서",
+            content_type="html",
+            raw_content="핵심감사사항",
+            doc_hash="b" * 40,
+            storage_status="externalized",
+        ))
 
 
 def test_selector_uses_verified_historical_membership_and_evidence_gap(temp_engine):
@@ -204,6 +236,79 @@ def test_selector_includes_target_year_standalone_audit_report_roots(temp_engine
 
     assert [(row["corp_code"], row["rcept_no"]) for row in result["targets"]] == [
         ("00000013", "20260609000510"),
+    ]
+
+
+def test_selector_includes_target_year_business_report_root_for_non_calendar_filer(temp_engine):
+    """Catch a selector that drops 2025 audit attachments under a 2025 business report."""
+    from kreports.collector.audit_procedure_recovery import select_audit_procedure_recovery_targets
+
+    _seed_target(
+        "00000014",
+        "20250618000208",
+        membership_market="KOSDAQ",
+        report_nm="사업보고서 (2025.03)",
+        disc_date=date(2025, 6, 18),
+    )
+    _seed_target_year_audit_attachment("00000014", "20250618000208")
+    _seed_target(
+        "00000014",
+        "20260618000208",
+        membership_market="KOSDAQ",
+        report_nm="사업보고서 (2026.03)",
+        disc_date=date(2026, 6, 18),
+    )
+    _seed_target(
+        "00000014",
+        "20250617000208",
+        membership_market="KOSDAQ",
+        report_nm="사업보고서 (2024.03)",
+        disc_date=date(2025, 6, 17),
+    )
+
+    result = select_audit_procedure_recovery_targets(year=2025, market="KOSDAQ", limit=20)
+
+    assert [(row["corp_code"], row["rcept_no"]) for row in result["targets"]] == [
+        ("00000014", "20250618000208"),
+    ]
+
+
+def test_selector_includes_business_report_fallback_before_attachments_are_indexed(temp_engine):
+    """Catch a selector that cannot fetch a valid business root to discover its audit attachments."""
+    from kreports.collector.audit_procedure_recovery import select_audit_procedure_recovery_targets
+
+    _seed_target(
+        "00000016",
+        "20250618000216",
+        membership_market="KOSDAQ",
+        report_nm="사업보고서 (2025.03)",
+        disc_date=date(2025, 6, 18),
+    )
+
+    result = select_audit_procedure_recovery_targets(year=2025, market="KOSDAQ", limit=20)
+
+    assert [(row["corp_code"], row["rcept_no"]) for row in result["targets"]] == [
+        ("00000016", "20250618000216"),
+    ]
+
+
+def test_selector_prefers_direct_audit_root_over_later_business_report_fallback(temp_engine):
+    """Catch a later annual filing replacing a direct audit root for the same company."""
+    from kreports.collector.audit_procedure_recovery import select_audit_procedure_recovery_targets
+
+    _seed_target("00000015", "20260318000208", disc_date=date(2026, 3, 18))
+    _seed_target(
+        "00000015",
+        "20260418000208",
+        report_nm="사업보고서 (2025.12)",
+        disc_date=date(2026, 4, 18),
+    )
+    _seed_target_year_audit_attachment("00000015", "20260418000208")
+
+    result = select_audit_procedure_recovery_targets(year=2025, market="KOSPI", limit=20)
+
+    assert [(row["corp_code"], row["rcept_no"]) for row in result["targets"]] == [
+        ("00000015", "20260318000208"),
     ]
 
 
@@ -330,9 +435,9 @@ def test_partial_success_failure_retries_only_the_failed_receipt(temp_engine, mo
 
 def test_derived_failure_does_not_advance_the_fetch_cursor(temp_engine, monkeypatch):
     """Catch a checkpoint that skips a fetched receipt when its derived rebuild fails."""
-    import pytest
-
     from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
     from kreports.maintenance.backfill_runs import BackfillLease
 
     _seed_target("00000060", "20260320000060")
@@ -348,13 +453,25 @@ def test_derived_failure_does_not_advance_the_fetch_cursor(temp_engine, monkeypa
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("derived rebuild failed")),
     )
     failed_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
-    with pytest.raises(RuntimeError, match="derived rebuild failed"):
-        recovery.run_audit_procedure_recovery_batch(
-            failed_lease,
-            year=2025,
-            market="KOSPI",
-            limit=1,
-        )
+    failed = recovery.run_audit_procedure_recovery_batch(
+        failed_lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    with get_session() as session:
+        row = session.get(BackfillRun, failed_lease.id)
+        checkpoint = json.loads(row.checkpoint_json)
+        assert (row.attempted_count, row.saved_count, row.error_count) == (1, 0, 1)
+        assert checkpoint["next_cursor"] is None
+        assert checkpoint["batch"]["api_receipt_fetches"] == 1
+        assert checkpoint["last_error"] == {
+            "corp_code": "00000060",
+            "rcept_no": "20260320000060",
+            "message": "derived rebuild failed",
+        }
+    assert failed["failed"] == 1
     failed_lease.fail("storage_error", "derived rebuild failed")
 
     retried: list[str] = []
@@ -404,17 +521,32 @@ def test_scoped_kam_rebuild_includes_collector_attachment_receipts(temp_engine):
     assert [row["rcept_no"] for row in result["receipts"]] == [attachment_receipt]
 
 
-def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch):
+def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch, tmp_path):
     """Catch removal of the public collector boundary around the durable selector."""
     from typer.testing import CliRunner
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
 
+    import kreports.db.engine as db_engine
     from kreports.cli.main import app
     from kreports.collector import audit_procedure_recovery as recovery
     from kreports.config import settings
+    from kreports.db.models import Base
+    from kreports.maintenance import rehearsal_safety
+
+    database = tmp_path / "recovery.db"
+    active_engine = create_engine(f"sqlite:///{database}")
+    Base.metadata.create_all(bind=active_engine)
+    monkeypatch.setattr(db_engine, "engine", active_engine)
+    monkeypatch.setattr(db_engine, "SessionLocal", sessionmaker(bind=active_engine))
 
     monkeypatch.setattr(settings, "dart_api_key", "test-key")
-    monkeypatch.setattr(settings, "raw_storage_backend", "file")
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
+    monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
+    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
     monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setattr(rehearsal_safety, "assert_free_space", lambda *_args, **_kwargs: 20 * 1024**3)
     captured = {}
 
     def fake_run(lease, **kwargs):
@@ -440,3 +572,186 @@ def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch
     assert captured["market"] == "KOSPI"
     assert captured["limit"] == 2
     assert callable(captured["progress_callback"])
+
+
+def test_cli_rejects_non_gcs_raw_storage_before_starting_lease(temp_engine, monkeypatch):
+    """Catch a recovery CLI that permits local file raw bodies for this cohort."""
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.config import settings
+
+    monkeypatch.setattr(settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(settings, "raw_storage_backend", "file")
+    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "file")
+    monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
+    started: list[bool] = []
+    monkeypatch.setattr(
+        recovery,
+        "run_audit_procedure_recovery_batch",
+        lambda *_args, **_kwargs: started.append(True) or _empty_recovery_result(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
+    )
+
+    assert result.exit_code == 2
+    assert "GCS" in result.output
+    assert started == []
+
+
+def test_cli_rejects_gcs_without_bucket_before_starting_lease(temp_engine, monkeypatch):
+    """Catch a GCS recovery invocation that would create unaddressable raw objects."""
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.config import settings
+
+    monkeypatch.setattr(settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
+    monkeypatch.delenv("RAW_STORAGE_BUCKET", raising=False)
+    started: list[bool] = []
+    monkeypatch.setattr(
+        recovery,
+        "run_audit_procedure_recovery_batch",
+        lambda *_args, **_kwargs: started.append(True) or _empty_recovery_result(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
+    )
+
+    assert result.exit_code == 2
+    assert "RAW_STORAGE_BUCKET" in result.output
+    assert started == []
+
+
+def test_cli_rejects_limit_above_safe_recovery_batch(temp_engine, monkeypatch):
+    """Catch an operator invocation that bypasses the bounded 25-root limit."""
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.config import settings
+
+    monkeypatch.setattr(settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
+    started: list[bool] = []
+    monkeypatch.setattr(
+        recovery,
+        "run_audit_procedure_recovery_batch",
+        lambda *_args, **_kwargs: started.append(True) or _empty_recovery_result(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "26"],
+    )
+
+    assert result.exit_code == 2
+    assert "25" in result.output
+    assert started == []
+
+
+def test_cli_blocks_mutation_when_python_disk_preflight_fails(temp_engine, monkeypatch, tmp_path):
+    """Catch a collector that opens a recovery lease after the 10 GiB guard fails."""
+    from typer.testing import CliRunner
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import kreports.db.engine as db_engine
+    from kreports.cli.main import app
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.config import settings
+    from kreports.db.models import Base
+    from kreports.maintenance import rehearsal_safety
+
+    monkeypatch.setattr(settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
+    database = tmp_path / "candidate" / "recovery.db"
+    database.parent.mkdir()
+    active_engine = create_engine(f"sqlite:///{database}")
+    Base.metadata.create_all(bind=active_engine)
+    monkeypatch.setattr(db_engine, "engine", active_engine)
+    monkeypatch.setattr(db_engine, "SessionLocal", sessionmaker(bind=active_engine))
+    monkeypatch.setattr(
+        rehearsal_safety,
+        "assert_free_space",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            rehearsal_safety.RehearsalSafetyError("insufficient_free_space", "test disk guard")
+        ),
+    )
+    started: list[bool] = []
+    monkeypatch.setattr(
+        recovery,
+        "run_audit_procedure_recovery_batch",
+        lambda *_args, **_kwargs: started.append(True) or _empty_recovery_result(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
+    )
+
+    assert result.exit_code == 2
+    assert "disk" in result.output.lower()
+    assert started == []
+
+
+def test_cli_preflight_checks_the_active_sqlite_database_parent(temp_engine, monkeypatch, tmp_path):
+    """Catch a disk guard that validates cwd instead of the database filesystem it mutates."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from typer.testing import CliRunner
+
+    import kreports.db.engine as db_engine
+    from kreports.cli.main import app
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.config import settings
+    from kreports.db.models import Base
+    from kreports.maintenance import rehearsal_safety
+
+    database = tmp_path / "candidate" / "recovery.db"
+    database.parent.mkdir()
+    active_engine = create_engine(f"sqlite:///{database}")
+    Base.metadata.create_all(bind=active_engine)
+    monkeypatch.setattr(db_engine, "engine", active_engine)
+    monkeypatch.setattr(db_engine, "SessionLocal", sessionmaker(bind=active_engine))
+    monkeypatch.setattr(settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
+    monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
+    paths = []
+    monkeypatch.setattr(
+        rehearsal_safety,
+        "assert_free_space",
+        lambda path, **_kwargs: paths.append(path) or 20 * 1024**3,
+    )
+    monkeypatch.setattr(
+        recovery,
+        "run_audit_procedure_recovery_batch",
+        lambda *_args, **_kwargs: _empty_recovery_result(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert paths == [database.parent.resolve()]

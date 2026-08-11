@@ -16,11 +16,12 @@ from kreports.config import settings
 from kreports.db.engine import get_session
 from kreports.db.models import BackfillRun
 from kreports.maintenance.backfill_runs import BackfillLease
+from kreports.processor.audit_parser import parse_bsns_year
 from kreports.quality.company_year import rebuild_company_year_quality
 
 
 TASK_TYPE = "audit_procedure_recovery"
-SELECTOR_VERSION = 3
+SELECTOR_VERSION = 4
 _EXPLICIT_BUSINESS_YEAR = re.compile(r"(?<!\d)(20\d{2})\s*사업연도")
 
 
@@ -57,6 +58,14 @@ def _matches_target_business_year(report_nm: object, year: int) -> bool:
     """Accept an unmarked report or one explicitly marked for this year only."""
     markers = {int(value) for value in _EXPLICIT_BUSINESS_YEAR.findall(str(report_nm or ""))}
     return not markers or markers == {int(year)}
+
+
+def _is_target_recovery_root(*, report_nm: object, rcept_no: object, year: int) -> bool:
+    """Keep target-year business-report roots without admitting adjacent years."""
+    name = str(report_nm or "")
+    if "사업보고서" in name:
+        return parse_bsns_year(name, str(rcept_no)) == int(year)
+    return _matches_target_business_year(name, int(year))
 
 
 def select_audit_procedure_recovery_targets(
@@ -98,13 +107,20 @@ def select_audit_procedure_recovery_targets(
           AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
           AND substr(d.rcept_no, 1, 4)=strftime('%Y', d.disc_date)
           AND (
-              d.report_nm LIKE '%감사보고서제출%'
-              OR d.report_nm LIKE :standalone_audit_marker
+              (
+                  (
+                      d.report_nm LIKE '%감사보고서제출%'
+                      OR d.report_nm LIKE :standalone_audit_marker
+                  )
+                  AND d.disc_date BETWEEN :start_date AND :end_date
+              )
+              OR d.report_nm LIKE '%사업보고서%'
           )
           AND d.report_nm NOT LIKE '%자회사의 주요경영사항%'
           AND d.report_nm NOT LIKE '%제출 지연%'
           AND d.report_nm NOT LIKE '%제출지연%'
-          AND d.disc_date BETWEEN :start_date AND :end_date
+          AND d.report_nm NOT LIKE '%제출기한연장%'
+          AND d.report_nm NOT LIKE '%해외증권%'
     """
     with get_session() as session:
         rows = session.execute(text(sql), params).mappings().all()
@@ -121,16 +137,28 @@ def select_audit_procedure_recovery_targets(
 
     canonical: dict[str, dict[str, object]] = {}
     for row in rows:
-        if not _matches_target_business_year(row["report_nm"], int(year)):
+        if not _is_target_recovery_root(
+            report_nm=row["report_nm"],
+            rcept_no=row["rcept_no"],
+            year=int(year),
+        ):
             continue
         corp_code = str(row["corp_code"])
         existing = canonical.get(corp_code)
+        candidate_priority = 0 if "사업보고서" in str(row["report_nm"] or "") else 1
         candidate_order = (str(row["disc_date"]), str(row["rcept_no"]))
+        existing_priority = -1
+        if existing is not None:
+            existing_priority = 0 if "사업보고서" in str(existing["report_nm"] or "") else 1
         existing_order = (
             (str(existing["disc_date"]), str(existing["rcept_no"]))
             if existing is not None else None
         )
-        if existing_order is None or candidate_order > existing_order:
+        if (
+            existing_order is None
+            or candidate_priority > existing_priority
+            or (candidate_priority == existing_priority and candidate_order > existing_order)
+        ):
             canonical[corp_code] = dict(row)
 
     def _has_attachment_evidence(receipt: str, corp_code: str, evidence_rows) -> bool:
@@ -343,11 +371,30 @@ def run_audit_procedure_recovery_batch(
                 error=error,
             )
             break
-        totals["ok"] = int(totals["ok"]) + 1
         totals["sections"] = int(totals["sections"]) + int(result.get("sections") or 0)
         # Do not let a successfully fetched raw receipt become resumably
         # skipped until KAM, procedures, and quality have all been persisted.
-        derived_receipts.append(_rebuild_derived_receipt(year=year, target=target))
+        try:
+            derived_receipts.append(_rebuild_derived_receipt(year=year, target=target))
+        except Exception as exc:  # noqa: BLE001 - receipt is retryable after durable checkpoint
+            totals["failed"] = int(totals["failed"]) + 1
+            error = {
+                "corp_code": str(target["corp_code"]),
+                "rcept_no": receipt,
+                "message": str(exc)[:1000],
+            }
+            totals["errors"] = [error]
+            _checkpoint(
+                lease,
+                base_counts=base_counts,
+                cursor_start=cursor_start,
+                next_cursor=next_cursor,
+                totals=totals,
+                exhausted=False,
+                error=error,
+            )
+            break
+        totals["ok"] = int(totals["ok"]) + 1
         next_cursor = {"corp_code": str(target["corp_code"]), "rcept_no": receipt}
         _checkpoint(
             lease,

@@ -113,6 +113,24 @@ def require_raw_backfill_mode(
             )
 
 
+def require_gcs_raw_backfill_mode(operation: str) -> None:
+    """Require the stricter GCS-only raw boundary for durable DART recovery."""
+    backend, keep_inline, bucket = raw_storage_policy()
+    if backend != "gcs":
+        raise RuntimeError(
+            f"{operation} must use GCS raw storage; set RAW_STORAGE_BACKEND=gcs."
+        )
+    if not bucket:
+        raise RuntimeError(
+            f"{operation} must set RAW_STORAGE_BUCKET for GCS raw storage."
+        )
+    require_raw_backfill_mode(
+        operation,
+        raw_storage_backend=backend,
+        raw_storage_keep_inline=keep_inline,
+    )
+
+
 def readonly_cache_miss(dataset: str, company: str | None = None, year: Any = None) -> str:
     parts = [f"{dataset} is not available in the pre-built DB"]
     if company:

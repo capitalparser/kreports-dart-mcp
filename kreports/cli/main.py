@@ -2605,11 +2605,13 @@ def collect_audit_report_sections_cmd(
 def collect_audit_procedure_recovery_cmd(
     year: int = typer.Option(2025, "--year", help="감사대상 사업연도"),
     market: str = typer.Option(..., "--market", help="검증된 historical 시장 (예: KOSPI/KOSDAQ)"),
-    limit: int = typer.Option(25, "--limit", min=1, help="이번 실행의 최대 receipt 수"),
+    limit: int = typer.Option(25, "--limit", min=1, max=25, help="이번 실행의 최대 receipt 수 (1-25)"),
     force: bool = typer.Option(False, "--force", help="동일 recovery lease가 running이면 강제 실행"),
 ):
     """검증된 과거 상장사 중 KAM/감사절차 증거가 부족한 receipt만 복구한다."""
-    from kreports.runtime import require_collector_mode, require_raw_backfill_mode
+    from kreports.db.engine import engine as configured_engine
+    from kreports.maintenance.rehearsal_safety import RehearsalSafetyError, assert_free_space
+    from kreports.runtime import require_collector_mode, require_gcs_raw_backfill_mode
     from kreports.collector.audit_procedure_recovery import (
         TASK_TYPE,
         recovery_backfill_params,
@@ -2618,12 +2620,15 @@ def collect_audit_procedure_recovery_cmd(
 
     try:
         require_collector_mode("collect-audit-procedure-recovery")
-        require_raw_backfill_mode(
-            "collect-audit-procedure-recovery",
-            raw_storage_backend=settings.raw_storage_backend,
-            raw_storage_keep_inline=settings.raw_storage_keep_inline,
+        require_gcs_raw_backfill_mode("collect-audit-procedure-recovery")
+        if configured_engine.dialect.name != "sqlite" or not configured_engine.url.database or configured_engine.url.database == ":memory:":
+            raise RuntimeError(
+                "collect-audit-procedure-recovery requires a file-backed SQLite candidate database."
+            )
+        assert_free_space(
+            Path(configured_engine.url.database).resolve().parent,
         )
-    except RuntimeError as exc:
+    except (OSError, RehearsalSafetyError, RuntimeError) as exc:
         typer.echo(f"오류: {exc}", err=True)
         raise typer.Exit(2)
     if not settings.dart_api_key:
