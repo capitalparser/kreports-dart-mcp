@@ -2841,18 +2841,22 @@ def test_rebuild_continues_from_failed_raw_read_to_normalized_evidence(
     )
 
 
-def test_rebuild_classifies_gcs_raw_as_external_unverified_without_fetch(
+def test_rebuild_recovers_hash_verified_gcs_raw(
     temp_engine,
     monkeypatch,
 ):
     from kreports.collector.report_document_collector import rebuild_kam_items
     from kreports.db.engine import get_session
-    from kreports.storage.raw_documents import RawDocumentStore
+    from kreports.storage.raw_documents import RawDocumentStore, sha1_text
 
-    def reject_network_read(*_args, **_kwargs):
-        raise AssertionError("local KAM rebuild must not fetch GCS raw data")
+    raw_body = FIXTURE.read_text(encoding="utf-8")
 
-    monkeypatch.setattr(RawDocumentStore, "read", reject_network_read)
+    def verified_gcs_read(_self, storage_uri, *, expected_hash=None):
+        assert storage_uri == "gs://raw-bucket/audit/20250318000003.xml.gz"
+        assert expected_hash == sha1_text(raw_body)
+        return raw_body
+
+    monkeypatch.setattr(RawDocumentStore, "read", verified_gcs_read)
     with get_session() as session:
         session.add_all(
             [
@@ -2871,7 +2875,7 @@ def test_rebuild_classifies_gcs_raw_as_external_unverified_without_fetch(
                     report_nm="감사보고서",
                     content_type="xml",
                     raw_content="",
-                    doc_hash="3" * 40,
+                    doc_hash=sha1_text(raw_body),
                     storage_uri="gs://raw-bucket/audit/20250318000003.xml.gz",
                     storage_status="externalized",
                 ),
@@ -2881,10 +2885,10 @@ def test_rebuild_classifies_gcs_raw_as_external_unverified_without_fetch(
     result = rebuild_kam_items(year=2024, dry_run=True)
 
     receipt = result["receipts"][0]
-    assert receipt["quality_status"] == "missing"
-    assert receipt["limitations"] == [
-        "source_documents.raw_body:external_raw_unverified"
-    ]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "source_documents.raw_body"
+    assert receipt["item_count"] == 2
+    assert receipt["limitations"] == []
 
 
 def test_rebuild_falls_back_from_ambiguous_raw_to_clear_normalized_evidence(
