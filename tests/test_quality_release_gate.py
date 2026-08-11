@@ -1663,6 +1663,55 @@ def test_quality_release_gate_cli_allows_newer_policy_fetch_success(
     ]
 
 
+def test_quality_release_gate_cli_rejects_policy_error_before_newer_success(
+    temp_engine,
+    monkeypatch,
+):
+    """A later success cannot erase a historical policy fetch error."""
+    from kreports.cli.main import app
+
+    quality_updated_at = datetime.now(UTC) - timedelta(minutes=1)
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+        policy_status="missing",
+    )
+    with get_session() as session:
+        quality_row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert quality_row is not None
+        quality_row.updated_at = quality_updated_at
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        session.add_all([
+            FetchLog(
+                task_type="policy",
+                corp_code="00126380",
+                year=2025,
+                status="error",
+                fetched_at=quality_updated_at + timedelta(seconds=1),
+            ),
+            FetchLog(
+                task_type="policy",
+                corp_code="00126380",
+                year=2025,
+                status="success",
+                fetched_at=quality_updated_at + timedelta(seconds=2),
+            ),
+        ])
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    result = CliRunner().invoke(
+        app,
+        ["quality-release-gate", "--profile", "public_runtime", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert "quality_input_stale" in json.loads(result.stdout)[
+        "required_failures"
+    ]
+
+
 def test_quality_freshness_groups_duplicate_fetch_evidence_by_company_year(
     temp_engine,
 ):

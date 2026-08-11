@@ -288,25 +288,17 @@ def _quality_input_timestamp_pairs(
         } <= fetch_columns:
             sources.append(
                 """
-                WITH latest_policy_fetch AS (
-                    SELECT f.corp_code, f.year, f.status, f.fetched_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY f.corp_code, f.year
-                               ORDER BY f.fetched_at DESC, f.id DESC
-                           ) AS source_rank
-                    FROM fetch_log AS f
-                    WHERE f.task_type IN (
-                        'policy', 'policy_items', 'accounting_policy'
-                    )
-                )
                 SELECT q.updated_at AS quality_updated_at,
-                       f.fetched_at AS input_fetched_at
+                       MAX(f.fetched_at) AS input_fetched_at
                 FROM company_year_quality AS q
-                JOIN latest_policy_fetch AS f
+                JOIN fetch_log AS f
                   ON f.corp_code=q.corp_code
                  AND f.year=q.bsns_year
-                WHERE f.source_rank=1
+                WHERE f.task_type IN (
+                    'policy', 'policy_items', 'accounting_policy'
+                )
                   AND f.status IN ('error', 'no_data')
+                GROUP BY q.corp_code, q.bsns_year, q.updated_at
                 """
             )
     for source in sources:
