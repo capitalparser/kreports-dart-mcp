@@ -1,33 +1,32 @@
-# Runtime Data Contract
+# Public response and provenance contract
 
-KReports release claims are properties of a selected SQLite artifact. They are
-not inferred from README counts, HTTP 200 responses, or a successful test suite.
+KReports responses are bound to a selected release artifact. README feature
+lists and HTTP success responses are not coverage proof.
 
-## Evidence layers
+## Evidence states
 
-- Raw: optional DART XML/HTML retained under the raw policy.
-- Evidence: receipt-bound excerpts, section identity, source hashes, and DART
-  links or an explicit source-access limitation.
-- Structured: normalized financial, audit, peer, group, and company-year quality
-  rows consumed by the 34-tool catalog.
+- `available`: the requested source or structured fact was retrieved and bound
+  to a filing/source locator;
+- `summary_only`: a derived or summarized value is available but the requested
+  original span is not included;
+- `unverified`: a locator or external source is known, but the content has not
+  been checked in the selected release;
+- `unavailable`: no usable source was found for the requested company, year, or
+  topic.
 
-Every professional response must expose DART provenance or say why the source is
-not locally accessible. A caller-supplied DART key is request-scoped and never
-crosses response, error, log, or release-manifest boundaries.
+Clients must display these states and must not render `summary_only`,
+`unverified`, or `unavailable` as confirmed original text.
 
-## Artifact binding
+## Provenance minimum
 
-`build-release-manifest` binds the DB file name, bytes, streaming SHA-256,
-schema and required indexes, dataset manifest, inline raw count, catalog wire
-hash, isolated real-dispatch catalog smoke, approved packaged golden-contract
-hash, and current release-gate evidence. The golden hash binds the declarative
-semantic contract; fixture-backed semantic execution remains a test-suite
-proof, not a claim that live company values are frozen.
-Unknown or missing fields and unsupported versions are rejected.
+Evidence-bearing results should include company identity, filing year, DART
+receipt/source locator, section or note topic, and the state above. Peer
+comparisons should also return the selected cohort and the rule used to select
+it.
 
-`verify-release-artifact` recomputes those facts from immutable/read-only SQLite
-access. It does not trust a stored ready flag. Non-empty WAL state, DB drift, a
-missing index, a catalog change, or a current named blocker fails verification.
+## Release binding
 
-Coverage years, markets, denominators, exclusions, and feature grades must be
-read from that verified artifact.
+Coverage claims are properties of the immutable runtime artifact selected by
+the private core deployment. The private release pipeline verifies the artifact
+before serving it; public clients should treat the artifact's coverage and
+feature grades as authoritative.
