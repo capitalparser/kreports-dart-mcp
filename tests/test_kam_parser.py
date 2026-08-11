@@ -102,6 +102,36 @@ def test_parse_collapsed_audit_report_recovers_explicit_kam_boundaries():
     )
 
 
+def test_parse_collapsed_audit_report_accepts_inline_dwaeojin_response_heading():
+    """Catch the Korean 다뤄진 response-heading variant leaving a complete KAM as error."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항\n"
+        "특수관계자 거래 및 잔액 공시의 적정성\n"
+        "핵심감사사항으로 결정한 이유\n"
+        "관련 거래와 잔액 공시에는 유의적인 왜곡표시위험이 포함됩니다.\n"
+        "핵심감사사항이 감사에서 다뤄진 방법 감사절차는 다음과 같습니다.\n"
+        "- 관련 계약서를 검사하였습니다.\n"
+        "- 거래 내역을 대사하였습니다.\n"
+        "- 잔액 확인서를 검토하였습니다.\n"
+        "- 공시 자료를 확인하였습니다.\n"
+        "- 승인 문서를 검사하였습니다.\n"
+        "- 재무제표 표시를 검토하였습니다.\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "특수관계자 거래 및 잔액 공시의 적정성",
+    ]
+    assert outcome.items[0].quality_status == "full_body"
+    assert len(extract_procedure_steps(outcome.items[0])) == 6
+
+
 def test_parse_collapsed_audit_report_ignores_numbered_field_labels():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 
