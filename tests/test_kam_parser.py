@@ -2921,6 +2921,37 @@ def test_parser_accepts_bulleted_reason_and_narrative_major_procedures_heading()
     assert "할인율" in outcome.items[0].audit_response_text
 
 
+def test_parser_accepts_majorhan_and_omitted_reason_heading_variants():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    cases = [
+        """핵심감사사항
+수출매출의 발생사실 및 기간귀속에 대한 적정성
+핵심감사사항으로 선정된 이유
+수익인식 시점 판단은 유의적인 위험입니다.
+이와 관련하여 우리가 수행한 주요한 감사절차는 다음과 같습니다.
+ㆍ계약서를 대사검증하였습니다.
+연결""",
+    ]
+
+    for body in cases:
+        outcome = parse_kam_items(body)
+        assert outcome.status == "complete"
+        assert len(outcome.items) == 1
+
+
+def test_collapsed_parser_accepts_narrative_major_procedure_heading():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    outcome = parse_collapsed_kam_items(
+        "핵심감사사항 (1) 재고자산 평가 핵심감사사항으로 결정된 이유 판단이 필요합니다. "
+        "이와 관련하여 우리가 수행한 주요한 감사절차는 다음과 같습니다. "
+        "재고자산 평가충당금을 재계산 검증"
+    )
+
+    assert outcome.status == "complete"
+
+
 def test_rebuild_prefers_exact_receipt_source_document_and_dry_run_writes_nothing(
     temp_engine,
 ):
