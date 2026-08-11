@@ -2838,6 +2838,35 @@ def test_parser_merges_repeated_reason_response_pair_across_page(first_response)
     assert "감사에서 다루어진 방법" not in items[0].audit_response_text
 
 
+def test_parser_keeps_numbered_procedure_before_standalone_separator():
+    """A separator after a numbered procedure cannot manufacture a KAM title."""
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    1. 수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속 판단 위험
+    감사에서 다루어진 방법
+    1. 계약 검사
+    2. 기간귀속 재수행
+    -
+    핵심감사사항으로 선정한 이유
+    반복 페이지의 복합계약 판단 위험
+    감사에서 다루어진 방법
+    추가 감사절차
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+    assert items[0].reason_text == "기간귀속 판단 위험\n반복 페이지의 복합계약 판단 위험"
+    assert items[0].audit_response_text == (
+        "1. 계약 검사\n2. 기간귀속 재수행\n-\n추가 감사절차"
+    )
+
+
 def test_parser_reports_ambiguous_unnumbered_matter_with_same_headings():
     from kreports.processor.kam_parser import extract_kam_items, parse_kam_items
 

@@ -959,6 +959,14 @@ def _has_clear_title_evidence(value: str) -> bool:
     )
 
 
+def _has_separator_title_evidence(value: str) -> bool:
+    """Accept a separator-marked title only with matter, not procedure, evidence."""
+    return _has_clear_title_evidence(value) or (
+        _title_evidence_score(value) >= 1
+        and _OMITTED_REASON_RISK_TITLE_ENDING_RE.search(value) is not None
+    )
+
+
 def _title_parts(values: list[str]) -> str:
     parts: list[str] = []
     for value in values:
@@ -1071,11 +1079,18 @@ def _discover_title_boundary(
         marker_reason_separator = lines[reason_index].lstrip().startswith(
             ("-", "–", "—")
         )
+        marker_separator_transition = (
+            (separator_padding or marker_reason_separator)
+            and _has_separator_title_evidence(marked_title)
+        )
         if (
             response_owned
             and has_suffix
             and not marked_wrap
-            and not (is_distinct_matter_marker and separator_padding)
+            and not (
+                is_distinct_matter_marker
+                and marker_separator_transition
+            )
         ):
             # This marker already belongs to the accepted matter's response.
             # The unnumbered suffix immediately before the new reason owns the
@@ -1112,7 +1127,7 @@ def _discover_title_boundary(
         has_explicit_structure=(
             (
                 selected_marker is not None
-                and (separator_padding or marker_reason_separator)
+                and marker_separator_transition
             )
             or (
                 structured_lines is not None
@@ -1271,6 +1286,32 @@ def _discover_matter_frames(
             structured_lines=structured_lines,
         )
         if title is None:
+            preceding = lines[lower:heading_frame.reason_heading]
+            marked_tail = [
+                (index, _title_marker(line))
+                for index, line in enumerate(preceding)
+                if _title_marker(line) is not None
+            ]
+            final_marker = marked_tail[-1] if marked_tail else None
+            if (
+                frames
+                and _is_semantically_equivalent_heading_pair(
+                    lines,
+                    frames[-1].heading_frames[-1],
+                    heading_frame,
+                )
+                and final_marker is not None
+                and final_marker[1] is not None
+                and not _has_separator_title_evidence(
+                    final_marker[1][2]
+                )
+                and all(
+                    re.fullmatch(r"\s*[-–—]+\s*", line) is not None
+                    for line in preceding[final_marker[0] + 1:]
+                )
+            ):
+                frames[-1].heading_frames.append(heading_frame)
+                previous_response = _last_response_heading(heading_frame)
             continue
         if (
             frames
