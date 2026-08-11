@@ -177,6 +177,9 @@ def test_extract_procedure_steps_preserves_inline_explicit_list_provenance(
     "text_value",
     [
         "보고기간 전ㆍ후 거래를 검토하였습니다.",
+        "내ㆍ외부 거래를 검토하였습니다.",
+        "현ㆍ전기 잔액을 비교하였습니다.",
+        "손익ㆍ공정가치 가정을 평가하였습니다.",
         "매출·매입 거래를 검토하였습니다.",
         "감사인은 전문가적 판단·의구심을 유지할 책임이 있습니다.",
     ],
