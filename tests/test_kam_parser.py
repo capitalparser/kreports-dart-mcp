@@ -457,6 +457,40 @@ def test_parse_collapsed_audit_report_recovers_inline_reason_after_explicit_titl
     )
 
 
+def test_parse_collapsed_audit_report_recovers_two_numbered_omitted_reason_matters():
+    """Split only marker-delimited matters with one explicit response each."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항\n"
+        "핵심감사사항은 우리의 전문가적 판단에 따라 당기 감사에서 가장 유의적인 사항입니다.\n"
+        "(1) 종속기업 투자주식에 대한 손상 평가 회사는 손상징후가 있는 투자주식의 "
+        "회수가능가액을 추정하며 할인율과 현금흐름에 경영진의 중요한 판단이 포함됩니다. "
+        "따라서 종속기업 투자주식 손상평가를 핵심감사사항으로 식별하였습니다.\n"
+        "핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.\n"
+        "- 손상징후와 평가결과 관련 내부통제 평가\n"
+        "- 외부전문가의 적격성과 독립성 평가\n"
+        "(2) 매출의 수익인식 기간귀속\n"
+        "매출은 수익인식조건이 충족되기 전에 인식되거나 적절한 기간에 "
+        "인식되지 않을 위험이 존재합니다. 따라서 기간귀속을 "
+        "핵심감사사항으로 선정하였습니다.\n"
+        "핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.\n"
+        "- 수익인식 귀속시기 관련 내부통제 평가\n"
+        "- 표본 거래 증빙과 계약조건 확인\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "종속기업 투자주식에 대한 손상 평가",
+        "매출의 수익인식 기간귀속",
+    ]
+    assert [len(extract_procedure_steps(item)) for item in outcome.items] == [2, 2]
+
+
 def test_parse_collapsed_audit_report_does_not_infer_title_from_reason_narrative():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 

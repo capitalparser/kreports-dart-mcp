@@ -159,6 +159,12 @@ def test_extract_procedure_steps_rejects_generic_bulleted_procedure_lead_in():
             ["계약서 검토", "외부조회 확인"],
             ["inspection", "confirmation"],
         ),
+        (
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.－ 계약서 검토"
+            " － 외부조회 확인",
+            ["계약서 검토", "외부조회 확인"],
+            ["inspection", "confirmation"],
+        ),
     ],
 )
 def test_extract_procedure_steps_preserves_inline_explicit_list_provenance(
@@ -296,6 +302,16 @@ def test_extract_procedure_steps_does_not_treat_lexical_middle_dots_as_list_prov
         assert steps == []
     else:
         assert [step.procedure_text for step in steps] == [text_value]
+
+
+def test_extract_procedure_steps_does_not_treat_fullwidth_hyphen_prose_as_bullets():
+    steps = extract_procedure_steps(
+        _kam_item("매출－매입 거래 차이를 검토하였습니다.")
+    )
+
+    assert [step.procedure_text for step in steps] == [
+        "매출－매입 거래 차이를 검토하였습니다.",
+    ]
 
 
 @pytest.mark.parametrize(

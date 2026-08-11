@@ -197,7 +197,7 @@ def legacy_procedure_type(method: str) -> str:
 
 def _normalize_clause(value: str) -> str:
     value = re.sub(
-        r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*|\(?\d{1,3}\)?[.)]\s*)",
+        r"^\s*(?:(?:[-－•·▪◦ㆍ])\s*|[①-⑳]\s*|\(?\d{1,3}\)?[.)]\s*)",
         "",
         value,
     )
@@ -212,11 +212,11 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
         r"\r?\n+",
         r"[;；]+",
         r"(?<=[.!?。])\s+",
-        r"(?<=[.!?。])(?=\s*[-•·▪◦ㆍ①-⑳])",
+        r"(?<=[.!?。])(?=\s*[-－•·▪◦ㆍ①-⑳])",
         r"(?:(?<![\s\S])(?=ㆍ)|(?<=[\s.!?。])(?=ㆍ)|(?=ㆍ\s+))",
         r"(?=[①-⑳])",
         r"(?<=\s)(?=[•·▪◦]\s+)",
-        r"(?<=\s)(?=-\s+)",
+        r"(?<=\s)(?=[-－]\s+)",
     ]
     base_pattern = re.compile("(?:" + "|".join(boundaries) + ")")
     boundary_positions = {
@@ -226,7 +226,7 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
     lead_in = _AUDIT_PROCEDURE_LIST_LEAD_IN.search(bounded)
     if lead_in is not None:
         list_pattern = re.compile(
-            r"(?:(?<=\S)(?=-\s*\S)|"
+            r"(?:(?<=\S)(?=[-－]\s*\S)|"
             r"(?<=\s)(?=\(?\d{1,3}\)?[.)]\s+))"
         )
         boundary_positions.update(
@@ -242,14 +242,14 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
         *,
         pending_bullet_context: bool = False,
     ) -> bool:
-        if re.fullmatch(r"\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw):
+        if re.fullmatch(r"\s*(?:(?:[-－•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw):
             return True
         lowered_raw = raw.lower()
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
             return False
         bullet_context = bool(
             re.match(
-                r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*|"
+                r"^\s*(?:(?:[-－•·▪◦ㆍ])\s*|[①-⑳]\s*|"
                 r"\(?\d{1,3}\)?[.)]\s*)",
                 raw,
             )

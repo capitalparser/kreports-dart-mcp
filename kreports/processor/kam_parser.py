@@ -160,6 +160,9 @@ _COLLAPSED_FIELD_MARKER_RE = re.compile(
 _COLLAPSED_REASON_SUBJECT_RE = re.compile(
     r"\s+(?=(?:연결)?회사는\s|당사는\s|그룹은\s)"
 )
+_NUMBERED_OMITTED_REASON_SUBJECT_RE = re.compile(
+    r"\s+(?=(?:(?:연결)?회사는|당사는|그룹은|매출은)\s)"
+)
 MAX_TITLE_BLOCK_LINES = 8
 MAX_TITLE_BLOCK_CHARS = 800
 _TITLE_CONNECTOR_ENDINGS = (
@@ -1742,6 +1745,81 @@ def _has_embedded_collapsed_section(full_text: str) -> bool:
     return False
 
 
+def _inject_numbered_omitted_collapsed_reason_headings(
+    lines: list[str],
+    *,
+    kam_start: int,
+    kam_end: int,
+    response_indexes: list[int],
+) -> bool:
+    """Recover explicit numbered matters with one response frame each.
+
+    This is deliberately separate from the unmarked single-matter fallback:
+    every matter must have a consecutive Arabic marker, a short title with
+    clear evidence, an inline reason, and its own explicit response heading.
+    """
+    if len(response_indexes) < 2:
+        return False
+
+    matters: list[tuple[int, str, str, str | None]] = []
+    lower = kam_start
+    for response_index in response_indexes:
+        candidates: list[tuple[int, str, str, str]] = []
+        for index in range(lower + 1, response_index):
+            marker = _TITLE_MARKER_RE.match(lines[index])
+            if marker is None or marker.group("arabic") is None:
+                continue
+            identity = marker.group("arabic").strip("()")
+            title_and_reason = _normalize_title(marker.group("title"))
+            subject = _NUMBERED_OMITTED_REASON_SUBJECT_RE.search(
+                title_and_reason
+            )
+            if subject is None:
+                title = title_and_reason
+                reason_parts = lines[index + 1:response_index]
+                inline_reason = None
+            else:
+                title = _normalize_title(title_and_reason[:subject.start()])
+                inline_reason = title_and_reason[subject.end():].strip()
+                reason_parts = [inline_reason, *lines[index + 1:response_index]]
+            if (
+                len(title) > 80
+                or title.endswith((".", "。"))
+                or not _has_clear_title_evidence(title)
+                or len(_compact(" ".join(reason_parts))) < 50
+                or any(
+                    _matches_heading(
+                        line,
+                        _KAM_HEADINGS
+                        + _REASON_HEADINGS
+                        + _RESPONSE_HEADINGS
+                        + _TRAILING_HEADINGS,
+                    )
+                    for line in reason_parts
+                )
+            ):
+                continue
+            candidates.append((index, identity, title, inline_reason))
+        if len(candidates) != 1:
+            return False
+        matters.append(candidates[0])
+        lower = response_index
+
+    if [identity for _index, identity, _title, _reason in matters] != [
+        str(number) for number in range(1, len(matters) + 1)
+    ]:
+        return False
+    for index, _identity, title, inline_reason in reversed(matters):
+        replacement = [
+            f"<TITLE>{escape(title)}</TITLE>",
+            "핵심감사사항으로 결정된 이유",
+        ]
+        if inline_reason:
+            replacement.append(inline_reason)
+        lines[index:index + 1] = replacement
+    return True
+
+
 def _inject_omitted_collapsed_reason_heading(
     lines: list[str],
     *,
@@ -1759,6 +1837,14 @@ def _inject_omitted_collapsed_reason_heading(
         for index in range(kam_start + 1, kam_end)
         if _matches_heading(lines[index], _RESPONSE_HEADINGS)
     ]
+    if len(response_indexes) > 1:
+        _inject_numbered_omitted_collapsed_reason_headings(
+            lines,
+            kam_start=kam_start,
+            kam_end=kam_end,
+            response_indexes=response_indexes,
+        )
+        return
     if len(response_indexes) != 1:
         return
     response_index = response_indexes[0]
