@@ -312,6 +312,66 @@ def test_selector_prefers_direct_audit_root_over_later_business_report_fallback(
     ]
 
 
+def test_selector_accepts_full_audit_evidence_under_target_year_business_fallback(
+    temp_engine,
+):
+    """Catch a direct-root adequacy check that ignores its annual fallback."""
+    from kreports.collector.audit_procedure_recovery import (
+        select_audit_procedure_recovery_targets,
+    )
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditProcedureItem, KamItem
+
+    corp_code = "00000018"
+    corrected_receipt = "20260428800618"
+    business_receipt = "20260428000618"
+    attachment_receipt = f"{business_receipt}_11351227"
+    _seed_target(
+        corp_code,
+        corrected_receipt,
+        report_nm="[기재정정]감사보고서제출",
+        disc_date=date(2026, 4, 28),
+    )
+    _seed_target(
+        corp_code,
+        business_receipt,
+        report_nm="사업보고서 (2025.12)",
+        disc_date=date(2026, 4, 28),
+    )
+    with get_session() as session:
+        session.add(KamItem(
+            rcept_no=attachment_receipt,
+            corp_code=corp_code,
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=0,
+            full_body_hash="b" * 40,
+            full_body_length=1000,
+            source_basis="report_sections.structured_body",
+            quality_status="full_body",
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no=attachment_receipt,
+            corp_code=corp_code,
+            bsns_year=2025,
+            source_type="audit_report",
+            procedure_type="substantive_test",
+            procedure_text="계약서를 검사하였습니다.",
+            section_ordinal=0,
+            procedure_ordinal=0,
+        ))
+
+    result = select_audit_procedure_recovery_targets(
+        year=2025,
+        market="KOSPI",
+        limit=20,
+    )
+
+    assert result["canonical_roots"] == 1
+    assert result["inadequate_roots"] == 0
+    assert result["targets"] == []
+
+
 def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
     temp_engine,
     monkeypatch,
@@ -346,7 +406,7 @@ def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
                 "sections": 0,
                 "error": "audit report attachment not found",
             }
-        return {"ok": 1, "sections": 2}
+        return {"ok": 1, "sections": 2, "audit_report_sections": 2}
 
     monkeypatch.setattr(recovery, "collect_report_sections_for_disclosure", fetch)
     monkeypatch.setattr(
@@ -380,6 +440,146 @@ def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
         "corp_code": corp_code,
         "rcept_no": corrected_receipt,
     }
+
+
+def test_batch_keeps_corrected_root_retryable_when_business_fallback_has_no_audit_evidence(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a business-only fallback being counted as recovered audit evidence."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    corp_code = "00000019"
+    corrected_receipt = "20260428800619"
+    business_receipt = "20260428000619"
+    _seed_target(
+        corp_code,
+        corrected_receipt,
+        report_nm="[기재정정]감사보고서제출",
+        disc_date=date(2026, 4, 28),
+    )
+    _seed_target(
+        corp_code,
+        business_receipt,
+        report_nm="사업보고서 (2025.12)",
+        disc_date=date(2026, 4, 28),
+    )
+    fetched: list[str] = []
+    rebuilt: list[str] = []
+
+    def fetch(receipt: str) -> dict[str, object]:
+        fetched.append(receipt)
+        if receipt == corrected_receipt:
+            return {
+                "ok": 0,
+                "sections": 0,
+                "error": "audit report attachment not found",
+            }
+        return {
+            "ok": 1,
+            "sections": 5,
+            "audit_report_sections": 0,
+            "errors": ["audit report attachment not found"],
+        }
+
+    monkeypatch.setattr(recovery, "collect_report_sections_for_disclosure", fetch)
+    monkeypatch.setattr(
+        recovery,
+        "_rebuild_derived_receipt",
+        lambda *, year, target: rebuilt.append(str(target["rcept_no"])),
+    )
+    params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+
+    result = recovery.run_audit_procedure_recovery_batch(
+        lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    with get_session() as session:
+        row = session.get(BackfillRun, lease.id)
+        checkpoint = json.loads(row.checkpoint_json)
+    assert fetched == [corrected_receipt, business_receipt]
+    assert rebuilt == []
+    assert result["ok"] == 0
+    assert result["failed"] == 1
+    assert result["api_receipt_fetches"] == 2
+    assert result["next_cursor"] is None
+    assert checkpoint["last_error"] == {
+        "corp_code": corp_code,
+        "rcept_no": corrected_receipt,
+        "message": (
+            "audit report attachment not found; annual business report "
+            "fallback yielded no audit report sections"
+        ),
+    }
+
+
+def test_batch_excludes_noncanonical_business_report_from_audit_fallback(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch fallback selection that admits subsidiary or delayed filing labels."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    corp_code = "00000023"
+    corrected_receipt = "20260428800623"
+    business_receipt = "20260428000623"
+    excluded_receipt = "20260429000623"
+    _seed_target(
+        corp_code,
+        corrected_receipt,
+        report_nm="[기재정정]감사보고서제출",
+        disc_date=date(2026, 4, 28),
+    )
+    _seed_target(
+        corp_code,
+        business_receipt,
+        report_nm="사업보고서 (2025.12)",
+        disc_date=date(2026, 4, 28),
+    )
+    _seed_target(
+        corp_code,
+        excluded_receipt,
+        report_nm="사업보고서 (2025.12) (자회사의 주요경영사항)",
+        disc_date=date(2026, 4, 29),
+    )
+    fetched: list[str] = []
+
+    def fetch(receipt: str) -> dict[str, object]:
+        fetched.append(receipt)
+        if receipt == corrected_receipt:
+            return {
+                "ok": 0,
+                "sections": 0,
+                "error": "audit report attachment not found",
+            }
+        return {"ok": 1, "sections": 2, "audit_report_sections": 2}
+
+    monkeypatch.setattr(recovery, "collect_report_sections_for_disclosure", fetch)
+    monkeypatch.setattr(
+        recovery,
+        "_rebuild_derived_receipt",
+        lambda *, year, target: {"rcept_no": str(target["rcept_no"])},
+    )
+    params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+
+    result = recovery.run_audit_procedure_recovery_batch(
+        lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    assert result["ok"] == 1
+    assert fetched == [corrected_receipt, business_receipt]
 
 
 def test_successful_batch_resumes_after_saved_prefix_and_failure_retries(temp_engine, monkeypatch):

@@ -136,6 +136,7 @@ def select_audit_procedure_recovery_targets(
         """), {"year": int(year)}).mappings().all()
 
     canonical: dict[str, dict[str, object]] = {}
+    business_fallbacks: dict[str, dict[str, object]] = {}
     for row in rows:
         if not _is_target_recovery_root(
             report_nm=row["report_nm"],
@@ -144,6 +145,21 @@ def select_audit_procedure_recovery_targets(
         ):
             continue
         corp_code = str(row["corp_code"])
+        if "사업보고서" in str(row["report_nm"] or ""):
+            existing_business = business_fallbacks.get(corp_code)
+            candidate_order = (str(row["disc_date"]), str(row["rcept_no"]))
+            existing_business_order = (
+                (
+                    str(existing_business["disc_date"]),
+                    str(existing_business["rcept_no"]),
+                )
+                if existing_business is not None else None
+            )
+            if (
+                existing_business_order is None
+                or candidate_order > existing_business_order
+            ):
+                business_fallbacks[corp_code] = dict(row)
         existing = canonical.get(corp_code)
         candidate_priority = 0 if "사업보고서" in str(row["report_nm"] or "") else 1
         candidate_order = (str(row["disc_date"]), str(row["rcept_no"]))
@@ -172,11 +188,24 @@ def select_audit_procedure_recovery_targets(
         )
 
     candidates = sorted(canonical.values(), key=lambda row: (str(row["corp_code"]), str(row["rcept_no"])))
+
+    def _has_complete_audit_evidence(receipt: str, corp_code: str) -> bool:
+        return (
+            _has_attachment_evidence(receipt, corp_code, full_kams)
+            and _has_attachment_evidence(receipt, corp_code, procedures)
+        )
+
     inadequate = [
         row for row in candidates
-        if not (
-            _has_attachment_evidence(str(row["rcept_no"]), str(row["corp_code"]), full_kams)
-            and _has_attachment_evidence(str(row["rcept_no"]), str(row["corp_code"]), procedures)
+        if not any(
+            _has_complete_audit_evidence(receipt, str(row["corp_code"]))
+            for receipt in (
+                str(row["rcept_no"]),
+                *(
+                    (str(business_fallbacks[str(row["corp_code"])]["rcept_no"]),)
+                    if str(row["corp_code"]) in business_fallbacks else ()
+                ),
+            )
         )
     ]
     if cursor is not None:
@@ -223,6 +252,11 @@ def _canonical_business_report_fallback(
               AND d.report_nm LIKE '%사업보고서%'
               AND length(d.rcept_no)=14
               AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+              AND d.report_nm NOT LIKE '%자회사의 주요경영사항%'
+              AND d.report_nm NOT LIKE '%제출 지연%'
+              AND d.report_nm NOT LIKE '%제출지연%'
+              AND d.report_nm NOT LIKE '%제출기한연장%'
+              AND d.report_nm NOT LIKE '%해외증권%'
         """), {"corp_code": corp_code}).mappings().all()
     candidates = [
         row
@@ -244,6 +278,14 @@ def _canonical_business_report_fallback(
         "rcept_no": str(selected["rcept_no"]),
         "corp_name": str(selected["corp_name"] or ""),
     }
+
+
+def _has_usable_fallback_audit_evidence(result: Mapping[str, object]) -> bool:
+    """Require audit attachment sections rather than a business-body success."""
+    try:
+        return int(result.get("audit_report_sections") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) -> dict[str, str] | None:
@@ -411,9 +453,24 @@ def run_audit_procedure_recovery_batch(
                 totals["api_receipt_fetches"] = (
                     int(totals["api_receipt_fetches"]) + 1
                 )
-                if fallback_result.get("ok"):
+                if (
+                    fallback_result.get("ok")
+                    and _has_usable_fallback_audit_evidence(fallback_result)
+                ):
                     result = fallback_result
                     effective_target = fallback
+                else:
+                    fallback_error = str(fallback_result.get("error") or "").strip()
+                    suffix = (
+                        f"fallback failed: {fallback_error}"
+                        if fallback_error else "fallback yielded no audit report sections"
+                    )
+                    result = {
+                        "ok": 0,
+                        "documents": 0,
+                        "sections": 0,
+                        "error": f"audit report attachment not found; annual business report {suffix}",
+                    }
         totals["processed"] = int(totals["processed"]) + 1
         if not result.get("ok"):
             totals["failed"] = int(totals["failed"]) + 1
