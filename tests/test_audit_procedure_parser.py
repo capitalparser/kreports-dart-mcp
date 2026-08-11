@@ -173,6 +173,69 @@ def test_extract_procedure_steps_preserves_inline_explicit_list_provenance(
     assert [step.method for step in steps] == expected_methods
 
 
+def test_extract_procedure_steps_preserves_standalone_bullet_provenance_for_next_clause():
+    steps = extract_procedure_steps(
+        _kam_item("ㆍ\n계약서 검토\nㆍ\n외부조회 확인")
+    )
+
+    assert [step.procedure_text for step in steps] == ["계약서 검토", "외부조회 확인"]
+    assert [step.method for step in steps] == ["inspection", "confirmation"]
+
+
+def test_extract_procedure_steps_preserves_glued_hyphen_list_after_audit_lead_in():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다- 계약서 검토"
+            "- 외부조회 확인- 분석적 절차 수행"
+        )
+    )
+
+    assert [step.procedure_text for step in steps] == [
+        "계약서 검토",
+        "외부조회 확인",
+        "분석적 절차 수행",
+    ]
+    assert [step.method for step in steps] == [
+        "inspection",
+        "confirmation",
+        "analytical_procedure",
+    ]
+
+
+@pytest.mark.parametrize(
+    "text_value",
+    [
+        "ㆍ\n감사기준에 따라 감사를 수행합니다.",
+        "매출-매입 차이를 검토하였습니다-추가 분석을 수행하였습니다.",
+    ],
+)
+def test_extract_procedure_steps_does_not_extend_list_provenance_to_responsibility_or_generic_minus_prose(
+    text_value,
+):
+    steps = extract_procedure_steps(_kam_item(text_value))
+
+    if "감사기준" in text_value:
+        assert steps == []
+    else:
+        assert [step.procedure_text for step in steps] == [text_value]
+
+
+@pytest.mark.parametrize(
+    "text_value",
+    [
+        "감사인의 책임 - 계약서 검토",
+        "감사인의 책임 - 계약서 검토 - 외부조회 확인",
+        "감사인은 전문가적 판단을 유지할 책임이 있습니다ㆍ 계약서 검토",
+        "감사기준에 따라 감사를 수행합니다 ① 계약서 검토",
+    ],
+)
+def test_extract_procedure_steps_does_not_bypass_responsibility_rejection_via_inline_marker(
+    text_value,
+):
+    """Catch artificial inline splitting that turns responsibility prose into a procedure list."""
+    assert extract_procedure_steps(_kam_item(text_value)) == []
+
+
 @pytest.mark.parametrize(
     "text_value",
     [

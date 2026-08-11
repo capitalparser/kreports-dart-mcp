@@ -144,6 +144,10 @@ _GENERIC_PROCEDURE_LEAD_IN = re.compile(
     r"(?:다음(?:을)? 포함한|다음의)\s*감사절차(?:를|는)?\s*"
     r"수행(?:하였|했|합니다|하였다)"
 )
+_AUDIT_PROCEDURE_LIST_LEAD_IN = re.compile(
+    r"(?:주요(?:한)?\s*)?감사절차\s*(?:는|를)?\s*"
+    r"다음(?:과\s*)?같(?:습니다|다|은)"
+)
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "existence": ("실재", "실사", "잔액 확인"),
@@ -202,23 +206,37 @@ def _normalize_clause(value: str) -> str:
 
 def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
     bounded = (source or "")[:MAX_INPUT_CHARS]
-    pattern = re.compile(
-        r"(?:\r?\n+|[;；]+|(?<=[.!?。])\s+|"
-        r"(?<=[.!?。])(?=\s*[-•·▪◦ㆍ①-⑳])|"
-        r"(?:(?<![\s\S])(?=ㆍ)|(?<=[\s.!?。])(?=ㆍ)|(?=ㆍ\s+))|"
-        r"(?=[①-⑳])|"
-        r"(?<=\s)(?=[•·▪◦]\s+)|"
-        r"(?<=\s)(?=-\s+))"
-    )
+    if any(marker in bounded.lower() for marker in _RESPONSIBILITY_BOILERPLATE):
+        return []
+    boundaries = [
+        r"\r?\n+",
+        r"[;；]+",
+        r"(?<=[.!?。])\s+",
+        r"(?<=[.!?。])(?=\s*[-•·▪◦ㆍ①-⑳])",
+        r"(?:(?<![\s\S])(?=ㆍ)|(?<=[\s.!?。])(?=ㆍ)|(?=ㆍ\s+))",
+        r"(?=[①-⑳])",
+        r"(?<=\s)(?=[•·▪◦]\s+)",
+        r"(?<=\s)(?=-\s+)",
+    ]
+    if _AUDIT_PROCEDURE_LIST_LEAD_IN.search(bounded):
+        boundaries.append(r"(?<=\S)(?=-\s*\S)")
+    pattern = re.compile("(?:" + "|".join(boundaries) + ")")
     clauses: list[tuple[str, int, int, bool, bool]] = []
 
-    def append_raw(raw: str, absolute_start: int) -> None:
+    def append_raw(
+        raw: str,
+        absolute_start: int,
+        *,
+        pending_bullet_context: bool = False,
+    ) -> bool:
+        if re.fullmatch(r"\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw):
+            return True
         lowered_raw = raw.lower()
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
-            return
+            return False
         bullet_context = bool(
             re.match(r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw)
-        )
+        ) or pending_bullet_context
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
             r"분석|테스트|평가|추출|활용|대사|조사|확인)"
@@ -304,12 +322,22 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
             absolute_start + local_start,
             absolute_start + len(raw),
         )
+        return False
 
     start = 0
+    pending_bullet_context = False
     for match in pattern.finditer(bounded):
-        append_raw(bounded[start:match.start()], start)
+        pending_bullet_context = append_raw(
+            bounded[start:match.start()],
+            start,
+            pending_bullet_context=pending_bullet_context,
+        )
         start = match.end()
-    append_raw(bounded[start:], start)
+    append_raw(
+        bounded[start:],
+        start,
+        pending_bullet_context=pending_bullet_context,
+    )
     return clauses
 
 
