@@ -1574,7 +1574,8 @@ def parse_kam_items(full_text: str) -> KamParseOutcome:
         )
 
 
-def _compact_span_end(value: str, compact_needle: str) -> int | None:
+def _compact_span_ends(value: str, compact_needle: str) -> list[int]:
+    """Return every source offset ending a whitespace-insensitive marker."""
     compact_chars: list[str] = []
     source_indexes: list[int] = []
     for index, character in enumerate(value):
@@ -1582,13 +1583,22 @@ def _compact_span_end(value: str, compact_needle: str) -> int | None:
             continue
         compact_chars.append(character.lower())
         source_indexes.append(index)
-    position = "".join(compact_chars).rfind(compact_needle.lower())
-    if position < 0:
-        return None
-    final = position + len(compact_needle) - 1
-    if final >= len(source_indexes):
-        return None
-    return source_indexes[final] + 1
+    compact_value = "".join(compact_chars)
+    start = 0
+    ends: list[int] = []
+    while True:
+        position = compact_value.find(compact_needle.lower(), start)
+        if position < 0:
+            return ends
+        final = position + len(compact_needle) - 1
+        if final < len(source_indexes):
+            ends.append(source_indexes[final] + 1)
+        start = position + 1
+
+
+def _compact_span_end(value: str, compact_needle: str) -> int | None:
+    ends = _compact_span_ends(value, compact_needle)
+    return ends[-1] if ends else None
 
 
 def _split_collapsed_headings(value: str) -> list[str]:
@@ -1757,27 +1767,30 @@ def _inject_omitted_collapsed_reason_heading(
     candidate_inline_reason = None
     for index in range(kam_start + 1, response_index):
         inline_reason = None
-        intro_cut = -1
-        for ending in _COLLAPSED_INTRO_ENDINGS:
-            position = _compact_span_end(lines[index], ending)
-            if position is not None:
-                intro_cut = max(intro_cut, position)
-        intro_tail = lines[index][intro_cut:].strip() if intro_cut >= 0 else ""
-        subject = _COLLAPSED_REASON_SUBJECT_RE.search(intro_tail)
-        if subject is not None:
+        candidate = None
+        intro_cuts = sorted(
+            {
+                position
+                for ending in _COLLAPSED_INTRO_ENDINGS
+                for position in _compact_span_ends(lines[index], ending)
+            }
+        )
+        for intro_cut in intro_cuts:
+            intro_tail = lines[index][intro_cut:].strip()
+            subject = _COLLAPSED_REASON_SUBJECT_RE.search(intro_tail)
+            if subject is None:
+                continue
             inline_title = intro_tail[:subject.start()].strip()
-            candidate = (
-                (lines[index][:intro_cut].strip(), inline_title)
-                if (
-                    len(inline_title) <= 80
-                    and not inline_title.endswith((".", "。"))
-                    and _title_evidence_score(inline_title) >= 3
-                )
-                else None
-            )
-            if candidate is not None:
-                inline_reason = intro_tail[subject.end():].strip()
-        else:
+            if (
+                len(inline_title) > 80
+                or inline_title.endswith((".", "。"))
+                or _title_evidence_score(inline_title) < 3
+            ):
+                continue
+            candidate = (lines[index][:intro_cut].strip(), inline_title)
+            inline_reason = intro_tail[subject.end():].strip()
+            break
+        if candidate is None:
             subject = _COLLAPSED_REASON_SUBJECT_RE.search(lines[index])
             if subject is not None:
                 inline_title = lines[index][:subject.start()].strip()

@@ -369,7 +369,16 @@ def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_after_intr
     ]
 
 
-def test_parse_collapsed_audit_report_recovers_intro_tail_title_before_inline_reason():
+@pytest.mark.parametrize(
+    "later_intro_like_ending",
+    [
+        "핵심감사사항으로 결정하였습니다.",
+        "핵심감사사항으로 식별하였습니다.",
+    ],
+)
+def test_parse_collapsed_audit_report_recovers_intro_tail_title_before_inline_reason(
+    later_intro_like_ending,
+):
     """Keep the explicit title between the KAM intro and the inline 회사는 reason."""
     from kreports.processor.audit_procedure_parser import extract_procedure_steps
     from kreports.processor.kam_parser import parse_collapsed_kam_items
@@ -381,7 +390,7 @@ def test_parse_collapsed_audit_report_recovers_intro_tail_title_before_inline_re
         "회사는 수익인식의 조건이 충족되기 전에 수익이 인식될 위험이 높다고 "
         "판단하였습니다. 수출조건에 따라 통제 이전 시기가 달라 기말시점에 "
         "기간귀속의 착오 및 누락가능성이 높습니다. 이에 오디오제품의 매출 "
-        "수익인식 기간귀속의 적정성을 핵심감사사항으로 선정하였습니다.\n"
+        f"수익인식 기간귀속의 적정성을 {later_intro_like_ending}\n"
         "핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.\n"
         "- 계약서 검토를 통한 수익인식 시점의 적정성 검토\n"
         "- 수익인식 귀속시기 관련 내부통제 이해와 평가\n"
