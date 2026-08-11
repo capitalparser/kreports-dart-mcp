@@ -244,3 +244,10 @@ After the selector exists, resume with one bounded deterministic batch, persist 
 - The recovered clauses are classified as cutoff testing (`보고기간말 전후`), analytical procedure (`분석`), and inspection (`검토`). Those method patterns apply only after an independently accepted action clause; the existing non-action/boilerplate rejection remains in force.
 - RED: the Korean enumerator fixture returned no procedures. GREEN: it returns all three expected clauses and methods; bare, pre-lead-in, and boilerplate negatives remain empty. Focused parser/indexer/recovery validation passed **328 tests**; Ruff and `git diff --check` passed.
 - Read-only post-change probes: `20260317801014_11133493` and `20260317801014_11133514` each remain complete/1 KAM with three procedures (`cutoff_test`, `analytical_procedure`, `inspection`) and empty limitations. No candidate DB mutation, raw-store read, DART API, or GCS call occurred.
+
+### Run 433 independent-review follow-up: exact Korean enumerator set
+
+- Review found the initial standalone Korean-enumerator matcher was too broad: `[가-하]` also accepts ordinary syllables such as `예.`, which could incorrectly grant explicit-bullet provenance after an otherwise valid procedure lead-in.
+- The matcher now admits only the exact standard set `가, 나, 다, 라, 마, 바, 사, 아, 자, 차, 카, 타, 파, 하`. The original lead-in-position and next-substantive-clause requirements remain unchanged.
+- RED: `예.` followed by a noun-ending cutoff phrase was accepted as a procedure. GREEN: it yields no procedures, while the standard enumerator positive, bare/pre-lead/boilerplate negatives, and both Hanwha Engine probes remain correct.
+- Focused parser/indexer/recovery validation passed **329 tests**; Ruff and `git diff --check` passed. This was code/test/read-only only: no database mutation, raw-store read, DART API, or GCS call.

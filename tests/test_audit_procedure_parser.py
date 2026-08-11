@@ -237,6 +237,17 @@ def test_extract_procedure_steps_rejects_bare_korean_enumerators():
     assert steps == []
 
 
+def test_extract_procedure_steps_rejects_non_enumerator_korean_label():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.\n"
+            "예.\n보고기간말 전후 발생한 매출거래의 수익인식시점 비교"
+        )
+    )
+
+    assert steps == []
+
+
 def test_extract_procedure_steps_does_not_promote_korean_label_before_lead_in():
     steps = extract_procedure_steps(
         _kam_item(

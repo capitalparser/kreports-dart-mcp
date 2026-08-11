@@ -155,7 +155,9 @@ _AUDIT_PROCEDURE_LIST_LEAD_IN = re.compile(
     r"(?:주요(?:한)?\s*)?감사절차\s*(?:는|를)?\s*"
     r"다음(?:과\s*)?같(?:습니다|다|은)"
 )
-_STANDALONE_KOREAN_ENUMERATOR_RE = re.compile(r"\s*[가-하]\s*[.)]\s*")
+_STANDALONE_KOREAN_ENUMERATOR_RE = re.compile(
+    r"\s*(?:가|나|다|라|마|바|사|아|자|차|카|타|파|하)\s*[.)]\s*"
+)
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "existence": ("실재", "실사", "잔액 확인"),
