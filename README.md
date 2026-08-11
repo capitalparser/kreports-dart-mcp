@@ -65,6 +65,30 @@ report.
 - **Source-grounded answers**: returns prose-oriented MCP responses with
   confirmed facts, analysis, next checks, and filing provenance instead of only
   raw JSON dumps.
+- **Semantic filing context**: combines business-report sections, audit-report
+  evidence, disclosures, financial facts, and accounting-note topics into one
+  company/year context so an LLM can answer across document types.
+- **Original-note comparison**: compares accounting-note topics across a
+  user-selected peer group and preserves the source excerpt, locator, source
+  status, and formatting metadata. Missing or unverified originals remain
+  explicitly marked rather than silently summarized.
+- **Custom peer cohorts**: peer selection can use industry-prefix rules,
+  explicit company lists, or adaptive criteria. The cohort and rule used for a
+  comparison are returned with the result for reproducibility.
+- **Fail-closed coverage**: release artifacts expose which report types,
+  sections, note topics, and raw sources are actually available. A successful
+  code/test run does not imply that every filing or original note is present.
+
+### Public/private boundary
+
+The public repository documents the MCP contract, supported workflows, data
+provenance model, and reproducible client examples. Collection credentials,
+raw-document storage, enrichment jobs, parser internals, and release data are
+maintained in a separate private core repository. This separation keeps the
+public interface inspectable while protecting operational data and the core
+processing pipeline. The public package must not be treated as a guarantee that
+all companies or all original note text are available in a given release; use
+the release artifact and per-source status for that determination.
 
 ### Two workflows
 
@@ -156,6 +180,7 @@ Get a free DART API key at [opendart.fss.or.kr](https://opendart.fss.or.kr).
 "Has Celltrion restated any prior period figures?"
 "Subsidiary auditor matrix for POSCO group"
 "Beneish M-Score for this company — earnings manipulation risk"
+"Compare lease-note policy, right-of-use assets, and lease liabilities across Samsung and its selected peers; show original excerpts and source status"
 ```
 
 ### MCP Tools (34)
@@ -364,6 +389,28 @@ KReports는 DART API를 얇게 감싼 래퍼가 아닙니다. 사업보고서와
   수 있습니다.
 - **근거 기반 서술형 응답**: 단순 JSON 나열이 아니라 확인된 사실,
   분석, 다음 확인사항, 공시 출처가 포함된 문장형 응답을 지향합니다.
+- **의미 기반 공시 맥락**: 사업보고서의 사업개요·위험·원재료·설비,
+  감사보고서, 공시사항, 재무 fact, 회계 주석 topic을 회사·연도 단위로
+  묶어 LLM이 문서 종류를 넘나들며 답할 수 있게 합니다.
+- **주석 원문 비교**: 리스 등 특정 주석 사례를 지정하거나 동종기업군을
+  선택해 비교할 수 있습니다. 원문 excerpt, 위치 정보, 서식 메타데이터,
+  출처 상태를 함께 보여주며, 원문 미확보·미검증은 요약으로 위장하지 않고
+  명시합니다.
+- **동종기업 기준 커스터마이징**: 업종코드 prefix, 명시적 기업 목록,
+  adaptive 규칙을 조합할 수 있고, 결과에 실제 선정군과 기준을 남겨 같은
+  질문을 재현할 수 있습니다.
+- **fail-closed 커버리지**: 릴리스 artifact에서 보고서 종류·섹션·주석
+  topic·원문 소스별 실제 가용 여부를 확인합니다. 테스트가 통과했다는
+  사실만으로 모든 기업의 모든 원문이 적재됐다고 간주하지 않습니다.
+
+### 공개 저장소와 private core의 경계
+
+공개 저장소에는 MCP 계약, 지원 기능, provenance 모델, 재현 가능한 사용
+예제를 공개합니다. 수집 credential, 원문 저장소, enrichment/backfill 작업,
+파서 내부 구현, 릴리스 데이터는 별도 private core 저장소에서 관리합니다.
+따라서 공개 패키지는 인터페이스와 사용법을 보여주지만, 특정 릴리스의 모든
+기업·모든 주석 원문 제공을 보장하지 않습니다. 실제 조회 가능 여부는
+릴리스 artifact와 source별 상태를 기준으로 판단해야 합니다.
 
 ### 두 가지 관점
 
@@ -455,6 +502,7 @@ DART API 키는 [opendart.fss.or.kr](https://opendart.fss.or.kr)에서 무료 �
 "셀트리온 전기 소급 재작성 있어?"
 "POSCO 그룹 종속회사 감사인 매트릭스"
 "이 회사 Beneish M-Score — 이익 조작 가능성은?"
+"삼성전자와 동종기업의 리스 주석(정책·사용권자산·리스부채)을 원문과 출처 상태까지 비교해줘"
 ```
 
 ### MCP 도구 (34개)
