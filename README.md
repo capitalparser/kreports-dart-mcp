@@ -84,11 +84,12 @@ report.
 The public repository documents the MCP contract, supported workflows, data
 provenance model, and reproducible client examples. Collection credentials,
 raw-document storage, enrichment jobs, parser internals, and release data are
-maintained in a separate private core repository. This separation keeps the
-public interface inspectable while protecting operational data and the core
-processing pipeline. The public package must not be treated as a guarantee that
-all companies or all original note text are available in a given release; use
-the release artifact and per-source status for that determination.
+maintained in the separate private `capitalparser/kreports-core` repository.
+The private repository is now the canonical home for the core pipeline; this
+public branch is the compatibility/public-documentation snapshot while the
+extraction is completed. The public package must not be treated as a guarantee
+that all companies or all original note text are available in a given release;
+use the release artifact and per-source status for that determination.
 
 ### Two workflows
 
@@ -407,10 +408,12 @@ KReports는 DART API를 얇게 감싼 래퍼가 아닙니다. 사업보고서와
 
 공개 저장소에는 MCP 계약, 지원 기능, provenance 모델, 재현 가능한 사용
 예제를 공개합니다. 수집 credential, 원문 저장소, enrichment/backfill 작업,
-파서 내부 구현, 릴리스 데이터는 별도 private core 저장소에서 관리합니다.
-따라서 공개 패키지는 인터페이스와 사용법을 보여주지만, 특정 릴리스의 모든
-기업·모든 주석 원문 제공을 보장하지 않습니다. 실제 조회 가능 여부는
-릴리스 artifact와 source별 상태를 기준으로 판단해야 합니다.
+파서 내부 구현, 릴리스 데이터는 별도 private `capitalparser/kreports-core`
+저장소를 canonical home으로 삼습니다. 현재 공개 브랜치는 추출이 완료될
+때까지의 호환·문서화 snapshot입니다. 따라서 공개 패키지는 인터페이스와
+사용법을 보여주지만, 특정 릴리스의 모든 기업·모든 주석 원문 제공을
+보장하지 않습니다. 실제 조회 가능 여부는 릴리스 artifact와 source별
+상태를 기준으로 판단해야 합니다.
 
 ### 두 가지 관점
 
