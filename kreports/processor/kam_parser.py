@@ -1757,11 +1757,17 @@ def _inject_omitted_collapsed_reason_heading(
     candidate_inline_reason = None
     for index in range(kam_start + 1, response_index):
         inline_reason = None
-        subject = _COLLAPSED_REASON_SUBJECT_RE.search(lines[index])
+        intro_cut = -1
+        for ending in _COLLAPSED_INTRO_ENDINGS:
+            position = _compact_span_end(lines[index], ending)
+            if position is not None:
+                intro_cut = max(intro_cut, position)
+        intro_tail = lines[index][intro_cut:].strip() if intro_cut >= 0 else ""
+        subject = _COLLAPSED_REASON_SUBJECT_RE.search(intro_tail)
         if subject is not None:
-            inline_title = lines[index][:subject.start()].strip()
+            inline_title = intro_tail[:subject.start()].strip()
             candidate = (
-                ("", inline_title)
+                (lines[index][:intro_cut].strip(), inline_title)
                 if (
                     len(inline_title) <= 80
                     and not inline_title.endswith((".", "。"))
@@ -1770,9 +1776,24 @@ def _inject_omitted_collapsed_reason_heading(
                 else None
             )
             if candidate is not None:
-                inline_reason = lines[index][subject.end():].strip()
+                inline_reason = intro_tail[subject.end():].strip()
         else:
-            candidate = None
+            subject = _COLLAPSED_REASON_SUBJECT_RE.search(lines[index])
+            if subject is not None:
+                inline_title = lines[index][:subject.start()].strip()
+                candidate = (
+                    ("", inline_title)
+                    if (
+                        len(inline_title) <= 80
+                        and not inline_title.endswith((".", "。"))
+                        and _title_evidence_score(inline_title) >= 3
+                    )
+                    else None
+                )
+                if candidate is not None:
+                    inline_reason = lines[index][subject.end():].strip()
+            else:
+                candidate = None
         if candidate is None:
             candidate = _collapsed_title_candidate(lines[index])
         if candidate is None:

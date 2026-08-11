@@ -369,6 +369,58 @@ def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_after_intr
     ]
 
 
+def test_parse_collapsed_audit_report_recovers_intro_tail_title_before_inline_reason():
+    """Keep the explicit title between the KAM intro and the inline 회사는 reason."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 우리의 전문가적 판단에 따라 당기 "
+        "재무제표감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 "
+        "별도의 의견을 제공하지는 않습니다. 오디오제품매출 수익인식 기간귀속의 적정성 "
+        "회사는 수익인식의 조건이 충족되기 전에 수익이 인식될 위험이 높다고 "
+        "판단하였습니다. 수출조건에 따라 통제 이전 시기가 달라 기말시점에 "
+        "기간귀속의 착오 및 누락가능성이 높습니다. 이에 오디오제품의 매출 "
+        "수익인식 기간귀속의 적정성을 핵심감사사항으로 선정하였습니다.\n"
+        "핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.\n"
+        "- 계약서 검토를 통한 수익인식 시점의 적정성 검토\n"
+        "- 수익인식 귀속시기 관련 내부통제 이해와 평가\n"
+        "- 표본 증빙 문서검사를 통한 수익인식시점의 적정성 확인\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "오디오제품매출 수익인식 기간귀속의 적정성"
+    ]
+    assert (outcome.items[0].reason_text or "").startswith(
+        "회사는 수익인식의 조건이 충족되기 전에"
+    )
+    assert len(extract_procedure_steps(outcome.items[0])) == 3
+
+
+def test_parse_collapsed_audit_report_rejects_intro_tail_prose_without_title_boundary():
+    """Do not turn a reason beginning with 회사는 into a KAM title."""
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    collapsed = (
+        "핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. "
+        "우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. 회사는 "
+        "수익인식 기간귀속의 적정성에 중요한 판단이 포함된다고 판단하였습니다. "
+        "따라서 핵심감사사항으로 선정하였습니다.\n"
+        "핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.\n"
+        "- 계약서 검토\n"
+        "재무제표감사에 대한 감사인의 책임"
+    )
+
+    outcome = parse_collapsed_kam_items(collapsed)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
 def test_parse_collapsed_audit_report_recovers_inline_reason_after_explicit_title():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 
