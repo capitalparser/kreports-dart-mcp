@@ -461,7 +461,13 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
     totals = {"documents": 0, "sections": 0, "errors": []}
     for attachment in attachments:
         dcm_no = attachment["dcm_no"]
-        content = fetch_viewer_html(meta["rcept_no"], dcm_no)
+        # DART attachment menus can point at a corrected/prior receipt.  Use
+        # that receipt only to fetch the viewer; persist under the root filing
+        # identity so downstream scoped rebuilds remain stable.
+        content = fetch_viewer_html(
+            attachment.get("rcept_no") or meta["rcept_no"],
+            dcm_no,
+        )
         if not content:
             totals["errors"].append({"dcm_no": dcm_no, "error": "viewer HTML empty"})
             continue

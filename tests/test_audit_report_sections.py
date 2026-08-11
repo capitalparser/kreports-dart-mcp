@@ -419,6 +419,37 @@ def test_collect_audit_submission_uses_attachment_viewer_html(temp_engine, monke
     ]
 
 
+def test_attached_audit_fetch_uses_attachment_receipt_but_keeps_root_identity(
+    temp_engine, monkeypatch,
+):
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    root = "20260430801810"
+    attachment = "20260430000001"
+    monkeypatch.setattr(collector_module, "fetch_dart_main_html", lambda value: """
+      <option value=\"rcpNo=20260430000001&amp;dcmNo=991\">감사보고서</option>
+      <option value=\"rcpNo=20260430000001&amp;dcmNo=991\">감사보고서</option>
+    """)
+    seen = []
+    def viewer(rcept_no, dcm_no):
+        seen.append((rcept_no, dcm_no))
+        return "<DOCUMENT><TITLE>핵심감사사항</TITLE><P>수익인식</P></DOCUMENT>"
+    monkeypatch.setattr(collector_module, "fetch_viewer_html", viewer)
+
+    result = collector_module._collect_attached_audit_reports({
+        "rcept_no": root, "corp_code": "00116268", "bsns_year": 2025,
+        "source_type": "business_report", "report_nm": "사업보고서",
+    })
+
+    assert result["documents"] == 1
+    assert seen == [(attachment, "991")]
+    with get_session() as session:
+        assert session.query(ReportDocument).filter_by(
+            rcept_no=f"{root}_991", dcm_no="991",
+        ).count() == 1
+
+
 def test_document_feature_refresh_rebuilds_kam_before_procedure_index(
     temp_engine,
 ):
