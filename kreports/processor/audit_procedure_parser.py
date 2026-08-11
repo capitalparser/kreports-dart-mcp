@@ -35,7 +35,14 @@ _METHOD_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("it_control_test", ("it 일반통제", "정보기술 일반통제", "itgc")),
     (
         "controls_test",
-        ("통제의 운영효과성", "통제 운영효과성", "통제 테스트", "test of control"),
+        (
+            "통제의 운영효과성",
+            "통제 운영효과성",
+            "통제의 설계 및 운영의 효과성",
+            "설계 및 운영의 효과성을 테스트",
+            "통제 테스트",
+            "test of control",
+        ),
     ),
     ("cutoff_test", ("기간귀속", "cut-off", "cutoff", "컷오프")),
     (
@@ -98,6 +105,25 @@ _ACTION_SIGNALS = (
     "evaluate",
     "sample",
 )
+_BULLET_NOUN_ACTION_ENDINGS = (
+    "검사",
+    "검토",
+    "테스트",
+    "대사",
+    "재수행",
+    "재계산",
+    "확인",
+    "조회",
+    "관찰",
+    "입회",
+    "질문",
+    "문의",
+    "분석",
+    "수행",
+    "평가",
+    "검증",
+    "비교",
+)
 
 _RESPONSIBILITY_BOILERPLATE = (
     "감사인의 책임",
@@ -113,6 +139,10 @@ _RESPONSIBILITY_BOILERPLATE = (
     "in accordance with",
     "왜곡표시위험을 식별",
     "감사절차를 설계",
+)
+_GENERIC_PROCEDURE_LEAD_IN = re.compile(
+    r"(?:다음(?:을)? 포함한|다음의)\s*감사절차(?:를|는)?\s*"
+    r"수행(?:하였|했|합니다|하였다)"
 )
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -166,15 +196,16 @@ def _normalize_clause(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
+def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
     bounded = (source or "")[:MAX_INPUT_CHARS]
     pattern = re.compile(r"(?:\r?\n+|[;；]+|(?<=[.!?。])\s+)")
-    clauses: list[tuple[str, int, int, bool]] = []
+    clauses: list[tuple[str, int, int, bool, bool]] = []
 
     def append_raw(raw: str, absolute_start: int) -> None:
         lowered_raw = raw.lower()
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
             return
+        bullet_context = bool(re.match(r"^\s*(?:[-•·▪◦])\s+", raw))
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
             r"분석|테스트|평가|추출|활용|대사|조사|확인)"
@@ -215,6 +246,7 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
                             piece_start,
                             piece_end,
                             performed_context,
+                            bullet_context,
                         )
                     )
                 return
@@ -228,6 +260,7 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
                         piece_start + local,
                         piece_start + local + len(part),
                         True,
+                        bullet_context,
                     )
                 )
 
@@ -267,12 +300,23 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool]]:
     return clauses
 
 
-def _is_action_clause(clause: str, *, compound_context: bool = False) -> bool:
+def _is_action_clause(
+    clause: str,
+    *,
+    compound_context: bool = False,
+    bullet_context: bool = False,
+) -> bool:
     lowered = clause.lower()
     if any(marker in lowered for marker in _RESPONSIBILITY_BOILERPLATE):
         return False
+    if _GENERIC_PROCEDURE_LEAD_IN.search(clause):
+        return False
     if not any(signal in lowered for signal in _ACTION_SIGNALS):
         return False
+    if bullet_context:
+        noun_ending = re.sub(r"[.!?。]+$", "", lowered).strip()
+        if any(noun_ending.endswith(ending) for ending in _BULLET_NOUN_ACTION_ENDINGS):
+            return True
     if compound_context:
         return _method(clause) != "other" or bool(
             re.search(r"(?:하였|했|합니다|하였다)", clause)
@@ -329,11 +373,18 @@ def extract_procedure_steps(kam_item: ParsedKamItem) -> list[ParsedProcedureStep
 
     steps: list[ParsedProcedureStep] = []
     seen_text: set[str] = set()
-    for clause, source_start, source_end, compound_context in _candidate_clauses(source):
+    for (
+        clause,
+        source_start,
+        source_end,
+        compound_context,
+        bullet_context,
+    ) in _candidate_clauses(source):
         normalized_key = re.sub(r"\s+", "", clause).lower()
         if normalized_key in seen_text or not _is_action_clause(
             clause,
             compound_context=compound_context,
+            bullet_context=bullet_context,
         ):
             continue
         seen_text.add(normalized_key)

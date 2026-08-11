@@ -132,6 +132,28 @@ def test_parse_collapsed_audit_report_accepts_inline_dwaeojin_response_heading()
     assert len(extract_procedure_steps(outcome.items[0])) == 6
 
 
+def test_parser_cuts_full_management_and_governance_responsibility_heading():
+    """Catch a full management/governance heading leaking into an audit response."""
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """
+    핵심감사사항
+    특수관계자 거래 공시
+    핵심감사사항으로 결정한 이유
+    관련 거래 공시에는 유의적인 판단이 포함됩니다.
+    핵심감사사항이 감사에서 다뤄진 방법
+    - 계약서를 검사하였습니다.
+    재무제표에 대한 경영진과 지배기구의 책임
+    경영진 책임 일반 설명입니다.
+    """
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert "계약서를 검사" in items[0].audit_response_text
+    assert "경영진 책임 일반 설명" not in items[0].audit_response_text
+
+
 def test_parse_collapsed_audit_report_ignores_numbered_field_labels():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 

@@ -126,6 +126,18 @@ def test_extract_procedure_steps_rejects_planning_responsibility_and_action_list
     assert extract_procedure_steps(_kam_item(text_value)) == []
 
 
+def test_extract_procedure_steps_rejects_generic_bulleted_procedure_lead_in():
+    item = _kam_item(
+        "핵심감사사항에 대응하기 위하여 우리는 다음을 포함한 감사절차를 "
+        "수행하였습니다.\n"
+        "- 주요 계약서를 검사하였습니다."
+    )
+
+    steps = extract_procedure_steps(item)
+
+    assert [step.procedure_text for step in steps] == ["주요 계약서를 검사하였습니다."]
+
+
 @pytest.mark.parametrize(
     ("text_value", "expected_method"),
     [

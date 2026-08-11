@@ -14,6 +14,84 @@ from kreports.db.models import (
 )
 
 
+def test_bulleted_noun_ending_audit_response_steps_remain_explicit_procedures():
+    """Catch a procedure indexer that drops explicit bullet steps only for noun endings."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import ParsedKamItem
+
+    item = ParsedKamItem(
+        ordinal=1,
+        title="특수관계자 거래 공시",
+        normalized_topic=None,
+        reason_text="공시 판단 위험",
+        audit_response_text=(
+            "- 내부통제에 대하여 설계 및 운영의 효과성을 테스트\n"
+            "- 분석적 절차 수행\n"
+            "- 거래내역 대사\n"
+            "- 계약서 검토"
+        ),
+        related_note_references=[],
+        full_body="특수관계자 거래 공시",
+        full_body_hash="b" * 40,
+        full_body_length=200,
+    )
+
+    steps = extract_procedure_steps(item)
+
+    assert [step.procedure_text for step in steps] == [
+        "내부통제에 대하여 설계 및 운영의 효과성을 테스트",
+        "분석적 절차 수행",
+        "거래내역 대사",
+        "계약서 검토",
+    ]
+    assert [step.method for step in steps] == [
+        "controls_test",
+        "analytical_procedure",
+        "other",
+        "inspection",
+    ]
+
+
+def test_noun_ending_responsibility_list_without_bullets_is_not_a_procedure():
+    """Catch noun-ending action labels being inferred outside explicit bullet response context."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import ParsedKamItem
+
+    item = ParsedKamItem(
+        ordinal=1,
+        title="일반 책임",
+        normalized_topic=None,
+        reason_text="일반 설명",
+        audit_response_text="통제 테스트\n분석적 절차 수행\n거래내역 대사\n계약서 검토",
+        related_note_references=[],
+        full_body="일반 책임",
+        full_body_hash="c" * 40,
+        full_body_length=200,
+    )
+
+    assert extract_procedure_steps(item) == []
+
+
+def test_bulleted_responsibility_boilerplate_is_not_a_procedure():
+    """Keep generic responsibility language excluded even when it is a bullet."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import ParsedKamItem
+
+    item = ParsedKamItem(
+        ordinal=1,
+        title="감사인의 책임",
+        normalized_topic=None,
+        reason_text="일반 설명",
+        audit_response_text="- 감사기준에 따라 감사를 수행합니다.",
+        related_note_references=[],
+        full_body="감사인의 책임",
+        full_body_hash="d" * 40,
+        full_body_length=200,
+    )
+
+    assert extract_procedure_steps(item) == []
+
+
 def test_index_audit_procedures_uses_cached_kam_body_only(temp_engine, monkeypatch):
     with get_session() as session:
         session.add(Company(corp_code="00126380", stock_code="005930", corp_name="삼성전자", market="KOSPI"))
