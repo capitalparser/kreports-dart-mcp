@@ -711,6 +711,26 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260812_20_audit_procedure_recovery_fallback",
+        description="Persist audited direct-to-annual recovery fallback provenance",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS audit_procedure_recovery_fallbacks (
+              direct_rcept_no VARCHAR(14) PRIMARY KEY,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fallback_rcept_no VARCHAR(14) NOT NULL,
+              resolution_reason VARCHAR(80) NOT NULL,
+              resolved_at DATETIME NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_procedure_recovery_fallback_corp_year
+            ON audit_procedure_recovery_fallbacks (corp_code, bsns_year)
+            """,
+        ),
+    ),
 )
 
 

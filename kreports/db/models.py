@@ -997,6 +997,27 @@ class BackfillRun(Base):
     )
 
 
+class AuditProcedureRecoveryFallback(Base):
+    """Durable direct-audit to annual-fallback resolution provenance."""
+
+    __tablename__ = "audit_procedure_recovery_fallbacks"
+
+    direct_rcept_no = Column(String(14), primary_key=True)
+    corp_code = Column(String(8), nullable=False)
+    bsns_year = Column(SmallInteger, nullable=False)
+    fallback_rcept_no = Column(String(14), nullable=False)
+    resolution_reason = Column(String(80), nullable=False)
+    resolved_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            "idx_audit_procedure_recovery_fallback_corp_year",
+            "corp_code",
+            "bsns_year",
+        ),
+    )
+
+
 class DisclosureEvent(Base):
     """Investor/auditor-relevant event indexed from DART disclosure titles."""
     __tablename__ = "disclosure_events"

@@ -21,6 +21,7 @@ REQUIRED_TABLES = (
     "evidence_documents",
     "kam_items",
     "audit_procedure_items",
+    "audit_procedure_recovery_fallbacks",
     "backfill_runs",
     "company_year_quality",
     "schema_migrations",
@@ -74,6 +75,10 @@ REQUIRED_COLUMN_SPECS = {
         "linked_note_keys_json", "linked_event_keys_json", "parser_version",
         "quality_status", "section_ordinal", "procedure_ordinal",
     ),
+    "audit_procedure_recovery_fallbacks": (
+        "direct_rcept_no", "corp_code", "bsns_year", "fallback_rcept_no",
+        "resolution_reason", "resolved_at",
+    ),
     "accounting_note_chapters": (
         "id", "corp_code", "bsns_year", "fs_div", "rcept_no", "dcm_no",
         "source_type", "note_no", "note_title", "section_type", "body",
@@ -121,6 +126,9 @@ REQUIRED_INDEX_SPECS = {
     "idx_kam_item_receipt": ("kam_items", ("rcept_no", "source_type"), False, None),
     "idx_audit_procedure_kam_item": ("audit_procedure_items", ("kam_item_id",), False, None),
     "idx_audit_procedure_method_year": ("audit_procedure_items", ("method", "bsns_year"), False, None),
+    "idx_audit_procedure_recovery_fallback_corp_year": (
+        "audit_procedure_recovery_fallbacks", ("corp_code", "bsns_year"), False, None
+    ),
     "idx_audit_fee_availability_year": ("audit_fees", ("bsns_year", "availability_status"), False, None),
     "idx_audit_fee_observation_corp_year": ("audit_fee_observations", ("corp_code", "bsns_year"), False, None),
     "idx_audit_fee_observation_receipt": ("audit_fee_observations", ("source_rcept_no",), False, None),

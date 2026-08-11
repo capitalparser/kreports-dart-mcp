@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import text
@@ -21,8 +22,9 @@ from kreports.quality.company_year import rebuild_company_year_quality
 
 
 TASK_TYPE = "audit_procedure_recovery"
-SELECTOR_VERSION = 4
+SELECTOR_VERSION = 5
 _EXPLICIT_BUSINESS_YEAR = re.compile(r"(?<!\d)(20\d{2})\s*사업연도")
+_FALLBACK_RESOLUTION_REASON = "audit_report_attachment_not_found"
 
 
 def recovery_backfill_params(*, year: int, market: str) -> dict[str, object]:
@@ -134,6 +136,12 @@ def select_audit_procedure_recovery_targets(
             WHERE bsns_year=:year AND source_type='audit_report'
               AND length(trim(procedure_text)) > 0
         """), {"year": int(year)}).mappings().all()
+        fallback_resolutions = session.execute(text("""
+            SELECT direct_rcept_no, corp_code, bsns_year, fallback_rcept_no,
+                   resolution_reason
+            FROM audit_procedure_recovery_fallbacks
+            WHERE bsns_year=:year
+        """), {"year": int(year)}).mappings().all()
 
     canonical: dict[str, dict[str, object]] = {}
     business_fallbacks: dict[str, dict[str, object]] = {}
@@ -195,16 +203,39 @@ def select_audit_procedure_recovery_targets(
             and _has_attachment_evidence(receipt, corp_code, procedures)
         )
 
+    resolutions_by_direct = {
+        str(row["direct_rcept_no"]): row for row in fallback_resolutions
+    }
+
+    def _selected_resolved_fallback(row: Mapping[str, object]) -> str | None:
+        """Return a fallback only when it remains this root's annual target."""
+        direct_receipt = str(row["rcept_no"])
+        corp_code = str(row["corp_code"])
+        resolution = resolutions_by_direct.get(direct_receipt)
+        fallback = business_fallbacks.get(corp_code)
+        if resolution is None or fallback is None:
+            return None
+        if (
+            str(resolution["corp_code"]) != corp_code
+            or int(resolution["bsns_year"]) != int(year)
+            or str(resolution["resolution_reason"]) != _FALLBACK_RESOLUTION_REASON
+            or str(resolution["fallback_rcept_no"]) != str(fallback["rcept_no"])
+        ):
+            return None
+        return str(fallback["rcept_no"])
+
+    # Older annual evidence does not itself establish that this direct root
+    # was recovered.  It is adequate only through a matching durable
+    # direct-to-current-annual resolution.
     inadequate = [
         row for row in candidates
-        if not any(
-            _has_complete_audit_evidence(receipt, str(row["corp_code"]))
-            for receipt in (
-                str(row["rcept_no"]),
-                *(
-                    (str(business_fallbacks[str(row["corp_code"])]["rcept_no"]),)
-                    if str(row["corp_code"]) in business_fallbacks else ()
-                ),
+        if not _has_complete_audit_evidence(
+            str(row["rcept_no"]), str(row["corp_code"])
+        )
+        and not (
+            (fallback_receipt := _selected_resolved_fallback(row)) is not None
+            and _has_complete_audit_evidence(
+                fallback_receipt, str(row["corp_code"])
             )
         )
     ]
@@ -286,6 +317,38 @@ def _has_usable_fallback_audit_evidence(result: Mapping[str, object]) -> bool:
         return int(result.get("audit_report_sections") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _record_fallback_resolution(
+    *,
+    year: int,
+    target: Mapping[str, str],
+    fallback: Mapping[str, str],
+) -> None:
+    """Upsert the proven fallback lineage only after derived evidence succeeds."""
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO audit_procedure_recovery_fallbacks (
+              direct_rcept_no, corp_code, bsns_year, fallback_rcept_no,
+              resolution_reason, resolved_at
+            ) VALUES (
+              :direct_rcept_no, :corp_code, :bsns_year, :fallback_rcept_no,
+              :resolution_reason, :resolved_at
+            )
+            ON CONFLICT(direct_rcept_no) DO UPDATE SET
+              corp_code=excluded.corp_code,
+              bsns_year=excluded.bsns_year,
+              fallback_rcept_no=excluded.fallback_rcept_no,
+              resolution_reason=excluded.resolution_reason,
+              resolved_at=excluded.resolved_at
+        """), {
+            "direct_rcept_no": str(target["rcept_no"]),
+            "corp_code": str(target["corp_code"]),
+            "bsns_year": int(year),
+            "fallback_rcept_no": str(fallback["rcept_no"]),
+            "resolution_reason": _FALLBACK_RESOLUTION_REASON,
+            "resolved_at": datetime.now(timezone.utc),
+        })
 
 
 def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) -> dict[str, str] | None:
@@ -436,6 +499,7 @@ def run_audit_procedure_recovery_batch(
         if progress_callback:
             progress_callback(index, len(targets), str(target["corp_name"]), receipt)
         effective_target = target
+        resolved_fallback: Mapping[str, str] | None = None
         result = collect_report_sections_for_disclosure(receipt)
         totals["api_receipt_fetches"] = int(totals["api_receipt_fetches"]) + 1
         if (
@@ -459,6 +523,7 @@ def run_audit_procedure_recovery_batch(
                 ):
                     result = fallback_result
                     effective_target = fallback
+                    resolved_fallback = fallback
                 else:
                     fallback_error = str(fallback_result.get("error") or "").strip()
                     suffix = (
@@ -494,9 +559,14 @@ def run_audit_procedure_recovery_batch(
         # Do not let a successfully fetched raw receipt become resumably
         # skipped until KAM, procedures, and quality have all been persisted.
         try:
-            derived_receipts.append(
-                _rebuild_derived_receipt(year=year, target=effective_target)
-            )
+            derived = _rebuild_derived_receipt(year=year, target=effective_target)
+            if resolved_fallback is not None:
+                _record_fallback_resolution(
+                    year=int(year),
+                    target=target,
+                    fallback=resolved_fallback,
+                )
+            derived_receipts.append(derived)
         except Exception as exc:  # noqa: BLE001 - receipt is retryable after durable checkpoint
             totals["failed"] = int(totals["failed"]) + 1
             error = {

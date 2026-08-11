@@ -6,6 +6,96 @@ import json
 from datetime import date
 
 
+def _create_fallback_resolution_table() -> None:
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS audit_procedure_recovery_fallbacks (
+              direct_rcept_no VARCHAR(14) PRIMARY KEY,
+              corp_code VARCHAR(8) NOT NULL,
+              bsns_year SMALLINT NOT NULL,
+              fallback_rcept_no VARCHAR(14) NOT NULL,
+              resolution_reason VARCHAR(80) NOT NULL,
+              resolved_at DATETIME NOT NULL
+            )
+        """))
+
+
+def _fallback_resolution_rows() -> list[tuple[str, str, int, str, str]]:
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        return [
+            tuple(row)
+            for row in session.execute(text("""
+                SELECT direct_rcept_no, corp_code, bsns_year,
+                       fallback_rcept_no, resolution_reason
+                FROM audit_procedure_recovery_fallbacks
+                ORDER BY direct_rcept_no
+            """))
+        ]
+
+
+def _seed_complete_audit_evidence(corp_code: str, receipt: str) -> None:
+    from kreports.db.engine import get_session
+    from kreports.db.models import AuditProcedureItem, KamItem
+
+    with get_session() as session:
+        session.add(KamItem(
+            rcept_no=receipt,
+            corp_code=corp_code,
+            bsns_year=2025,
+            source_type="audit_report",
+            ordinal=0,
+            full_body_hash="b" * 40,
+            full_body_length=1000,
+            source_basis="report_sections.structured_body",
+            quality_status="full_body",
+        ))
+        session.add(AuditProcedureItem(
+            rcept_no=receipt,
+            corp_code=corp_code,
+            bsns_year=2025,
+            source_type="audit_report",
+            procedure_type="substantive_test",
+            procedure_text="계약서를 검사하였습니다.",
+            section_ordinal=0,
+            procedure_ordinal=0,
+        ))
+
+
+def _seed_fallback_resolution(
+    *,
+    direct_rcept_no: str,
+    corp_code: str,
+    fallback_rcept_no: str,
+) -> None:
+    from sqlalchemy import text
+
+    from kreports.db.engine import get_session
+
+    _create_fallback_resolution_table()
+    with get_session() as session:
+        session.execute(text("""
+            INSERT INTO audit_procedure_recovery_fallbacks (
+              direct_rcept_no, corp_code, bsns_year, fallback_rcept_no,
+              resolution_reason, resolved_at
+            ) VALUES (
+              :direct_rcept_no, :corp_code, 2025, :fallback_rcept_no,
+              'audit_report_attachment_not_found', CURRENT_TIMESTAMP
+            )
+        """), {
+            "direct_rcept_no": direct_rcept_no,
+            "corp_code": corp_code,
+            "fallback_rcept_no": fallback_rcept_no,
+        })
+
+
 def _membership(corp_code: str, *, year: int = 2025, market: str = "KOSPI", status: str = "verified"):
     from kreports.db.models import CompanyYearListingMembership
 
@@ -312,15 +402,13 @@ def test_selector_prefers_direct_audit_root_over_later_business_report_fallback(
     ]
 
 
-def test_selector_accepts_full_audit_evidence_under_target_year_business_fallback(
+def test_selector_keeps_direct_root_inadequate_without_fallback_resolution(
     temp_engine,
 ):
-    """Catch a direct-root adequacy check that ignores its annual fallback."""
+    """Catch annual evidence masking a direct root without an exact resolution."""
     from kreports.collector.audit_procedure_recovery import (
         select_audit_procedure_recovery_targets,
     )
-    from kreports.db.engine import get_session
-    from kreports.db.models import AuditProcedureItem, KamItem
 
     corp_code = "00000018"
     corrected_receipt = "20260428800618"
@@ -338,28 +426,7 @@ def test_selector_accepts_full_audit_evidence_under_target_year_business_fallbac
         report_nm="사업보고서 (2025.12)",
         disc_date=date(2026, 4, 28),
     )
-    with get_session() as session:
-        session.add(KamItem(
-            rcept_no=attachment_receipt,
-            corp_code=corp_code,
-            bsns_year=2025,
-            source_type="audit_report",
-            ordinal=0,
-            full_body_hash="b" * 40,
-            full_body_length=1000,
-            source_basis="report_sections.structured_body",
-            quality_status="full_body",
-        ))
-        session.add(AuditProcedureItem(
-            rcept_no=attachment_receipt,
-            corp_code=corp_code,
-            bsns_year=2025,
-            source_type="audit_report",
-            procedure_type="substantive_test",
-            procedure_text="계약서를 검사하였습니다.",
-            section_ordinal=0,
-            procedure_ordinal=0,
-        ))
+    _seed_complete_audit_evidence(corp_code, attachment_receipt)
 
     result = select_audit_procedure_recovery_targets(
         year=2025,
@@ -368,8 +435,83 @@ def test_selector_accepts_full_audit_evidence_under_target_year_business_fallbac
     )
 
     assert result["canonical_roots"] == 1
-    assert result["inadequate_roots"] == 0
-    assert result["targets"] == []
+    assert result["inadequate_roots"] == 1
+    assert result["targets"] == [{
+        "corp_code": corp_code,
+        "rcept_no": corrected_receipt,
+        "corp_name": f"회사{corp_code}",
+    }]
+
+
+def test_selector_rejects_different_stale_or_excluded_fallback_resolutions(
+    temp_engine,
+):
+    """Catch any mapping that is not the current eligible annual fallback."""
+    from kreports.collector.audit_procedure_recovery import (
+        select_audit_procedure_recovery_targets,
+    )
+
+    _create_fallback_resolution_table()
+    cases = (
+        ("00000024", "different", "20260428000999"),
+        ("00000025", "stale", "20260427000625"),
+        ("00000026", "excluded", "20260429000626"),
+    )
+    for corp_code, kind, mapped_receipt in cases:
+        direct_receipt = f"20260428800{corp_code[-3:]}"
+        business_receipt = f"20260428000{corp_code[-3:]}"
+        _seed_target(
+            corp_code,
+            direct_receipt,
+            report_nm="[기재정정]감사보고서제출",
+            disc_date=date(2026, 4, 28),
+        )
+        _seed_target(
+            corp_code,
+            business_receipt,
+            report_nm="사업보고서 (2025.12)",
+            disc_date=date(2026, 4, 28),
+        )
+        _seed_complete_audit_evidence(corp_code, f"{business_receipt}_11351227")
+        if kind == "different":
+            _seed_target(
+                "00000027",
+                mapped_receipt,
+                membership_status=None,
+                report_nm="사업보고서 (2025.12)",
+                disc_date=date(2026, 4, 28),
+            )
+        elif kind == "stale":
+            _seed_target(
+                corp_code,
+                mapped_receipt,
+                report_nm="사업보고서 (2025.12)",
+                disc_date=date(2026, 4, 27),
+            )
+        else:
+            _seed_target(
+                corp_code,
+                mapped_receipt,
+                report_nm="사업보고서 (2025.12) (자회사의 주요경영사항)",
+                disc_date=date(2026, 4, 29),
+            )
+        _seed_fallback_resolution(
+            direct_rcept_no=direct_receipt,
+            corp_code=corp_code,
+            fallback_rcept_no=mapped_receipt,
+        )
+
+    result = select_audit_procedure_recovery_targets(
+        year=2025,
+        market="KOSPI",
+        limit=20,
+    )
+
+    assert {(row["corp_code"], row["rcept_no"]) for row in result["targets"]} == {
+        ("00000024", "20260428800024"),
+        ("00000025", "20260428800025"),
+        ("00000026", "20260428800026"),
+    }
 
 
 def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
@@ -383,6 +525,7 @@ def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
     corp_code = "00000017"
     corrected_receipt = "20260428800599"
     business_receipt = "20260428000679"
+    _create_fallback_resolution_table()
     _seed_target(
         corp_code,
         corrected_receipt,
@@ -409,13 +552,15 @@ def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
         return {"ok": 1, "sections": 2, "audit_report_sections": 2}
 
     monkeypatch.setattr(recovery, "collect_report_sections_for_disclosure", fetch)
-    monkeypatch.setattr(
-        recovery,
-        "_rebuild_derived_receipt",
-        lambda *, year, target: rebuilt.append(str(target["rcept_no"])) or {
-            "rcept_no": str(target["rcept_no"]),
-        },
-    )
+    def rebuild(*, year, target):
+        rebuilt.append(str(target["rcept_no"]))
+        _seed_complete_audit_evidence(
+            corp_code,
+            f"{target['rcept_no']}_11351227",
+        )
+        return {"rcept_no": str(target["rcept_no"])}
+
+    monkeypatch.setattr(recovery, "_rebuild_derived_receipt", rebuild)
     params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
     lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
 
@@ -440,6 +585,21 @@ def test_batch_uses_canonical_business_report_after_empty_corrected_audit_root(
         "corp_code": corp_code,
         "rcept_no": corrected_receipt,
     }
+    assert _fallback_resolution_rows() == [
+        (
+            corrected_receipt,
+            corp_code,
+            2025,
+            business_receipt,
+            "audit_report_attachment_not_found",
+        )
+    ]
+    full_sweep = recovery.select_audit_procedure_recovery_targets(
+        year=2025,
+        market="KOSPI",
+        limit=20,
+    )
+    assert full_sweep["targets"] == []
 
 
 def test_batch_keeps_corrected_root_retryable_when_business_fallback_has_no_audit_evidence(
@@ -455,6 +615,7 @@ def test_batch_keeps_corrected_root_retryable_when_business_fallback_has_no_audi
     corp_code = "00000019"
     corrected_receipt = "20260428800619"
     business_receipt = "20260428000619"
+    _create_fallback_resolution_table()
     _seed_target(
         corp_code,
         corrected_receipt,
@@ -518,6 +679,87 @@ def test_batch_keeps_corrected_root_retryable_when_business_fallback_has_no_audi
             "fallback yielded no audit report sections"
         ),
     }
+    assert _fallback_resolution_rows() == []
+
+
+def test_fallback_resolution_is_written_once_after_a_retryable_derived_failure(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch a pre-commit marker or duplicate marker across a failed retry."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    corp_code = "00000028"
+    corrected_receipt = "20260428800028"
+    business_receipt = "20260428000028"
+    _create_fallback_resolution_table()
+    _seed_target(
+        corp_code,
+        corrected_receipt,
+        report_nm="[기재정정]감사보고서제출",
+        disc_date=date(2026, 4, 28),
+    )
+    _seed_target(
+        corp_code,
+        business_receipt,
+        report_nm="사업보고서 (2025.12)",
+        disc_date=date(2026, 4, 28),
+    )
+    monkeypatch.setattr(
+        recovery,
+        "collect_report_sections_for_disclosure",
+        lambda receipt: (
+            {"ok": 0, "sections": 0, "error": "audit report attachment not found"}
+            if receipt == corrected_receipt
+            else {"ok": 1, "sections": 2, "audit_report_sections": 2}
+        ),
+    )
+    rebuild_attempts = 0
+
+    def rebuild(*, year, target):
+        nonlocal rebuild_attempts
+        rebuild_attempts += 1
+        if rebuild_attempts == 1:
+            raise RuntimeError("derived rebuild failed")
+        _seed_complete_audit_evidence(
+            corp_code,
+            f"{target['rcept_no']}_11351227",
+        )
+        return {"rcept_no": str(target["rcept_no"])}
+
+    monkeypatch.setattr(recovery, "_rebuild_derived_receipt", rebuild)
+    params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    failed_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+    failed = recovery.run_audit_procedure_recovery_batch(
+        failed_lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+    failed_lease.fail("storage_error", "derived rebuild failed")
+
+    assert failed["failed"] == 1
+    assert _fallback_resolution_rows() == []
+
+    retry_lease = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", params)
+    retry = recovery.run_audit_procedure_recovery_batch(
+        retry_lease,
+        year=2025,
+        market="KOSPI",
+        limit=1,
+    )
+
+    assert retry["ok"] == 1
+    assert _fallback_resolution_rows() == [
+        (
+            corrected_receipt,
+            corp_code,
+            2025,
+            business_receipt,
+            "audit_report_attachment_not_found",
+        )
+    ]
 
 
 def test_batch_excludes_noncanonical_business_report_from_audit_fallback(
