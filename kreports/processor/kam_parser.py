@@ -966,6 +966,11 @@ def _has_clear_title_evidence(value: str) -> bool:
     )
 
 
+def _ends_with_title_connector(value: str) -> bool:
+    compact = _compact(_normalize_title(value))
+    return any(compact.endswith(connector) for connector in _TITLE_CONNECTOR_ENDINGS)
+
+
 def _has_separator_title_evidence(value: str) -> bool:
     """Accept a separator-marked title only with matter, not procedure, evidence."""
     return _has_clear_title_evidence(value) or (
@@ -2102,6 +2107,7 @@ def _inject_omitted_collapsed_reason_heading(
         if (
             len(normalized_title) > 80
             or normalized_title.endswith((".", "。"))
+            or _ends_with_title_connector(normalized_title)
             or (
                 _title_evidence_score(normalized_title) < 3
                 and not (

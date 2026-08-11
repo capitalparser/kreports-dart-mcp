@@ -229,3 +229,10 @@ After the selector exists, resume with one bounded deterministic batch, persist 
 - The procedure parser also retained only four of the five Huvis explicit bullets: `...정책의 검토 및 프로세스와 내부통제의 이해` ends in the observed noun action `이해`. That ending is now admitted only in the existing explicit-bullet provenance path; non-bulleted noun-only phrases remain rejected.
 - RED: both Huvis title fixtures were incomplete and the explicit-bullet `이해` procedure was dropped. GREEN: title forms, prose and numbered-procedure negatives, and explicit-bullet understanding all pass. Focused parser/indexer/recovery validation passed **323 tests**; Ruff and `git diff --check` passed.
 - Read-only post-change probes: standalone `20260316800719_11124861` complete/1, reason 300 chars, 5 procedures; consolidated `20260316800719_11124862` complete/1, reason 311 chars, 5 procedures; each has empty limitations. No candidate DB mutation, raw-store read, DART API, or GCS call occurred.
+
+### Run 433 independent-review follow-up: reject incomplete connector titles
+
+- Review identified a high-severity over-acceptance in clear-title omitted-reason recovery: `수출매출의 기간귀속 및` has title evidence but ends in the existing incomplete connector `및`; the score-2 fallback would incorrectly promote it as a KAM.
+- Final candidate validation now normalizes and compacts every recovered title, then rejects a title whose suffix is one of `_TITLE_CONNECTOR_ENDINGS`. This boundary applies before the clear-title exception and preserves the existing terminal, length, reason, and heading-conflict checks.
+- RED: the connector-ending shape parsed as complete before the change. GREEN: it is `error` with no items. Huvis standalone/consolidated probes remain complete/1 with five procedures each and no limitations.
+- Focused parser/indexer/recovery validation passed **324 tests**; Ruff and `git diff --check` passed. This was code/test/read-only only: no database mutation, raw-store read, DART API, or GCS call.

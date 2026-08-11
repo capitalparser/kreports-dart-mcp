@@ -432,6 +432,22 @@ def test_collapsed_parser_recovers_standalone_clear_title_before_note_reason():
     assert len(extract_procedure_steps(outcome.items[0])) == 5
 
 
+def test_collapsed_parser_rejects_clear_title_ending_with_connector():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+수출매출의 기간귀속 및
+회사의 재무제표에 대한 주석 2에서 기재한 바와 같이 회사는 재화의 통제가 고객에게 이전되는 시점에 수익을 인식하며 수출조건에 따라 수익인식시점 판단이 요구됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ수출매출 정책과 프로세스를 검토
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
 def test_collapsed_parser_rejects_clear_title_shaped_prose_sentence():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 
