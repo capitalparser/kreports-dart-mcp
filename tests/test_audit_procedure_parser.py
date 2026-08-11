@@ -202,6 +202,64 @@ def test_extract_procedure_steps_preserves_standalone_bullet_provenance_for_next
     assert [step.method for step in steps] == ["inspection", "confirmation"]
 
 
+def test_extract_procedure_steps_preserves_standalone_korean_enumerators():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.\n"
+            "가.\n"
+            "보고기간말 전후 발생한 매출거래의 수익인식시점 비교\n"
+            "나.\n"
+            "보고기간말에 임박하여 발생한 유의적인 거래에 대한 분석\n"
+            "다.\n"
+            "매출거래의 인도조건에 따른 수익인식시기의 정확성을 검토"
+        )
+    )
+
+    assert [step.procedure_text for step in steps] == [
+        "보고기간말 전후 발생한 매출거래의 수익인식시점 비교",
+        "보고기간말에 임박하여 발생한 유의적인 거래에 대한 분석",
+        "매출거래의 인도조건에 따른 수익인식시기의 정확성을 검토",
+    ]
+    assert [step.method for step in steps] == [
+        "cutoff_test",
+        "analytical_procedure",
+        "inspection",
+    ]
+
+
+def test_extract_procedure_steps_rejects_bare_korean_enumerators():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.\n가.\n나.\n다."
+        )
+    )
+
+    assert steps == []
+
+
+def test_extract_procedure_steps_does_not_promote_korean_label_before_lead_in():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "가.\n"
+            "보고기간말 전후 발생한 매출거래의 수익인식시점 비교\n"
+            "우리가 수행한 주요 감사절차는 다음과 같습니다."
+        )
+    )
+
+    assert steps == []
+
+
+def test_extract_procedure_steps_rejects_korean_enumerator_boilerplate():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.\n"
+            "가.\n감사인의 책임과 전문가적 판단에 대한 일반 설명"
+        )
+    )
+
+    assert steps == []
+
+
 def test_extract_procedure_steps_preserves_glued_hyphen_list_after_audit_lead_in():
     steps = extract_procedure_steps(
         _kam_item(

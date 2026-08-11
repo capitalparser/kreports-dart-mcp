@@ -44,7 +44,10 @@ _METHOD_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "test of control",
         ),
     ),
-    ("cutoff_test", ("기간귀속", "cut-off", "cutoff", "컷오프")),
+    (
+        "cutoff_test",
+        ("기간귀속", "보고기간말 전후", "cut-off", "cutoff", "컷오프"),
+    ),
     (
         "valuation_model_test",
         (
@@ -56,7 +59,10 @@ _METHOD_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "모델 검증",
         ),
     ),
-    ("analytical_procedure", ("분석적 절차", "추세 분석", "analytical procedure")),
+    (
+        "analytical_procedure",
+        ("분석적 절차", "추세 분석", "분석", "analytical procedure"),
+    ),
     ("sampling", ("표본", "샘플", "sample")),
     ("reperformance", ("재수행", "reperform")),
     ("recalculation", ("재계산", "recalculate")),
@@ -65,7 +71,7 @@ _METHOD_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("inquiry", ("질문", "문의", "inquir")),
     (
         "inspection",
-        ("검사", "문서검토", "계약서 검토", "증빙 검토", "inspect"),
+        ("검사", "검토", "문서검토", "계약서 검토", "증빙 검토", "inspect"),
     ),
 )
 PROCEDURE_METHODS = tuple(name for name, _patterns in _METHOD_PATTERNS) + (
@@ -149,6 +155,7 @@ _AUDIT_PROCEDURE_LIST_LEAD_IN = re.compile(
     r"(?:주요(?:한)?\s*)?감사절차\s*(?:는|를)?\s*"
     r"다음(?:과\s*)?같(?:습니다|다|은)"
 )
+_STANDALONE_KOREAN_ENUMERATOR_RE = re.compile(r"\s*[가-하]\s*[.)]\s*")
 
 _ASSERTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "existence": ("실재", "실사", "잔액 확인"),
@@ -243,7 +250,18 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
         *,
         pending_bullet_context: bool = False,
     ) -> bool:
-        if re.fullmatch(r"\s*(?:(?:[-－•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw):
+        standalone_korean_enumerator = (
+            lead_in is not None
+            and absolute_start >= lead_in.end()
+            and _STANDALONE_KOREAN_ENUMERATOR_RE.fullmatch(raw) is not None
+        )
+        if (
+            re.fullmatch(
+                r"\s*(?:(?:[-－•·▪◦ㆍ])\s*|[①-⑳]\s*)",
+                raw,
+            )
+            or standalone_korean_enumerator
+        ):
             return True
         lowered_raw = raw.lower()
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
