@@ -359,8 +359,9 @@ def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) 
     checkpoint cursor points at that prefix while ``last_error`` names the next
     receipt, so resuming after the cursor retries the failure without refetching
     the successful work before it.  Selector v5 additionally receives one
-    bounded handoff from v4: only before any terminal v5 history exists, and
-    only for the otherwise identical task/year/market parameter scope.
+    bounded handoff from v4: only before a terminal v5 cursor or explicit
+    exhaustion decision exists, and only for the otherwise identical
+    task/year/market parameter scope.
     """
 
     def _terminal_checkpoints_for(params_value: dict[str, object]) -> list[str]:
@@ -382,31 +383,41 @@ def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) 
             )
             return [str(run.checkpoint_json or "{}") for run in runs]
 
-    def _checkpoint_cursor(checkpoints: list[str]) -> dict[str, str] | None:
+    def _checkpoint_decision(
+        checkpoints: list[str],
+    ) -> tuple[bool, dict[str, str] | None]:
         for checkpoint_json in checkpoints:
             try:
                 checkpoint = json.loads(checkpoint_json)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(checkpoint, dict):
+                continue
             try:
                 parsed = _cursor(checkpoint.get("next_cursor"))
             except ValueError:
-                continue
+                parsed = None
             if parsed is not None:
-                return {"corp_code": parsed[0], "rcept_no": parsed[1]}
-        return None
+                return True, {"corp_code": parsed[0], "rcept_no": parsed[1]}
+            if checkpoint.get("exhausted") is True:
+                return True, None
+        return False, None
 
     current_checkpoints = _terminal_checkpoints_for(params)
-    # A terminal v5 record consumes the compatibility handoff even when it
-    # has no cursor (for example, an exhausted run), so v4 can never override
-    # a newer v5 decision.
-    if current_checkpoints:
-        return _checkpoint_cursor(current_checkpoints)
+    current_has_decision, current_cursor = _checkpoint_decision(current_checkpoints)
+    # Only a valid v5 cursor or an explicit exhausted decision consumes the
+    # compatibility handoff.  Empty, malformed, or non-exhausted terminal
+    # records cannot turn a known v4 prefix into a restart from the beginning.
+    if current_has_decision:
+        return current_cursor
 
     if params.get("selector_version") != SELECTOR_VERSION:
         return None
     legacy_params = {**params, "selector_version": _LEGACY_SELECTOR_VERSION}
-    return _checkpoint_cursor(_terminal_checkpoints_for(legacy_params))
+    _, legacy_cursor = _checkpoint_decision(
+        _terminal_checkpoints_for(legacy_params)
+    )
+    return legacy_cursor
 
 
 def _lease_counts(lease: BackfillLease) -> tuple[int, int, int, int]:

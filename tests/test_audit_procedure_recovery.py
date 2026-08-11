@@ -5,6 +5,7 @@ import hashlib
 import json
 from datetime import date
 
+import pytest
 
 def _create_fallback_resolution_table() -> None:
     from sqlalchemy import text
@@ -911,6 +912,106 @@ def test_resume_uses_latest_terminal_v4_cursor_once_before_v5_history(
     assert recovery._latest_resume_cursor(
         year=2025, market="KOSPI", params=v5_params,
     ) == v5_cursor
+
+
+@pytest.mark.parametrize(
+    ("v5_checkpoint", "expected_legacy"),
+    (
+        ({}, True),
+        ({"next_cursor": {"corp_code": 838500, "rcept_no": "20260428800599"}}, True),
+        ({"exhausted": False}, True),
+        ({"exhausted": True}, False),
+    ),
+)
+def test_terminal_v5_consumes_legacy_only_with_cursor_or_explicit_exhaustion(
+    temp_engine,
+    v5_checkpoint,
+    expected_legacy,
+):
+    """Catch empty or malformed v5 terminal records restarting a v4 prefix."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    v5_params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    v4_params = {**v5_params, "selector_version": 4}
+    legacy_cursor = {"corp_code": "00828789", "rcept_no": "20260428828789"}
+    legacy = BackfillLease.start(
+        "audit_procedure_recovery", 2025, "KOSPI", v4_params,
+    )
+    legacy.checkpoint(
+        {"next_cursor": legacy_cursor}, attempted=1, saved=1, no_data=0, errors=0,
+    )
+    legacy.fail("transport_error", "retry after saved prefix")
+
+    v5 = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", v5_params)
+    v5.checkpoint(v5_checkpoint, attempted=0, saved=0, no_data=0, errors=0)
+    v5.succeed({"ok": 0})
+
+    assert recovery._latest_resume_cursor(
+        year=2025, market="KOSPI", params=v5_params,
+    ) == (legacy_cursor if expected_legacy else None)
+
+
+def test_v5_batch_retries_failed_v4_target_after_saved_prefix(temp_engine, monkeypatch):
+    """Keep run438's saved prefix and retry its direct failure with strict cursor order."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    saved_cursor = {"corp_code": "00828789", "rcept_no": "20260428828789"}
+    failed_target = {"corp_code": "00838500", "rcept_no": "20260428800599"}
+    _seed_target(saved_cursor["corp_code"], saved_cursor["rcept_no"])
+    _seed_target(
+        failed_target["corp_code"],
+        failed_target["rcept_no"],
+        report_nm="[기재정정]감사보고서제출",
+        disc_date=date(2026, 4, 28),
+    )
+    v5_params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    v4_params = {**v5_params, "selector_version": 4}
+    failed_v4 = BackfillLease.start(
+        "audit_procedure_recovery", 2025, "KOSPI", v4_params,
+    )
+    failed_v4.checkpoint(
+        {
+            "next_cursor": saved_cursor,
+            "exhausted": False,
+            "last_error": {
+                "corp_code": failed_target["corp_code"],
+                "rcept_no": failed_target["rcept_no"],
+                "message": "audit report attachment not found",
+            },
+        },
+        attempted=2,
+        saved=1,
+        no_data=0,
+        errors=1,
+    )
+    failed_v4.fail("transport_error", "retry corrected audit receipt")
+
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        recovery,
+        "collect_report_sections_for_disclosure",
+        lambda receipt: fetched.append(receipt) or {"ok": 1, "sections": 1},
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_rebuild_derived_receipt",
+        lambda *, year, target: {"rcept_no": target["rcept_no"]},
+    )
+    v5 = BackfillLease.start("audit_procedure_recovery", 2025, "KOSPI", v5_params)
+
+    result = recovery.run_audit_procedure_recovery_batch(
+        v5, year=2025, market="KOSPI", limit=1,
+    )
+
+    assert result["cursor_start"] == saved_cursor
+    assert result["targets"] == [{
+        "corp_code": failed_target["corp_code"],
+        "rcept_no": failed_target["rcept_no"],
+        "corp_name": f"회사{failed_target['corp_code']}",
+    }]
+    assert fetched == [failed_target["rcept_no"]]
 
 
 def test_batch_checkpoint_counts_each_processed_receipt_once(temp_engine, monkeypatch):
