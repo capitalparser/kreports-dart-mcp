@@ -1,0 +1,67 @@
+# Database
+kreports.db
+kreports.db-shm
+kreports.db-wal
+dart_platform.db
+*.db-journal
+
+# Legacy package symlink
+dart_platform
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DART API cache
+.cache/
+
+# Local raw disclosure document store
+data/raw_documents/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Logs
+*.log
+logs/
+
+# Local export artifacts
+artifacts/
+
+# Local backfill process markers
+*.pid
+.dart-backfill.lock/
+
+# Isolated implementation worktrees
+.worktrees/
