@@ -193,6 +193,39 @@ def test_successful_batch_resumes_after_saved_prefix_and_failure_retries(temp_en
     assert retry["next_cursor"] == second["next_cursor"]
 
 
+def test_batch_checkpoint_counts_each_processed_receipt_once(temp_engine, monkeypatch):
+    """Catch a checkpoint that adds a cumulative batch count more than once."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.db.engine import get_session
+    from kreports.db.models import BackfillRun
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    _seed_target("00000030", "20260320000030")
+    _seed_target("00000031", "20260320000031")
+    monkeypatch.setattr(
+        recovery,
+        "collect_report_sections_for_disclosure",
+        lambda _receipt: {"ok": 1, "sections": 1},
+    )
+    lease = BackfillLease.start(
+        "audit_procedure_recovery",
+        2025,
+        "KOSPI",
+        recovery.recovery_backfill_params(year=2025, market="KOSPI"),
+    )
+    result = recovery.run_audit_procedure_recovery_batch(
+        lease,
+        year=2025,
+        market="KOSPI",
+        limit=2,
+    )
+    lease.succeed(result)
+
+    with get_session() as session:
+        row = session.get(BackfillRun, lease.id)
+        assert (row.attempted_count, row.saved_count, row.error_count) == (2, 2, 0)
+
+
 def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch):
     """Catch removal of the public collector boundary around the durable selector."""
     from typer.testing import CliRunner

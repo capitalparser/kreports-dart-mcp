@@ -188,13 +188,14 @@ def _lease_counts(lease: BackfillLease) -> tuple[int, int, int, int]:
 def _checkpoint(
     lease: BackfillLease,
     *,
+    base_counts: tuple[int, int, int, int],
     cursor_start: dict[str, str] | None,
     next_cursor: dict[str, str] | None,
     totals: dict[str, object],
     exhausted: bool,
     error: dict[str, str] | None = None,
 ) -> None:
-    base_attempted, base_saved, base_no_data, base_errors = _lease_counts(lease)
+    base_attempted, base_saved, base_no_data, base_errors = base_counts
     lease.checkpoint(
         {
             "selector": "historical_audit_procedure_gap",
@@ -244,6 +245,7 @@ def run_audit_procedure_recovery_batch(
         after=cursor_start,
     )
     targets = list(selected["targets"])
+    base_counts = _lease_counts(lease)
     totals: dict[str, object] = {
         "total": len(targets),
         "processed": 0,
@@ -270,6 +272,7 @@ def run_audit_procedure_recovery_batch(
             totals["errors"] = [error]
             _checkpoint(
                 lease,
+                base_counts=base_counts,
                 cursor_start=cursor_start,
                 next_cursor=next_cursor,
                 totals=totals,
@@ -283,6 +286,7 @@ def run_audit_procedure_recovery_batch(
         successful_targets.append({"corp_code": str(target["corp_code"]), "rcept_no": receipt})
         _checkpoint(
             lease,
+            base_counts=base_counts,
             cursor_start=cursor_start,
             next_cursor=next_cursor,
             totals=totals,
@@ -308,6 +312,7 @@ def run_audit_procedure_recovery_batch(
     if not targets:
         _checkpoint(
             lease,
+            base_counts=base_counts,
             cursor_start=cursor_start,
             next_cursor=next_cursor,
             totals=totals,
