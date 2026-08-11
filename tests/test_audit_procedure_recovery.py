@@ -183,6 +183,30 @@ def test_selector_uses_one_own_company_target_year_root_per_company(temp_engine)
     ]
 
 
+def test_selector_includes_target_year_standalone_audit_report_roots(temp_engine):
+    """Catch a selector that only sees the 감사보고서제출 filing label."""
+    from kreports.collector.audit_procedure_recovery import select_audit_procedure_recovery_targets
+
+    _seed_target(
+        "00000013",
+        "20260609000508",
+        report_nm="감사보고서 (2025.12)",
+        disc_date=date(2026, 6, 9),
+    )
+    _seed_target(
+        "00000013",
+        "20260609000510",
+        report_nm="연결감사보고서 (2025.12)",
+        disc_date=date(2026, 6, 9),
+    )
+
+    result = select_audit_procedure_recovery_targets(year=2025, market="KOSPI", limit=20)
+
+    assert [(row["corp_code"], row["rcept_no"]) for row in result["targets"]] == [
+        ("00000013", "20260609000510"),
+    ]
+
+
 def test_successful_batch_resumes_after_saved_prefix_and_failure_retries(temp_engine, monkeypatch):
     """Catch a lease checkpoint that refetches successes or skips a failed receipt."""
     from kreports.collector import audit_procedure_recovery as recovery

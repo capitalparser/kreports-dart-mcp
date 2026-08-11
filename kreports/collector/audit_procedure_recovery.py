@@ -20,7 +20,7 @@ from kreports.quality.company_year import rebuild_company_year_quality
 
 
 TASK_TYPE = "audit_procedure_recovery"
-SELECTOR_VERSION = 2
+SELECTOR_VERSION = 3
 _EXPLICIT_BUSINESS_YEAR = re.compile(r"(?<!\d)(20\d{2})\s*사업연도")
 
 
@@ -82,6 +82,7 @@ def select_audit_procedure_recovery_targets(
         "market": normalized_market,
         "start_date": f"{int(year) + 1}-01-01",
         "end_date": f"{int(year) + 1}-12-31",
+        "standalone_audit_marker": f"%감사보고서 ({int(year)}.%",
         "limit": limit,
     }
     sql = """
@@ -96,7 +97,10 @@ def select_audit_procedure_recovery_targets(
           AND length(d.rcept_no)=14
           AND d.rcept_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
           AND substr(d.rcept_no, 1, 4)=strftime('%Y', d.disc_date)
-          AND d.report_nm LIKE '%감사보고서제출%'
+          AND (
+              d.report_nm LIKE '%감사보고서제출%'
+              OR d.report_nm LIKE :standalone_audit_marker
+          )
           AND d.report_nm NOT LIKE '%자회사의 주요경영사항%'
           AND d.report_nm NOT LIKE '%제출 지연%'
           AND d.report_nm NOT LIKE '%제출지연%'
