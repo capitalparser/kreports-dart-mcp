@@ -346,6 +346,101 @@ def test_parse_collapsed_audit_report_recovers_risk_only_title_with_omitted_reas
     assert len(extract_procedure_steps(outcome.items[0])) == 3
 
 
+def test_collapsed_parser_recovers_standalone_title_with_subject_led_reason():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+특수관계자 등 거래 및 공시의 적정성
+회사는 다수의 특수관계자와 중요한 수익ㆍ비용 거래 및 채권ㆍ채무를 보유하고 있으며 거래금액의 집계와 대사과정에는 오류가능성이 존재합니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ공시된 특수관계자 거래의 실재성을 검토
+ㆍ특수관계자 거래와 잔액을 대사
+ㆍ당기 및 전기 거래에 분석적 절차 수행
+ㆍ유의적인 거래의 계약서 검토
+ㆍ중요 잔액에 대해 채권채무조회 수행
+ㆍ특수관계자 거래 관련 통제를 평가
+ㆍ이사회 의사록을 검사하여 미공시 거래를 확인
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "특수관계자 등 거래 및 공시의 적정성"
+    ]
+    assert len(extract_procedure_steps(outcome.items[0])) == 7
+
+
+def test_collapsed_parser_rejects_standalone_title_without_subject_led_reason():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+특수관계자 등 거래 및 공시의 적정성
+특수관계자 거래에는 중요한 판단과 오류가능성이 존재하여 핵심감사사항으로 선정하였습니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ특수관계자 거래를 검토
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
+def test_collapsed_parser_recovers_intro_tail_risk_title_before_year_reason():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. 종속기업투자주식의 손상 평가 2025년 12월 31일 현재 회사의 종속기업투자주식 장부금액은 중요하며 회수가능액 추정에는 매출성장률과 할인율에 대한 경영진의 판단이 개입됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+- 손상평가 프로세스와 통제를 평가
+- 경영진 측 전문가의 적격성을 평가
+- 사업계획과 재무예측치를 비교 검토
+- 할인율과 방법론의 적정성을 확인
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "종속기업투자주식의 손상 평가"
+    ]
+    assert len(extract_procedure_steps(outcome.items[0])) == 4
+
+
+def test_collapsed_parser_recovers_risk_title_after_adjacent_intro_line():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다.
+종속기업투자주식의 손상 평가 2025년 12월 31일 현재 회사의 종속기업투자주식 장부금액은 중요하며 회수가능액 추정에는 매출성장률과 할인율에 대한 경영진의 판단이 개입됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+- 손상평가 프로세스와 통제를 평가
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "종속기업투자주식의 손상 평가"
+    ]
+
+
+def test_collapsed_parser_rejects_intro_tail_risk_title_without_year_cue():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. 종속기업투자주식의 손상 평가 당기말 회사의 종속기업투자주식 장부금액은 중요하며 회수가능액 추정에는 경영진의 판단이 개입됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+- 손상평가 프로세스와 통제를 평가
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
 def test_parse_collapsed_audit_report_recovers_omitted_reason_heading_after_intro_tail_title():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 

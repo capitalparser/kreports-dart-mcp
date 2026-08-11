@@ -183,6 +183,13 @@ _COLLAPSED_FIELD_MARKER_RE = re.compile(
 _COLLAPSED_REASON_SUBJECT_RE = re.compile(
     r"\s+(?=(?:연결)?회사는\s|당사는\s|그룹은\s)"
 )
+_COLLAPSED_REASON_SUBJECT_START_RE = re.compile(
+    r"(?:(?:연결)?회사는|당사는|그룹은)\s"
+)
+_INTRO_TAIL_RISK_TITLE_RE = re.compile(
+    r"(?:손상\s*평가|손상\s*검사|공정가치\s*측정|매수가격\s*배분|회수\s*가능성)"
+)
+_INTRO_TAIL_YEAR_CUE_RE = re.compile(r"^20\d{2}년(?:\s|$)")
 _NUMBERED_OMITTED_REASON_SUBJECT_RE = re.compile(
     r"\s+(?=(?:(?:연결)?회사는|연결실체는|당사는|그룹은|매출은)\s)"
 )
@@ -964,6 +971,34 @@ def _has_separator_title_evidence(value: str) -> bool:
     return _has_clear_title_evidence(value) or (
         _title_evidence_score(value) >= 1
         and _OMITTED_REASON_RISK_TITLE_ENDING_RE.search(value) is not None
+    )
+
+
+def _has_collapsed_title_ending(value: str) -> bool:
+    normalized = _normalize_title(value)
+    match = _COLLAPSED_TITLE_ENDING_RE.search(normalized)
+    return match is not None and match.end() == len(normalized)
+
+
+def _intro_tail_risk_title_candidate(value: str) -> tuple[str, str] | None:
+    for risk_match in _INTRO_TAIL_RISK_TITLE_RE.finditer(value):
+        title = value[:risk_match.end()].strip()
+        reason = value[risk_match.end():].strip()
+        if (
+            len(title) <= 80
+            and not title.endswith((".", "。"))
+            and _title_evidence_score(title) >= 1
+            and _INTRO_TAIL_YEAR_CUE_RE.match(reason) is not None
+        ):
+            return title, reason
+    return None
+
+
+def _ends_with_collapsed_intro(value: str) -> bool:
+    return any(
+        position == len(value.rstrip())
+        for ending in _COLLAPSED_INTRO_ENDINGS
+        for position in _compact_span_ends(value, ending)
     )
 
 
@@ -1960,6 +1995,7 @@ def _inject_omitted_collapsed_reason_heading(
     for index in range(kam_start + 1, response_index):
         inline_reason = None
         candidate = None
+        subject_led_standalone_title = False
         note_title = _OMITTED_REASON_TITLE_NOTE_RE.match(lines[index])
         if note_title is not None:
             candidate = ("", note_title.group("title"))
@@ -1973,6 +2009,11 @@ def _inject_omitted_collapsed_reason_heading(
         )
         for intro_cut in intro_cuts if candidate is None else ():
             intro_tail = lines[index][intro_cut:].strip()
+            risk_candidate = _intro_tail_risk_title_candidate(intro_tail)
+            if risk_candidate is not None:
+                candidate = (lines[index][:intro_cut].strip(), risk_candidate[0])
+                inline_reason = risk_candidate[1]
+                break
             subject = _COLLAPSED_REASON_SUBJECT_RE.search(intro_tail)
             if subject is None:
                 continue
@@ -2003,8 +2044,30 @@ def _inject_omitted_collapsed_reason_heading(
                     inline_reason = lines[index][subject.end():].strip()
             else:
                 candidate = None
+        if (
+            candidate is None
+            and index > kam_start + 1
+            and _ends_with_collapsed_intro(lines[index - 1])
+        ):
+            risk_candidate = _intro_tail_risk_title_candidate(lines[index])
+            if risk_candidate is not None:
+                candidate = ("", risk_candidate[0])
+                inline_reason = risk_candidate[1]
         if candidate is None:
             candidate = _collapsed_title_candidate(lines[index])
+        if (
+            candidate is None
+            and len(lines[index]) <= 80
+            and not lines[index].endswith((".", "。"))
+            and _has_collapsed_title_ending(lines[index])
+            and index + 1 < response_index
+            and _COLLAPSED_REASON_SUBJECT_START_RE.match(
+                lines[index + 1]
+            )
+            is not None
+        ):
+            candidate = ("", lines[index])
+            subject_led_standalone_title = True
         if candidate is None:
             cut = -1
             for ending in _COLLAPSED_INTRO_ENDINGS:
@@ -2048,6 +2111,7 @@ def _inject_omitted_collapsed_reason_heading(
                     )
                     is not None
                 )
+                and not subject_led_standalone_title
             )
         ):
             continue
