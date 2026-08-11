@@ -491,6 +491,78 @@ def test_parse_collapsed_audit_report_recovers_two_numbered_omitted_reason_matte
     assert [len(extract_procedure_steps(item)) for item in outcome.items] == [2, 2]
 
 
+def test_collapsed_parser_splits_numbered_nice_style_matter_pairs():
+    """A separator between a numbered title and its reason is not a procedure."""
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+(1) 알루미늄 제조사업부문 현금창출단위 손상검사
+-
+핵심감사사항으로 결정된 이유
+연결회사는 사업환경 변화로 손상징후를 검토하였고 사용가치 산정에는 현금흐름과 할인율에 대한 경영진의 중요한 판단이 수반됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ외부전문가의 적격성을 평가하였습니다.
+(2) 인도네시아 PG 사업부문 현금창출단위 손상검사
+-
+핵심감사사항으로 결정된 이유
+연결회사는 사업환경 변화로 손상징후를 검토하였고 사용가치 산정에는 현금흐름과 할인율에 대한 경영진의 중요한 판단이 수반됩니다.
+이와 관련하여 우리가 부문감사인을 참여시켜 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ할인율의 적정성을 평가하였습니다.
+연결재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "알루미늄 제조사업부문 현금창출단위 손상검사",
+        "인도네시아 PG 사업부문 현금창출단위 손상검사",
+    ]
+    assert [len(extract_procedure_steps(item)) for item in outcome.items] == [1, 1]
+
+
+def test_collapsed_parser_recovers_title_before_inline_financial_statement_note():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+영업권 손상평가 연결재무제표 주석 15에 기술된 바와 같이 연결회사의 영업권 장부금액은 중요합니다.
+우리는 손상평가 과정이 복잡하고 미래 현금흐름, 할인율 및 영구성장률의 결정에 경영진의 판단이 개입되어 핵심감사사항으로 식별하였습니다.
+핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.
+ㆍ내부통제의 설계와 운영을 평가하였습니다.
+ㆍ할인율과 영구성장률의 민감도를 검토하였습니다.
+연결재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["영업권 손상평가"]
+    assert "연결재무제표 주석 15" in (outcome.items[0].reason_text or "")
+    assert len(extract_procedure_steps(outcome.items[0])) == 2
+
+
+def test_collapsed_parser_recovers_inline_procedure_sentence_for_numbered_matters():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+(1) 재고자산의 평가 연결실체는 재고자산평가충당금 계산에 경영진의 판단과 추정이 개입되어 재고자산 평가를 핵심감사사항으로 판단하였습니다. 당기말 재고자산 평가의 적정성에 대하여 우리가 수행한 주요 감사절차는 다음과 같습니다. - 재고자산 평가 프로세스와 통제를 평가 - 재고자산평가충당금을 재계산 검증
+(2) 현금창출단위의 손상 연결실체는 영업권에 배분된 현금창출단위의 손상검사에 매출성장률, 할인율 및 영구성장률에 대한 경영진의 판단이 개입되어 핵심감사사항으로 식별하였습니다.
+핵심감사사항에 대응하기 위한 우리의 감사절차는 다음을 포함하고 있습니다.
+ㆍ외부전문가의 적격성과 객관성을 평가
+ㆍ평가모델의 변수와 방법론을 검토
+연결재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "재고자산의 평가",
+        "현금창출단위의 손상",
+    ]
+    assert [len(extract_procedure_steps(item)) for item in outcome.items] == [2, 2]
+
+
 def test_parse_collapsed_audit_report_does_not_infer_title_from_reason_narrative():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 

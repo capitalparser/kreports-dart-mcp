@@ -55,9 +55,13 @@ _RESPONSE_HEADINGS = (
     "이와관련하여우리가수행한주요감사절차는다음과같습니다.",
     "이와관련하여우리가수행한주요한감사절차는다음과같습니다.",
     "이와관련하여우리가부문감사인을참여시켜수행한주요감사절차는다음과같습니다.",
+    "우리가수행한주요감사절차는다음과같습니다.",
     "감사인의대응",
     "howthematterwasaddressedintheaudit",
     "auditresponse",
+)
+_GENERIC_MAJOR_PROCEDURE_HEADING = (
+    "우리가수행한주요감사절차는다음과같습니다.",
 )
 _TRAILING_HEADINGS = (
     "재무제표감사에대한감사인의책임",
@@ -104,6 +108,10 @@ _COLLAPSED_HEADING_LABELS = (
     (
         "이와관련하여우리가부문감사인을참여시켜수행한주요감사절차는다음과같습니다.",
         "이와 관련하여 우리가 부문감사인을 참여시켜 수행한 주요 감사절차는 다음과 같습니다.",
+    ),
+    (
+        "우리가수행한주요감사절차는다음과같습니다.",
+        "우리가 수행한 주요 감사절차는 다음과 같습니다.",
     ),
     ("감사에서다루어진방법", "감사에서 다루어진 방법"),
     ("감사에서다뤄진방법", "감사에서 다뤄진 방법"),
@@ -176,7 +184,14 @@ _COLLAPSED_REASON_SUBJECT_RE = re.compile(
     r"\s+(?=(?:연결)?회사는\s|당사는\s|그룹은\s)"
 )
 _NUMBERED_OMITTED_REASON_SUBJECT_RE = re.compile(
-    r"\s+(?=(?:(?:연결)?회사는|당사는|그룹은|매출은)\s)"
+    r"\s+(?=(?:(?:연결)?회사는|연결실체는|당사는|그룹은|매출은)\s)"
+)
+_NUMBERED_OMITTED_REASON_TITLE_ENDING_RE = re.compile(
+    r"(?:손상|평가|검사|인식|측정|회수가능성)\s*$"
+)
+_OMITTED_REASON_TITLE_NOTE_RE = re.compile(
+    r"^(?P<title>.+?(?:손상평가|손상검사|공정가치측정|매수가격배분|회수가능성))\s+"
+    r"(?P<reason>(?:연결)?재무제표\s*(?:에\s*대한\s*)?주석\s*[제]?\s*\d+.*)$"
 )
 MAX_TITLE_BLOCK_LINES = 8
 MAX_TITLE_BLOCK_CHARS = 800
@@ -1017,6 +1032,7 @@ def _discover_title_boundary(
     start: int
     title_values: list[str]
     selected_marker: tuple[str, str] | None = None
+    marker_reason_separator = False
     if marker_index is None or marker is None:
         start = _unnumbered_suffix_start(lines, scan_start, reason_index)
         title_values = lines[start:reason_index]
@@ -1045,7 +1061,22 @@ def _discover_title_boundary(
             and is_distinct_matter_marker
             and _is_title_continuation(marked_title, lines[suffix_start])
         )
-        if response_owned and has_suffix and not marked_wrap:
+        separator_padding = (
+            has_suffix
+            and all(
+                re.fullmatch(r"\s*[-–—]+\s*", line) is not None
+                for line in lines[suffix_start:reason_index]
+            )
+        )
+        marker_reason_separator = lines[reason_index].lstrip().startswith(
+            ("-", "–", "—")
+        )
+        if (
+            response_owned
+            and has_suffix
+            and not marked_wrap
+            and not (is_distinct_matter_marker and separator_padding)
+        ):
             # This marker already belongs to the accepted matter's response.
             # The unnumbered suffix immediately before the new reason owns the
             # next title; the procedure marker is never recycled as a title.
@@ -1079,10 +1110,16 @@ def _discover_title_boundary(
         title=title,
         marker=selected_marker,
         has_explicit_structure=(
-            structured_lines is not None
-            and any(
-                line.is_explicit_heading
-                for line in structured_lines[start:reason_index]
+            (
+                selected_marker is not None
+                and (separator_padding or marker_reason_separator)
+            )
+            or (
+                structured_lines is not None
+                and any(
+                    line.is_explicit_heading
+                    for line in structured_lines[start:reason_index]
+                )
             )
         ),
     )
@@ -1800,7 +1837,11 @@ def _inject_numbered_omitted_collapsed_reason_headings(
             if (
                 len(title) > 80
                 or title.endswith((".", "。"))
-                or not _has_clear_title_evidence(title)
+                or (
+                    not _has_clear_title_evidence(title)
+                    and _NUMBERED_OMITTED_REASON_TITLE_ENDING_RE.search(title)
+                    is None
+                )
                 or len(_compact(" ".join(reason_parts))) < 50
                 or any(
                     _matches_heading(
@@ -1851,6 +1892,15 @@ def _inject_omitted_collapsed_reason_heading(
         index
         for index in range(kam_start + 1, kam_end)
         if _matches_heading(lines[index], _RESPONSE_HEADINGS)
+        and not (
+            _matches_heading(
+                lines[index], _GENERIC_MAJOR_PROCEDURE_HEADING
+            )
+            and any(
+                _matches_heading(lines[prior], _RESPONSE_HEADINGS)
+                for prior in range(kam_start + 1, index)
+            )
+        )
     ]
     if len(response_indexes) > 1:
         _inject_numbered_omitted_collapsed_reason_headings(
@@ -1869,6 +1919,10 @@ def _inject_omitted_collapsed_reason_heading(
     for index in range(kam_start + 1, response_index):
         inline_reason = None
         candidate = None
+        note_title = _OMITTED_REASON_TITLE_NOTE_RE.match(lines[index])
+        if note_title is not None:
+            candidate = ("", note_title.group("title"))
+            inline_reason = note_title.group("reason")
         intro_cuts = sorted(
             {
                 position
@@ -1876,7 +1930,7 @@ def _inject_omitted_collapsed_reason_heading(
                 for position in _compact_span_ends(lines[index], ending)
             }
         )
-        for intro_cut in intro_cuts:
+        for intro_cut in intro_cuts if candidate is None else ():
             intro_tail = lines[index][intro_cut:].strip()
             subject = _COLLAPSED_REASON_SUBJECT_RE.search(intro_tail)
             if subject is None:
