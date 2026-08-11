@@ -152,6 +152,17 @@ def test_extract_procedure_steps_keeps_explicit_bullet_understanding_step():
     ]
 
 
+def test_extract_procedure_steps_keeps_explicit_bullet_specialist_use_step():
+    steps = extract_procedure_steps(
+        _kam_item("ㆍ감사인 내부의 가치평가 전문가를 활용")
+    )
+
+    assert [step.procedure_text for step in steps] == [
+        "감사인 내부의 가치평가 전문가를 활용"
+    ]
+    assert [step.method for step in steps] == ["specialist_involvement"]
+
+
 @pytest.mark.parametrize(
     ("text_value", "expected_texts", "expected_methods"),
     [

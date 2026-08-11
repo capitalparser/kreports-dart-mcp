@@ -170,7 +170,8 @@ _COLLAPSED_TITLE_ENDING_RE = re.compile(
     r"공정가치측정|매수가격배분|평가|검사|인식|측정|배분|표시)"
 )
 _OMITTED_REASON_RISK_TITLE_ENDING_RE = re.compile(
-    r"(?:손상평가|손상검사|공정가치측정|매수가격배분|회수가능성)\s*$"
+    r"(?:손상\s*평가|손상\s*검사|손상\s*검토|공정가치\s*측정|"
+    r"매수가격\s*배분|회수\s*가능성)\s*$"
 )
 _COLLAPSED_TITLE_MARKER_START_RE = re.compile(
     r"(?:^|\s)(?:\(?\d{1,2}\)?[.)]|[가-하]\s*[.)]|[IVX]{1,5}[.)])\s*",
@@ -183,11 +184,15 @@ _COLLAPSED_FIELD_MARKER_RE = re.compile(
 _COLLAPSED_REASON_SUBJECT_RE = re.compile(
     r"\s+(?=(?:연결)?회사는\s|당사는\s|그룹은\s)"
 )
+_COLLAPSED_GENITIVE_REASON_SUBJECT_RE = re.compile(
+    r"\s+(?=(?:(?:연결)?회사의)\s)"
+)
 _COLLAPSED_REASON_SUBJECT_START_RE = re.compile(
     r"(?:(?:연결)?회사는|당사는|그룹은)\s"
 )
 _INTRO_TAIL_RISK_TITLE_RE = re.compile(
-    r"(?:손상\s*평가|손상\s*검사|공정가치\s*측정|매수가격\s*배분|회수\s*가능성)"
+    r"(?:손상\s*평가|손상\s*검사|손상\s*검토|공정가치\s*측정|"
+    r"매수가격\s*배분|회수\s*가능성)"
 )
 _INTRO_TAIL_YEAR_CUE_RE = re.compile(r"^20\d{2}년(?:\s|$)")
 _NUMBERED_OMITTED_REASON_SUBJECT_RE = re.compile(
@@ -197,7 +202,8 @@ _NUMBERED_OMITTED_REASON_TITLE_ENDING_RE = re.compile(
     r"(?:손상|평가|검사|인식|측정|회수가능성)\s*$"
 )
 _OMITTED_REASON_TITLE_NOTE_RE = re.compile(
-    r"^(?P<title>.+?(?:손상평가|손상검사|공정가치측정|매수가격배분|회수가능성))\s+"
+    r"^(?P<title>.+?(?:손상\s*평가|손상\s*검사|손상\s*검토|"
+    r"공정가치\s*측정|매수가격\s*배분|회수\s*가능성))\s+"
     r"(?P<reason>(?:연결)?재무제표\s*(?:에\s*대한\s*)?주석\s*[제]?\s*\d+.*)$"
 )
 MAX_TITLE_BLOCK_LINES = 8
@@ -2019,6 +2025,20 @@ def _inject_omitted_collapsed_reason_heading(
                 candidate = (lines[index][:intro_cut].strip(), risk_candidate[0])
                 inline_reason = risk_candidate[1]
                 break
+            genitive_subject = _COLLAPSED_GENITIVE_REASON_SUBJECT_RE.search(
+                intro_tail
+            )
+            if genitive_subject is not None:
+                inline_title = intro_tail[:genitive_subject.start()].strip()
+                if (
+                    len(inline_title) <= 80
+                    and not inline_title.endswith((".", "。"))
+                    and not _ends_with_title_connector(inline_title)
+                    and _has_clear_title_evidence(inline_title)
+                ):
+                    candidate = (lines[index][:intro_cut].strip(), inline_title)
+                    inline_reason = intro_tail[genitive_subject.end():].strip()
+                    break
             subject = _COLLAPSED_REASON_SUBJECT_RE.search(intro_tail)
             if subject is None:
                 continue

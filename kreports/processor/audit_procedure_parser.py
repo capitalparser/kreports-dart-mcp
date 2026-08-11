@@ -130,6 +130,7 @@ _BULLET_NOUN_ACTION_ENDINGS = (
     "검증",
     "비교",
     "이해",
+    "활용",
 )
 
 _RESPONSIBILITY_BOILERPLATE = (

@@ -448,6 +448,106 @@ def test_collapsed_parser_rejects_clear_title_ending_with_connector():
     assert outcome.items == []
 
 
+def test_collapsed_parser_recovers_intro_tail_risk_title_with_note_cue():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다.
+화장품 원료제조사업부문에 배부된 영업권의 손상검토 연결재무제표에 대한 주석 16에서 언급한 바와 같이 연결실체의 영업권 장부금액은 유의적이며 회수가능액 추정에는 경영진의 판단이 개입됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ영업권 관련 내부통제를 평가
+ㆍ외부평가기관의 적격성을 평가
+ㆍ가치평가 모델과 할인율을 검토
+ㆍ사업계획과 외부시장자료를 비교
+ㆍ독립적인 재계산을 수행
+ㆍ전년도 예측과 당기 실적을 비교
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "화장품 원료제조사업부문에 배부된 영업권의 손상검토"
+    ]
+    assert len(extract_procedure_steps(outcome.items[0])) == 6
+
+
+def test_collapsed_parser_rejects_intro_tail_risk_title_without_note_cue():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다.
+화장품 원료제조사업부문에 배부된 영업권의 손상검토 일반적인 사업 설명에는 여러 추정과 판단이 포함됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ영업권 관련 내부통제를 평가
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
+def test_collapsed_parser_recovers_standalone_risk_title_before_year_reason():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다.
+(주)한섬 부문 현금창출단위에 대한 손상 검사
+2025년 12월 31일 현재 연결회사의 현금창출단위 장부금액은 유의적이며 사용가치 추정의 성장률과 할인율에는 경영진의 판단이 개입됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ현금창출단위 관련 내부통제를 평가
+ㆍ외부전문가의 적격성을 평가
+ㆍ가치평가 모델과 할인율을 검토
+ㆍ사업계획과 외부시장자료를 비교
+ㆍ독립적인 재계산을 수행
+ㆍ전년도 예측과 당기 실적을 비교
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == [
+        "(주)한섬 부문 현금창출단위에 대한 손상 검사"
+    ]
+    assert len(extract_procedure_steps(outcome.items[0])) == 6
+
+
+def test_collapsed_parser_recovers_intro_tail_clear_title_with_genitive_reason():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. 수익의 기간귀속 및 측정 회사의 주요 매출은 프로젝트 단위로 발생하며 통제 이전 시점과 변동대가의 측정에는 판단이 요구되어 수익의 기간귀속 및 측정을 핵심감사사항으로 식별하였습니다.
+우리가 수행한 주요 감사절차는 다음과 같습니다.
+- 계약조건 확인을 통한 회계정책 검토
+- 주요 매출거래 증빙 확인
+- 기간귀속 내부통제의 효과성 평가
+- 보고기간말 전후 거래의 원천증빙 대사
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["수익의 기간귀속 및 측정"]
+    assert len(extract_procedure_steps(outcome.items[0])) == 4
+
+
+def test_collapsed_parser_rejects_intro_tail_clear_title_without_genitive_reason():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. 수익의 기간귀속 및 측정 주요 매출은 프로젝트 단위로 발생하며 수익인식 판단이 요구됩니다.
+우리가 수행한 주요 감사절차는 다음과 같습니다.
+- 계약조건 검토
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
 def test_collapsed_parser_rejects_clear_title_shaped_prose_sentence():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 
