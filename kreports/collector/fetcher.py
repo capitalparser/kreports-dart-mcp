@@ -642,7 +642,8 @@ def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:
         return None
     try:
         with _get_client() as client:
-            response = client.get(
+            with client.stream(
+                "GET",
                 f"{DART_WEB_BASE}/pdf/download/pdf.do",
                 params={"rcp_no": rcept_no, "dcm_no": dcm_no},
                 headers={
@@ -650,8 +651,27 @@ def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:
                     "Referer": f"{DART_WEB_BASE}/dsaf001/main.do?rcpNo={rcept_no}",
                 },
                 timeout=60.0,
-            )
-            response.raise_for_status()
+            ) as response:
+                response.raise_for_status()
+                content_type = str(
+                    response.headers.get("content-type") or ""
+                ).lower()
+                declared_length = response.headers.get("content-length")
+                if content_type.find("application/pdf") < 0:
+                    return None
+                try:
+                    if declared_length and int(declared_length) > MAX_AUDIT_REPORT_PDF_BYTES:
+                        return None
+                except ValueError:
+                    return None
+                chunks: list[bytes] = []
+                total_bytes = 0
+                for chunk in response.iter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_AUDIT_REPORT_PDF_BYTES:
+                        return None
+                    chunks.append(chunk)
+                payload = b"".join(chunks)
     except Exception as exc:  # External transport must remain fail-closed.
         logger.warning(
             "DART audit PDF fetch failed [%s/%s]: %s",
@@ -661,11 +681,8 @@ def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:
         )
         return None
 
-    content_type = str(response.headers.get("content-type") or "").lower()
-    payload = bytes(response.content or b"")
     if (
-        "application/pdf" not in content_type
-        or not payload.startswith(b"%PDF-")
+        not payload.startswith(b"%PDF-")
         or len(payload) > MAX_AUDIT_REPORT_PDF_BYTES
     ):
         logger.warning("DART audit PDF response rejected [%s/%s]", rcept_no, dcm_no)

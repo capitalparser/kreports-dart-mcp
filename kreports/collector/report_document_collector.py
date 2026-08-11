@@ -202,6 +202,9 @@ _AUDIT_PDF_TEXT_MARKERS = (
     "감사의견",
     "핵심감사사항",
     "재무제표감사에 대한 감사인의 책임",
+    "Audit Opinion",
+    "Key Audit Matters",
+    "Auditor's Responsibilities for the Audit of the Financial Statements",
 )
 
 
@@ -544,6 +547,7 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
             "source_type": "audit_report",
             "report_nm": attachment.get("title") or meta["report_nm"],
             **({"content_type": content_type} if content_type else {}),
+            **({"pdf_binary": pdf_payload} if content_type == "pdf_text" else {}),
         }
         result = _persist_report_document(doc_meta, content=content)
         totals["documents"] += 1
@@ -596,11 +600,17 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
     )
     now = datetime.utcnow()
     doc_hash = _sha1(content)
-    storage_payload = _raw_storage_payload(meta, content=content, doc_hash=doc_hash)
+    source_meta = {key: value for key, value in meta.items() if key != "pdf_binary"}
+    storage_payload = _raw_storage_payload(
+        source_meta,
+        content=content,
+        doc_hash=doc_hash,
+        pdf_binary=meta.get("pdf_binary"),
+    )
     with get_session() as session:
         stmt = sqlite_insert(SourceDocument).values({
-            **meta,
-            "content_type": meta.get("content_type") or "xml",
+            **source_meta,
+            "content_type": source_meta.get("content_type") or "xml",
             "doc_hash": doc_hash,
             **storage_payload,
             "fetched_at": now,
@@ -618,6 +628,10 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
                 "storage_uri": stmt.excluded.storage_uri,
                 "content_length": stmt.excluded.content_length,
                 "compressed_length": stmt.excluded.compressed_length,
+                "pdf_storage_uri": stmt.excluded.pdf_storage_uri,
+                "pdf_sha256": stmt.excluded.pdf_sha256,
+                "pdf_content_length": stmt.excluded.pdf_content_length,
+                "pdf_compressed_length": stmt.excluded.pdf_compressed_length,
                 "storage_status": stmt.excluded.storage_status,
                 "fetched_at": stmt.excluded.fetched_at,
             },
@@ -633,14 +647,26 @@ def _persist_source_document(meta: dict, *, content: str) -> int:
     return int(source_doc_id)
 
 
-def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
+def _raw_storage_payload(
+    meta: dict,
+    *,
+    content: str,
+    doc_hash: str,
+    pdf_binary: bytes | None = None,
+) -> dict:
     backend, keep_inline, bucket = raw_storage_policy()
     if backend in ("", "inline", "db"):
+        if pdf_binary is not None:
+            raise RuntimeError("official audit PDF binary requires external raw storage")
         return {
             "raw_content": content,
             "storage_uri": None,
             "content_length": len((content or "").encode("utf-8")),
             "compressed_length": None,
+            "pdf_storage_uri": None,
+            "pdf_sha256": None,
+            "pdf_content_length": None,
+            "pdf_compressed_length": None,
             "storage_status": "inline",
         }
     store = RawDocumentStore(
@@ -648,6 +674,18 @@ def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
         bucket=bucket or None,
         prefix=settings.raw_storage_prefix or "",
     )
+    # Keep the original first; a source row is only externalized after its
+    # independently-verifiable binary and its extractor input both succeed.
+    pdf_saved = None
+    if pdf_binary is not None:
+        pdf_saved = store.write_bytes(
+            corp_code=meta["corp_code"],
+            bsns_year=meta["bsns_year"],
+            source_type=meta["source_type"],
+            rcept_no=meta["rcept_no"],
+            content_type="pdf",
+            data=pdf_binary,
+        )
     saved = store.write(
         corp_code=meta["corp_code"],
         bsns_year=meta["bsns_year"],
@@ -663,6 +701,10 @@ def _raw_storage_payload(meta: dict, *, content: str, doc_hash: str) -> dict:
         "storage_uri": saved.storage_uri,
         "content_length": saved.content_length,
         "compressed_length": saved.compressed_length,
+        "pdf_storage_uri": pdf_saved.storage_uri if pdf_saved else None,
+        "pdf_sha256": pdf_saved.doc_hash if pdf_saved else None,
+        "pdf_content_length": pdf_saved.content_length if pdf_saved else None,
+        "pdf_compressed_length": pdf_saved.compressed_length if pdf_saved else None,
         "storage_status": "externalized",
     }
 

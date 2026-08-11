@@ -65,8 +65,55 @@ def test_schema_migrations_are_idempotent(temp_engine):
         "20260810_18_year_listing_membership",
         "20260810_19_year_membership_indexes",
         "20260812_20_audit_procedure_recovery_fallback",
+        "20260812_21_source_document_pdf_provenance",
     ]
     assert second == []
+
+
+def test_source_document_pdf_provenance_migration_upgrades_legacy_source_table(tmp_path):
+    from kreports.db.migrations import MIGRATIONS, _checksum, apply_schema_migrations
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-source-documents.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE schema_migrations (
+              revision TEXT PRIMARY KEY, checksum TEXT NOT NULL,
+              description TEXT NOT NULL, applied_at TEXT NOT NULL
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE source_documents (
+              id INTEGER PRIMARY KEY, rcept_no TEXT NOT NULL, dcm_no TEXT,
+              corp_code TEXT NOT NULL, bsns_year INTEGER NOT NULL,
+              source_type TEXT NOT NULL, report_nm TEXT NOT NULL,
+              content_type TEXT NOT NULL, raw_content TEXT NOT NULL,
+              doc_hash TEXT NOT NULL, storage_uri TEXT, content_length INTEGER,
+              compressed_length INTEGER, storage_status TEXT NOT NULL,
+              fetched_at TEXT NOT NULL
+            )
+        """))
+        for migration in MIGRATIONS[:-1]:
+            connection.execute(text("""
+                INSERT INTO schema_migrations
+                (revision, checksum, description, applied_at)
+                VALUES (:revision, :checksum, :description, CURRENT_TIMESTAMP)
+            """), {
+                "revision": migration.revision,
+                "checksum": _checksum(migration),
+                "description": migration.description,
+            })
+
+    with engine.begin() as connection:
+        assert apply_schema_migrations(connection) == [
+            "20260812_21_source_document_pdf_provenance",
+        ]
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(source_documents)")
+        }
+
+    assert {
+        "pdf_storage_uri", "pdf_sha256", "pdf_content_length", "pdf_compressed_length",
+    }.issubset(columns)
 
 
 def test_disclosure_lookup_index_migrates_legacy_db_and_serves_corp_scoped_annual_lookup(
@@ -124,6 +171,7 @@ def test_disclosure_lookup_index_migrates_legacy_db_and_serves_corp_scoped_annua
             "20260810_18_year_listing_membership",
             "20260810_19_year_membership_indexes",
             "20260812_20_audit_procedure_recovery_fallback",
+            "20260812_21_source_document_pdf_provenance",
         ]
         assert apply_schema_migrations(conn) == []
         indexes = {
@@ -334,6 +382,7 @@ def test_revision_08_database_upgrades_to_foundation_without_rewriting_rows(
         "20260810_18_year_listing_membership",
         "20260810_19_year_membership_indexes",
         "20260812_20_audit_procedure_recovery_fallback",
+        "20260812_21_source_document_pdf_provenance",
     ]
     assert second_applied == []
     assert seeded_audit_fee == ("00126380", 2025, 1000, 2000)

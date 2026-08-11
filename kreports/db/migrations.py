@@ -731,6 +731,16 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        revision="20260812_21_source_document_pdf_provenance",
+        description="Retain official audit PDF evidence alongside extracted text",
+        statements=(
+            "ALTER TABLE source_documents ADD COLUMN pdf_storage_uri VARCHAR(500)",
+            "ALTER TABLE source_documents ADD COLUMN pdf_sha256 VARCHAR(64)",
+            "ALTER TABLE source_documents ADD COLUMN pdf_content_length INTEGER",
+            "ALTER TABLE source_documents ADD COLUMN pdf_compressed_length INTEGER",
+        ),
+    ),
 )
 
 
@@ -832,6 +842,10 @@ def apply_schema_migrations(connection: Connection) -> list[str]:
                             "20260805_15_disclosure_lookup_index",
                         }
                     ),
+                    tolerate_missing_column_table=(
+                        migration.revision
+                        == "20260812_21_source_document_pdf_provenance"
+                    ),
                 )
             connection.execute(
                 text(
@@ -860,6 +874,7 @@ def _execute_statement(
     statement: str,
     *,
     tolerate_missing_index_table: bool = False,
+    tolerate_missing_column_table: bool = False,
 ) -> None:
     """Execute one statement, tolerating columns already created by metadata.
 
@@ -877,6 +892,8 @@ def _execute_statement(
     ):
         table_name = tokens[2]
         column_name = tokens[5]
+        if tolerate_missing_column_table and not inspect(connection).has_table(table_name):
+            return
         existing = {
             column["name"]
             for column in inspect(connection).get_columns(table_name)

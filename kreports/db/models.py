@@ -589,6 +589,10 @@ class SourceDocument(Base):
     storage_uri = Column(String(500), nullable=True)
     content_length = Column(Integer, nullable=True)
     compressed_length = Column(Integer, nullable=True)
+    pdf_storage_uri = Column(String(500), nullable=True)
+    pdf_sha256 = Column(String(64), nullable=True)
+    pdf_content_length = Column(Integer, nullable=True)
+    pdf_compressed_length = Column(Integer, nullable=True)
     storage_status = Column(String(30), nullable=False, default="inline")
     fetched_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

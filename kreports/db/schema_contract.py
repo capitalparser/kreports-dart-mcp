@@ -60,6 +60,12 @@ REQUIRED_COLUMN_SPECS = {
         "citation_rcept_no", "citation_report_nm", "citation_basis",
         "quality_status",
     ),
+    "source_documents": (
+        "id", "rcept_no", "dcm_no", "corp_code", "bsns_year", "source_type",
+        "report_nm", "content_type", "raw_content", "doc_hash", "storage_uri",
+        "content_length", "compressed_length", "pdf_storage_uri", "pdf_sha256",
+        "pdf_content_length", "pdf_compressed_length", "storage_status", "fetched_at",
+    ),
     "kam_items": (
         "id", "rcept_no", "dcm_no", "corp_code", "bsns_year",
         "source_type", "ordinal", "title", "normalized_topic",

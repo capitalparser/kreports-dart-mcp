@@ -12,6 +12,15 @@ class _FakeResponse:
     def raise_for_status(self):
         return None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def iter_bytes(self):
+        yield self.content
+
 
 class _FakeClient:
     def __init__(self, response: _FakeResponse):
@@ -33,6 +42,10 @@ class _RecordingClient(_FakeClient):
         self.calls: list[tuple[tuple, dict]] = []
 
     def get(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.response
+
+    def stream(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.response
 
@@ -134,7 +147,90 @@ def test_fetch_audit_report_pdf_uses_official_endpoint_and_safe_headers(monkeypa
     assert fetcher.fetch_audit_report_pdf("20260428000679", "11351227") == b"%PDF-1.7\nbody"
     assert client.calls
     args, kwargs = client.calls[0]
-    assert args[0].endswith("/pdf/download/pdf.do")
+    assert args == ("GET", "https://dart.fss.or.kr/pdf/download/pdf.do")
     assert kwargs["params"] == {"rcp_no": "20260428000679", "dcm_no": "11351227"}
     assert kwargs["headers"]["Referer"].endswith("main.do?rcpNo=20260428000679")
     assert "Mozilla" in kwargs["headers"]["User-Agent"]
+
+
+def test_fetch_audit_report_pdf_stops_streaming_at_the_byte_cap(monkeypatch):
+    """Catch a PDF fallback buffering bytes after its configured limit is crossed."""
+    consumed: list[bytes] = []
+    closed: list[bool] = []
+
+    class Response:
+        headers = {"content-type": "application/pdf"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            closed.append(True)
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            for chunk in (b"%PDF", b"-123", b"must-not-be-read"):
+                consumed.append(chunk)
+                yield chunk
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, method, url, **kwargs):
+            assert method == "GET"
+            assert url.endswith("/pdf/download/pdf.do")
+            return Response()
+
+    monkeypatch.setattr(fetcher, "MAX_AUDIT_REPORT_PDF_BYTES", 7)
+    monkeypatch.setattr(fetcher, "_get_client", lambda: Client())
+
+    assert fetcher.fetch_audit_report_pdf("20260428000679", "11351227") is None
+    assert consumed == [b"%PDF", b"-123"]
+    assert closed == [True]
+
+
+def test_fetch_audit_report_pdf_rejects_declared_oversize_before_reading(monkeypatch):
+    """A Content-Length cap must close the stream without consuming its body."""
+    closed: list[bool] = []
+
+    class Response:
+        headers = {
+            "content-type": "application/pdf",
+            "content-length": str(8),
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            closed.append(True)
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            raise AssertionError("oversize body must not be read")
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(fetcher, "MAX_AUDIT_REPORT_PDF_BYTES", 7)
+    monkeypatch.setattr(fetcher, "_get_client", lambda: Client())
+
+    assert fetcher.fetch_audit_report_pdf("20260428000679", "11351227") is None
+    assert closed == [True]

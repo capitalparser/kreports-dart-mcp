@@ -54,6 +54,10 @@ def test_source_documents_has_raw_storage_columns(temp_engine):
     assert "storage_uri" in columns
     assert "content_length" in columns
     assert "compressed_length" in columns
+    assert "pdf_storage_uri" in columns
+    assert "pdf_sha256" in columns
+    assert "pdf_content_length" in columns
+    assert "pdf_compressed_length" in columns
     assert "storage_status" in columns
 
 
@@ -95,6 +99,26 @@ def test_raw_document_store_labels_pdf_extracted_text_as_txt(tmp_path):
     assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
 
 
+def test_raw_document_store_keeps_official_pdf_bytes_as_pdf_gzip(tmp_path):
+    """The official binary remains independently verifiable from extracted text."""
+    store = RawDocumentStore(base_dir=tmp_path)
+    payload = b"%PDF-1.7\nreal official bytes\n%%EOF\n"
+
+    saved = store.write_bytes(
+        corp_code="00838500",
+        bsns_year=2025,
+        source_type="audit_report",
+        rcept_no="20260428000679_11351227",
+        content_type="pdf",
+        data=payload,
+    )
+
+    assert saved.path.endswith("20260428000679_11351227.pdf.gz")
+    assert len(saved.doc_hash) == 64
+    assert saved.content_length == len(payload)
+    assert store.read_bytes(saved.storage_uri, expected_sha256=saved.doc_hash) == payload
+
+
 def test_raw_document_store_writes_and_reads_gcs_uri():
     client = _FakeGcsClient()
     store = RawDocumentStore(
@@ -122,6 +146,30 @@ def test_raw_document_store_writes_and_reads_gcs_uri():
     assert saved.content_length == len(content.encode("utf-8"))
     assert saved.compressed_length > 0
     assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
+
+
+def test_raw_document_store_writes_and_reads_official_pdf_to_gcs():
+    client = _FakeGcsClient()
+    store = RawDocumentStore(
+        backend="gcs",
+        bucket="kreports-raw-documents",
+        prefix="dart",
+        gcs_client=client,
+    )
+    payload = b"%PDF-1.7\noriginal official bytes\n%%EOF\n"
+
+    saved = store.write_bytes(
+        corp_code="00838500",
+        bsns_year=2025,
+        source_type="audit_report",
+        rcept_no="20260428000679_11351227",
+        content_type="pdf",
+        data=payload,
+    )
+
+    assert saved.storage_uri.endswith("20260428000679_11351227.pdf.gz")
+    assert client.objects[saved.path]["content_type"] == "application/gzip"
+    assert store.read_bytes(saved.storage_uri, expected_sha256=saved.doc_hash) == payload
 
 
 def test_raw_document_store_requires_bucket_for_gcs():

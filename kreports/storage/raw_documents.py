@@ -20,11 +20,17 @@ def sha1_text(content: str) -> str:
     return hashlib.sha1((content or "").encode("utf-8")).hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def _suffix_for_content_type(content_type: str) -> str:
     if content_type == "html":
         return "html"
     if content_type == "pdf_text":
         return "txt"
+    if content_type == "pdf":
+        return "pdf"
     return "xml"
 
 
@@ -202,15 +208,56 @@ class RawDocumentStore:
             )
         raise ValueError(f"unsupported raw storage backend: {self.backend}")
 
-    def _read_file(self, storage_uri: str) -> str:
+    def write_bytes(
+        self,
+        *,
+        corp_code: str,
+        bsns_year: int,
+        source_type: str,
+        rcept_no: str,
+        content_type: str,
+        data: bytes,
+    ) -> StoredRawDocument:
+        """Persist official binary evidence without treating it as extracted text."""
+        from kreports.runtime import raw_persistence_allowed
+
+        if not raw_persistence_allowed(backend=self.backend, bucket=self.bucket):
+            raise RuntimeError(
+                "raw persistence requires collector mode, explicit raw opt-in, "
+                "external non-inline storage, and a GCS bucket when applicable."
+            )
+        doc_hash = sha256_bytes(data)
+        if self.backend == "file":
+            return self._write_file(
+                corp_code=corp_code,
+                bsns_year=int(bsns_year),
+                source_type=source_type,
+                rcept_no=rcept_no,
+                content_type=content_type,
+                data=data,
+                doc_hash=doc_hash,
+            )
+        if self.backend == "gcs":
+            return self._write_gcs(
+                corp_code=corp_code,
+                bsns_year=int(bsns_year),
+                source_type=source_type,
+                rcept_no=rcept_no,
+                content_type=content_type,
+                data=data,
+                doc_hash=doc_hash,
+            )
+        raise ValueError(f"unsupported raw storage backend: {self.backend}")
+
+    def _read_file_bytes(self, storage_uri: str) -> bytes:
         parsed = urlparse(storage_uri)
         path = Path(parsed.path)
         if not path.exists():
             raise FileNotFoundError(f"missing raw document: {path}")
         with gzip.open(path, "rb") as fh:
-            return fh.read().decode("utf-8")
+            return fh.read()
 
-    def _read_gcs(self, storage_uri: str) -> str:
+    def _read_gcs_bytes(self, storage_uri: str) -> bytes:
         parsed = urlparse(storage_uri)
         bucket_name = parsed.netloc
         object_name = parsed.path.lstrip("/")
@@ -219,16 +266,27 @@ class RawDocumentStore:
         client = self._get_gcs_client()
         blob = client.bucket(bucket_name).blob(object_name)
         compressed = blob.download_as_bytes()
-        return gzip.decompress(compressed).decode("utf-8")
+        return gzip.decompress(compressed)
 
-    def read(self, storage_uri: str, *, expected_hash: str | None = None) -> str:
+    def read_bytes(
+        self,
+        storage_uri: str,
+        *,
+        expected_sha256: str | None = None,
+    ) -> bytes:
         parsed = urlparse(storage_uri)
         if parsed.scheme == "file":
-            content = self._read_file(storage_uri)
+            data = self._read_file_bytes(storage_uri)
         elif parsed.scheme == "gs":
-            content = self._read_gcs(storage_uri)
+            data = self._read_gcs_bytes(storage_uri)
         else:
             raise ValueError(f"unsupported storage_uri scheme: {parsed.scheme}")
+        if expected_sha256 and sha256_bytes(data) != expected_sha256:
+            raise ValueError("raw document SHA-256 mismatch")
+        return data
+
+    def read(self, storage_uri: str, *, expected_hash: str | None = None) -> str:
+        content = self.read_bytes(storage_uri).decode("utf-8")
         if expected_hash and sha1_text(content) != expected_hash:
             raise ValueError("raw document hash mismatch")
         return content

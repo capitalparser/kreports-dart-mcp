@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import hashlib
 
 import pytest
 
@@ -28,6 +29,36 @@ from kreports.processor.audit_report_parser import (
     extract_audit_report_sections,
     summarize_kam_body,
 )
+
+
+def _built_in_font_audit_pdf(lines: list[str]) -> bytes:
+    """Create a tiny deterministic PDF without adding a report-generation dependency."""
+    escaped = [line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") for line in lines]
+    stream = "BT\n/F1 11 Tf\n72 720 Td\n" + "\n".join(
+        f"({line}) Tj\n0 -15 Td" for line in escaped
+    ) + "\nET\n"
+    stream_bytes = stream.encode("latin-1")
+    objects = (
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream_bytes)).encode() + b" >>\nstream\n" + stream_bytes + b"endstream",
+    )
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out.extend(f"{number} 0 obj\n".encode())
+        out.extend(obj)
+        out.extend(b"\nendobj\n")
+    xref_offset = len(out)
+    out.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+    out.extend(b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets[1:]))
+    out.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode()
+    )
+    return bytes(out)
 
 
 def test_extract_audit_report_sections_finds_kam_and_opinion():
@@ -809,10 +840,11 @@ def test_unreadable_audit_viewer_uses_pdf_text_and_rebuilds_kam_procedures(
         "fetch_viewer_html",
         lambda _receipt, _dcm: "<DOCUMENT><TITLE>媛먯궗蹂닿퀬?꽌</TITLE><P>媛먯궗?쓽寃</P></DOCUMENT>",
     )
+    official_pdf = b"%PDF-1.7 fixture official binary\n%%EOF\n"
     monkeypatch.setattr(
         collector_module,
         "fetch_audit_report_pdf",
-        lambda _receipt, _dcm: b"%PDF-1.7 fixture",
+        lambda _receipt, _dcm: official_pdf,
         raising=False,
     )
     monkeypatch.setattr(
@@ -853,11 +885,22 @@ def test_unreadable_audit_viewer_uses_pdf_text_and_rebuilds_kam_procedures(
         )
         source_content_type = source.content_type
         source_storage_uri = source.storage_uri
+        source_pdf_storage_uri = source.pdf_storage_uri
+        source_pdf_sha256 = source.pdf_sha256
+        source_pdf_content_length = source.pdf_content_length
+        source_pdf_compressed_length = source.pdf_compressed_length
         source_dcm_no = source.dcm_no
         source_report_nm = source.report_nm
         kam_title = kam.title
     assert source_content_type == "pdf_text"
     assert source_storage_uri.endswith(".txt.gz")
+    assert source_pdf_storage_uri.endswith(".pdf.gz")
+    assert source_pdf_sha256 == hashlib.sha256(official_pdf).hexdigest()
+    assert source_pdf_content_length == len(official_pdf)
+    assert source_pdf_compressed_length > 0
+    assert collector_module.RawDocumentStore().read_bytes(
+        source_pdf_storage_uri, expected_sha256=source_pdf_sha256,
+    ) == official_pdf
     assert source_dcm_no == dcm_no
     assert source_report_nm == "외국법인등의연결감사보고서"
     assert persisted_text == extracted_pdf_text
@@ -898,6 +941,12 @@ def test_readable_audit_viewer_stays_preferred_without_pdf_fetch(temp_engine, mo
 
     assert result["ok"] == 1
     assert result["documents"] == 1
+    from kreports.db.engine import get_session
+
+    with get_session() as session:
+        source = session.query(SourceDocument).one()
+        assert source.pdf_storage_uri is None
+        assert source.pdf_sha256 is None
 
 
 @pytest.mark.parametrize(
@@ -921,6 +970,74 @@ def test_audit_pdf_text_rejects_business_only_content():
     from kreports.collector.report_document_collector import _is_usable_audit_pdf_text
 
     assert _is_usable_audit_pdf_text("사업보고서\n회사의 사업 내용과 재무 현황입니다.") is False
+
+
+def test_real_built_in_font_pdf_extracts_and_flows_through_kam_procedures():
+    """Exercise pypdf extraction, rather than a mocked text extractor, end to end."""
+    from kreports.collector.report_document_collector import _extract_audit_pdf_text
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_kam_items
+
+    payload = _built_in_font_audit_pdf([
+        "Audit Opinion",
+        "Key Audit Matters",
+        "Revenue Recognition",
+        "1) Why the matter was determined to be a key audit matter",
+        "Revenue recognition required significant judgement.",
+        "2) How the matter was addressed in the audit",
+        "Inspected revenue contracts.",
+        "Auditor's Responsibilities for the Audit of the Financial Statements",
+    ])
+
+    extracted = _extract_audit_pdf_text(payload)
+
+    assert extracted is not None
+    assert "Key Audit Matters" in extracted
+    outcome = parse_kam_items(extracted)
+    assert len(outcome.items) == 1
+    assert outcome.items[0].title == "Revenue Recognition"
+    assert [step.method for step in extract_procedure_steps(outcome.items[0])] == ["inspection"]
+
+
+def test_pdf_source_is_not_marked_externalized_until_text_upload_succeeds(
+    temp_engine,
+    monkeypatch,
+):
+    """Avoid a relational provenance row pointing at only one half of the evidence."""
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    writes: list[str] = []
+
+    class _Store:
+        def __init__(self, **_kwargs):
+            pass
+
+        def write_bytes(self, **_kwargs):
+            writes.append("pdf")
+            return object()
+
+        def write(self, **_kwargs):
+            writes.append("text")
+            raise OSError("text storage unavailable")
+
+    monkeypatch.setattr(collector_module, "RawDocumentStore", _Store)
+
+    with pytest.raises(OSError, match="text storage unavailable"):
+        collector_module._persist_source_document({
+            "rcept_no": "20260428000679_11351227",
+            "dcm_no": "11351227",
+            "corp_code": "00838500",
+            "bsns_year": 2025,
+            "source_type": "audit_report",
+            "report_nm": "감사보고서",
+            "content_type": "pdf_text",
+            "pdf_binary": b"%PDF-1.7 official binary",
+        }, content="핵심감사사항")
+
+    assert writes == ["pdf", "text"]
+    with get_session() as session:
+        assert session.query(SourceDocument).count() == 0
 
 
 def test_collect_business_report_uses_viewer_html_when_document_api_unavailable(temp_engine, monkeypatch):
