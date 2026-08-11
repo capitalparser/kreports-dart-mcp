@@ -2111,6 +2111,7 @@ def _inject_omitted_collapsed_reason_heading(
                     )
                     is not None
                 )
+                and not _has_clear_title_evidence(normalized_title)
                 and not subject_led_standalone_title
             )
         ):

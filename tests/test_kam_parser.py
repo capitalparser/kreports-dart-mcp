@@ -388,6 +388,85 @@ def test_collapsed_parser_rejects_standalone_title_without_subject_led_reason():
     assert outcome.items == []
 
 
+def test_collapsed_parser_recovers_intro_tail_clear_title_before_note_reason():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항 핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다. 수출매출의 기간귀속
+회사의 재무제표에 대한 주석 2에서 기재한 바와 같이 회사는 재화의 통제가 고객에게 이전되는 시점에 수익을 인식하며 수출조건에 따라 수익인식시점 판단이 요구됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ수출매출 정책과 프로세스를 검토
+ㆍ기간귀속 내부통제를 평가
+ㆍ선정된 거래의 문서를 검사
+ㆍ보고기간말 전후 거래의 증빙을 확인
+ㆍ매출채권 표본을 외부조회
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["수출매출의 기간귀속"]
+    assert len(extract_procedure_steps(outcome.items[0])) == 5
+
+
+def test_collapsed_parser_recovers_standalone_clear_title_before_note_reason():
+    from kreports.processor.audit_procedure_parser import extract_procedure_steps
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+핵심감사사항은 당기 감사에서 가장 유의적인 사항입니다. 우리는 이런 사항에 대하여 별도의 의견을 제공하지는 않습니다.
+수출매출의 기간귀속
+연결회사의 연결재무제표에 대한 주석 2에서 기재한 바와 같이 연결회사는 재화의 통제가 고객에게 이전되는 시점에 수익을 인식하며 수출조건에 따라 수익인식시점 판단이 요구됩니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ수출매출 정책과 프로세스를 검토
+ㆍ기간귀속 내부통제를 평가
+ㆍ선정된 거래의 문서를 검사
+ㆍ보고기간말 전후 거래의 증빙을 확인
+ㆍ매출채권 표본을 외부조회
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["수출매출의 기간귀속"]
+    assert len(extract_procedure_steps(outcome.items[0])) == 5
+
+
+def test_collapsed_parser_rejects_clear_title_shaped_prose_sentence():
+    from kreports.processor.kam_parser import parse_collapsed_kam_items
+
+    body = """핵심감사사항
+수출매출의 기간귀속은 경영진의 판단이 필요한 일반적인 수익인식 설명입니다.
+수출조건과 거래시점에 대한 설명은 재무제표 전체의 일반적인 주석을 보완합니다.
+이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+ㆍ거래를 검토
+재무제표감사에 대한 감사인의 책임"""
+
+    outcome = parse_collapsed_kam_items(body)
+
+    assert outcome.status == "error"
+    assert outcome.items == []
+
+
+def test_parser_keeps_numbered_clear_title_as_response_procedure():
+    from kreports.processor.kam_parser import extract_kam_items
+
+    body = """핵심감사사항
+수익인식
+핵심감사사항으로 선정한 이유
+기간귀속 판단 위험이 존재합니다.
+감사에서 다루어진 방법
+1. 계약 검사
+2. 수출매출의 기간귀속
+"""
+
+    items = extract_kam_items(body)
+
+    assert len(items) == 1
+    assert items[0].title == "수익인식"
+    assert items[0].audit_response_text == "1. 계약 검사\n2. 수출매출의 기간귀속"
+
+
 def test_collapsed_parser_recovers_intro_tail_risk_title_before_year_reason():
     from kreports.processor.audit_procedure_parser import extract_procedure_steps
     from kreports.processor.kam_parser import parse_collapsed_kam_items

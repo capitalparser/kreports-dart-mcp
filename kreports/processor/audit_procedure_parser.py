@@ -123,6 +123,7 @@ _BULLET_NOUN_ACTION_ENDINGS = (
     "평가",
     "검증",
     "비교",
+    "이해",
 )
 
 _RESPONSIBILITY_BOILERPLATE = (

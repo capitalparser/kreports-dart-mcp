@@ -138,6 +138,20 @@ def test_extract_procedure_steps_rejects_generic_bulleted_procedure_lead_in():
     assert [step.procedure_text for step in steps] == ["주요 계약서를 검사하였습니다."]
 
 
+def test_extract_procedure_steps_keeps_explicit_bullet_understanding_step():
+    item = _kam_item(
+        "ㆍ수출매출 정책의 검토 및 프로세스와 내부통제의 이해\n"
+        "ㆍ수출매출 기간귀속 내부통제의 설계 및 운영의 효과성 평가"
+    )
+
+    steps = extract_procedure_steps(item)
+
+    assert [step.procedure_text for step in steps] == [
+        "수출매출 정책의 검토 및 프로세스와 내부통제의 이해",
+        "수출매출 기간귀속 내부통제의 설계 및 운영의 효과성 평가",
+    ]
+
+
 @pytest.mark.parametrize(
     ("text_value", "expected_texts", "expected_methods"),
     [
