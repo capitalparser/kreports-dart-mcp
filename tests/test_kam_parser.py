@@ -2900,6 +2900,27 @@ def test_parser_removes_repeated_response_heading_separator():
     assert "감사에서 다루어진 방법" not in items[0].audit_response_text
 
 
+def test_parser_accepts_bulleted_reason_and_narrative_major_procedures_heading():
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    핵심감사사항
+    (1) 현금창출단위 손상검사
+    - 핵심감사사항으로 결정된 이유
+    손상검사에는 경영진의 중요한 판단이 수반됩니다.
+    이와 관련하여 우리가 수행한 주요 감사절차는 다음과 같습니다.
+    ㆍ외부전문가의 적격성을 평가하였습니다.
+    ㆍ할인율을 재계산하였습니다.
+    연결
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert len(outcome.items) == 1
+    assert "할인율" in outcome.items[0].audit_response_text
+
+
 def test_rebuild_prefers_exact_receipt_source_document_and_dry_run_writes_nothing(
     temp_engine,
 ):

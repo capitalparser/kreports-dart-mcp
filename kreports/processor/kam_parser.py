@@ -52,6 +52,8 @@ _RESPONSE_HEADINGS = (
     "핵심감사사항이감사에서다뤄진방법",
     "핵심감사사항에대응하기위한우리의감사절차는다음을포함하고있습니다.",
     "감사인이수행한주요절차",
+    "이와관련하여우리가수행한주요감사절차는다음과같습니다.",
+    "이와관련하여우리가부문감사인을참여시켜수행한주요감사절차는다음과같습니다.",
     "감사인의대응",
     "howthematterwasaddressedintheaudit",
     "auditresponse",
@@ -827,7 +829,7 @@ def _plain_lines(full_text: str) -> list[str]:
 
 
 def _matches_heading(line: str, headings: tuple[str, ...]) -> bool:
-    compact = _compact(line).strip(":-–—()[]")
+    compact = _compact(line).strip(":-–—()[]").lstrip("-·•ㆍ")
     return any(compact == heading or compact.startswith(f"{heading}:") for heading in headings)
 
 
