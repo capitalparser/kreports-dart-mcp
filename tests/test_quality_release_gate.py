@@ -16,6 +16,8 @@ from kreports.db.models import (
     Disclosure,
     FinancialFactCompact,
     AccountingPolicyItem,
+    AccountingNoteChapter,
+    FetchLog,
 )
 from kreports.quality.company_year_fingerprint import (
     build_quality_evidence_summary,
@@ -1575,6 +1577,107 @@ def test_quality_release_gate_cli_rejects_policy_evidence_newer_than_ledger(
     report = json.loads(result.stdout)
     assert report["ok"] is False
     assert "quality_input_stale" in report["required_failures"]
+
+
+def test_quality_release_gate_cli_rejects_newer_policy_fetch_error(
+    temp_engine,
+    monkeypatch,
+):
+    """A newer policy fetch outcome invalidates the derived policy status."""
+    from kreports.cli.main import app
+
+    quality_updated_at = datetime.now(UTC) - timedelta(minutes=1)
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+        policy_status="missing",
+    )
+    with get_session() as session:
+        quality_row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert quality_row is not None
+        quality_row.updated_at = quality_updated_at
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        session.add(
+            FetchLog(
+                task_type="policy",
+                corp_code="00126380",
+                year=2025,
+                status="error",
+                fetched_at=quality_updated_at + timedelta(seconds=1),
+            )
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    result = CliRunner().invoke(
+        app,
+        ["quality-release-gate", "--profile", "public_runtime", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert "quality_input_stale" in json.loads(result.stdout)[
+        "required_failures"
+    ]
+
+
+def test_quality_release_gate_cli_rejects_newer_policy_note(
+    temp_engine,
+    monkeypatch,
+):
+    """A newer policy note is a quality input even without policy items."""
+    from kreports.cli.main import app
+
+    quality_updated_at = datetime.now(UTC) - timedelta(minutes=1)
+    _seed_quality_row(
+        corp_code="00126380",
+        grade="A",
+        stock_code="005930",
+        policy_status="missing",
+    )
+    with get_session() as session:
+        quality_row = session.get(CompanyYearQuality, ("00126380", 2025))
+        assert quality_row is not None
+        quality_row.updated_at = quality_updated_at
+    _seed_valid_manifest(temp_engine)
+    with get_session() as session:
+        session.add(
+            AccountingNoteChapter(
+                corp_code="00126380",
+                bsns_year=2025,
+                fs_div="CFS",
+                rcept_no="20260318000001",
+                note_no="2",
+                section_type="policy",
+                body="수익 인식 정책 원문 " * 100,
+                fetched_at=quality_updated_at + timedelta(seconds=1),
+            )
+        )
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+
+    result = CliRunner().invoke(
+        app,
+        ["quality-release-gate", "--profile", "public_runtime", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert "quality_input_stale" in json.loads(result.stdout)[
+        "required_failures"
+    ]
+
+
+def test_quality_freshness_timestamp_comparison_normalizes_to_utc():
+    """Naive source timestamps are UTC before comparison to aware ledger rows."""
+    from kreports.quality.release_gate import _timestamp_is_newer_than_ledger
+
+    assert _timestamp_is_newer_than_ledger(
+        "2026-08-10 12:00:00",
+        "2026-08-10T11:00:00+00:00",
+    )
+    assert not _timestamp_is_newer_than_ledger(
+        "2026-08-10T12:00:00+09:00",
+        "2026-08-10T03:30:00+00:00",
+    )
 
 
 def test_release_gate_rejects_matching_snapshot_for_unsupported_version(

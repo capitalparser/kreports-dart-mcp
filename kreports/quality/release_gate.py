@@ -188,6 +188,43 @@ def _empty_quality_contract() -> tuple[
     return None, {}, {}, {}, {}
 
 
+def _as_utc(value: Any) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _timestamp_is_newer_than_ledger(
+    input_timestamp: Any,
+    ledger_timestamp: Any,
+) -> bool:
+    """Compare persisted timestamps after explicitly normalizing to UTC."""
+    input_at = _as_utc(input_timestamp)
+    ledger_at = _as_utc(ledger_timestamp)
+    return bool(input_at and ledger_at and input_at > ledger_at)
+
+
+def _source_rows_are_newer_than_ledger(
+    session: Any,
+    query: str,
+) -> bool:
+    """Read source/ledger timestamp pairs without dialect-dependent coercion."""
+    for row in session.execute(text(query)).mappings():
+        if _timestamp_is_newer_than_ledger(
+            row["input_fetched_at"],
+            row["quality_updated_at"],
+        ):
+            return True
+    return False
+
+
 def _quality_inputs_are_newer_than_ledger(
     session: Any,
     *,
@@ -197,8 +234,8 @@ def _quality_inputs_are_newer_than_ledger(
 
     The ledger fingerprint proves persisted quality content, while source
     receipt timestamps prove whether that content was derived after the policy
-    evidence it summarizes.  This bounded indexed query deliberately checks
-    only the policy and policy-note sources consumed by ``_policy_status``.
+    evidence it summarizes.  The source families mirror ``_policy_status``:
+    policy items, policy note chapters, and policy fetch outcomes.
     """
     quality_columns = {
         str(column["name"])
@@ -220,11 +257,12 @@ def _quality_inputs_are_newer_than_ledger(
         if {"corp_code", "bsns_year", "fetched_at"} <= policy_columns:
             sources.append(
                 """
-                SELECT 1
-                FROM accounting_policy_items AS p
-                WHERE p.corp_code=q.corp_code
-                  AND p.bsns_year=q.bsns_year
-                  AND p.fetched_at > q.updated_at
+                SELECT q.updated_at AS quality_updated_at,
+                       p.fetched_at AS input_fetched_at
+                FROM company_year_quality AS q
+                JOIN accounting_policy_items AS p
+                  ON p.corp_code=q.corp_code
+                 AND p.bsns_year=q.bsns_year
                 """
             )
     if "accounting_note_chapters" in table_names:
@@ -242,40 +280,45 @@ def _quality_inputs_are_newer_than_ledger(
         } <= note_columns:
             sources.append(
                 """
-                SELECT 1
-                FROM accounting_note_chapters AS n
-                WHERE n.corp_code=q.corp_code
-                  AND n.bsns_year=q.bsns_year
-                  AND n.section_type='policy'
-                  AND n.fetched_at > q.updated_at
+                SELECT q.updated_at AS quality_updated_at,
+                       n.fetched_at AS input_fetched_at
+                FROM company_year_quality AS q
+                JOIN accounting_note_chapters AS n
+                  ON n.corp_code=q.corp_code
+                 AND n.bsns_year=q.bsns_year
+                WHERE n.section_type='policy'
+                """
+            )
+    if "fetch_log" in table_names:
+        fetch_columns = {
+            str(column["name"])
+            for column in inspect(session.get_bind()).get_columns("fetch_log")
+        }
+        if {
+            "task_type",
+            "corp_code",
+            "year",
+            "fetched_at",
+        } <= fetch_columns:
+            sources.append(
+                """
+                SELECT q.updated_at AS quality_updated_at,
+                       f.fetched_at AS input_fetched_at
+                FROM company_year_quality AS q
+                JOIN fetch_log AS f
+                  ON f.corp_code=q.corp_code
+                 AND f.year=q.bsns_year
+                WHERE f.task_type IN (
+                    'policy', 'policy_items', 'accounting_policy'
+                )
                 """
             )
     if not sources:
         return False
-    query = " UNION ALL ".join(sources)
-    return bool(
-        session.execute(
-            text(
-                "SELECT EXISTS("
-                "SELECT 1 FROM company_year_quality AS q WHERE EXISTS("
-                + query
-                + ") LIMIT 1)"
-            )
-        ).scalar()
+    return any(
+        _source_rows_are_newer_than_ledger(session, source)
+        for source in sources
     )
-
-
-def _as_utc(value: Any) -> datetime | None:
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if not isinstance(value, datetime):
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _runtime_schema_state(
