@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+from io import BytesIO
 import json
 import logging
 from pathlib import Path
@@ -15,7 +16,9 @@ from sqlalchemy.orm import Session
 
 from kreports.analysis.queries import extract_accounting_note_chapters
 from kreports.collector.fetcher import (
+    MAX_AUDIT_REPORT_PDF_BYTES,
     fetch_dart_main_html,
+    fetch_audit_report_pdf,
     fetch_document_zip_files,
     fetch_document_xml,
     fetch_viewer_html,
@@ -71,6 +74,7 @@ from kreports.analysis.group_graph import (
     normalize_entity_name,
 )
 from kreports.runtime import raw_persistence_allowed, raw_storage_policy, require_raw_backfill_mode, require_runtime_write
+from kreports.security import redact_external_error
 
 logger = logging.getLogger(__name__)
 _KAM_SOURCE_TABLES = {
@@ -190,6 +194,53 @@ def _looks_unreadable_korean_audit_report(content: str) -> bool:
         return False
     mojibake_markers = ("媛", "蹂", "닿", "퀬", "?꽌", "?쓽", "?옱", "?젣", "?몴")
     return sum(text.count(marker) for marker in mojibake_markers) >= 2
+
+
+_MAX_AUDIT_PDF_PAGES = 200
+_MAX_AUDIT_PDF_TEXT_CHARS = 2_000_000
+_AUDIT_PDF_TEXT_MARKERS = (
+    "감사의견",
+    "핵심감사사항",
+    "재무제표감사에 대한 감사인의 책임",
+)
+
+
+def _is_usable_audit_pdf_text(text: str) -> bool:
+    """Reject empty or business-only extracted text before source persistence."""
+    return bool(text.strip()) and any(marker in text for marker in _AUDIT_PDF_TEXT_MARKERS)
+
+
+def _extract_audit_pdf_text(payload: bytes) -> str | None:
+    """Extract bounded, recognizably audit-report text from one official PDF."""
+    if (
+        not payload
+        or len(payload) > MAX_AUDIT_REPORT_PDF_BYTES
+        or not payload.startswith(b"%PDF-")
+    ):
+        return None
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(payload))
+        page_count = len(reader.pages)
+        if page_count < 1 or page_count > _MAX_AUDIT_PDF_PAGES:
+            return None
+        chunks: list[str] = []
+        total_chars = 0
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            total_chars += len(page_text)
+            if total_chars > _MAX_AUDIT_PDF_TEXT_CHARS:
+                return None
+            if page_text:
+                chunks.append(page_text)
+    except Exception as exc:  # Corrupt/encrypted PDFs are not usable source text.
+        logger.warning("DART audit PDF text extraction failed: %s", redact_external_error(exc))
+        return None
+    text = "\n".join(chunks).strip()
+    if not _is_usable_audit_pdf_text(text):
+        return None
+    return text
 
 
 def collect_report_sections_for_disclosure(rcept_no: str) -> dict:
@@ -468,12 +519,23 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
             attachment.get("rcept_no") or meta["rcept_no"],
             dcm_no,
         )
+        viewer_error = None
         if not content:
-            totals["errors"].append({"dcm_no": dcm_no, "error": "viewer HTML empty"})
-            continue
-        if _looks_unreadable_korean_audit_report(content):
-            totals["errors"].append({"dcm_no": dcm_no, "error": "viewer HTML unreadable"})
-            continue
+            viewer_error = "viewer HTML empty"
+        elif _looks_unreadable_korean_audit_report(content):
+            viewer_error = "viewer HTML unreadable"
+        content_type = None
+        if viewer_error is not None:
+            pdf_payload = fetch_audit_report_pdf(
+                attachment.get("rcept_no") or meta["rcept_no"],
+                dcm_no,
+            )
+            pdf_text = _extract_audit_pdf_text(pdf_payload or b"")
+            if pdf_text is None:
+                totals["errors"].append({"dcm_no": dcm_no, "error": viewer_error})
+                continue
+            content = pdf_text
+            content_type = "pdf_text"
         stored_rcept_no = f"{meta['rcept_no']}_{dcm_no}"
         doc_meta = {
             **meta,
@@ -481,6 +543,7 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
             "dcm_no": dcm_no,
             "source_type": "audit_report",
             "report_nm": attachment.get("title") or meta["report_nm"],
+            **({"content_type": content_type} if content_type else {}),
         }
         result = _persist_report_document(doc_meta, content=content)
         totals["documents"] += 1

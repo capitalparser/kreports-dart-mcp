@@ -20,6 +20,14 @@ def sha1_text(content: str) -> str:
     return hashlib.sha1((content or "").encode("utf-8")).hexdigest()
 
 
+def _suffix_for_content_type(content_type: str) -> str:
+    if content_type == "html":
+        return "html"
+    if content_type == "pdf_text":
+        return "txt"
+    return "xml"
+
+
 class RawDocumentStore:
     def __init__(
         self,
@@ -45,7 +53,7 @@ class RawDocumentStore:
         rcept_no: str,
         content_type: str,
     ) -> Path:
-        suffix = "html" if content_type == "html" else "xml"
+        suffix = _suffix_for_content_type(content_type)
         safe_rcept_no = "".join(
             ch if ch.isalnum() or ch in ("_", "-") else "_"
             for ch in rcept_no
@@ -61,7 +69,7 @@ class RawDocumentStore:
         rcept_no: str,
         content_type: str,
     ) -> str:
-        suffix = "html" if content_type == "html" else "xml"
+        suffix = _suffix_for_content_type(content_type)
         safe_rcept_no = "".join(
             ch if ch.isalnum() or ch in ("_", "-") else "_"
             for ch in rcept_no

@@ -27,6 +27,16 @@ class _FakeClient:
         return self.response
 
 
+class _RecordingClient(_FakeClient):
+    def __init__(self, response: _FakeResponse):
+        super().__init__(response)
+        self.calls: list[tuple[tuple, dict]] = []
+
+    def get(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.response
+
+
 def test_fetch_document_xml_accepts_raw_document_xml(monkeypatch):
     raw = """
     <DOCUMENT>
@@ -89,3 +99,42 @@ def test_fetch_document_zip_files_logs_non_limit_dart_error_xml(monkeypatch, cap
     assert fetcher.fetch_document_zip_files("20250331000001") == {}
     assert "status=999" in caplog.text
     assert "other error" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type"),
+    (
+        pytest.param(b"", "application/pdf", id="empty"),
+        pytest.param(b"<html>not a PDF</html>", "application/pdf", id="non_pdf"),
+        pytest.param(b"%PDF-1.7", "text/html", id="wrong_content_type"),
+        pytest.param(
+            b"%PDF-1.7" + b"x" * (20 * 1024 * 1024),
+            "application/pdf",
+            id="oversize",
+        ),
+    ),
+)
+def test_fetch_audit_report_pdf_rejects_empty_non_pdf_or_oversize_payloads(
+    monkeypatch,
+    content,
+    content_type,
+):
+    """Catch an official PDF fallback accepting an unsafe or non-PDF response."""
+    client = _RecordingClient(_FakeResponse(content, content_type=content_type))
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+
+    assert fetcher.fetch_audit_report_pdf("20260428000679", "11351227") is None
+
+
+def test_fetch_audit_report_pdf_uses_official_endpoint_and_safe_headers(monkeypatch):
+    """Catch a PDF fallback that omits DART's browser/referrer request context."""
+    client = _RecordingClient(_FakeResponse(b"%PDF-1.7\nbody", "application/pdf"))
+    monkeypatch.setattr(fetcher, "_get_client", lambda: client)
+
+    assert fetcher.fetch_audit_report_pdf("20260428000679", "11351227") == b"%PDF-1.7\nbody"
+    assert client.calls
+    args, kwargs = client.calls[0]
+    assert args[0].endswith("/pdf/download/pdf.do")
+    assert kwargs["params"] == {"rcp_no": "20260428000679", "dcm_no": "11351227"}
+    assert kwargs["headers"]["Referer"].endswith("main.do?rcpNo=20260428000679")
+    assert "Mozilla" in kwargs["headers"]["User-Agent"]

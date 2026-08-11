@@ -870,8 +870,22 @@ def _plain_lines(full_text: str) -> list[str]:
 
 
 def _matches_heading(line: str, headings: tuple[str, ...]) -> bool:
-    compact = _compact(line).strip(":-–—()[]").lstrip("-·•ㆍ")
-    return any(compact == heading or compact.startswith(f"{heading}:") for heading in headings)
+    def _matches(value: str) -> bool:
+        compact = _compact(value).strip(":-–—()[]").lstrip("-·•ㆍ")
+        return any(
+            compact == heading or compact.startswith(f"{heading}:")
+            for heading in headings
+        )
+
+    if _matches(line):
+        return True
+    # DART PDF text commonly labels only the reason/response field headings
+    # as 1)/2).  Do not normalize general numbered lines, which may be KAM
+    # titles or procedure steps.
+    if headings in {_REASON_HEADINGS, _RESPONSE_HEADINGS}:
+        normalized = re.sub(r"^\s*(?:\(?[12]\)?[.)]|[①②])\s*", "", line)
+        return normalized != line and _matches(normalized)
+    return False
 
 
 def _trim_to_kam(lines: list[str]) -> list[str]:

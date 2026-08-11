@@ -33,6 +33,7 @@ dependencies = [
     "pandas>=2.0",
     "lxml>=5.0",
     "mcp>=1.0",
+    "pypdf>=6.15.0",
 ]
 
 [project.optional-dependencies]

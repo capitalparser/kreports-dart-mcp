@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 DART_BASE = "https://opendart.fss.or.kr/api"
 DART_WEB_BASE = "https://dart.fss.or.kr"
 CORP_CODE_ZIP_URL = f"{DART_BASE}/corpCode.xml"  # zip 반환
+MAX_AUDIT_REPORT_PDF_BYTES = 16 * 1024 * 1024
+_DART_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (compatible; KReports/0.1; audit-document-recovery)"
+)
 _DART_LIMIT_MARKERS = ("사용한도", "초과", "limit", "quota")
 _DART_AUTH_MARKERS = (
     "인증키", "api key", "apikey", "auth", "unauthorized", "등록되지 않은",
@@ -625,6 +629,48 @@ def fetch_viewer_html(
                 return None
             time.sleep(settings.request_delay * attempt)
     return None
+
+
+def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:
+    """Fetch one bounded official DART attachment PDF or fail closed.
+
+    This endpoint is used only after the corresponding primary viewer body is
+    empty or unrecoverably mojibaked.  The response must identify as a PDF and
+    carry the PDF signature; callers receive no partial or non-PDF bytes.
+    """
+    if not rcept_no or not dcm_no:
+        return None
+    try:
+        with _get_client() as client:
+            response = client.get(
+                f"{DART_WEB_BASE}/pdf/download/pdf.do",
+                params={"rcp_no": rcept_no, "dcm_no": dcm_no},
+                headers={
+                    "User-Agent": _DART_BROWSER_USER_AGENT,
+                    "Referer": f"{DART_WEB_BASE}/dsaf001/main.do?rcpNo={rcept_no}",
+                },
+                timeout=60.0,
+            )
+            response.raise_for_status()
+    except Exception as exc:  # External transport must remain fail-closed.
+        logger.warning(
+            "DART audit PDF fetch failed [%s/%s]: %s",
+            rcept_no,
+            dcm_no,
+            redact_external_error(exc),
+        )
+        return None
+
+    content_type = str(response.headers.get("content-type") or "").lower()
+    payload = bytes(response.content or b"")
+    if (
+        "application/pdf" not in content_type
+        or not payload.startswith(b"%PDF-")
+        or len(payload) > MAX_AUDIT_REPORT_PDF_BYTES
+    ):
+        logger.warning("DART audit PDF response rejected [%s/%s]", rcept_no, dcm_no)
+        return None
+    return payload
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 from datetime import date, datetime
 
+import pytest
+
 from kreports.analysis.api import compare_peer_kam_topics, get_audit_report_sections
 from kreports.collector.fetcher import parse_attachment_options
 from kreports.collector.fetcher import _decode_dart_text
@@ -14,6 +16,7 @@ from kreports.db.models import (
     Disclosure,
     EvidenceDocument,
     FetchLog,
+    KamItem,
     Financial,
     ReportDocument,
     ReportSection,
@@ -763,6 +766,161 @@ def test_collect_attached_audit_reports_skips_unreadable_mojibake_viewer_body(te
     assert result["errors"][0]["error"] == "viewer HTML unreadable"
     with get_session() as session:
         assert session.query(SourceDocument).count() == 0
+
+
+def test_unreadable_audit_viewer_uses_pdf_text_and_rebuilds_kam_procedures(
+    temp_engine,
+    monkeypatch,
+):
+    """Catch unreadable primary audit HTML dropping a recoverable PDF attachment."""
+    import kreports.collector.report_document_collector as collector_module
+    from kreports.db.engine import get_session
+
+    root_receipt = "20260428000679"
+    dcm_no = "11351227"
+    with get_session() as session:
+        session.add(Company(
+            corp_code="00838500",
+            stock_code="900001",
+            corp_name="엘브이엠씨",
+            market="KOSPI",
+        ))
+    extracted_pdf_text = """
+    핵심감사사항
+    지배력 상실 회계처리
+    1) 핵심감사사항으로 결정한 이유
+    종속기업 처분 거래의 회계처리에는 유의적인 판단과 복잡한 계약 검토가 필요합니다.
+    2) 감사에서 다루어진 방법
+    ① 처분 계약서를 검사하였습니다.
+    ② 이사회 의사록을 검토하였습니다.
+    ③ 관련 회계처리를 대사하였습니다.
+    ④ 공시자료를 확인하였습니다.
+    재무제표감사에 대한 감사인의 책임
+    """
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_dart_main_html",
+        lambda _receipt: f"""
+        <option value="rcpNo={root_receipt}&amp;dcmNo={dcm_no}">외국법인등의연결감사보고서</option>
+        """,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_viewer_html",
+        lambda _receipt, _dcm: "<DOCUMENT><TITLE>媛먯궗蹂닿퀬?꽌</TITLE><P>媛먯궗?쓽寃</P></DOCUMENT>",
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_audit_report_pdf",
+        lambda _receipt, _dcm: b"%PDF-1.7 fixture",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "_extract_audit_pdf_text",
+        lambda _payload: extracted_pdf_text,
+        raising=False,
+    )
+
+    result = collector_module._collect_attached_audit_reports({
+        "rcept_no": root_receipt,
+        "corp_code": "00838500",
+        "bsns_year": 2025,
+        "source_type": "business_report",
+        "report_nm": "사업보고서 (2025.12)",
+    })
+    rebuilt = collector_module.rebuild_kam_items_for_receipts(
+        year=2025,
+        rcept_nos=[root_receipt],
+    )
+
+    assert result["ok"] == 1
+    assert result["documents"] == 1
+    assert result["sections"] > 0
+    assert rebuilt["rows_written"] == 1
+    with get_session() as session:
+        source = session.query(SourceDocument).filter_by(
+            rcept_no=f"{root_receipt}_{dcm_no}", source_type="audit_report",
+        ).one()
+        kam = session.query(KamItem).filter_by(
+            rcept_no=f"{root_receipt}_{dcm_no}", source_type="audit_report",
+        ).one()
+        procedures = session.query(AuditProcedureItem).filter_by(
+            rcept_no=f"{root_receipt}_{dcm_no}", source_type="audit_report",
+        ).all()
+        persisted_text = collector_module.RawDocumentStore().read(
+            source.storage_uri, expected_hash=source.doc_hash,
+        )
+        source_content_type = source.content_type
+        source_storage_uri = source.storage_uri
+        source_dcm_no = source.dcm_no
+        source_report_nm = source.report_nm
+        kam_title = kam.title
+    assert source_content_type == "pdf_text"
+    assert source_storage_uri.endswith(".txt.gz")
+    assert source_dcm_no == dcm_no
+    assert source_report_nm == "외국법인등의연결감사보고서"
+    assert persisted_text == extracted_pdf_text
+    assert kam_title == "지배력 상실 회계처리"
+    assert len(procedures) == 4
+
+
+def test_readable_audit_viewer_stays_preferred_without_pdf_fetch(temp_engine, monkeypatch):
+    """Catch a PDF fallback replacing a readable primary audit viewer body."""
+    import kreports.collector.report_document_collector as collector_module
+
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_dart_main_html",
+        lambda _receipt: """
+        <option value="rcpNo=20260428000679&amp;dcmNo=11351227">외국법인등의연결감사보고서</option>
+        """,
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_viewer_html",
+        lambda _receipt, _dcm: "<DOCUMENT><TITLE>감사보고서</TITLE><P>핵심감사사항</P><P>수익인식</P></DOCUMENT>",
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "fetch_audit_report_pdf",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("PDF fallback called")),
+        raising=False,
+    )
+
+    result = collector_module._collect_attached_audit_reports({
+        "rcept_no": "20260428000679",
+        "corp_code": "00838500",
+        "bsns_year": 2025,
+        "source_type": "business_report",
+        "report_nm": "사업보고서 (2025.12)",
+    })
+
+    assert result["ok"] == 1
+    assert result["documents"] == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        pytest.param(b"", id="empty"),
+        pytest.param(b"<html>business report only</html>", id="non_pdf"),
+        pytest.param(b"%PDF-1.7 malformed", id="malformed"),
+        pytest.param(b"%PDF-1.7" + b"x" * (20 * 1024 * 1024), id="oversize"),
+    ),
+)
+def test_extract_audit_pdf_text_fails_closed_for_invalid_or_oversize_payload(payload):
+    """Catch PDF fallback treating malformed, empty, or non-audit bytes as evidence."""
+    import kreports.collector.report_document_collector as collector_module
+
+    assert collector_module._extract_audit_pdf_text(payload) is None
+
+
+def test_audit_pdf_text_rejects_business_only_content():
+    """Catch a text-extractable annual-report page counting as an audit attachment."""
+    from kreports.collector.report_document_collector import _is_usable_audit_pdf_text
+
+    assert _is_usable_audit_pdf_text("사업보고서\n회사의 사업 내용과 재무 현황입니다.") is False
 
 
 def test_collect_business_report_uses_viewer_html_when_document_api_unavailable(temp_engine, monkeypatch):

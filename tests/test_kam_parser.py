@@ -196,6 +196,31 @@ def test_parse_collapsed_audit_report_ignores_separate_numbered_field_label():
     ]
 
 
+def test_parse_kam_accepts_numbered_reason_and_response_headings_only():
+    """Catch PDF line labels leaving a complete KAM unparsed or becoming a title."""
+    from kreports.processor.kam_parser import parse_kam_items
+
+    body = """
+    핵심감사사항
+    지배력 상실 회계처리
+    1) 핵심감사사항으로 결정한 이유
+    종속기업 처분 거래의 회계처리에는 유의적인 판단과 복잡한 계약 검토가 필요합니다.
+    2) 감사에서 다루어진 방법
+    ① 처분 계약서를 검사하였습니다.
+    ② 이사회 의사록을 검토하였습니다.
+    ③ 관련 회계처리를 대사하였습니다.
+    ④ 공시자료를 확인하였습니다.
+    재무제표감사에 대한 감사인의 책임
+    """
+
+    outcome = parse_kam_items(body)
+
+    assert outcome.status == "complete"
+    assert [item.title for item in outcome.items] == ["지배력 상실 회계처리"]
+    assert "1) 핵심감사사항" not in outcome.items[0].reason_text
+    assert "2) 감사에서" not in outcome.items[0].audit_response_text
+
+
 def test_parse_collapsed_audit_report_accepts_spaced_korean_matter_marker():
     from kreports.processor.kam_parser import parse_collapsed_kam_items
 

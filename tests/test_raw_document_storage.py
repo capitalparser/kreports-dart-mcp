@@ -77,6 +77,24 @@ def test_raw_document_store_writes_gzip_and_verifies_hash(tmp_path):
     assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
 
 
+def test_raw_document_store_labels_pdf_extracted_text_as_txt(tmp_path):
+    """Catch PDF-extracted text being persisted under the XML raw identity."""
+    store = RawDocumentStore(base_dir=tmp_path)
+    content = "핵심감사사항\n지배력 상실 회계처리"
+
+    saved = store.write(
+        corp_code="00838500",
+        bsns_year=2025,
+        source_type="audit_report",
+        rcept_no="20260428000679_11351227",
+        content_type="pdf_text",
+        content=content,
+    )
+
+    assert saved.path.endswith("20260428000679_11351227.txt.gz")
+    assert store.read(saved.storage_uri, expected_hash=saved.doc_hash) == content
+
+
 def test_raw_document_store_writes_and_reads_gcs_uri():
     client = _FakeGcsClient()
     store = RawDocumentStore(
