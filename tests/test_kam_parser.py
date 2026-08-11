@@ -2786,6 +2786,31 @@ def test_rebuild_prefers_exact_receipt_source_document_and_dry_run_writes_nothin
         assert session.query(KamItem).count() == 0
 
 
+def test_rebuild_normalizes_xml_raw_before_parsing_kam_detail(temp_engine):
+    from kreports.collector.report_document_collector import rebuild_kam_items
+    from kreports.db.engine import get_session
+
+    raw_xml = """
+    <DOCUMENT><TITLE>핵심감사사항</TITLE>
+    <P>핵심감사사항은 재무제표감사에서 가장 유의적인 사항입니다.</P>
+    <TITLE>수익인식</TITLE><P>핵심감사사항으로 선정한 이유</P>
+    <P>기간귀속 판단에는 중요한 위험이 있습니다.</P>
+    <P>감사에서 다루어진 방법</P><P>계약서를 검사하고 표본을 대사하였습니다.</P>
+    <TITLE>재무제표감사에 대한 감사인의 책임</TITLE><P>감사인의 책임입니다.</P></DOCUMENT>
+    """
+    with get_session() as session:
+        session.add_all([
+            Company(corp_code="00164781", stock_code="035422", corp_name="XML원문회사", market="KOSPI"),
+            SourceDocument(rcept_no="20250318000004", dcm_no="400", corp_code="00164781", bsns_year=2024, source_type="audit_report", report_nm="감사보고서", content_type="xml", raw_content=raw_xml, doc_hash="4" * 40, storage_status="inline"),
+        ])
+
+    result = rebuild_kam_items(year=2024, dry_run=True)
+
+    receipt = result["receipts"][0]
+    assert receipt["quality_status"] == "full_body"
+    assert receipt["source_basis"] == "source_documents.raw_body"
+
+
 def test_rebuild_continues_from_failed_raw_read_to_normalized_evidence(
     temp_engine,
 ):

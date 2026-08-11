@@ -97,7 +97,11 @@ _SECTION_SPECIFIC_TRAILING_MARKERS: dict[str, tuple[str, ...]] = {
     "going_concern": _AUDIT_REPORT_TRAILING_MARKERS,
     "basis_for_opinion": _AUDIT_REPORT_TRAILING_MARKERS,
     "audit_opinion": _AUDIT_REPORT_TRAILING_MARKERS,
-    "kam": _AUDIT_REPORT_TRAILING_MARKERS + _KAM_RESPONSIBILITY_MARKERS,
+    # KAM narratives routinely refer to the financial statements themselves;
+    # the generic attachment markers (notably "재무제표") would therefore
+    # truncate a genuine KAM body immediately after its heading.  Only the
+    # auditor-responsibility heading can safely terminate this section here.
+    "kam": _KAM_RESPONSIBILITY_MARKERS,
 }
 
 

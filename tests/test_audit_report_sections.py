@@ -50,6 +50,29 @@ def test_extract_audit_report_sections_finds_kam_and_opinion():
     assert classify_kam_topics(sections["kam"]["body_text"]) == ["revenue", "inventory"]
 
 
+def test_recover_kam_detail_does_not_treat_generic_auditor_phrase_as_boundary():
+    """A KAM narrative can mention an auditor without ending the KAM section."""
+    from kreports.processor.audit_report_parser import recover_kam_detail_body
+
+    full_text = """
+    핵심감사사항
+    핵심감사사항은 감사인의 책임과 전문가적 판단에 따라 선정됩니다.
+    수익인식
+    핵심감사사항으로 선정한 이유
+    기간귀속과 계약조건 판단에는 중요한 위험이 있습니다.
+    감사에서 다루어진 방법
+    계약서를 검사하고 표본을 대사하였습니다.
+    재무제표감사에 대한 감사인의 책임
+    감사인은 적절한 감사의견을 표명합니다.
+    """
+
+    recovered = recover_kam_detail_body(full_text, "핵심감사사항")
+
+    assert "수익인식" in recovered
+    assert "계약서를 검사" in recovered
+    assert "재무제표감사에 대한 감사인의 책임" not in recovered
+
+
 def test_audit_report_fetch_error_uses_production_task_name(temp_engine, monkeypatch):
     import kreports.collector.report_document_collector as collector_module
     from kreports.db.engine import get_session

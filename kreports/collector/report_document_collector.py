@@ -2063,6 +2063,37 @@ def _recover_kam_items(
                 limitations,
                 source.fetched_at,
             )
+        # Raw DART XML can contain the full KAM narrative in paragraph/table
+        # structure that the KAM parser cannot read directly.  Normalize the
+        # audit-report section first, then use the conservative collapsed
+        # parser only when it returns a complete item set.
+        extracted = extract_audit_report_sections(body)
+        kam_body = str(extracted.get("kam", {}).get("body_text") or "")
+        if kam_body:
+            if limitations and limitations[-1] == (
+                "source_documents.raw_body:no_kam_items"
+            ):
+                limitations.pop()
+            items = _parse_kam_candidate(
+                kam_body,
+                "source_documents.raw_body.normalized_kam",
+                limitations,
+            )
+            if not items:
+                if limitations and limitations[-1] == (
+                    "source_documents.raw_body.normalized_kam:no_kam_items"
+                ):
+                    limitations.pop()
+                collapsed = parse_collapsed_kam_items(kam_body)
+                if collapsed.status == "complete":
+                    items = collapsed.items
+            if items:
+                return (
+                    items,
+                    "source_documents.raw_body",
+                    limitations,
+                    source.fetched_at,
+                )
     for evidence in target["evidence_documents"]:
         if evidence.full_text_uri:
             try:
