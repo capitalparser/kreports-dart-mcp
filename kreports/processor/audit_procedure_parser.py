@@ -192,20 +192,33 @@ def legacy_procedure_type(method: str) -> str:
 
 
 def _normalize_clause(value: str) -> str:
-    value = re.sub(r"^\s*(?:[-•·▪◦]|\(?\d{1,3}\)?[.)])\s*", "", value)
+    value = re.sub(
+        r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*|\(?\d{1,3}\)?[.)]\s*)",
+        "",
+        value,
+    )
     return re.sub(r"\s+", " ", value).strip()
 
 
 def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
     bounded = (source or "")[:MAX_INPUT_CHARS]
-    pattern = re.compile(r"(?:\r?\n+|[;；]+|(?<=[.!?。])\s+)")
+    pattern = re.compile(
+        r"(?:\r?\n+|[;；]+|(?<=[.!?。])\s+|"
+        r"(?<=[.!?。])(?=\s*[-•·▪◦ㆍ①-⑳])|"
+        r"(?<!전)(?=ㆍ(?!후))|"
+        r"(?=[①-⑳])|"
+        r"(?<=\s)(?=[•·▪◦]\s+)|"
+        r"(?<=\s)(?=-\s+))"
+    )
     clauses: list[tuple[str, int, int, bool, bool]] = []
 
     def append_raw(raw: str, absolute_start: int) -> None:
         lowered_raw = raw.lower()
         if any(marker in lowered_raw for marker in _RESPONSIBILITY_BOILERPLATE):
             return
-        bullet_context = bool(re.match(r"^\s*(?:[-•·▪◦])\s+", raw))
+        bullet_context = bool(
+            re.match(r"^\s*(?:(?:[-•·▪◦ㆍ])\s*|[①-⑳]\s*)", raw)
+        )
         conjunction = re.compile(
             r"((?:검사|검토|질문|문의|입회|관찰|조회|재계산|재수행|"
             r"분석|테스트|평가|추출|활용|대사|조사|확인)"

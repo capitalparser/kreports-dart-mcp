@@ -139,6 +139,61 @@ def test_extract_procedure_steps_rejects_generic_bulleted_procedure_lead_in():
 
 
 @pytest.mark.parametrize(
+    ("text_value", "expected_texts", "expected_methods"),
+    [
+        (
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.ㆍ 계약서 검토"
+            "ㆍ 통제 테스트ㆍ 분석적 절차 수행",
+            ["계약서 검토", "통제 테스트", "분석적 절차 수행"],
+            ["inspection", "controls_test", "analytical_procedure"],
+        ),
+        (
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.① 계약서 검토"
+            "② 외부조회 확인",
+            ["계약서 검토", "외부조회 확인"],
+            ["inspection", "confirmation"],
+        ),
+        (
+            "우리가 수행한 주요 감사절차는 다음과 같습니다.- 계약서 검토"
+            " - 외부조회 확인",
+            ["계약서 검토", "외부조회 확인"],
+            ["inspection", "confirmation"],
+        ),
+    ],
+)
+def test_extract_procedure_steps_preserves_inline_explicit_list_provenance(
+    text_value,
+    expected_texts,
+    expected_methods,
+):
+    """Catch inline list markers being collapsed before noun-ending steps are parsed."""
+    steps = extract_procedure_steps(_kam_item(text_value))
+
+    assert [step.procedure_text for step in steps] == expected_texts
+    assert [step.method for step in steps] == expected_methods
+
+
+@pytest.mark.parametrize(
+    "text_value",
+    [
+        "보고기간 전ㆍ후 거래를 검토하였습니다.",
+        "매출·매입 거래를 검토하였습니다.",
+        "감사인은 전문가적 판단·의구심을 유지할 책임이 있습니다.",
+    ],
+)
+def test_extract_procedure_steps_does_not_treat_lexical_middle_dots_as_list_provenance(
+    text_value,
+):
+    """Catch a splitter that turns prose middle dots into unsupported procedure bullets."""
+    steps = extract_procedure_steps(_kam_item(text_value))
+
+    if "책임" in text_value:
+        assert steps == []
+    else:
+        assert [step.procedure_text for step in steps] == [text_value]
+
+
+@pytest.mark.parametrize(
     ("text_value", "expected_method"),
     [
         ("감사계획에 따라 주요 계약서를 검사하였습니다.", "inspection"),
