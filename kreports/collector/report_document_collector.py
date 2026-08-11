@@ -1844,6 +1844,7 @@ def index_audit_procedures_from_sections(
     *,
     year: int | None = None,
     limit: int | None = None,
+    rcept_nos: list[str] | None = None,
     progress_callback=None,
 ) -> dict:
     """Reconcile procedure index for every persisted logical KAM identity."""
@@ -1856,6 +1857,14 @@ def index_audit_procedures_from_sections(
     if year is not None:
         sql += " AND bsns_year=:year"
         params["year"] = year
+    normalized_receipts = sorted({str(value) for value in (rcept_nos or []) if str(value)})
+    if normalized_receipts:
+        receipt_bindings = []
+        for index, receipt in enumerate(normalized_receipts):
+            key = f"receipt_{index}"
+            receipt_bindings.append(f":{key}")
+            params[key] = receipt
+        sql += " AND rcept_no IN (" + ", ".join(receipt_bindings) + ")"
     sql += """
         UNION
         SELECT rcept_no, corp_code, bsns_year, source_type,
@@ -1865,6 +1874,8 @@ def index_audit_procedures_from_sections(
     """
     if year is not None:
         sql += " AND bsns_year=:year"
+    if normalized_receipts:
+        sql += " AND rcept_no IN (" + ", ".join(receipt_bindings) + ")"
     sql += " ORDER BY bsns_year, rcept_no, ordinal"
     if limit is not None:
         sql += " LIMIT :limit"
@@ -2476,6 +2487,30 @@ def _rebuild_kam_receipt(meta: dict) -> dict:
         "quality_status": quality_status,
         "kam_items": kam_count,
         "procedure_items": procedure_count,
+    }
+
+
+def rebuild_kam_items_for_receipts(*, year: int, rcept_nos: list[str]) -> dict:
+    """Rebuild only explicitly collected audit-report receipts.
+
+    This small scoped entrypoint is for recovery runners.  It deliberately
+    avoids the year-wide ``rebuild_kam_items`` scan after a bounded live batch.
+    """
+    receipts = sorted({str(value) for value in rcept_nos if str(value)})
+    results = []
+    for receipt in receipts:
+        result = _rebuild_kam_receipt({
+            "rcept_no": receipt,
+            "bsns_year": int(year),
+            "source_type": "audit_report",
+        })
+        results.append({"rcept_no": receipt, **result})
+    return {
+        "year": int(year),
+        "total": len(receipts),
+        "rows_written": sum(int(row["kam_items"]) for row in results),
+        "procedure_items": sum(int(row["procedure_items"]) for row in results),
+        "receipts": results,
     }
 
 

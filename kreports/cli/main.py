@@ -2601,6 +2601,63 @@ def collect_audit_report_sections_cmd(
             typer.echo(f"  {row['rcept_no']} {row['corp_name']}: {row['error']}")
 
 
+@app.command("collect-audit-procedure-recovery")
+def collect_audit_procedure_recovery_cmd(
+    year: int = typer.Option(2025, "--year", help="감사대상 사업연도"),
+    market: str = typer.Option(..., "--market", help="검증된 historical 시장 (예: KOSPI/KOSDAQ)"),
+    limit: int = typer.Option(25, "--limit", min=1, help="이번 실행의 최대 receipt 수"),
+    force: bool = typer.Option(False, "--force", help="동일 recovery lease가 running이면 강제 실행"),
+):
+    """검증된 과거 상장사 중 KAM/감사절차 증거가 부족한 receipt만 복구한다."""
+    from kreports.runtime import require_collector_mode, require_raw_backfill_mode
+    from kreports.collector.audit_procedure_recovery import (
+        TASK_TYPE,
+        recovery_backfill_params,
+        run_audit_procedure_recovery_batch,
+    )
+
+    try:
+        require_collector_mode("collect-audit-procedure-recovery")
+        require_raw_backfill_mode(
+            "collect-audit-procedure-recovery",
+            raw_storage_backend=settings.raw_storage_backend,
+            raw_storage_keep_inline=settings.raw_storage_keep_inline,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"오류: {exc}", err=True)
+        raise typer.Exit(2)
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    normalized_market = market.strip().upper()
+    init_db()
+
+    def _progress(index, total, corp_name, rcept_no):
+        typer.echo(f"  [{index}/{total}] {corp_name} {rcept_no}")
+
+    with _backfill_run_guard(
+        task_type=TASK_TYPE,
+        year=year,
+        market=normalized_market,
+        params=recovery_backfill_params(year=year, market=normalized_market),
+        force=force,
+    ) as run_id:
+        result = run_audit_procedure_recovery_batch(
+            _ACTIVE_BACKFILL_LEASES[run_id],
+            year=year,
+            market=normalized_market,
+            limit=limit,
+            progress_callback=_progress,
+        )
+        _finish_backfill_run(run_id, result)
+    typer.echo(
+        f"완료 - 처리 {result['processed']:,} | 성공 {result['ok']:,} | "
+        f"실패 {result['failed']:,} | sections {result['sections']:,} | "
+        f"next_cursor={result['next_cursor']} | exhausted={result['exhausted']}"
+    )
+
+
 @app.command("collect-business-report-sections")
 def collect_business_report_sections_cmd(
     year: int = typer.Option(2025, "--year", help="사업연도"),
