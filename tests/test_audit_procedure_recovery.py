@@ -867,6 +867,52 @@ def test_successful_batch_resumes_after_saved_prefix_and_failure_retries(temp_en
     assert retry["next_cursor"] == second["next_cursor"]
 
 
+def test_resume_uses_latest_terminal_v4_cursor_once_before_v5_history(
+    temp_engine,
+):
+    """Catch a v5 selector scope restart from the beginning after v4 progress."""
+    from kreports.collector import audit_procedure_recovery as recovery
+    from kreports.maintenance.backfill_runs import BackfillLease
+
+    v5_params = recovery.recovery_backfill_params(year=2025, market="KOSPI")
+    v4_params = {**v5_params, "selector_version": 4}
+    completed_cursor = {"corp_code": "00838500", "rcept_no": "20260428800598"}
+    failed_cursor = {"corp_code": "00838500", "rcept_no": "20260428800599"}
+    v5_cursor = {"corp_code": "00838500", "rcept_no": "20260428800600"}
+
+    completed_v4 = BackfillLease.start(
+        "audit_procedure_recovery", 2025, "KOSPI", v4_params,
+    )
+    completed_v4.checkpoint(
+        {"next_cursor": completed_cursor}, attempted=1, saved=1, no_data=0, errors=0,
+    )
+    completed_v4.succeed({"ok": 1})
+
+    failed_v4 = BackfillLease.start(
+        "audit_procedure_recovery", 2025, "KOSPI", v4_params,
+    )
+    failed_v4.checkpoint(
+        {"next_cursor": failed_cursor}, attempted=2, saved=1, no_data=0, errors=1,
+    )
+    failed_v4.fail("transport_error", "retry corrected audit receipt")
+
+    assert recovery._latest_resume_cursor(
+        year=2025, market="KOSPI", params=v5_params,
+    ) == failed_cursor
+
+    terminal_v5 = BackfillLease.start(
+        "audit_procedure_recovery", 2025, "KOSPI", v5_params,
+    )
+    terminal_v5.checkpoint(
+        {"next_cursor": v5_cursor}, attempted=1, saved=1, no_data=0, errors=0,
+    )
+    terminal_v5.succeed({"ok": 1})
+
+    assert recovery._latest_resume_cursor(
+        year=2025, market="KOSPI", params=v5_params,
+    ) == v5_cursor
+
+
 def test_batch_checkpoint_counts_each_processed_receipt_once(temp_engine, monkeypatch):
     """Catch a checkpoint that adds a cumulative batch count more than once."""
     from kreports.collector import audit_procedure_recovery as recovery

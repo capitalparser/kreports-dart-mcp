@@ -25,6 +25,7 @@ TASK_TYPE = "audit_procedure_recovery"
 SELECTOR_VERSION = 5
 _EXPLICIT_BUSINESS_YEAR = re.compile(r"(?<!\d)(20\d{2})\s*사업연도")
 _FALLBACK_RESOLUTION_REASON = "audit_report_attachment_not_found"
+_LEGACY_SELECTOR_VERSION = 4
 
 
 def recovery_backfill_params(*, year: int, market: str) -> dict[str, object]:
@@ -352,41 +353,60 @@ def _record_fallback_resolution(
 
 
 def _latest_resume_cursor(*, year: int, market: str, params: dict[str, object]) -> dict[str, str] | None:
-    """Recover the last verified prefix from this exact terminal run scope.
+    """Recover the last verified prefix from this terminal run scope.
 
     A failed run can still have a successfully persisted prefix.  Its
     checkpoint cursor points at that prefix while ``last_error`` names the next
     receipt, so resuming after the cursor retries the failure without refetching
-    the successful work before it.
+    the successful work before it.  Selector v5 additionally receives one
+    bounded handoff from v4: only before any terminal v5 history exists, and
+    only for the otherwise identical task/year/market parameter scope.
     """
-    canonical_params = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    with get_session() as session:
-        runs = (
-            session.query(BackfillRun)
-            .filter(
-                BackfillRun.task_type == TASK_TYPE,
-                BackfillRun.year == year,
-                BackfillRun.market == market,
-                BackfillRun.status != "running",
-                BackfillRun.params_json == canonical_params,
-            )
-            .order_by(BackfillRun.finished_at.desc(), BackfillRun.id.desc())
-            .all()
+
+    def _terminal_checkpoints_for(params_value: dict[str, object]) -> list[str]:
+        canonical_params = json.dumps(
+            params_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-        checkpoints = [str(run.checkpoint_json or "{}") for run in runs]
-    for checkpoint_json in checkpoints:
-        try:
-            checkpoint = json.loads(checkpoint_json)
-        except json.JSONDecodeError:
-            continue
-        raw_cursor = checkpoint.get("next_cursor")
-        try:
-            parsed = _cursor(raw_cursor)
-        except ValueError:
-            continue
-        if parsed is not None:
-            return {"corp_code": parsed[0], "rcept_no": parsed[1]}
-    return None
+        with get_session() as session:
+            runs = (
+                session.query(BackfillRun)
+                .filter(
+                    BackfillRun.task_type == TASK_TYPE,
+                    BackfillRun.year == year,
+                    BackfillRun.market == market,
+                    BackfillRun.status != "running",
+                    BackfillRun.params_json == canonical_params,
+                )
+                .order_by(BackfillRun.finished_at.desc(), BackfillRun.id.desc())
+                .all()
+            )
+            return [str(run.checkpoint_json or "{}") for run in runs]
+
+    def _checkpoint_cursor(checkpoints: list[str]) -> dict[str, str] | None:
+        for checkpoint_json in checkpoints:
+            try:
+                checkpoint = json.loads(checkpoint_json)
+            except json.JSONDecodeError:
+                continue
+            try:
+                parsed = _cursor(checkpoint.get("next_cursor"))
+            except ValueError:
+                continue
+            if parsed is not None:
+                return {"corp_code": parsed[0], "rcept_no": parsed[1]}
+        return None
+
+    current_checkpoints = _terminal_checkpoints_for(params)
+    # A terminal v5 record consumes the compatibility handoff even when it
+    # has no cursor (for example, an exhausted run), so v4 can never override
+    # a newer v5 decision.
+    if current_checkpoints:
+        return _checkpoint_cursor(current_checkpoints)
+
+    if params.get("selector_version") != SELECTOR_VERSION:
+        return None
+    legacy_params = {**params, "selector_version": _LEGACY_SELECTOR_VERSION}
+    return _checkpoint_cursor(_terminal_checkpoints_for(legacy_params))
 
 
 def _lease_counts(lease: BackfillLease) -> tuple[int, int, int, int]:
