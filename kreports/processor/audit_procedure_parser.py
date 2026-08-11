@@ -226,7 +226,7 @@ def _candidate_clauses(source: str) -> list[tuple[str, int, int, bool, bool]]:
     lead_in = _AUDIT_PROCEDURE_LIST_LEAD_IN.search(bounded)
     if lead_in is not None:
         list_pattern = re.compile(
-            r"(?:(?<=\S)(?=[-－]\s*\S)|"
+            r"(?:(?<=\S)(?=-\s*\S)|(?<=\s)(?=－\s+\S)|"
             r"(?<=\s)(?=\(?\d{1,3}\)?[.)]\s+))"
         )
         boundary_positions.update(

@@ -314,6 +314,19 @@ def test_extract_procedure_steps_does_not_treat_fullwidth_hyphen_prose_as_bullet
     ]
 
 
+def test_extract_procedure_steps_keeps_fullwidth_hyphen_prose_after_audit_lead_in():
+    steps = extract_procedure_steps(
+        _kam_item(
+            "우리가 수행한 주요 감사절차는 다음과 같습니다. "
+            "매출－매입 거래 차이를 검토하였습니다."
+        )
+    )
+
+    assert [step.procedure_text for step in steps] == [
+        "매출－매입 거래 차이를 검토하였습니다.",
+    ]
+
+
 @pytest.mark.parametrize(
     ("text_value", "expected_method"),
     [
