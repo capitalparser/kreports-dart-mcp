@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KReports 백필 운영 현황</title>
+  <style>
+    :root {
+      --bg: #f6f7f8;
+      --surface: #ffffff;
+      --surface-muted: #eef1f4;
+      --line: #d8dde3;
+      --line-strong: #b9c1ca;
+      --text: #17202a;
+      --text-muted: #5f6b78;
+      --text-soft: #87919d;
+      --accent: #0f766e;
+      --risk: #b42318;
+      --warn: #b54708;
+      --ok: #027a48;
+      --info: #175cd3;
+      --radius: 8px;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
+      --font: Pretendard, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.6;
+      letter-spacing: -0.02em;
+    }
+
+    a { color: inherit; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 24px 20px;
+      border-right: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .wordmark {
+      font-weight: 800;
+      font-size: 15px;
+      margin-bottom: 28px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .nav a {
+      display: block;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm, 6px);
+      text-decoration: none;
+    }
+
+    .nav a:hover {
+      background: var(--surface-muted);
+      color: var(--text);
+    }
+
+    .main {
+      width: min(1180px, calc(100vw - 260px));
+      padding: 28px 32px 56px;
+    }
+
+    .header {
+      display: grid;
+      gap: 14px;
+      padding-bottom: 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    .verdict-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 28px;
+      padding: 4px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--info);
+    }
+
+    .dot.ok { background: var(--ok); }
+    .dot.warn { background: var(--warn); }
+    .dot.risk { background: var(--risk); }
+
+    .brief {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .brief-item {
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .brief-label {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin: 24px 0;
+    }
+
+    .kpi {
+      min-height: 118px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .kpi label {
+      display: block;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .kpi strong {
+      display: block;
+      font-size: 26px;
+      line-height: 1.05;
+      letter-spacing: 0;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .kpi span {
+      display: block;
+      color: var(--text-soft);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+
+    .section {
+      margin-top: 28px;
+      padding-top: 4px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-body { padding: 16px; }
+
+    .panel-title {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .meter {
+      height: 10px;
+      border-radius: 999px;
+      background: var(--surface-muted);
+      overflow: hidden;
+      margin-top: 10px;
+    }
+
+    .meter > div {
+      height: 100%;
+      background: var(--accent);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 720px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    th, td {
+      padding: 9px 11px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    td.num, th.num { text-align: right; }
+    tr:last-child td { border-bottom: 0; }
+
+    .gap-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .gap {
+      display: grid;
+      grid-template-columns: 94px minmax(0, 1fr);
+      gap: 12px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .gap:last-child { border-bottom: 0; }
+
+    .gap-kind {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .muted { color: var(--text-muted); }
+    .soft { color: var(--text-soft); }
+    .ok-text { color: var(--ok); font-weight: 800; }
+    .warn-text { color: var(--warn); font-weight: 800; }
+
+    footer {
+      margin-top: 34px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+      color: var(--text-soft);
+      font-size: 12px;
+    }
+
+    @media (max-width: 900px) {
+      .shell { display: block; }
+      .sidebar {
+        position: sticky;
+        z-index: 2;
+        height: auto;
+        top: 0;
+        padding: 12px 16px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .wordmark { margin-bottom: 8px; }
+      .nav {
+        display: flex;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      .main {
+        width: 100%;
+        padding: 22px 16px 42px;
+      }
+      .brief, .kpis, .grid-2 {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="wordmark">KReports Workbench</div>
+      <nav class="nav">
+        <a href="#summary">요약</a>
+        <a href="#raw">원문 저장</a>
+        <a href="#evidence">파생 근거</a>
+        <a href="#gaps">남은 갭</a>
+        <a href="#actions">다음 실행</a>
+      </nav>
+    </aside>
+    <main class="main">
+      <header id="summary" class="header">
+        <div class="eyebrow">DART MCP 백필 운영 현황 · 2026-05-27 15:57 KST</div>
+        <h1>원문은 GCS로 빠지고, MCP용 파생 근거는 로컬 DB에서 즉시 조회 가능한 상태</h1>
+        <div class="verdict-row">
+          <span class="badge"><span class="dot ok"></span>저장 검증: 최신 2,117건 통과</span>
+          <span class="badge"><span class="dot warn"></span>KOSPI 2024 원문 누락 313건</span>
+          <span class="badge"><span class="dot"></span>로컬 원문 적재 0건</span>
+        </div>
+        <div class="brief">
+          <div class="brief-item">
+            <div class="brief-label">현재 상태</div>
+            <div>원문 2,117건이 외부 압축 저장소로 연결되어 있고, 로컬 DB는 2.1GB 수준으로 유지되고 있음.</div>
+          </div>
+          <div class="brief-item">
+            <div class="brief-label">왜 중요한가</div>
+            <div>감사보고서 본문 재파싱 여지를 확보하면서도, MCP 런타임 DB가 다시 40GB대로 커지는 흐름을 막고 있음.</div>
+          </div>
+          <div class="brief-item">
+            <div class="brief-label">다음 행동</div>
+            <div>KOSPI 2024 사업보고서 raw-missing 313건을 우선 제거한 뒤, KOSDAQ과 2023년으로 확장.</div>
+          </div>
+        </div>
+      </header>
+
+      <section class="kpis" aria-label="핵심 지표">
+        <div class="kpi">
+          <label>원문 참조 가능</label>
+          <strong>2,117</strong>
+          <span>사업보고서 901 · 감사보고서 1,216</span>
+        </div>
+        <div class="kpi">
+          <label>로컬 원문 적재</label>
+          <strong>0</strong>
+          <span>DB에는 원문 본문을 남기지 않음</span>
+        </div>
+        <div class="kpi">
+          <label>GCS 압축 원문</label>
+          <strong>332.4MB</strong>
+          <span>원문 환산 3.5GB → gzip 저장</span>
+        </div>
+        <div class="kpi">
+          <label>파생 근거 문서</label>
+          <strong>13,208</strong>
+          <span>2,646개 회사 · 2개년 중심</span>
+        </div>
+        <div class="kpi">
+          <label>KOSPI 2024 잔여</label>
+          <strong>313</strong>
+          <span>사업보고서 원문 누락 기준</span>
+        </div>
+      </section>
+
+      <section id="raw" class="section">
+        <h2>원문 저장 상태</h2>
+        <div class="grid-2">
+          <div class="panel">
+            <div class="panel-title">외부 저장 진행률</div>
+            <div class="panel-body">
+              <div class="muted">source_documents 전체 13,946건 중 외부 원문 연결 2,117건</div>
+              <div class="meter" aria-label="외부 저장 진행률"><div style="width: 15.2%"></div></div>
+              <p class="soft">진행률은 전체 source_documents 기준임. derived-only placeholder 11,816건은 원문이 아니라 파생 섹션 묶음이므로, 재파싱 근거로는 제한적임.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-title">용량 구조</div>
+            <div class="panel-body">
+              <div>로컬 DB: <strong>2.1GB</strong></div>
+              <div>GCS 압축 원문: <strong>332.4MB</strong></div>
+              <div>원문 환산 크기: <strong>3.5GB</strong></div>
+              <p class="soft">긴 XML/HTML 원문은 GCS gzip으로 저장하고, DB에는 위치·해시·크기만 남기는 구조임.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-wrap" style="margin-top:16px">
+          <table>
+            <thead>
+              <tr>
+                <th>문서 구분</th>
+                <th>저장 상태</th>
+                <th class="num">문서 수</th>
+                <th class="num">원문 환산</th>
+                <th class="num">압축 저장</th>
+                <th>판정</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>사업보고서</td>
+                <td>GCS 외부 저장</td>
+                <td class="num">901</td>
+                <td class="num">2,832.7MB</td>
+                <td class="num">246.7MB</td>
+                <td><span class="ok-text">정상</span> · MCP 재파싱 근거로 사용 가능</td>
+              </tr>
+              <tr>
+                <td>감사보고서</td>
+                <td>GCS 외부 저장</td>
+                <td class="num">1,216</td>
+                <td class="num">754.3MB</td>
+                <td class="num">85.7MB</td>
+                <td><span class="ok-text">정상</span> · KAM/강조사항/기타사항 보강 근거</td>
+              </tr>
+              <tr>
+                <td>사업보고서</td>
+                <td>파생 근거만 존재</td>
+                <td class="num">4,698</td>
+                <td class="num">0MB</td>
+                <td class="num">0MB</td>
+                <td><span class="warn-text">보완 필요</span> · 재파싱 한계 있음</td>
+              </tr>
+              <tr>
+                <td>감사보고서</td>
+                <td>파생 근거만 존재</td>
+                <td class="num">7,131</td>
+                <td class="num">0MB</td>
+                <td class="num">0MB</td>
+                <td><span class="warn-text">보완 필요</span> · 상세 감사절차 재추출 제한</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="evidence" class="section">
+        <h2>MCP 응답용 파생 근거</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>항목</th>
+                <th class="num">수량</th>
+                <th>의미</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>evidence documents</td>
+                <td class="num">13,208</td>
+                <td>MCP가 서술형 답변을 만들 때 우선 검색하는 경량 근거 문서</td>
+              </tr>
+              <tr>
+                <td>대상 회사</td>
+                <td class="num">2,646</td>
+                <td>현재 파생 근거 레이어에 등장하는 회사 수</td>
+              </tr>
+              <tr>
+                <td>감사보고서 근거</td>
+                <td class="num">7,882</td>
+                <td>KAM, 감사절차, 강조사항, 기타사항, 감사의견 등 감사인 관점 기능의 핵심 후보</td>
+              </tr>
+              <tr>
+                <td>사업보고서 근거</td>
+                <td class="num">5,326</td>
+                <td>사업개요, 감사보수, 감사시간, 감사인 정보, 재무 관련 보조 근거</td>
+              </tr>
+              <tr>
+                <td>report sections</td>
+                <td class="num">15,673</td>
+                <td>사업보고서 8,224개 섹션 · 감사보고서 7,449개 섹션</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="gaps" class="section">
+        <h2>갭 분류</h2>
+        <div class="panel">
+          <div class="panel-body gap-list">
+            <div class="gap">
+              <div class="gap-kind">required</div>
+              <div>KOSPI 2024 사업보고서 원문 누락 313건을 제거해야 함. 이 구간이 끝나야 현재 우선순위 시장의 감사보고서 첨부 원문 완전성이 크게 올라감.</div>
+            </div>
+            <div class="gap">
+              <div class="gap-kind">required</div>
+              <div>파생 근거만 있는 11,816건은 원문 재파싱이 불가능하므로, KAM 감사절차·강조사항·기타사항 기능 확장 시 원문 보강 필요.</div>
+            </div>
+            <div class="gap">
+              <div class="gap-kind">monitor</div>
+              <div>DART `파일이 존재하지 않습니다` 경고는 일부 접수번호에서 반복됨. 실패로 죽지는 않지만, 장기적으로는 회피 목록 또는 대체 viewer 수집 로그로 분류해야 함.</div>
+            </div>
+            <div class="gap">
+              <div class="gap-kind">recommended</div>
+              <div>대시보드 숫자를 수동 스냅샷이 아니라 DB/GCS 상태에서 자동 생성하도록 만들면 운영 판단이 더 단단해짐.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="actions" class="section">
+        <h2>다음 실행 순서</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>순서</th>
+                <th>작업</th>
+                <th>완료 기준</th>
+                <th>비고</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="num">1</td>
+                <td>KOSPI 2024 raw-missing 배치 계속 실행</td>
+                <td>잔여 313건 → 0건</td>
+                <td>100건 단위로 수집·검증 반복</td>
+              </tr>
+              <tr>
+                <td class="num">2</td>
+                <td>GCS 원문 검증</td>
+                <td>2,117건 확인 · 실패 0건</td>
+                <td>최신 검증 기준 통과</td>
+              </tr>
+              <tr>
+                <td class="num">3</td>
+                <td>evidence documents 재생성</td>
+                <td>신규 섹션이 MCP 검색 레이어에 반영</td>
+                <td>원문 수집 후 파생 근거 새로고침</td>
+              </tr>
+              <tr>
+                <td class="num">4</td>
+                <td>KOSDAQ 및 2023년 확장</td>
+                <td>시장·연도별 raw coverage 표 갱신</td>
+                <td>API 한도와 GCS 검증 속도 기준으로 배치 조절</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer>
+        생성 기준: 로컬 SQLite DB와 GCS manifest 컬럼 스냅샷. 숫자는 2026-05-27 15:57 KST 기준이며, 백필이 계속되면 갱신 필요.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
