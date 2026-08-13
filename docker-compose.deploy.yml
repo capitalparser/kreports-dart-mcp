@@ -1,0 +1,20 @@
+services:
+  kreports-mcp:
+    build:
+      context: .
+    image: kreports-mcp:local
+    restart: unless-stopped
+    environment:
+      KREPORTS_RUNTIME_MODE: readonly
+      DB_URL: sqlite:////data/kreports.db
+      KREPORTS_MCP_TOKEN: ${KREPORTS_MCP_TOKEN:?set KREPORTS_MCP_TOKEN}
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./kreports.db:/data/kreports.db:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

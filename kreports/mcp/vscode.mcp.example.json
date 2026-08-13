@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "kreports": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "kreports", "kreports-mcp"],
+      "env": {
+        "DB_URL": "sqlite:////absolute/path/to/kreports.db"
+      }
+    }
+  }
+}

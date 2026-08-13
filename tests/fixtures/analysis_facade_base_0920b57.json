@@ -1,0 +1,1794 @@
+{
+  "accounting_policy": {
+    "bsns_year": 2024,
+    "corp_code": "00000001",
+    "fs_div": "CFS",
+    "item_count": 1,
+    "items": {
+      "revenue_recognition": {
+        "body": "고객에게 통제가 이전될 때 수익을 인식합니다. 정책유형 1.",
+        "body_hash": "policy-1",
+        "body_length": 35,
+        "heading": "수익인식"
+      }
+    }
+  },
+  "audit_history": {
+    "corp_code": "00000001",
+    "count": 1,
+    "history": [
+      {
+        "감사의견": "적정",
+        "감사인": "패리티회계법인1",
+        "교체여부": "최초",
+        "구분": "CFS",
+        "연속연수": 1,
+        "접수번호": "20250401000001",
+        "회계연도": 2024
+      }
+    ]
+  },
+  "audit_matters": {
+    "analysis": [
+      {
+        "perspective": "auditor",
+        "statement": "강조사항·기타사항·계속기업 문단은 감사의견 자체와 별도로 수임위험, 계속기업, 후속사건, 범위제한 가능성을 점검하는 근거입니다."
+      }
+    ],
+    "companies": [
+      {
+        "corp_code": "00000001",
+        "corp_name": "패리티대상",
+        "industry_name": "전자부품·컴퓨터·통신장비 제조",
+        "induty_code": "26400",
+        "market": "KOSPI",
+        "matter_counts": {
+          "emphasis": 0,
+          "going_concern": 0,
+          "other_matter": 1
+        },
+        "sections": [
+          {
+            "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
+            "body_length": 32,
+            "bsns_year": 2024,
+            "dcm_no": null,
+            "rcept_no": "20250401000001",
+            "section_key": "other_matter",
+            "section_title": "기타사항",
+            "severity_hint": "info",
+            "topic_tags": []
+          }
+        ],
+        "stock_code": "000001",
+        "total_sections": 1,
+        "years": [
+          2024
+        ]
+      }
+    ],
+    "confirmed_facts": [
+      {
+        "excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250401000001",
+          "report_nm": "감사보고서",
+          "section_key": "other_matter",
+          "section_title": "기타사항",
+          "source_table": "report_sections.audit_report"
+        },
+        "statement": "패리티대상 2024년 감사보고서에서 기타사항 문단이 확인됩니다. 주요 내용: 전기 재무제표 감사인과 비교 정보에 관한 기타사항 1."
+      }
+    ],
+    "data_quality": {
+      "interpretation": "Results are local cached audit-report sections. Empty results mean no cached matching section, not proof that the filing has no such matter.",
+      "source": "report_sections.audit_report",
+      "status": "usable"
+    },
+    "next_checks": [
+      "해당 문단이 감사의견 변형, 강조사항, 기타사항, 계속기업 관련 중요한 불확실성 중 무엇인지 원문 기준으로 확인하세요.",
+      "동종업종 내 반복적으로 나타나는 matter인지 peer 검색 결과와 비교하세요."
+    ],
+    "query": {
+      "company": "000001",
+      "include_excerpt": true,
+      "induty_prefix": null,
+      "limit": 10,
+      "market": null,
+      "section_keys": [
+        "other_matter",
+        "emphasis",
+        "going_concern"
+      ],
+      "year": 2024
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "total_companies": 1,
+    "total_sections": 1
+  },
+  "audit_procedures": {
+    "analysis": [
+      {
+        "perspective": "auditor",
+        "statement": "감사절차 유형은 KAM 위험요인에 대한 감사인의 대응 방식이 충분히 구체적인지, peer 대비 절차 밀도가 낮지 않은지 비교하는 데 사용됩니다."
+      }
+    ],
+    "companies": [
+      {
+        "corp_code": "00000001",
+        "corp_name": "패리티대상",
+        "induty_code": "26400",
+        "market": "KOSPI",
+        "record_count": 1,
+        "records": [
+          {
+            "assertion_hints": [],
+            "dcm_no": null,
+            "kam_topic": "revenue",
+            "linkages": [
+              {
+                "category": "audit_report_kam",
+                "confidence_basis": "explicit_keyword_map_match",
+                "key": "revenue",
+                "label": "KAM: 수익인식",
+                "matching_phrase": "매출"
+              },
+              {
+                "category": "financial_statement_account",
+                "confidence_basis": "explicit_keyword_map_match",
+                "key": "revenue",
+                "label": "재무제표: 매출액",
+                "matching_phrase": "매출"
+              },
+              {
+                "category": "accounting_note",
+                "confidence_basis": "explicit_keyword_map_match",
+                "key": "revenue_policy",
+                "label": "주석: 수익인식 회계정책",
+                "matching_phrase": "매출"
+              }
+            ],
+            "linked_event_keys": [],
+            "linked_metric_keys": [],
+            "linked_note_keys": [],
+            "method": null,
+            "parser_version": null,
+            "procedure_excerpt": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
+            "procedure_length": 40,
+            "procedure_ordinal": 0,
+            "procedure_text": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
+            "procedure_type": "substantive_test",
+            "quality_status": null,
+            "rcept_no": "20250401000001",
+            "section_ordinal": 0,
+            "source_type": "audit_report",
+            "year": 2024
+          }
+        ],
+        "stock_code": "000001"
+      }
+    ],
+    "confirmed_facts": [
+      {
+        "excerpt": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250401000001",
+          "report_nm": "감사보고서",
+          "section_key": null,
+          "section_title": "KAM 감사절차",
+          "source_table": "audit_procedure_items"
+        },
+        "statement": "패리티대상 2024년 KAM 감사절차에서 substantive_test 유형 절차가 확인됩니다. 절차 내용: 매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다."
+      }
+    ],
+    "data_quality": {
+      "interpretation": "Procedure items are parsed hints from cached audit-report KAM response paragraphs. The linkages explain which audit-report KAM, financial-statement account, accounting note, or disclosure-event evidence should be checked with the procedure. Each linkage is a navigation aid, not evidence that the audit procedure was sufficient or appropriately performed.",
+      "source": "audit_procedure_items",
+      "status": "usable"
+    },
+    "kam_topic_counts": {
+      "revenue": 1
+    },
+    "next_checks": [
+      "절차 문구가 단순 확인인지, 통제테스트·실증절차·전문가 활용·추정 검토 등으로 충분히 구분되는지 확인하세요.",
+      "동일 KAM topic에서 peer 감사절차 유형 분포와 비교하세요."
+    ],
+    "procedure_type_counts": {
+      "substantive_test": 1
+    },
+    "query": {
+      "company": "000001",
+      "include_excerpt": true,
+      "induty_prefix": null,
+      "kam_topic": null,
+      "keyword": null,
+      "limit": 10,
+      "market": null,
+      "method": null,
+      "procedure_type": null,
+      "year": 2024
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "total_companies": 1,
+    "total_procedures": 1
+  },
+  "audit_sections": {
+    "alternative_sections": [],
+    "analysis": [
+      {
+        "perspective": "auditor",
+        "statement": "감사보고서 본문 섹션은 감사위험 식별, KAM 선정 이유, 감사절차 대응을 확인하는 1차 증거입니다."
+      }
+    ],
+    "confirmed_facts": [
+      {
+        "excerpt": "수익인식 위험 1에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250401000001",
+          "report_nm": "감사보고서",
+          "section_key": "kam",
+          "section_title": "핵심감사사항",
+          "source_table": "report_sections"
+        },
+        "statement": "2024년 감사보고서 핵심감사사항 본문에서 다음 내용이 확인됩니다: 수익인식 위험 1에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다."
+      },
+      {
+        "excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250401000001",
+          "report_nm": "감사보고서",
+          "section_key": "other_matter",
+          "section_title": "기타사항",
+          "source_table": "report_sections"
+        },
+        "statement": "2024년 감사보고서 기타사항 본문에서 다음 내용이 확인됩니다: 전기 재무제표 감사인과 비교 정보에 관한 기타사항 1."
+      }
+    ],
+    "coverage_note": "Cached audit_report report_sections.",
+    "data_quality": {
+      "alternative_section_count": 0,
+      "available_audit_report_years": [
+        2024
+      ],
+      "available_business_report_years": [
+        2024
+      ],
+      "interpretation": "No rows means the local cache lacks the requested section/year. It does not prove the filing lacks that audit report section.",
+      "kam_procedure_coverage": {
+        "coverage_pct": 100.0,
+        "with_procedure_hint": 1
+      },
+      "kam_reason_coverage": {
+        "coverage_pct": 0.0,
+        "with_reason_hint": 0
+      },
+      "latest_available_year": 2024,
+      "requested_section_key": null,
+      "requested_source_type": "audit_report",
+      "requested_year": 2024,
+      "section_count": 2,
+      "source": "report_sections",
+      "status": "usable"
+    },
+    "next_checks": [
+      "KAM 본문에서는 선정 이유와 수행한 감사절차가 모두 추출되었는지 확인하세요.",
+      "사업보고서 주석의 회계정책·추정 문단과 감사보고서 KAM 대응절차를 대조하세요."
+    ],
+    "section_count": 2,
+    "section_key": null,
+    "sections": [
+      {
+        "body_excerpt": "수익인식 위험 1에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+        "body_length": 45,
+        "bsns_year": 2024,
+        "dcm_no": null,
+        "kam_analysis": {
+          "has_procedure_hint": true,
+          "has_reason_hint": false,
+          "procedure_excerpt": "수익인식 위험 1에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+          "procedure_keywords": [
+            "테스트"
+          ],
+          "reason_excerpt": "",
+          "reason_keywords": [],
+          "topics": [
+            "revenue"
+          ]
+        },
+        "ordinal": 0,
+        "rcept_no": "20250401000001",
+        "related_audit_procedure_count": 1,
+        "related_audit_procedure_source": "audit_procedure_items",
+        "related_audit_procedures": [
+          {
+            "dcm_no": null,
+            "kam_topic": "revenue",
+            "procedure_excerpt": "매출 계약 표본 1에 대해 문서검사와 기간귀속 테스트를 수행했습니다.",
+            "procedure_length": 40,
+            "procedure_ordinal": 0,
+            "procedure_type": "substantive_test",
+            "rcept_no": "20250401000001",
+            "section_ordinal": 0
+          }
+        ],
+        "section_key": "kam",
+        "section_title": "핵심감사사항",
+        "source_type": "audit_report"
+      },
+      {
+        "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
+        "body_length": 32,
+        "bsns_year": 2024,
+        "dcm_no": null,
+        "ordinal": 0,
+        "rcept_no": "20250401000001",
+        "section_key": "other_matter",
+        "section_title": "기타사항",
+        "source_type": "audit_report"
+      }
+    ],
+    "source_type": "audit_report",
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "year": 2024
+  },
+  "business_overview": {
+    "analysis": [
+      {
+        "basis": [
+          "사업의 내용",
+          "사업의 개요"
+        ],
+        "perspective": "investor",
+        "risk_level": "watch",
+        "statement": "사업 포트폴리오와 주요 제품·서비스 기재는 성장성 판단의 출발점이지만, 투자 판단에는 수익성·현금흐름·재무구조 확인이 함께 필요합니다."
+      }
+    ],
+    "audit_focus": [],
+    "available_sections": [
+      "business_overview"
+    ],
+    "bsns_year": 2024,
+    "confirmed_facts": [
+      {
+        "excerpt": "회사는 반도체 부품을 제조하고 해외 고객에게 판매합니다.",
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "dart_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250331000001",
+          "rcept_no": "20250331000001",
+          "report_nm": "사업보고서 (2024.12)",
+          "section_key": "business_overview",
+          "section_title": "사업의 개요",
+          "source_table": "report_sections"
+        },
+        "statement": "사업 개요 섹션에서 회사는 반도체 부품을 제조하고 해외 고객에게 판매합니다."
+      }
+    ],
+    "corp_code": "00000001",
+    "corp_name": "패리티대상",
+    "data_quality": {
+      "available_business_report_years": [
+        2024
+      ],
+      "requested_year": 2024,
+      "source": "local_report_sections",
+      "status": "usable"
+    },
+    "industry_name": "전자부품·컴퓨터·통신장비 제조",
+    "induty_code": "26400",
+    "insights": [
+      {
+        "accounts": "전반감사계획",
+        "assertions": "위험평가",
+        "audience": "auditor",
+        "detail": "사업의 개요가 31자 수준입니다. 사업의 내용과 주석을 함께 확인하세요.",
+        "evidence": "회사는 반도체 부품을 제조하고 해외 고객에게 판매합니다.",
+        "risk_level": "warn",
+        "source_label": "사업의 개요",
+        "source_section": "business_overview",
+        "title": "사업이해 원문 밀도",
+        "value": "낮음"
+      },
+      {
+        "accounts": "",
+        "assertions": "",
+        "audience": "investor",
+        "detail": "제품·서비스와 수익 구조 관련 표현 1회 확인",
+        "evidence": "회사는 반도체 부품을 제조하고 해외 고객에게 판매합니다.",
+        "risk_level": "ok",
+        "source_label": "사업의 개요",
+        "source_section": "business_overview",
+        "title": "비즈니스 모델 키워드",
+        "value": "고객"
+      },
+      {
+        "accounts": "",
+        "assertions": "",
+        "audience": "investor",
+        "detail": "시장 확대와 투자 계획 관련 표현 1회 확인",
+        "evidence": "회사는 반도체 부품을 제조하고 해외 고객에게 판매합니다.",
+        "risk_level": "ok",
+        "source_label": "사업의 개요",
+        "source_section": "business_overview",
+        "title": "성장동력 후보",
+        "value": "해외"
+      }
+    ],
+    "investment_focus": [],
+    "missing_sections": [
+      "business_description",
+      "key_contracts",
+      "management_plan",
+      "rd_activities",
+      "risk_management"
+    ],
+    "next_checks": [
+      "중요 문단은 공시 링크에서 원문 위치와 표 수치를 재확인하세요.",
+      "감사인 관점 검토에는 감사보고서 KAM 본문과 감사절차를 함께 확인하세요."
+    ],
+    "report_meta": {},
+    "risk_distribution": null,
+    "section_count": 1,
+    "sections": {
+      "business_overview": {
+        "body_text": "회사는 반도체 부품을 제조하고 해외 고객에게 판매합니다.",
+        "length": 31,
+        "title": "사업의 개요"
+      }
+    },
+    "total_chars": 31
+  },
+  "financial_cfs": {
+    "corp_code": "00000001",
+    "fs_div": "CFS",
+    "row_count": 2,
+    "rows": [
+      {
+        "CCC": null,
+        "CFO_NI": null,
+        "CapEx": null,
+        "CapEx_OCF": null,
+        "DIO": null,
+        "DPO": null,
+        "DSO": null,
+        "FCF": null,
+        "FCF마진": null,
+        "ROA": 3.9,
+        "ROE": 6.4,
+        "ROIC": null,
+        "구분": "CFS",
+        "매입채무": null,
+        "매출성장률": null,
+        "매출액": 1000.0,
+        "매출원가": null,
+        "매출채권": null,
+        "부채비율": 63.6,
+        "부채총계": 700.0,
+        "분기": 4,
+        "순이익": 70.0,
+        "순이익률": 7.0,
+        "연도": 2023,
+        "영업CF": 80.0,
+        "영업이익": 90.0,
+        "영업이익률": 9.0,
+        "이자보상배율": null,
+        "이자비용": null,
+        "자본총계": 1100.0,
+        "자산총계": 1800.0,
+        "재고자산": null,
+        "투하자본": null,
+        "현금성자산": null
+      },
+      {
+        "CCC": null,
+        "CFO_NI": null,
+        "CapEx": null,
+        "CapEx_OCF": null,
+        "DIO": null,
+        "DPO": null,
+        "DSO": null,
+        "FCF": null,
+        "FCF마진": null,
+        "ROA": 4.5,
+        "ROE": 7.5,
+        "ROIC": null,
+        "구분": "CFS",
+        "매입채무": null,
+        "매출성장률": 19.999999999999996,
+        "매출액": 1200.0,
+        "매출원가": null,
+        "매출채권": null,
+        "부채비율": 66.7,
+        "부채총계": 800.0,
+        "분기": 4,
+        "순이익": 90.0,
+        "순이익률": 7.5,
+        "연도": 2024,
+        "영업CF": 110.0,
+        "영업이익": 120.0,
+        "영업이익률": 10.0,
+        "이자보상배율": null,
+        "이자비용": null,
+        "자본총계": 1200.0,
+        "자산총계": 2000.0,
+        "재고자산": null,
+        "투하자본": null,
+        "현금성자산": null
+      }
+    ],
+    "unit": "억원"
+  },
+  "financial_cfs_fallback": {
+    "corp_code": "00000004",
+    "fs_div": "OFS",
+    "row_count": 1,
+    "rows": [
+      {
+        "CCC": null,
+        "CFO_NI": null,
+        "CapEx": null,
+        "CapEx_OCF": null,
+        "DIO": null,
+        "DPO": null,
+        "DSO": null,
+        "FCF": null,
+        "FCF마진": null,
+        "ROA": 3.0,
+        "ROE": 4.6,
+        "ROIC": null,
+        "구분": "OFS",
+        "매입채무": null,
+        "매출성장률": null,
+        "매출액": 700.0,
+        "매출원가": null,
+        "매출채권": null,
+        "부채비율": 53.8,
+        "부채총계": 350.0,
+        "분기": 4,
+        "순이익": 30.0,
+        "순이익률": 4.3,
+        "연도": 2024,
+        "영업CF": 40.0,
+        "영업이익": 40.0,
+        "영업이익률": 5.7,
+        "이자보상배율": null,
+        "이자비용": null,
+        "자본총계": 650.0,
+        "자산총계": 1000.0,
+        "재고자산": null,
+        "투하자본": null,
+        "현금성자산": null
+      }
+    ],
+    "unit": "억원"
+  },
+  "financial_missing": {
+    "corp_code": null,
+    "error": "'999999'에 해당하는 기업을 찾을 수 없습니다.",
+    "fs_div": "CFS",
+    "row_count": 0,
+    "rows": [],
+    "unit": "억원"
+  },
+  "financial_ofs": {
+    "corp_code": "00000001",
+    "fs_div": "OFS",
+    "row_count": 1,
+    "rows": [
+      {
+        "CCC": null,
+        "CFO_NI": null,
+        "CapEx": null,
+        "CapEx_OCF": null,
+        "DIO": null,
+        "DPO": null,
+        "DSO": null,
+        "FCF": null,
+        "FCF마진": null,
+        "ROA": 4.4,
+        "ROE": 7.0,
+        "ROIC": null,
+        "구분": "OFS",
+        "매입채무": null,
+        "매출성장률": null,
+        "매출액": 1000.0,
+        "매출원가": null,
+        "매출채권": null,
+        "부채비율": 60.0,
+        "부채총계": 600.0,
+        "분기": 4,
+        "순이익": 70.0,
+        "순이익률": 7.0,
+        "연도": 2024,
+        "영업CF": 80.0,
+        "영업이익": 100.0,
+        "영업이익률": 10.0,
+        "이자보상배율": null,
+        "이자비용": null,
+        "자본총계": 1000.0,
+        "자산총계": 1600.0,
+        "재고자산": null,
+        "투하자본": null,
+        "현금성자산": null
+      }
+    ],
+    "unit": "억원"
+  },
+  "investor_signals": {
+    "accounting_risk": {
+      "factors": [],
+      "raw_summary": {
+        "amendment_heavy_count": 0,
+        "auditor_change_count": 0,
+        "beneish_alert_count": 0,
+        "cfs_ofs_gap_count": 0,
+        "equity_negative_count": 0,
+        "going_concern_count": 0,
+        "has_data": true,
+        "high_accrual_count": 0,
+        "latest_beneish_m": -2.1,
+        "low_map_conf_count": 0,
+        "nas_risk_count": 0,
+        "non_clean_opinion_count": 0,
+        "op_cf_divergence_count": 0,
+        "op_net_divergence_count": 0,
+        "revenue_vol_count": 0
+      },
+      "score": 0,
+      "verdict": "clean"
+    },
+    "analysis": [
+      {
+        "perspective": "investor",
+        "statement": "투자자 신호는 재무 품질, 회계 리스크, 최근 공시 이벤트를 함께 보는 1차 스크리닝입니다. 개별 신호 하나만으로 투자 결론을 내리면 안 됩니다."
+      }
+    ],
+    "confirmed_facts": [
+      {
+        "excerpt": "latest_snapshot={'연도': 2024, '분기': 4, '구분': 'CFS', '매출액': 1200.0, '영업이익': 120.0, '순이익': 90.0, '자산총계': 2000.0, '부채총계': 800.0, '자본총계': 1200.0, '영업CF': 110.0, '영업이익률': 10.0, '순이익률': 7.5, '부채비율': 66.7, 'ROE': 7.5, 'ROA': 4.5, '매출성장률': 19.999999999999996, 'CapEx': None, '재고자산': None, '매출채권': None, '매입채무': None, '매출원가': None, '이자비용': None, '현금성자산': None, 'FCF': None, 'FCF마진': None, 'CapEx_OCF': None, 'CFO_NI': None, '투하자본': None, 'ROIC': None, '이자보상배율': None, 'DIO': None, 'DSO': None, 'DPO': None, 'CCC': None}",
+        "source": {
+          "bsns_year": 2024,
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "rcept_no": "20250331000001",
+          "report_nm": "사업보고서 (2024.12)",
+          "section_title": "재무제표",
+          "source_table": "financial_facts"
+        },
+        "statement": "2024년 연간 재무 스냅샷 기준 ROE=7.5, 영업이익률=10.0, FCF=None가 확인됩니다."
+      },
+      {
+        "excerpt": "{'cfs_ofs_gap_count': 0, 'low_map_conf_count': 0, 'auditor_change_count': 0, 'non_clean_opinion_count': 0, 'equity_negative_count': 0, 'going_concern_count': 0, 'op_net_divergence_count': 0, 'beneish_alert_count': 0, 'latest_beneish_m': -2.1, 'nas_risk_count': 0, 'revenue_vol_count': 0, 'op_cf_diver",
+        "source": {
+          "corp_code": "00000001",
+          "corp_name": "패리티대상",
+          "section_title": "회계 리스크 요약",
+          "source_table": "risk_summary_views"
+        },
+        "statement": "회계/거버넌스 리스크 요약 데이터가 있으며 현재 verdict는 clean입니다."
+      }
+    ],
+    "corp_code": "00000001",
+    "event_counts": {
+      "amendment": 0,
+      "capital_raise": 0,
+      "convertible_bond": 0,
+      "litigation": 0,
+      "major_contract": 0,
+      "merger_split": 0,
+      "treasury_buy": 0
+    },
+    "has_data": true,
+    "limitations": [
+      "최근 공시 이벤트는 수집된 disclosures 테이블의 제목 기반 분류입니다.",
+      "내부자 지분 매매 원자료는 아직 별도 수집하지 않으므로 insider_signal은 포함하지 않습니다.",
+      "투자 판단 전 원 공시와 최신 수집 시각을 확인하세요."
+    ],
+    "next_checks": [
+      "품질 체크가 낮거나 리스크 verdict가 warning 이상이면 사업보고서 주석과 감사보고서 KAM/강조사항을 함께 확인하세요.",
+      "최근 자본조달·CB·합병·소송 이벤트는 접수번호 기준 원문을 열어 조건과 재무효과를 확인하세요."
+    ],
+    "quality_snapshot": {
+      "avg_operating_margin": 9.5,
+      "avg_revenue_growth": 19.999999999999996,
+      "avg_roe": 6.95,
+      "checks": {
+        "cfo_covers_net_income": false,
+        "debt_ratio_under_100": true,
+        "positive_avg_op_margin": true,
+        "positive_avg_roe": false,
+        "positive_latest_fcf": false,
+        "positive_revenue_growth": true
+      },
+      "latest_cfo_ni": null,
+      "latest_debt_ratio": 66.7,
+      "latest_fcf": null,
+      "latest_year": 2024,
+      "passed_checks": 3,
+      "total_checks": 6
+    },
+    "recent_events": [],
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "takeaways": [
+      "quality_profile_mixed"
+    ],
+    "unit": "억원",
+    "window_days": 3650,
+    "years": 2
+  },
+  "peer_fees": {
+    "benchmarks": {
+      "audit_fee_m": {
+        "n": 2,
+        "p25": null,
+        "p50": 150.0,
+        "p75": null,
+        "subject_percentile": 0.0
+      },
+      "audit_fee_per_hour_m": {
+        "n": 2,
+        "p25": null,
+        "p50": 0.12,
+        "p75": null,
+        "subject_percentile": 0.0
+      },
+      "audit_fee_to_assets_bps": {
+        "n": 2,
+        "p25": null,
+        "p50": 8.0,
+        "p75": null,
+        "subject_percentile": 0.0
+      },
+      "audit_hours": {
+        "n": 2,
+        "p25": null,
+        "p50": 1250.0,
+        "p75": null,
+        "subject_percentile": 0.0
+      },
+      "nas_ratio": {
+        "n": 2,
+        "p25": null,
+        "p50": 0.17,
+        "p75": null,
+        "subject_percentile": 0.0
+      }
+    },
+    "data_quality": {
+      "limited_metrics": [
+        "audit_fee_m",
+        "audit_hours",
+        "nas_ratio",
+        "audit_fee_to_assets_bps",
+        "audit_fee_per_hour_m"
+      ],
+      "metric_coverage": {
+        "audit_fee_m": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "audit_fee_per_hour_m": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "audit_fee_to_assets_bps": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "audit_hours": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "nas_ratio": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        }
+      },
+      "subject_scale_history": {
+        "complete_years": [
+          2024
+        ],
+        "covered_years": [
+          2024,
+          2023
+        ],
+        "missing_by_year": {
+          "2022": [
+            "total_assets",
+            "revenue",
+            "audit_fee_m",
+            "audit_hours"
+          ],
+          "2023": [
+            "audit_fee_m",
+            "audit_hours"
+          ]
+        },
+        "requested_years": [
+          2024,
+          2023,
+          2022
+        ],
+        "status": "limited"
+      }
+    },
+    "fs_div_used": "CFS",
+    "note": "DART audit fee contract/status data; audit judgment not performed. Metrics with available_n < 5 are screening signals only.",
+    "peer_count": 2,
+    "peers": [
+      {
+        "audit_fee_m": 160,
+        "audit_hours": 1300,
+        "corp_code": "00000003",
+        "corp_name": "패리티피어B",
+        "fee_assets_bps": 6.666666666666667,
+        "fee_per_hour_m": 0.12307692307692308,
+        "nas_ratio": 0.1875,
+        "non_audit_fee_m": 30,
+        "total_assets": 240000000000
+      },
+      {
+        "audit_fee_m": 140,
+        "audit_hours": 1200,
+        "corp_code": "00000002",
+        "corp_name": "패리티피어A",
+        "fee_assets_bps": 9.333333333333334,
+        "fee_per_hour_m": 0.11666666666666667,
+        "nas_ratio": 0.1429,
+        "non_audit_fee_m": 20,
+        "total_assets": 150000000000
+      }
+    ],
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "subject_metrics": {
+      "audit_fee_m": 120,
+      "audit_hours": 1100,
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "fee_assets_bps": 6.0,
+      "fee_per_hour_m": 0.10909090909090909,
+      "nas_ratio": 0.0833,
+      "non_audit_fee_m": 10,
+      "total_assets": 200000000000
+    },
+    "subject_scale_history": [
+      {
+        "audit_fee_m": 120,
+        "audit_fee_m_per_trillion_assets": 600.0,
+        "audit_fee_m_per_trillion_revenue": 1000.0,
+        "audit_fee_per_hour_m": 0.109091,
+        "audit_hours": 1100,
+        "audit_hours_per_trillion_assets": 5500.0,
+        "audit_hours_per_trillion_revenue": 9166.67,
+        "auditor_nm": "패리티회계법인1",
+        "fs_div": "CFS",
+        "metric_basis": "legacy_inferred",
+        "missing_fields": [],
+        "nas_ratio": 0.0833,
+        "non_audit_fee_m": 10,
+        "revenue": 120000000000,
+        "revenue_100m": 1200.0,
+        "total_assets": 200000000000,
+        "total_assets_100m": 2000.0,
+        "year": 2024
+      },
+      {
+        "fs_div": "CFS",
+        "missing_fields": [
+          "audit_fee_m",
+          "audit_hours"
+        ],
+        "missing_fields_label": "감사보수, 감사시간",
+        "revenue": 100000000000,
+        "revenue_100m": 1000.0,
+        "total_assets": 180000000000,
+        "total_assets_100m": 1800.0,
+        "year": 2023
+      },
+      {
+        "fs_div": "CFS",
+        "missing_fields": [
+          "total_assets",
+          "revenue",
+          "audit_fee_m",
+          "audit_hours"
+        ],
+        "missing_fields_label": "총자산, 매출액, 감사보수, 감사시간",
+        "year": 2022
+      }
+    ],
+    "year": 2024
+  },
+  "peer_kam": {
+    "audit_report_events": {
+      "delayed_submission_like_events": 0,
+      "peer_companies_with_events": 2,
+      "restatement_like_events": 0,
+      "subject_count": 1,
+      "total_events": 3
+    },
+    "audit_report_sections": {
+      "kam_body_count": 3,
+      "kam_procedure_coverage": {
+        "coverage_pct": 100.0,
+        "with_procedure_hint": 3
+      },
+      "kam_reason_coverage": {
+        "coverage_pct": 0.0,
+        "with_reason_hint": 0
+      },
+      "peer_companies_with_sections": 2,
+      "source": "audit_report_sections",
+      "subject_section_count": 1,
+      "total_sections": 3
+    },
+    "business_report_kam_summary": {
+      "note": "사업보고서 KAM은 요약표/요약 문단으로만 취급하며, 상세 판단근거와 감사절차의 기준 소스는 audit_report입니다.",
+      "peer_companies_with_summary": 0,
+      "subject_summary_count": 0,
+      "total_summary_sections": 0
+    },
+    "data_quality": {
+      "available_subject_kam_years": [
+        2024
+      ],
+      "business_report_summary_sections": 0,
+      "coverage_note": "KAM body comparison uses cached audit_report report_sections, with evidence_documents fallback. Disclosure events are not a substitute for KAM body/topic coverage.",
+      "kam_procedure_coverage": {
+        "coverage_pct": 100.0,
+        "with_procedure_hint": 3
+      },
+      "kam_reason_coverage": {
+        "coverage_pct": 0.0,
+        "with_reason_hint": 0
+      },
+      "peer_companies_with_sections": 2,
+      "peer_count": 2,
+      "requested_year": 2024,
+      "source": "report_sections.audit_report",
+      "status": "usable",
+      "subject_kam_body_count": 1,
+      "total_audit_report_sections": 3,
+      "total_kam_body_count": 3
+    },
+    "kam_topics": {
+      "revenue": 3
+    },
+    "limitations": [
+      "KAM paragraphs are based on cached audit_report body sections, not business-report summary tables."
+    ],
+    "peer_count": 2,
+    "peer_event_samples": {
+      "00000002": [
+        {
+          "corp_code": "00000002",
+          "corp_name": "패리티피어A",
+          "disc_date": "2025-04-01",
+          "rcept_no": "20250401000002",
+          "report_nm": "감사보고서 (2024.12)",
+          "topic_hints": []
+        }
+      ],
+      "00000003": [
+        {
+          "corp_code": "00000003",
+          "corp_name": "패리티피어B",
+          "disc_date": "2025-04-01",
+          "rcept_no": "20250401000003",
+          "report_nm": "감사보고서 (2024.12)",
+          "topic_hints": []
+        }
+      ]
+    },
+    "peer_section_samples": {
+      "00000002": [
+        {
+          "body_excerpt": "수익인식 위험 2에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+          "body_length": 45,
+          "corp_code": "00000002",
+          "corp_name": "패리티피어A",
+          "dcm_no": null,
+          "kam_analysis": {
+            "has_procedure_hint": true,
+            "has_reason_hint": false,
+            "procedure_excerpt": "수익인식 위험 2에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+            "procedure_keywords": [
+              "테스트"
+            ],
+            "reason_excerpt": "",
+            "reason_keywords": [],
+            "topics": [
+              "revenue"
+            ]
+          },
+          "rcept_no": "20250401000002",
+          "section_key": "kam",
+          "section_title": "핵심감사사항",
+          "source_type": "audit_report",
+          "topic_hints": [
+            "revenue"
+          ]
+        }
+      ],
+      "00000003": [
+        {
+          "body_excerpt": "수익인식 위험 3에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+          "body_length": 45,
+          "corp_code": "00000003",
+          "corp_name": "패리티피어B",
+          "dcm_no": null,
+          "kam_analysis": {
+            "has_procedure_hint": true,
+            "has_reason_hint": false,
+            "procedure_excerpt": "수익인식 위험 3에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+            "procedure_keywords": [
+              "테스트"
+            ],
+            "reason_excerpt": "",
+            "reason_keywords": [],
+            "topics": [
+              "revenue"
+            ]
+          },
+          "rcept_no": "20250401000003",
+          "section_key": "kam",
+          "section_title": "핵심감사사항",
+          "source_type": "audit_report",
+          "topic_hints": [
+            "revenue"
+          ]
+        }
+      ]
+    },
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "subject_business_report_kam_summary": [],
+    "subject_events": [
+      {
+        "corp_code": "00000001",
+        "corp_name": "패리티대상",
+        "disc_date": "2025-04-01",
+        "rcept_no": "20250401000001",
+        "report_nm": "감사보고서 (2024.12)",
+        "topic_hints": []
+      }
+    ],
+    "subject_sections": [
+      {
+        "body_excerpt": "수익인식 위험 1에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+        "body_length": 45,
+        "corp_code": "00000001",
+        "corp_name": "패리티대상",
+        "dcm_no": null,
+        "kam_analysis": {
+          "has_procedure_hint": true,
+          "has_reason_hint": false,
+          "procedure_excerpt": "수익인식 위험 1에 대해 계약 문서검사와 기간귀속 테스트를 수행했습니다.",
+          "procedure_keywords": [
+            "테스트"
+          ],
+          "reason_excerpt": "",
+          "reason_keywords": [],
+          "topics": [
+            "revenue"
+          ]
+        },
+        "rcept_no": "20250401000001",
+        "section_key": "kam",
+        "section_title": "핵심감사사항",
+        "source_type": "audit_report",
+        "topic_hints": [
+          "revenue"
+        ]
+      }
+    ],
+    "year": 2024
+  },
+  "peer_matters": {
+    "data_quality": {
+      "available_subject_years": [
+        2024
+      ],
+      "interpretation": "Emphasis/other-matter/going-concern paragraphs are audit-report screening evidence. Absence in cache does not prove absence in the filing.",
+      "peer_companies_with_sections": 2,
+      "peer_count": 2,
+      "requested_year": 2024,
+      "section_keys": [
+        "other_matter",
+        "emphasis",
+        "going_concern",
+        "basis_for_opinion"
+      ],
+      "source": "report_sections.audit_report",
+      "status": "usable",
+      "subject_section_count": 1,
+      "total_sections": 3
+    },
+    "limitations": [
+      "These paragraphs are screening evidence, not audit conclusions.",
+      "Going-concern emphasis in audit reports should be read together with the opinion and basis-for-opinion sections.",
+      "Peer comparisons depend on current local report_sections coverage."
+    ],
+    "matter_counts": {
+      "basis_for_opinion": {
+        "peer_companies_with_section": 0,
+        "peer_coverage_pct": 0.0,
+        "subject_count": 0,
+        "total_sections": 0
+      },
+      "emphasis": {
+        "peer_companies_with_section": 0,
+        "peer_coverage_pct": 0.0,
+        "subject_count": 0,
+        "total_sections": 0
+      },
+      "going_concern": {
+        "peer_companies_with_section": 0,
+        "peer_coverage_pct": 0.0,
+        "subject_count": 0,
+        "total_sections": 0
+      },
+      "other_matter": {
+        "peer_companies_with_section": 2,
+        "peer_coverage_pct": 100.0,
+        "subject_count": 1,
+        "total_sections": 3
+      }
+    },
+    "peer_count": 2,
+    "peer_matter_samples": {
+      "00000002": [
+        {
+          "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 2.",
+          "body_length": 32,
+          "corp_code": "00000002",
+          "corp_name": "패리티피어A",
+          "dcm_no": null,
+          "ordinal": 0,
+          "rcept_no": "20250401000002",
+          "section_key": "other_matter",
+          "section_title": "기타사항",
+          "severity_hint": "info",
+          "source_type": "audit_report",
+          "topic_tags": []
+        }
+      ],
+      "00000003": [
+        {
+          "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 3.",
+          "body_length": 32,
+          "corp_code": "00000003",
+          "corp_name": "패리티피어B",
+          "dcm_no": null,
+          "ordinal": 0,
+          "rcept_no": "20250401000003",
+          "section_key": "other_matter",
+          "section_title": "기타사항",
+          "severity_hint": "info",
+          "source_type": "audit_report",
+          "topic_tags": []
+        }
+      ]
+    },
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "subject_matters": [
+      {
+        "body_excerpt": "전기 재무제표 감사인과 비교 정보에 관한 기타사항 1.",
+        "body_length": 32,
+        "corp_code": "00000001",
+        "corp_name": "패리티대상",
+        "dcm_no": null,
+        "ordinal": 0,
+        "rcept_no": "20250401000001",
+        "section_key": "other_matter",
+        "section_title": "기타사항",
+        "severity_hint": "info",
+        "source_type": "audit_report",
+        "topic_tags": []
+      }
+    ],
+    "year": 2024
+  },
+  "peer_policy": {
+    "coverage_note": "Accounting policy comparison uses cached accounting_policy_items only; low coverage means dataset refresh is required, not that peers lack policy disclosures.",
+    "data_quality": {
+      "interpretation": "Coverage measures local cache availability. Missing items must not be interpreted as absence of accounting policy disclosure.",
+      "peer_count": 2,
+      "peer_coverage_pct": 100.0,
+      "peers_with_policy": 2,
+      "requested_year": 2024,
+      "source": "accounting_policy_items",
+      "status": "usable",
+      "subject_policy_count": 1
+    },
+    "fs_div": "CFS",
+    "peer_count": 2,
+    "peer_item_coverage": {
+      "revenue_recognition": {
+        "coverage_pct": 100.0,
+        "covered_peers": 2,
+        "peer_count": 2,
+        "subject_has_item": true
+      }
+    },
+    "peer_summaries": [
+      {
+        "corp_code": "00000003",
+        "corp_name": "패리티피어B",
+        "item_count": 1,
+        "item_keys": [
+          "revenue_recognition"
+        ]
+      },
+      {
+        "corp_code": "00000002",
+        "corp_name": "패리티피어A",
+        "item_count": 1,
+        "item_keys": [
+          "revenue_recognition"
+        ]
+      }
+    ],
+    "peers_with_policy": 2,
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "subject_items": {
+      "revenue_recognition": {
+        "body_hash": "policy-1",
+        "body_length": 35,
+        "heading": "수익인식"
+      }
+    },
+    "subject_policy_count": 1,
+    "year": 2024
+  },
+  "peer_procedures": {
+    "companies_with_procedures": 3,
+    "coverage": {
+      "denominator_full_body_kam_receipts": 0,
+      "full_body_kam_receipts_with_procedures": 0,
+      "quality_gaps": {
+        "error": 0,
+        "missing": 0,
+        "summary_only": 0
+      },
+      "rate": 0.0
+    },
+    "data_quality": {
+      "coverage_note": "The coverage denominator is full_body KAM receipts only. Summary-only, missing, and error KAMs are separate gaps.",
+      "source": "audit_procedure_items",
+      "status": "usable"
+    },
+    "peer_count": 2,
+    "peer_kam_topic_counts": {
+      "revenue": 2
+    },
+    "peer_method_counts": {},
+    "peer_procedure_type_counts": {
+      "substantive_test": 2
+    },
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "subject_method_counts": {},
+    "subject_procedure_type_counts": {
+      "substantive_test": 1
+    },
+    "year": 2024
+  },
+  "peer_risk": {
+    "benchmarks": {
+      "accrual_ratio": {
+        "n": 2,
+        "p25": null,
+        "p50": -0.21,
+        "p75": null
+      },
+      "beneish_m_score": {
+        "n": 2,
+        "p25": null,
+        "p50": -1.85,
+        "p75": null
+      },
+      "inventory_to_revenue": {
+        "n": 0,
+        "p25": null,
+        "p50": null,
+        "p75": null
+      },
+      "op_cf_to_operating_profit": {
+        "n": 2,
+        "p25": null,
+        "p50": 85.42,
+        "p75": null
+      },
+      "receivables_to_revenue": {
+        "n": 0,
+        "p25": null,
+        "p50": null,
+        "p75": null
+      }
+    },
+    "data_quality": {
+      "limited_metrics": [
+        "op_cf_to_operating_profit",
+        "accrual_ratio",
+        "beneish_m_score"
+      ],
+      "metric_coverage": {
+        "accrual_ratio": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "beneish_m_score": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "inventory_to_revenue": {
+          "available_n": 0,
+          "coverage_pct": 0.0,
+          "peer_count": 2,
+          "status": "missing"
+        },
+        "op_cf_to_operating_profit": {
+          "available_n": 2,
+          "coverage_pct": 100.0,
+          "peer_count": 2,
+          "status": "limited"
+        },
+        "receivables_to_revenue": {
+          "available_n": 0,
+          "coverage_pct": 0.0,
+          "peer_count": 2,
+          "status": "missing"
+        }
+      },
+      "unavailable_metrics": [
+        "receivables_to_revenue",
+        "inventory_to_revenue"
+      ]
+    },
+    "disclosure_event_counts": {
+      "peers": {
+        "00000002": {},
+        "00000003": {}
+      },
+      "subject": {}
+    },
+    "fs_div_used": "CFS",
+    "note": "Risk profile is a DART-based signal pack, not audit risk assessment. Missing metrics must not be interpreted as low risk.",
+    "peer_count": 2,
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    "subject_metrics": {
+      "accrual_ratio": -0.2222,
+      "beneish_m_score": -2.1,
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "going_concern_flag": null,
+      "net_income": 9000000000,
+      "op_cf_divergence_flag": null,
+      "operating_cf": 11000000000,
+      "operating_profit": 12000000000,
+      "revenue": 120000000000,
+      "total_assets": 200000000000
+    },
+    "year": 2024
+  },
+  "peer_selection": {
+    "confidence": "insufficient",
+    "excluded_categories": [
+      "financial",
+      "holding",
+      "real_estate"
+    ],
+    "note": "sector=general · KSIC prefix_len=2 매칭 · ⚠ p3→p2 fallback · ⚠ peer 수가 부족합니다 (n<5 → P25/P75 신뢰도 낮음)",
+    "peer_count": 2,
+    "peers": [
+      {
+        "audit_fee_m": 160,
+        "audit_hours": 1300,
+        "corp_code": "00000003",
+        "corp_name": "패리티피어B",
+        "include_reasons": [
+          "same_ksic_prefix",
+          "sector_group:general",
+          "audit_fee_available"
+        ],
+        "induty_code": "26420",
+        "market": "KOSPI",
+        "nas_ratio": 0.1875,
+        "reason_components": {
+          "audit_evidence_available": {
+            "audit_fee_m": 160,
+            "audit_hours": 1300,
+            "matched": true,
+            "nas_ratio": 0.1875
+          },
+          "audit_matter_overlap": {
+            "basis": "not_indexed_for_peer_scoring",
+            "matched": null
+          },
+          "business_text_overlap": {
+            "basis": "not_indexed_for_peer_scoring",
+            "matched": null
+          },
+          "industry_match": {
+            "basis": "same_ksic_prefix",
+            "matched": true,
+            "matched_prefix_len": 2,
+            "peer_induty_code": "26420",
+            "subject_induty_code": "26400"
+          },
+          "kam_topic_overlap": {
+            "basis": "not_indexed_for_peer_scoring",
+            "matched": null
+          },
+          "sector_match": {
+            "basis": "sector_group:general",
+            "matched": true
+          },
+          "size_bucket_match": {
+            "basis": "not_requested",
+            "matched": false
+          }
+        },
+        "revenue": 150000000000,
+        "stock_code": "000003",
+        "total_assets": 240000000000
+      },
+      {
+        "audit_fee_m": 140,
+        "audit_hours": 1200,
+        "corp_code": "00000002",
+        "corp_name": "패리티피어A",
+        "include_reasons": [
+          "same_ksic_prefix",
+          "sector_group:general",
+          "audit_fee_available"
+        ],
+        "induty_code": "26410",
+        "market": "KOSPI",
+        "nas_ratio": 0.1429,
+        "reason_components": {
+          "audit_evidence_available": {
+            "audit_fee_m": 140,
+            "audit_hours": 1200,
+            "matched": true,
+            "nas_ratio": 0.1429
+          },
+          "audit_matter_overlap": {
+            "basis": "not_indexed_for_peer_scoring",
+            "matched": null
+          },
+          "business_text_overlap": {
+            "basis": "not_indexed_for_peer_scoring",
+            "matched": null
+          },
+          "industry_match": {
+            "basis": "same_ksic_prefix",
+            "matched": true,
+            "matched_prefix_len": 2,
+            "peer_induty_code": "26410",
+            "subject_induty_code": "26400"
+          },
+          "kam_topic_overlap": {
+            "basis": "not_indexed_for_peer_scoring",
+            "matched": null
+          },
+          "sector_match": {
+            "basis": "sector_group:general",
+            "matched": true
+          },
+          "size_bucket_match": {
+            "basis": "not_requested",
+            "matched": false
+          }
+        },
+        "revenue": 90000000000,
+        "stock_code": "000002",
+        "total_assets": 150000000000
+      }
+    ],
+    "returned_peer_count": 2,
+    "selection_policy": {
+      "criteria": [
+        "industry",
+        "sector",
+        "financial_data"
+      ],
+      "exclude_other_sectors": true,
+      "fs_div_used": "CFS",
+      "fs_strategy": "auto",
+      "matched_prefix_len": 2,
+      "prefix_len_start": 3,
+      "reason_component_note": "industry/sector/audit availability are populated now; business text, KAM topic, and audit matter overlap are exposed as nullable components until those indexes are fully backfilled.",
+      "requested_year": 2024,
+      "resolved_year": 2024,
+      "size_bucket_decade": null
+    },
+    "subject": {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "induty_code": "26400",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    }
+  },
+  "resolve_company": "00000001",
+  "resolve_missing": null,
+  "search_company": [
+    {
+      "corp_code": "00000004",
+      "corp_name": "패리티OFS",
+      "market": "KOSPI",
+      "stock_code": "000004"
+    },
+    {
+      "corp_code": "00000001",
+      "corp_name": "패리티대상",
+      "market": "KOSPI",
+      "stock_code": "000001"
+    },
+    {
+      "corp_code": "00000002",
+      "corp_name": "패리티피어A",
+      "market": "KOSPI",
+      "stock_code": "000002"
+    },
+    {
+      "corp_code": "00000003",
+      "corp_name": "패리티피어B",
+      "market": "KOSPI",
+      "stock_code": "000003"
+    }
+  ],
+  "subsidiary_auditors": {
+    "bsns_year": 2024,
+    "consolidated_totals": {
+      "assets_amount": 200000000000,
+      "assets_amount_m": 200000.0,
+      "fs_div": "CFS",
+      "revenue_amount": 120000000000,
+      "revenue_amount_m": 120000.0,
+      "source": "financials"
+    },
+    "corp_code": "00000001",
+    "count": 1,
+    "data_quality": {
+      "coverage": {
+        "asset_share_calculated": 1,
+        "auditor_hidden_name_mismatch": 0,
+        "consolidated_assets_available": true,
+        "consolidated_revenue_available": true,
+        "entity_assets_with_amount": 1,
+        "entity_auditor_with_exact_match": 1,
+        "entity_revenue_with_amount": 1,
+        "qsc_classified": 1,
+        "qsc_count": 1,
+        "qsc_undetermined": 0,
+        "revenue_share_calculated": 1,
+        "total_entities": 1
+      },
+      "coverage_note": "개별 실체 자산은 사업보고서 종속회사/타법인출자 표의 백만원 단위 금액을 사용합니다. 개별 실체 매출은 해당 표에 없는 경우가 많아, corp_code가 매칭되고 연간 재무정보가 있더라도 회사명이 정확히 일치하는 경우에만 matched_company_financials 기준으로 보조 산출합니다. 감사인 정보도 회사명 정확매칭이 확인된 경우에만 표시합니다.",
+      "source": "local_subsidiary_auditor_matrix",
+      "status": "usable"
+    },
+    "parent_rcept_no": "20250331000001",
+    "qsc_criterion": {
+      "basis": "asset_share_pct >= 10.0 OR revenue_share_pct >= 10.0",
+      "status_values": {
+        "not_qsc": "총자산과 총매출 비중이 모두 10% 미만",
+        "qsc": "총자산 또는 총매출 비중이 10% 이상",
+        "undetermined": "총자산/총매출 비중 산출에 필요한 데이터 부족"
+      },
+      "threshold_pct": 10.0
+    },
+    "subsidiaries": [
+      {
+        "asset_amount_m": 150000.0,
+        "asset_share_pct": 75.0,
+        "auditor": {
+          "audit_opinion": "적정",
+          "auditor_nm": "패리티회계법인2",
+          "bsns_year": 2024
+        },
+        "corp_code": "00000002",
+        "is_qsc": true,
+        "listed_yn": "Y",
+        "market": "KOSPI",
+        "name": "패리티피어A",
+        "ownership_pct": 80.0,
+        "qsc_basis": [
+          "asset_share_pct>=10.0",
+          "revenue_share_pct>=10.0"
+        ],
+        "qsc_status": "qsc",
+        "relation": "subsidiary",
+        "revenue_amount_m": 90000.0,
+        "revenue_share_pct": 75.0,
+        "stock_code": "000002"
+      }
+    ],
+    "total": 1,
+    "truncated": false
+  }
+}
