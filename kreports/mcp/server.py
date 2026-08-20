@@ -14,6 +14,7 @@ from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from kreports.mcp.catalog_extensions import install_catalog_extensions
 from kreports.mcp.dispatch import dispatch_tool, list_mcp_tools
 from kreports.mcp.prompts import get_prompt, mcp_prompts
 from kreports.mcp.resources import (
@@ -23,6 +24,8 @@ from kreports.mcp.resources import (
     resource_mime_type,
 )
 from kreports.runtime import runtime_mode
+
+install_catalog_extensions()
 
 logging.basicConfig(
     level=logging.INFO,

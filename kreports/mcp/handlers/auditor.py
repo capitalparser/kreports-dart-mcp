@@ -21,6 +21,7 @@ from kreports.analysis.peer_benchmarks import (
     compare_peer_kam_topics,
     compare_peer_risk_profile,
     estimate_audit_hours_proxy,
+    select_peer_group,
 )
 from kreports.mcp.dispatch import resolve_company
 from kreports.mcp.input_models import (
@@ -42,6 +43,20 @@ from kreports.mcp.input_models import (
     SearchAuditProceduresInput,
     SearchAuditReportMattersInput,
 )
+
+
+def _custom_peer_group(args) -> dict | None:
+    criteria = getattr(args, "peer_criteria", None)
+    if criteria is None:
+        return None
+    return select_peer_group(
+        company=resolve_company(args.company),
+        criteria=criteria,
+        peer_limit=args.peer_limit,
+        fs_strategy=args.fs_strategy,
+        size_bucket_decade=getattr(args, "size_bucket_decade", None),
+        year=args.year,
+    )
 
 
 def handle_get_accounting_policy(args: GetAccountingPolicyInput) -> dict:
@@ -79,6 +94,7 @@ def handle_compare_peer_audit_fees(args: ComparePeerAuditFeesInput) -> dict:
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
         size_bucket_decade=args.size_bucket_decade,
+        _peer_group=_custom_peer_group(args),
     )
 
 
@@ -88,6 +104,7 @@ def handle_compare_peer_risk_profile(args: ComparePeerRiskProfileInput) -> dict:
         year=args.year,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
+        _peer_group=_custom_peer_group(args),
     )
 
 
@@ -100,6 +117,7 @@ def handle_compare_peer_accounting_policies(
         peer_limit=args.peer_limit,
         fs_div=args.fs_div,
         fs_strategy=args.fs_strategy,
+        _peer_group=_custom_peer_group(args),
     )
 
 
@@ -124,6 +142,7 @@ def handle_compare_peer_kam_topics(args: ComparePeerKamTopicsInput) -> dict:
         year=args.year,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
+        _peer_group=_custom_peer_group(args),
     )
 
 
@@ -135,6 +154,7 @@ def handle_compare_peer_audit_report_matters(
         year=args.year,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
+        _peer_group=_custom_peer_group(args),
     )
 
 
@@ -172,6 +192,7 @@ def handle_compare_peer_audit_procedures(
         year=args.year,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
+        _peer_group=_custom_peer_group(args),
     )
 
 

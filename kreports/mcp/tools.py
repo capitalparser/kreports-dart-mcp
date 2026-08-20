@@ -5,6 +5,7 @@ import json
 from typing import Any, Callable
 
 from kreports.mcp.catalog import TOOL_CATALOG
+from kreports.mcp.catalog_extensions import install_catalog_extensions
 from kreports.mcp.dispatch import (
     _attach_meta,
     legacy_result,
@@ -12,6 +13,7 @@ from kreports.mcp.dispatch import (
     raw_result,
 )
 
+install_catalog_extensions()
 
 ALL_TOOLS = list_mcp_tools()
 

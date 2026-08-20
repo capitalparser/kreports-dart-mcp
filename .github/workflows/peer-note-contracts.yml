@@ -1,0 +1,42 @@
+name: Peer and note workflow contracts
+
+# Manual-only by design. Local validation is executed in Codex before this
+# workflow is dispatched, so pushes and pull-request updates consume no
+# GitHub Actions minutes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  peer-note-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[dev,api]"
+      - name: Compile changed runtime layers
+        run: python -m compileall -q kreports/analysis kreports/mcp
+      - name: Initialize contract database schema
+        env:
+          DB_URL: "sqlite:///./.ci/kreports.db"
+          KREPORTS_RUNTIME_MODE: collector
+        run: mkdir -p .ci && kreports init
+      - name: Run peer and note workflow contracts
+        env:
+          DB_URL: "sqlite:///./.ci/kreports.db"
+          KREPORTS_RUNTIME_MODE: readonly
+        run: >-
+          pytest -q
+          tests/test_peer_criteria.py
+          tests/test_peer_workflows.py
+          tests/test_peer_workflow_mcp.py
+          tests/test_mcp_catalog.py
+          tests/test_mcp_contracts.py
+          tests/test_readonly_mcp.py

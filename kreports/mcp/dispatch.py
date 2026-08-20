@@ -242,8 +242,10 @@ def _invoke_handler(
     *,
     capture_failure: bool,
 ) -> dict[str, Any]:
+    from kreports.mcp.catalog_extensions import install_catalog_extensions
     from kreports.mcp.catalog import TOOL_CATALOG
 
+    install_catalog_extensions()
     spec = TOOL_CATALOG.get(name)
     if spec is None:
         raise LookupError(f"Unknown tool: {_bounded_tool_name(name)}")
@@ -332,6 +334,8 @@ def legacy_result(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]
 
 
 def list_mcp_tools() -> list[Tool]:
+    from kreports.mcp.catalog_extensions import install_catalog_extensions
     from kreports.mcp.catalog import TOOL_CATALOG
 
+    install_catalog_extensions()
     return [spec.to_mcp_tool() for spec in TOOL_CATALOG.values()]

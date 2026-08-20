@@ -8,6 +8,10 @@ from kreports.analysis.peer_benchmarks import (
     select_peer_group,
 )
 from kreports.analysis.financial_analysis import _annual_report_source
+from kreports.analysis.peer_workflows import (
+    compare_custom_peer_financials,
+    search_note_disclosing_companies,
+)
 from kreports.analysis.search_adapter import search_dataset
 from kreports.collector.on_demand import fetch_disclosure_on_demand
 from kreports.mcp.dispatch import resolve_company
@@ -35,6 +39,20 @@ def handle_compare_to_industry(args: CompareToIndustryInput) -> dict:
 
 
 def handle_compare_to_industry_multi(args: CompareToIndustryMultiInput) -> dict:
+    peer_criteria = getattr(args, "peer_criteria", None)
+    requested_year = getattr(args, "year", None)
+    if peer_criteria is not None or requested_year is not None:
+        return compare_custom_peer_financials(
+            company=resolve_company(args.company),
+            year=requested_year,
+            metrics=args.metrics,
+            years_back=args.years_back,
+            peer_criteria=peer_criteria,
+            fs_strategy=args.fs_strategy,
+            prefix_len_start=args.prefix_len_start,
+            size_bucket_decade=args.size_bucket_decade,
+            exclude_other_sectors=args.exclude_other_sectors,
+        )
     return compare_to_industry_multi(
         company=resolve_company(args.company),
         metrics=args.metrics,
@@ -56,6 +74,7 @@ def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
         prefix_len_start=args.prefix_len_start,
         size_bucket_decade=args.size_bucket_decade,
         exclude_other_sectors=args.exclude_other_sectors,
+        year=getattr(args, "year", None),
     )
     subject = result.get("subject") or {}
     policy = result.get("selection_policy") or {}
@@ -76,6 +95,7 @@ def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
                 source_table="peer_cohort",
             ),
             "excerpt": (
+                f"requested_year={policy.get('requested_year')}, "
                 f"resolved_year={resolved_year}, "
                 f"fs_div={policy.get('fs_div_used')}"
             ),
@@ -84,6 +104,22 @@ def handle_select_peer_group(args: SelectPeerGroupInput) -> dict:
 
 
 def handle_search_dataset(args: SearchDatasetInput) -> dict:
+    if (
+        args.dataset == "accounting_note_chapters"
+        and args.keyword
+        and args.company is None
+        and args.source_type in {None, "business_report"}
+    ):
+        return search_note_disclosing_companies(
+            args.keyword,
+            year=args.year,
+            market=args.market,
+            induty_prefix=args.induty_prefix,
+            fs_div=args.fs_div,
+            section_type=args.section_type,
+            limit=args.limit,
+            include_excerpt=args.include_excerpt,
+        )
     return search_dataset(**args.model_dump())
 
 
