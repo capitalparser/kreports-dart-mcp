@@ -11,7 +11,15 @@ from kreports.analysis.audit_reporting import (
     search_audit_report_matters,
 )
 from kreports.analysis.group_audit import get_subsidiary_auditors
-from kreports.analysis.note_comparison import compare_peer_accounting_notes
+from kreports.analysis.note_comparison import (
+    compare_peer_accounting_notes,
+)
+from kreports.analysis.note_quality import (
+    annotate_note_comparison_quality,
+)
+from kreports.analysis.note_source_projection import (
+    project_note_comparison_sources,
+)
 from kreports.analysis.peer_benchmarks import (
     build_audit_acceptance_pack,
     compare_peer_accounting_policies,
@@ -54,14 +62,24 @@ def _custom_peer_group(args) -> dict | None:
         criteria=criteria,
         peer_limit=args.peer_limit,
         fs_strategy=args.fs_strategy,
-        size_bucket_decade=getattr(args, "size_bucket_decade", None),
+        size_bucket_decade=getattr(
+            args,
+            "size_bucket_decade",
+            None,
+        ),
         year=args.year,
     )
 
 
-def handle_get_accounting_policy(args: GetAccountingPolicyInput) -> dict:
+def handle_get_accounting_policy(
+    args: GetAccountingPolicyInput,
+) -> dict:
     corp_code = resolve_company(args.company)
-    result = get_accounting_policy(corp_code, args.bsns_year, fs_div=args.fs_div)
+    result = get_accounting_policy(
+        corp_code,
+        args.bsns_year,
+        fs_div=args.fs_div,
+    )
     if result is not None:
         return result
     return {
@@ -70,15 +88,24 @@ def handle_get_accounting_policy(args: GetAccountingPolicyInput) -> dict:
         "fs_div": args.fs_div,
         "items": {},
         "item_count": 0,
-        "note": "해당 연도 사업보고서가 수집되지 않았거나 주석이 파싱되지 않음.",
+        "note": (
+            "해당 연도 사업보고서가 수집되지 않았거나 "
+            "주석이 파싱되지 않음."
+        ),
     }
 
 
-def handle_get_audit_history(args: GetAuditHistoryInput) -> dict:
-    return get_audit_history(resolve_company(args.company))
+def handle_get_audit_history(
+    args: GetAuditHistoryInput,
+) -> dict:
+    return get_audit_history(
+        resolve_company(args.company)
+    )
 
 
-def handle_get_subsidiary_auditors(args: GetSubsidiaryAuditorsInput) -> dict:
+def handle_get_subsidiary_auditors(
+    args: GetSubsidiaryAuditorsInput,
+) -> dict:
     return get_subsidiary_auditors(
         resolve_company(args.company),
         limit=args.limit,
@@ -87,7 +114,9 @@ def handle_get_subsidiary_auditors(args: GetSubsidiaryAuditorsInput) -> dict:
     )
 
 
-def handle_compare_peer_audit_fees(args: ComparePeerAuditFeesInput) -> dict:
+def handle_compare_peer_audit_fees(
+    args: ComparePeerAuditFeesInput,
+) -> dict:
     return compare_peer_audit_fees(
         company=resolve_company(args.company),
         year=args.year,
@@ -98,7 +127,9 @@ def handle_compare_peer_audit_fees(args: ComparePeerAuditFeesInput) -> dict:
     )
 
 
-def handle_compare_peer_risk_profile(args: ComparePeerRiskProfileInput) -> dict:
+def handle_compare_peer_risk_profile(
+    args: ComparePeerRiskProfileInput,
+) -> dict:
     return compare_peer_risk_profile(
         company=resolve_company(args.company),
         year=args.year,
@@ -124,7 +155,7 @@ def handle_compare_peer_accounting_policies(
 def handle_compare_peer_accounting_notes(
     args: ComparePeerAccountingNotesInput,
 ) -> dict:
-    return compare_peer_accounting_notes(
+    result = compare_peer_accounting_notes(
         company=resolve_company(args.company),
         year=args.year,
         topics=args.topics,
@@ -134,9 +165,20 @@ def handle_compare_peer_accounting_notes(
         fs_strategy=args.fs_strategy,
         peer_criteria=args.peer_criteria,
     )
+    quality_result = annotate_note_comparison_quality(
+        result,
+        fs_basis_policy=getattr(
+            args,
+            "fs_basis_policy",
+            "fallback_with_warning",
+        ),
+    )
+    return project_note_comparison_sources(quality_result)
 
 
-def handle_compare_peer_kam_topics(args: ComparePeerKamTopicsInput) -> dict:
+def handle_compare_peer_kam_topics(
+    args: ComparePeerKamTopicsInput,
+) -> dict:
     return compare_peer_kam_topics(
         company=resolve_company(args.company),
         year=args.year,
@@ -158,7 +200,9 @@ def handle_compare_peer_audit_report_matters(
     )
 
 
-def handle_search_audit_report_matters(args: SearchAuditReportMattersInput) -> dict:
+def handle_search_audit_report_matters(
+    args: SearchAuditReportMattersInput,
+) -> dict:
     return search_audit_report_matters(
         company=args.company,
         year=args.year,
@@ -170,7 +214,9 @@ def handle_search_audit_report_matters(args: SearchAuditReportMattersInput) -> d
     )
 
 
-def handle_search_audit_procedures(args: SearchAuditProceduresInput) -> dict:
+def handle_search_audit_procedures(
+    args: SearchAuditProceduresInput,
+) -> dict:
     return search_audit_procedures(
         company=args.company,
         year=args.year,
@@ -196,7 +242,9 @@ def handle_compare_peer_audit_procedures(
     )
 
 
-def handle_get_kam_lifecycle(args: GetKamLifecycleInput) -> dict:
+def handle_get_kam_lifecycle(
+    args: GetKamLifecycleInput,
+) -> dict:
     return get_kam_lifecycle(
         company=resolve_company(args.company),
         start_year=args.start_year,
@@ -215,7 +263,9 @@ def handle_get_accounting_policy_changes(
     )
 
 
-def handle_get_audit_report_sections(args: GetAuditReportSectionsInput) -> dict:
+def handle_get_audit_report_sections(
+    args: GetAuditReportSectionsInput,
+) -> dict:
     return get_audit_report_sections(
         company=resolve_company(args.company),
         year=args.year,
@@ -225,7 +275,9 @@ def handle_get_audit_report_sections(args: GetAuditReportSectionsInput) -> dict:
     )
 
 
-def handle_estimate_audit_hours_proxy(args: EstimateAuditHoursProxyInput) -> dict:
+def handle_estimate_audit_hours_proxy(
+    args: EstimateAuditHoursProxyInput,
+) -> dict:
     return estimate_audit_hours_proxy(
         company=resolve_company(args.company),
         year=args.year,
@@ -234,7 +286,9 @@ def handle_estimate_audit_hours_proxy(args: EstimateAuditHoursProxyInput) -> dic
     )
 
 
-def handle_build_audit_acceptance_pack(args: BuildAuditAcceptancePackInput) -> dict:
+def handle_build_audit_acceptance_pack(
+    args: BuildAuditAcceptancePackInput,
+) -> dict:
     return build_audit_acceptance_pack(
         company=resolve_company(args.company),
         year=args.year,

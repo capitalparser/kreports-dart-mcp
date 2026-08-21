@@ -32,6 +32,9 @@ def test_required_resources_and_templates_are_enumerated():
     assert {resource.uri_template for resource in list_resource_templates()} == {
         "kreports://company/{corp_code}/{year}",
         "kreports://evidence/{rcept_no}",
+        "kreports://note/{note_ref}",
+        "kreports://note/{note_ref}/paragraph",
+        "kreports://note/{note_ref}/page/{page}",
         "kreports://visualization/{digest}",
     }
 
@@ -67,6 +70,7 @@ def test_stdio_and_http_share_registered_resource_and_prompt_handlers():
         "kreports://company/00126380/1999",
         "kreports://evidence/2025010100000",
         "kreports://evidence/20250101000000?path=/tmp/private",
+        "kreports://note/not-a-note-ref",
         "kreports://unknown/value",
     ],
 )
@@ -89,6 +93,8 @@ def test_resource_uri_parser_rejects_malformed_or_unknown_uris(uri):
         "kreports://evidence//20250101000000",
         "kreports://evidence/20250101000000/",
         "kreports://evidence/%2e%2e",
+        "kreports://note/n1-1-0123456789abcdef0123/",
+        "kreports://note/n1-1-0123456789abcdef0123/page/01",
     ],
 )
 def test_resource_uri_parser_requires_exact_canonical_path(uri):
@@ -106,6 +112,7 @@ def test_resource_uri_parser_requires_exact_canonical_path(uri):
         "kreports://evidence/20250312\x000001",
         "kreports://evidence/20250312\x1f0001",
         "kreports://evidence/20250312\x7f0001",
+        "kreports://note/n1-1-0123456789abcdef0123/para\ngraph",
     ],
 )
 def test_resource_uri_rejects_whitespace_and_ascii_controls_before_parse(uri):
@@ -119,11 +126,13 @@ def test_resource_uri_rejects_whitespace_and_ascii_controls_before_parse(uri):
         "KREPORTS://dataset/readiness",
         "KREPORTS://company/00126380/2025",
         "KREPORTS://evidence/20250312000001",
+        "KREPORTS://note/n1-1-0123456789abcdef0123",
         "kreports://company/００１２６３８０/2025",
         "kreports://company/00126380/２０２５",
         "kreports://company/001２63８0/20２5",
         "kreports://evidence/２０２５０３１２０００００１",
         "kreports://evidence/202５０3120０0001",
+        "kreports://note/n1-１-0123456789abcdef0123",
     ],
 )
 def test_resource_uri_requires_exact_ascii_canonical_reconstruction(uri):

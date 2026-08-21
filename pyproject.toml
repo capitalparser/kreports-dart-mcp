@@ -16,7 +16,7 @@ keywords = ["dart", "korea", "financial", "audit", "mcp", "intelligence", "accou
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Financial and Insurance Industry",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: Apache-2.0",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -59,6 +59,10 @@ dev = [
 kreports = "kreports.cli.main:app"
 kreports-mcp = "kreports.mcp.server:main"
 kreports-mcp-http = "kreports.mcp.http_server:main"
+# This entry point imports only in the isolated environment described in
+# requirements-mcp-v2.txt. The default installation intentionally stays on
+# MCP 1.x until the compatibility sidecar has completed validation.
+kreports-mcp-v2 = "kreports.mcp.v2_server:main"
 
 [project.urls]
 Homepage = "https://github.com/capitalparser/kreports-dart-mcp"
