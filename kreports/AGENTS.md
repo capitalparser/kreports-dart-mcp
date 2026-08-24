@@ -4,6 +4,104 @@ This file supplements the repository-root `AGENTS.md` for work under
 `kreports/`. The root anti-patchwork, source-traceability, readonly, chatbot,
 context-window, and Codex-validation requirements remain authoritative.
 
+## Audit Report Package And Financial-Statement Source Contract
+
+KReports uses `audit report` in the broad professional sense of the DART audit
+report submission package, not only the independent auditor's opinion pages.
+The package includes:
+
+- the independent auditor's report and opinion;
+- the audited statement of financial position, income or comprehensive-income
+  statement, cash-flow statement, and statement of changes in equity;
+- the complete attached financial-statement notes;
+- significant accounting policies;
+- significant estimates and judgments; and
+- related schedules included in the same audit report submission.
+
+### Canonical source ownership
+
+- The audit report package is the canonical source for audited financial
+  statements, financial-statement notes, accounting policies, significant
+  estimates and judgments, audit opinion, KAM, audit procedures, going-concern
+  paragraphs, emphasis paragraphs, and other audit-report matters.
+- The business report is the canonical source for business overview, products
+  and services, sales and purchase structure, R&D, risks, major contracts,
+  governance, and other statutory business-report disclosures.
+- Financial-statement note functionality must not use the business report as its
+  default source merely because a duplicate or similar note appears there.
+- Existing business-report-derived note rows are legacy fallback evidence. They
+  may be returned only when the audit report package source is unavailable and
+  the response preserves the true source type, receipt number, CFS/OFS basis,
+  availability, and limitation.
+- A fallback must never be relabelled as audit-report evidence or presented as
+  equivalent to a verified audit report package source.
+
+### Implementation rules
+
+Before changing note, policy, financial-statement, KAM, or audit-evidence code,
+record the complete source path:
+
+```text
+DART audit report submission and attachments
+→ raw/source document
+→ package and attachment selection
+→ parser/extractor
+→ structured or evidence row
+→ analysis service
+→ MCP/API result
+→ user-visible source link and limitation
+```
+
+- One canonical service must own report-package selection and source precedence.
+  Handlers, renderers, dashboards, and exports must not independently decide
+  whether a business-report copy can substitute for an audit-report package.
+- Source selection must be deterministic and testable by receipt number, report
+  type, business year, and CFS/OFS basis.
+- Do not silently merge text from the business report and audit report package
+  into one apparent source excerpt.
+- A migration from legacy business-report note data must inventory affected
+  rows, preserve old provenance, rebuild from audit-report packages, and report
+  unresolved coverage gaps rather than overwriting history without evidence.
+- A new feature is incomplete if its answer shows note text without the actual
+  source package, receipt number or DART link when available, and source status.
+
+### Required regressions
+
+Tests for financial-statement notes and accounting policies must prove that:
+
+- an available audit report package is selected ahead of a business-report copy;
+- the attached financial statements and notes are treated as part of the audit
+  report package;
+- a business-report fallback is explicit and never labelled as the canonical
+  audit source;
+- different CFS/OFS bases are not silently combined;
+- receipt numbers and source links belong to the same evidence used in the
+  answer;
+- missing local audit-package evidence is not interpreted as absence from the
+  company's filing; and
+- MCP, API, dashboard, export, and resource paths consume the same source
+  decision.
+
+### Real-filing verification
+
+For changes to report-package selection, parsing, audited financial statements,
+financial-statement notes, accounting policies, KAM, audit procedures, or DART
+links:
+
+- Add deterministic fixture-based regression coverage.
+- Also compare the result with representative real DART filing evidence when
+  the required public filing is locally or lawfully available.
+- Record the company, business year, receipt number, CFS/OFS basis, item checked,
+  expected source, and comparison result in the Pull Request.
+- Confirm that the receipt number and DART link identify the same source package
+  actually used by the answer.
+- If real-filing verification cannot be performed, state the missing prerequisite
+  explicitly and keep the limitation visible.
+- Do not imply that fixture-only validation proves live-data coverage,
+  extraction completeness, or release readiness.
+- Do not place confidential client or audit data into fixtures, PRs, comments, or
+  screenshots; use public DART evidence or synthetic legally safe samples.
+
 ## Customized Peer-Selection Transparency Contract
 
 Peer selection is a user-controlled analytical decision. Any feature that uses a

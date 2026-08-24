@@ -33,6 +33,88 @@ dashboard, and MCP surfaces.
   definitions unless the task explicitly changes the domain contract.
 - Update `CONTEXT.md`, public schemas, tests, and user documentation together
   when a domain term or public behavior changes.
+- Also follow the nearest scoped instructions: `kreports/AGENTS.md` for domain
+  and MCP work, `kreports/db/AGENTS.md` for database work, and `docs/AGENTS.md`
+  for documentation, demos, and submission artifacts.
+
+## Shared Database And Data-Mutation Policy
+
+Shared maintainer, team-query, release-candidate, and runtime databases are
+controlled artifacts.
+
+- Treat every shared database as read-only unless the user explicitly authorizes
+  the current task to mutate that exact database.
+- Only the designated database maintainer may run shared migrations, backfills,
+  regeneration jobs, runtime exports, or release-manifest builds.
+- Contributors and agents must use disposable test databases, fixtures, or
+  explicitly supplied read-only database copies for development and validation.
+- Never repair a data defect by manually editing a shared database row. Fix the
+  canonical collector, parser, transformation, or analysis logic; add a
+  regression test; merge the change; then let the database maintainer rebuild
+  or migrate the shared artifact.
+- Before executing any command that may write to a non-disposable database,
+  state the target database, expected mutations, rollback path, and required
+  approval. Stop if authorization or target identity is unclear.
+- Do not infer permission to write merely because a database path, environment
+  variable, credential, or writable file is available.
+- A read-only runtime must not initialize, migrate, backfill, persist a silent
+  cache, or switch to an unrelated database when the intended artifact is
+  missing or invalid.
+
+## Task-Scoped Git And Pull-Request Workflow
+
+Use task-scoped branches rather than long-lived person-scoped branches.
+
+- The default unit is one Issue, one task branch, and one Pull Request.
+- Create every task branch from the latest approved `main`.
+- Name branches by work type and Issue, for example:
+  `feat/10-audit-package-note-source`,
+  `fix/15-wrong-dart-link`,
+  `docs/13-submission-report`,
+  `test/17-kam-golden-cases`, or
+  `chore/18-release-db-baseline`.
+- Do not create or continue long-lived branches named only after a contributor,
+  such as `ye`, `ei`, or `kj`, for new work. Existing transition branches may be
+  completed only for their already-open PR and then retired.
+- Assign one primary branch owner. Other contributors participate through
+  review, pair work, comments, or separately scoped prerequisite branches.
+- Do not expand a Pull Request to include an unrelated problem discovered during
+  implementation. Open a separate Issue and task branch.
+- Stage only confirmed paths. Never use `git add .`, `git add -A`,
+  `git add --all`, or equivalent broad staging commands.
+- A review requesting changes does not require reverting the Worktree. Apply the
+  requested fixes on the same task branch, rerun validation, commit, and push to
+  update the existing Pull Request.
+- Do not use `git reset --hard`, force-push, rebase a published shared branch,
+  delete a shared branch, or rewrite history without explicit authorization.
+- After merge, confirm that no uncommitted work remains, remove the completed
+  Worktree and task branch, and start the next Issue from the latest `main`.
+- If a defect is found after merge, create a new Issue and a new `fix/...`
+  branch; do not revive the completed feature branch.
+
+## Non-Developer Handoff And Explainability
+
+KReports is developed with accounting professionals who may not be software
+engineers. Every implementation handoff must remain reviewable by a
+non-developer domain owner.
+
+Before marking work ready for review, provide a plain-language Korean summary
+covering:
+
+1. the user or business problem being solved;
+2. the source report and data used;
+3. the end-to-end path from source filing to user answer;
+4. the existing canonical modules, tables, tools, and tests reused;
+5. the files changed and why;
+6. the automated validation executed;
+7. the real DART filings or representative fixtures compared; and
+8. known limitations, missing coverage, and remaining blockers.
+
+Do not mark AI-generated work ready merely because it compiles or a test passes.
+The branch owner must be able to explain the input, output, source, calculation
+or selection rule, failure behavior, and validation evidence. When a technical
+term is necessary in a team-facing explanation, preserve the correct term and
+add a short plain-language explanation on first use.
 
 ## Architecture Integrity and Anti-Patchwork Rules
 
