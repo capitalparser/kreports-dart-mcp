@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--profile", default="public_runtime")
+    parser.add_argument("--source-commit-sha")
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
 
@@ -34,6 +35,7 @@ def main() -> int:
         args.db,
         args.manifest,
         profile=args.profile,
+        source_commit_sha=args.source_commit_sha,
     )
     manifest = ReleaseManifest.model_validate_json(output.read_text())
     print(

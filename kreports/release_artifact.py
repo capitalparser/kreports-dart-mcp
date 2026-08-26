@@ -38,7 +38,8 @@ from kreports.db.schema_contract import (
 )
 
 
-ARTIFACT_VERSION = "1.0"
+ARTIFACT_VERSION = "1.1"
+LEGACY_ARTIFACT_VERSION = "1.0"
 TOOL_CONTRACT_VERSION = "1.3"
 FROZEN_TOOL_COUNT = 33
 FROZEN_TOOL_WIRE_SHA256 = (
@@ -52,6 +53,7 @@ _RUNTIME_DIGEST_CACHE: dict[tuple[Any, ...], str] = {}
 _RUNTIME_DIGEST_LOCK = threading.Lock()
 _EXPLICIT_RUNTIME_LOCK = threading.RLock()
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_SOURCE_COMMIT_SHA_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 _MAX_COUNT = 10**12
 _MAX_TEXT_LENGTH = 10_000
 MAX_MANIFEST_BYTES = 2_000_000
@@ -152,6 +154,10 @@ class ContractEvidence(_StrictModel):
     golden_contract_passed: StrictBool = True
 
 
+class CodeEvidence(_StrictModel):
+    source_commit_sha: StrictStr = Field(pattern=_SOURCE_COMMIT_SHA_PATTERN)
+
+
 def _validate_bounded_json(value: Any, *, depth: int = 0) -> None:
     if depth > 12:
         raise ValueError("manifest values exceed maximum nesting")
@@ -197,11 +203,19 @@ class ReleaseManifest(_StrictModel):
     release_gate: ReleaseGateEvidence
     inline_raw_count: StrictInt = Field(ge=0, le=_MAX_COUNT)
     contracts: ContractEvidence
+    code: CodeEvidence | None = None
 
     @model_validator(mode="after")
     def _supported_contracts_and_bounded_values(self) -> "ReleaseManifest":
-        if self.artifact_version != ARTIFACT_VERSION:
+        if self.artifact_version not in {
+            LEGACY_ARTIFACT_VERSION,
+            ARTIFACT_VERSION,
+        }:
             raise ValueError("unsupported release artifact version")
+        if self.artifact_version == ARTIFACT_VERSION and self.code is None:
+            raise ValueError("release artifact code evidence is required")
+        if self.artifact_version == LEGACY_ARTIFACT_VERSION and self.code is not None:
+            raise ValueError("legacy release artifacts must not contain code evidence")
         if self.tool_contract.version != TOOL_CONTRACT_VERSION:
             raise ValueError("unsupported tool contract version")
         _validate_bounded_json(self.model_dump(mode="python", by_alias=True))
@@ -221,6 +235,18 @@ class VerificationResult(_StrictModel):
 
 
 _VERIFICATION_DIAGNOSTIC_OVERRIDES: dict[str, tuple[str, str]] = {
+    "release_code_identity_missing": (
+        "dataset_release_maintainer",
+        "rebuild the release manifest with the exact source commit SHA",
+    ),
+    "runtime_build_sha_unavailable": (
+        "runtime_operator",
+        "configure KREPORTS_BUILD_SHA with the deployed lowercase commit SHA",
+    ),
+    "runtime_build_sha_mismatch": (
+        "runtime_operator",
+        "deploy the build matching the release manifest source commit SHA",
+    ),
     "tool_contract_evidence_mismatch": (
         "dataset_release_maintainer",
         "rebuild the release manifest from the current approved 33-tool public catalog",
@@ -1417,6 +1443,7 @@ def evaluate_artifact_readiness(
             "invalid_release_manifest",
         )
 
+    runtime_failures.extend(_runtime_code_identity_failures(stored))
     if stored.release_gate.profile != profile:
         runtime_failures.append("release_artifact_profile_mismatch")
     if stored.database.file_name != database.name:
@@ -1462,6 +1489,9 @@ def evaluate_artifact_readiness(
     return {
         "ok": gate.passed and not required_failures,
         "profile": gate.profile,
+        "source_commit_sha": (
+            stored.code.source_commit_sha if stored.code is not None else None
+        ),
         "schema_version": stored.schema_evidence.version,
         "dataset_version": stored.dataset.version,
         "required_failures": required_failures,
@@ -1474,6 +1504,19 @@ def evaluate_artifact_readiness(
         "excluded_populations": gate.coverage_exclusions,
         "feature_grades": gate.feature_grades,
     }
+
+
+def _runtime_code_identity_failures(stored: ReleaseManifest) -> list[str]:
+    if stored.code is None:
+        return ["release_code_identity_missing"]
+    runtime_sha = os.environ.get("KREPORTS_BUILD_SHA")
+    if runtime_sha is None or re.fullmatch(
+        _SOURCE_COMMIT_SHA_PATTERN, runtime_sha
+    ) is None:
+        return ["runtime_build_sha_unavailable"]
+    if runtime_sha != stored.code.source_commit_sha:
+        return ["runtime_build_sha_mismatch"]
+    return []
 
 
 def _cached_runtime_db_digest(
@@ -1500,6 +1543,7 @@ def _unavailable_artifact_readiness(
     return {
         "ok": False,
         "profile": profile,
+        "source_commit_sha": None,
         "schema_version": "unknown",
         "dataset_version": "unknown",
         "required_failures": [failure],
@@ -1640,12 +1684,26 @@ def build_release_manifest(
     manifest_path: str | os.PathLike[str] | None = None,
     *,
     profile: str = "public_runtime",
+    source_commit_sha: str | None = None,
 ) -> Path:
     """Build evidence even when the live gate is blocked."""
     database = _safe_existing_db_path(db_path)
     output = _safe_manifest_path(database, manifest_path)
+    source_commit_sha = source_commit_sha or os.environ.get(
+        "KREPORTS_BUILD_SHA"
+    )
+    if source_commit_sha is None:
+        raise ValueError("source_commit_sha is required")
+    try:
+        code = CodeEvidence(source_commit_sha=source_commit_sha)
+    except ValueError as exc:
+        raise ValueError(
+            "source_commit_sha must be a lowercase 40- or 64-character SHA"
+        ) from exc
     before = _require_quiescent_db(database)
     payload = _collect_current_evidence(database, profile)
+    payload["artifact_version"] = ARTIFACT_VERSION
+    payload["code"] = code.model_dump(mode="json")
     payload["database"] = {
         "file_name": database.name,
         "byte_count": database.stat().st_size,
@@ -1694,6 +1752,7 @@ def verify_release_artifact(
         )
 
     failures: list[str] = []
+    failures.extend(_runtime_code_identity_failures(stored))
     current_size = database.stat().st_size
     current_digest = _sha256_file(database)
     if stored.database.file_name != database.name:
@@ -1710,6 +1769,9 @@ def verify_release_artifact(
             "byte_count": current_size,
             "sha256": current_digest,
         }
+        current_payload["artifact_version"] = stored.artifact_version
+        if stored.code is not None:
+            current_payload["code"] = stored.code.model_dump(mode="json")
         current = ReleaseManifest.model_validate(current_payload)
     except Exception as exc:
         failures.append(f"current_evidence_unavailable:{type(exc).__name__}")

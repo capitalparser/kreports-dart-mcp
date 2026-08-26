@@ -13,6 +13,11 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 
+@pytest.fixture(autouse=True)
+def _matching_runtime_build_sha(monkeypatch):
+    monkeypatch.setenv("KREPORTS_BUILD_SHA", "a" * 40)
+
+
 def _minimal_manifest_payload() -> dict:
     from kreports.release_artifact import FROZEN_TOOL_COUNT, FROZEN_TOOL_WIRE_SHA256
 
@@ -76,6 +81,94 @@ def test_release_manifest_rejects_missing_unknown_and_malformed_fields():
     malformed["database"]["sha256"] = "not-a-digest"
     with pytest.raises(ValidationError):
         ReleaseManifest.model_validate(malformed)
+
+
+def test_release_manifest_v11_binds_a_full_source_commit_sha():
+    """A released DB must be bound to the exact code build that serves it."""
+    from kreports.release_artifact import ReleaseManifest
+
+    payload = _minimal_manifest_payload()
+    payload["artifact_version"] = "1.1"
+    payload["code"] = {"source_commit_sha": "a" * 40}
+
+    parsed = ReleaseManifest.model_validate(payload)
+
+    assert parsed.code.source_commit_sha == "a" * 40
+
+    del payload["code"]
+    with pytest.raises(ValidationError, match="code evidence is required"):
+        ReleaseManifest.model_validate(payload)
+
+
+def test_release_build_rejects_an_unbound_database(tmp_path, monkeypatch):
+    """Removing the code SHA must prevent a deployable proof from being made."""
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    monkeypatch.setattr(
+        release_artifact,
+        "_collect_current_evidence",
+        lambda _db, _profile: _minimal_manifest_payload(),
+    )
+    monkeypatch.delenv("KREPORTS_BUILD_SHA", raising=False)
+
+    with pytest.raises(ValueError, match="source_commit_sha is required"):
+        release_artifact.build_release_manifest(db_path)
+
+
+def test_release_build_uses_the_configured_runtime_build_sha(
+    tmp_path, monkeypatch
+):
+    """A deployment build may supply its immutable SHA through its environment."""
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    monkeypatch.setattr(
+        release_artifact,
+        "_collect_current_evidence",
+        lambda _db, _profile: _minimal_manifest_payload(),
+    )
+    monkeypatch.setenv("KREPORTS_BUILD_SHA", "a" * 40)
+
+    manifest_path = release_artifact.build_release_manifest(db_path)
+
+    stored = json.loads(manifest_path.read_text())
+    assert stored["code"] == {"source_commit_sha": "a" * 40}
+
+
+def test_release_verification_rejects_a_different_runtime_build(
+    tmp_path, monkeypatch
+):
+    """Serving a valid DB from another commit must fail closed."""
+    from kreports import release_artifact
+
+    db_path = tmp_path / "runtime.db"
+    _create_contract_db(db_path)
+    payload = _minimal_manifest_payload()
+    payload["release_gate"] = {
+        **payload["release_gate"],
+        "passed": True,
+        "blockers": [],
+    }
+    payload["contracts"]["golden_contract_sha256"] = (
+        release_artifact.APPROVED_GOLDEN_CONTRACT_SHA256
+    )
+    monkeypatch.setattr(
+        release_artifact,
+        "_collect_current_evidence",
+        lambda _db, _profile: json.loads(json.dumps(payload)),
+    )
+    monkeypatch.setenv("KREPORTS_BUILD_SHA", "b" * 40)
+
+    manifest_path = release_artifact.build_release_manifest(
+        db_path,
+        source_commit_sha="a" * 40,
+    )
+    result = release_artifact.verify_release_artifact(db_path, manifest_path)
+
+    assert "runtime_build_sha_mismatch" in result.failures
 
 
 def test_release_manifest_preserves_materiality_coverage_metadata():
@@ -289,6 +382,8 @@ def test_verify_recomputes_db_digest_and_reports_named_drift(tmp_path, monkeypat
     db_path = tmp_path / "runtime.db"
     _create_contract_db(db_path)
     payload = _minimal_manifest_payload()
+    payload["artifact_version"] = "1.1"
+    payload["code"] = {"source_commit_sha": "a" * 40}
     payload["database"] = {
         "file_name": db_path.name,
         "byte_count": db_path.stat().st_size,
@@ -1292,6 +1387,8 @@ def test_runtime_readiness_uses_deployment_artifact_without_full_recompute(
     db_path = tmp_path / "runtime.db"
     _create_contract_db(db_path)
     payload = _minimal_manifest_payload()
+    payload["artifact_version"] = "1.1"
+    payload["code"] = {"source_commit_sha": "a" * 40}
     payload["database"] = {
         "file_name": db_path.name,
         "byte_count": db_path.stat().st_size,
@@ -1419,6 +1516,8 @@ def test_runtime_readiness_rehashes_and_rejects_same_size_db_change(
     db_path = tmp_path / "runtime.db"
     _create_contract_db(db_path)
     payload = _minimal_manifest_payload()
+    payload["artifact_version"] = "1.1"
+    payload["code"] = {"source_commit_sha": "a" * 40}
     payload["release_gate"] = {
         **payload["release_gate"],
         "passed": True,
@@ -1493,8 +1592,9 @@ def test_cli_build_writes_blocked_proof_with_zero_but_verify_exits_nonzero(
     manifest = release_artifact.ReleaseManifest.model_validate(payload)
     real_build = release_artifact.build_release_manifest
 
-    def fake_build(_db, output, *, profile):
+    def fake_build(_db, output, *, profile, source_commit_sha):
         assert profile == "public_runtime"
+        assert source_commit_sha == "a" * 40
         output.write_text(
             manifest.model_dump_json(by_alias=True),
         )
@@ -1514,6 +1614,8 @@ def test_cli_build_writes_blocked_proof_with_zero_but_verify_exits_nonzero(
             str(db_path),
             "--manifest",
             str(manifest_path),
+            "--source-commit-sha",
+            "a" * 40,
             "--json",
         ],
     )

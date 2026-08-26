@@ -3610,6 +3610,11 @@ def build_release_manifest_cmd(
         "--profile",
         help="public_runtime 또는 auditor_full",
     ),
+    source_commit_sha: Optional[str] = typer.Option(
+        None,
+        "--source-commit-sha",
+        help="Release build source commit SHA (lowercase 40 or 64 hex)",
+    ),
     json_output: bool = typer.Option(False, "--json", help="JSON 출력"),
 ):
     """현재 DB 증거를 원자적으로 기록한다. Gate 실패도 blocker로 보존한다."""
@@ -3621,6 +3626,7 @@ def build_release_manifest_cmd(
             selected_db,
             manifest_path,
             profile=profile,
+            source_commit_sha=source_commit_sha,
         )
         manifest = release_artifact.ReleaseManifest.model_validate_json(
             output.read_text()
