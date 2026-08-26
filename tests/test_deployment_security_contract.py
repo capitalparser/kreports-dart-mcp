@@ -35,3 +35,12 @@ def test_container_healthcheck_uses_authenticated_readiness_without_token_argv(m
     assert "KREPORTS_MCP_TOKEN" not in dockerfile
     compose = Path("docker-compose.deploy.yml").read_text(encoding="utf-8")
     assert 'test: ["CMD", "python", "-m", "kreports.deployment_healthcheck"]' in compose
+
+
+def test_lightsail_readonly_runtime_puts_settings_data_on_tmpfs():
+    """Settings import must not attempt to create /root/.local on a readonly root."""
+    compose = Path("deploy/lightsail/compose.yaml").read_text(encoding="utf-8")
+
+    assert "read_only: true" in compose
+    assert "XDG_DATA_HOME: /tmp/xdg" in compose
+    assert "- /tmp" in compose
