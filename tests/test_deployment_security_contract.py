@@ -44,3 +44,17 @@ def test_lightsail_readonly_runtime_puts_settings_data_on_tmpfs():
     assert "read_only: true" in compose
     assert "XDG_DATA_HOME: /tmp/xdg" in compose
     assert "- /tmp" in compose
+
+
+def test_default_db_path_honors_xdg_data_home_on_linux(monkeypatch, tmp_path):
+    """Readonly containers can place Settings' fallback directory on tmpfs."""
+    from kreports import config
+
+    xdg_data_home = tmp_path / "xdg"
+    monkeypatch.setattr(config.sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data_home))
+
+    assert config._resolve_default_db_url() == (
+        f"sqlite:///{xdg_data_home / 'kreports' / 'kreports.db'}"
+    )

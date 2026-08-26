@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+import os
 import sys
 
 BASE_DIR = Path(__file__).parent.parent
@@ -16,10 +17,14 @@ def _resolve_default_db_url() -> str:
     if sys.platform == "darwin":
         data_dir = Path.home() / "Library" / "Application Support" / "kreports"
     elif sys.platform == "win32":
-        import os
         data_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "kreports"
     else:
-        data_dir = Path.home() / ".local" / "share" / "kreports"
+        data_home = os.environ.get("XDG_DATA_HOME")
+        data_dir = (
+            Path(data_home) / "kreports"
+            if data_home
+            else Path.home() / ".local" / "share" / "kreports"
+        )
     data_dir.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{data_dir / 'kreports.db'}"
 
