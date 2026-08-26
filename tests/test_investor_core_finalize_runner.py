@@ -82,6 +82,7 @@ def test_finalize_dry_run_does_not_call_writers_or_change_database(tmp_path, mon
 
 def test_finalize_rejects_manifest_id_collision_before_derived_writes(tmp_path, monkeypatch):
     """A tampered manifest identity must fail before compact/quality writes."""
+    monkeypatch.delenv("DB_URL", raising=False)
     database = tmp_path / "manifest-id-collision.db"
     _create_database(database)
     with sqlite3.connect(database) as connection:

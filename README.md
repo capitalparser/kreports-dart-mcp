@@ -103,28 +103,99 @@ Two modes — pick one.
 
 ---
 
-#### Option A: Hosted service (no API key needed)
+#### Option A: Hosted remote MCP (no DART key needed)
 
-Connect to the pre-built database. No DART key. No data collection. Just add the MCP endpoint.
+The production service is a **read-only Streamable HTTP MCP endpoint**:
 
-**Claude Code:**
-```bash
-claude mcp add kreports -- uvx --from kreports kreports-mcp
+```text
+https://mcp.dartmcp.com/mcp
 ```
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+It serves the verified compact release artifact, not the writable collector
+database. It exposes 33 public read-only tools; no DART API key, raw filing
+backfill, or collector credentials are present on the public service.
+
+##### 1. Authentication and the safe sharing rule
+
+The endpoint currently requires a static bearer token on every `/mcp` and
+`/readyz` request:
+
+```http
+Authorization: Bearer <KREPORTS_MCP_TOKEN>
+```
+
+`/healthz` is the only unauthenticated route and returns only `{"ok": true}`.
+Opening `/mcp` in a browser without the header should return `401`; it is not a
+web page. Do not put the token in a prompt, screenshot, Git repository,
+bookmark, browser URL, or a shared chat. The current static token is a service
+credential, not a per-user account or an invitation mechanism. Rotate it when
+access changes.
+
+##### 2. Header-capable MCP clients
+
+Use the client's **remote / Streamable HTTP MCP** configuration and enter the
+endpoint above plus this header. Exact field names differ by client, but the
+connection contract is:
+
 ```json
 {
-  "mcpServers": {
-    "kreports": {
-      "command": "uvx",
-      "args": ["--from", "kreports", "kreports-mcp"]
-    }
+  "url": "https://mcp.dartmcp.com/mcp",
+  "headers": {
+    "Authorization": "Bearer <token kept in the client's secret store>"
   }
 }
 ```
 
-> Hosted endpoint coming soon. Follow the repo for the release.
+First test with a read-only prompt such as: `삼성전자 2025년 투자자 신호를
+근거와 한계까지 요약해줘`. A working client discovers the tool list and may
+ask for per-tool permission; it must never receive a DART API key.
+
+##### 3. Web chatbots: current support matrix
+
+| Client | What to enter | Current production status |
+|---|---|---|
+| Header-capable MCP desktop/client apps | Endpoint and bearer header above | Supported for a trusted operator who can protect the token. |
+| Claude.ai / Claude remote connector | Public HTTPS MCP URL; its normal remote flow is OAuth or no-auth | **Not a safe self-service path yet.** The current server uses static bearer auth, not an OAuth authorization server. Do not share the bearer token among users to work around this. |
+| ChatGPT web custom app | A remote MCP URL in Developer mode, then the workspace's configured authentication flow | **OAuth adapter required first.** Availability and publishing controls depend on the ChatGPT plan and workspace admin settings. |
+| ChatGPT / OpenAI API application | Remote MCP URL and an `Authorization` header supplied by the application's server-side secret store | Possible for an application operator; this is API integration, not a user self-service web connector. |
+
+Claude's current remote-connector instructions describe a public HTTPS URL and
+OAuth/no-auth flow; ChatGPT's Developer mode similarly asks the workspace to
+choose and scan an app's authentication mechanism. See the official
+[Claude remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+and [ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta).
+
+For a true multi-user web-chatbot rollout, add an OAuth 2.1 authorization layer
+in front of this MCP service. Each user then signs in, receives a revocable
+per-user token, and the chatbot connector can complete its normal OAuth flow.
+That is a separate security feature; it is intentionally not simulated by a
+shared static bearer token.
+
+##### 4. Local Claude Desktop / Claude Code is a different mode
+
+The following starts a **local stdio** MCP process; it does not connect to the
+hosted production endpoint and needs a locally configured runtime DB:
+
+```bash
+claude mcp add kreports -- uvx --from kreports kreports-mcp
+```
+
+Use it for local development. For the hosted service, use the remote endpoint
+and authentication contract above.
+
+##### 5. Operator-only smoke checks
+
+Keep the token in a local environment variable rather than shell history:
+
+```bash
+curl -fsS https://mcp.dartmcp.com/healthz
+curl -fsS -H "Authorization: Bearer $KREPORTS_MCP_TOKEN" \
+  https://mcp.dartmcp.com/readyz
+```
+
+The first command returns a liveness response. The second must return HTTP 200
+before inviting any client. A 401 means the header is missing or wrong; a 503
+means the release artifact is not ready and must not be bypassed.
 
 ---
 
@@ -241,14 +312,12 @@ kreports collect-all --year-from 2021 --year-to 2025   # configured company univ
 kreports serve
 ```
 
-### Remote HTTP MCP (claude.ai web)
+### Remote HTTP MCP
 
-```bash
-kreports serve-http --port 8765 --token your_bearer_token
-# then expose via ngrok, Fly.io, or any HTTPS host
-```
-
-Add `https://your-host/mcp` as a custom connector in claude.ai Settings → Integrations.
+For the production endpoint and web-chatbot/OAuth support boundaries, see
+[Hosted remote MCP](#option-a-hosted-remote-mcp-no-dart-key-needed). Do not
+expose a local `serve-http` process to the public internet with
+`--allow-unauthenticated`; that flag is only for short-lived loopback testing.
 
 ### Going Concern Scorecard
 
@@ -423,28 +492,96 @@ KReports는 감사 현장에서 출발한 도구입니다. 흩어진 DART 공시
 
 ---
 
-#### 방법 A: 호스팅 서비스 (API 키 불필요)
+#### 방법 A: 호스팅 원격 MCP (API 키 불필요)
 
-사전 구축된 데이터베이스에 연결합니다. DART 키도, 데이터 수집도 필요 없습니다.
+운영 서비스는 **읽기 전용 Streamable HTTP MCP**입니다.
 
-**Claude Code:**
-```bash
-claude mcp add kreports -- uvx --from kreports kreports-mcp
+```text
+https://mcp.dartmcp.com/mcp
 ```
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+이 주소는 쓰기 가능한 수집 DB가 아니라 검증된 compact runtime artifact만
+제공합니다. 공개 읽기 도구 33개만 노출하며, DART API 키·원문 백필·수집기
+자격증명은 서비스에 넣지 않습니다.
+
+##### 1. 인증과 안전한 공유 원칙
+
+현재 `/mcp`와 `/readyz`의 모든 요청에는 정적 bearer token이 필요합니다.
+
+```http
+Authorization: Bearer <KREPORTS_MCP_TOKEN>
+```
+
+인증 없이 열리는 경로는 `{"ok": true}`만 반환하는 `/healthz`뿐입니다.
+브라우저로 `/mcp`를 직접 열면 헤더가 없으므로 `401`이 정상이며, 웹 페이지가
+아닙니다. 토큰을 프롬프트, 스크린샷, Git 저장소, 북마크, URL, 공유 채팅에
+넣지 마세요. 현 정적 토큰은 서비스 자격증명이지 사용자 계정이나 초대장이
+아닙니다. 접근자가 바뀌면 교체합니다.
+
+##### 2. 헤더를 지원하는 MCP 클라이언트
+
+클라이언트의 **remote / Streamable HTTP MCP** 설정에 위 endpoint와 다음
+헤더를 입력하세요. 실제 필드명은 각 클라이언트 문서를 따르되, 연결 계약은
+다음과 같습니다.
+
 ```json
 {
-  "mcpServers": {
-    "kreports": {
-      "command": "uvx",
-      "args": ["--from", "kreports", "kreports-mcp"]
-    }
+  "url": "https://mcp.dartmcp.com/mcp",
+  "headers": {
+    "Authorization": "Bearer <클라이언트 secret store에 보관한 토큰>"
   }
 }
 ```
 
-> 호스팅 엔드포인트 준비 중. 레포를 팔로우하세요.
+첫 질문은 `삼성전자 2025년 투자자 신호를 근거와 한계까지 요약해줘`처럼 읽기
+전용으로 시작하세요. 정상 클라이언트는 도구 목록을 발견하고 도구별 사용
+권한을 물을 수 있습니다. 어떤 경우에도 DART API 키를 MCP 클라이언트에 넣지
+않습니다.
+
+##### 3. 웹 챗봇 연결: 현재 지원 상태
+
+| 클라이언트 | 입력할 항목 | 현재 운영 상태 |
+|---|---|---|
+| 헤더 지원 MCP 데스크톱/클라이언트 앱 | 위 endpoint와 bearer header | 토큰을 안전하게 보관할 수 있는 신뢰된 운영자에게 지원됩니다. |
+| Claude.ai / Claude 원격 커넥터 | 공개 HTTPS MCP URL, 일반적으로 OAuth 또는 무인증 원격 흐름 | **아직 안전한 셀프서비스 경로가 아닙니다.** 현재 서버는 OAuth 서버가 아닌 정적 bearer 인증입니다. 이를 우회하려고 사용자끼리 토큰을 공유하면 안 됩니다. |
+| ChatGPT 웹 custom app | Developer mode에서 원격 MCP URL 및 워크스페이스 인증 흐름 | **OAuth adapter를 먼저 추가해야 합니다.** 사용 가능 여부와 게시 권한은 ChatGPT 요금제·워크스페이스 관리자 설정에 따릅니다. |
+| ChatGPT / OpenAI API 애플리케이션 | 애플리케이션 서버의 secret store가 넣는 원격 MCP URL 및 `Authorization` header | 애플리케이션 운영자는 사용할 수 있습니다. 사용자가 직접 연결하는 웹 챗봇 경로와는 다릅니다. |
+
+Claude 원격 커넥터는 공개 HTTPS URL과 OAuth/무인증 흐름을 안내하며, ChatGPT
+Developer mode도 워크스페이스가 앱 인증 방식을 선택하고 도구를 스캔하도록
+합니다. 공식 안내는 [Claude remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)와
+[ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta)를 참고하세요.
+
+여러 사용자가 웹 챗봇에서 안전하게 쓰려면 이 MCP 앞에 OAuth 2.1 인증 계층을
+추가해야 합니다. 사용자는 로그인 후 취소 가능한 개인별 토큰을 받고, 챗봇
+커넥터는 표준 OAuth 흐름으로 연결합니다. 이는 별도의 보안 기능이며 공유 정적
+bearer token으로 흉내 내지 않습니다.
+
+##### 4. 로컬 Claude Desktop / Claude Code는 별도 방식입니다
+
+다음은 호스팅 endpoint에 접속하는 설정이 아니라 **로컬 stdio** MCP 프로세스를
+시작합니다. 로컬 runtime DB가 필요합니다.
+
+```bash
+claude mcp add kreports -- uvx --from kreports kreports-mcp
+```
+
+로컬 개발에는 이 방식을 쓰고, 호스팅 서비스는 위 원격 endpoint와 인증 계약을
+사용하세요.
+
+##### 5. 운영자 전용 점검
+
+토큰은 shell history에 직접 쓰지 말고 로컬 환경변수에 보관합니다.
+
+```bash
+curl -fsS https://mcp.dartmcp.com/healthz
+curl -fsS -H "Authorization: Bearer $KREPORTS_MCP_TOKEN" \
+  https://mcp.dartmcp.com/readyz
+```
+
+첫 명령은 liveness만 확인합니다. 두 번째가 HTTP 200을 반환한 뒤에만 클라이언트를
+초대합니다. 401은 헤더 누락·오류, 503은 release artifact 미준비를 뜻하며 우회하면
+안 됩니다.
 
 ---
 
@@ -527,13 +664,11 @@ kreports collect-seed --size small   # ~350개사, ~20분
 kreports serve
 ```
 
-### 원격 HTTP MCP (claude.ai 웹)
+### 원격 HTTP MCP
 
-```bash
-kreports serve-http --port 8765 --token 발급받은_토큰
-# ngrok 또는 클라우드에 HTTPS로 노출 후
-# claude.ai → Settings → Integrations → URL 등록
-```
+운영 endpoint와 웹 챗봇/OAuth 지원 경계는 [호스팅 원격 MCP](#방법-a-호스팅-원격-mcp-api-키-불필요)를
+참고하세요. `serve-http` 로컬 프로세스를 `--allow-unauthenticated`로 외부 인터넷에
+노출하면 안 됩니다. 이 옵션은 짧은 loopback 테스트 전용입니다.
 
 ### 계속기업 스코어카드
 

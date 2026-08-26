@@ -1186,10 +1186,9 @@ def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
+    import kreports.cli.main as cli_main
     import kreports.db.engine as db_engine
-    from kreports.cli.main import app
     from kreports.collector import audit_procedure_recovery as recovery
-    from kreports.config import settings
     from kreports.db.models import Base
     from kreports.maintenance import rehearsal_safety
 
@@ -1199,12 +1198,12 @@ def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch
     monkeypatch.setattr(db_engine, "engine", active_engine)
     monkeypatch.setattr(db_engine, "SessionLocal", sessionmaker(bind=active_engine))
 
-    monkeypatch.setattr(settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(cli_main.settings, "dart_api_key", "test-key")
     monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
     monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
     monkeypatch.setenv("RAW_STORAGE_KEEP_INLINE", "false")
-    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
-    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setattr(cli_main.settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(cli_main.settings, "raw_storage_keep_inline", False)
     monkeypatch.setattr(rehearsal_safety, "assert_free_space", lambda *_args, **_kwargs: 20 * 1024**3)
     captured = {}
 
@@ -1222,7 +1221,7 @@ def test_cli_exposes_a_bounded_historical_recovery_mode(temp_engine, monkeypatch
 
     monkeypatch.setattr(recovery, "run_audit_procedure_recovery_batch", fake_run)
     result = CliRunner().invoke(
-        app,
+        cli_main.app,
         ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
     )
 
@@ -1329,16 +1328,15 @@ def test_cli_blocks_mutation_when_python_disk_preflight_fails(temp_engine, monke
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
+    import kreports.cli.main as cli_main
     import kreports.db.engine as db_engine
-    from kreports.cli.main import app
     from kreports.collector import audit_procedure_recovery as recovery
-    from kreports.config import settings
     from kreports.db.models import Base
     from kreports.maintenance import rehearsal_safety
 
-    monkeypatch.setattr(settings, "dart_api_key", "test-key")
-    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
-    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setattr(cli_main.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(cli_main.settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(cli_main.settings, "raw_storage_keep_inline", False)
     monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
     monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
     database = tmp_path / "candidate" / "recovery.db"
@@ -1362,7 +1360,7 @@ def test_cli_blocks_mutation_when_python_disk_preflight_fails(temp_engine, monke
     )
 
     result = CliRunner().invoke(
-        app,
+        cli_main.app,
         ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
     )
 
@@ -1377,10 +1375,9 @@ def test_cli_preflight_checks_the_active_sqlite_database_parent(temp_engine, mon
     from sqlalchemy.orm import sessionmaker
     from typer.testing import CliRunner
 
+    import kreports.cli.main as cli_main
     import kreports.db.engine as db_engine
-    from kreports.cli.main import app
     from kreports.collector import audit_procedure_recovery as recovery
-    from kreports.config import settings
     from kreports.db.models import Base
     from kreports.maintenance import rehearsal_safety
 
@@ -1390,9 +1387,9 @@ def test_cli_preflight_checks_the_active_sqlite_database_parent(temp_engine, mon
     Base.metadata.create_all(bind=active_engine)
     monkeypatch.setattr(db_engine, "engine", active_engine)
     monkeypatch.setattr(db_engine, "SessionLocal", sessionmaker(bind=active_engine))
-    monkeypatch.setattr(settings, "dart_api_key", "test-key")
-    monkeypatch.setattr(settings, "raw_storage_backend", "gcs")
-    monkeypatch.setattr(settings, "raw_storage_keep_inline", False)
+    monkeypatch.setattr(cli_main.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(cli_main.settings, "raw_storage_backend", "gcs")
+    monkeypatch.setattr(cli_main.settings, "raw_storage_keep_inline", False)
     monkeypatch.setenv("RAW_STORAGE_BACKEND", "gcs")
     monkeypatch.setenv("RAW_STORAGE_BUCKET", "test-recovery-raw")
     paths = []
@@ -1408,7 +1405,7 @@ def test_cli_preflight_checks_the_active_sqlite_database_parent(temp_engine, mon
     )
 
     result = CliRunner().invoke(
-        app,
+        cli_main.app,
         ["collect-audit-procedure-recovery", "--year", "2025", "--market", "KOSPI", "--limit", "2"],
     )
 

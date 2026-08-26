@@ -414,7 +414,7 @@ def _isolated_catalog_dispatch_contract(db_path: Path) -> bool:
             text=True,
             capture_output=True,
             check=False,
-            timeout=180,
+            timeout=300,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

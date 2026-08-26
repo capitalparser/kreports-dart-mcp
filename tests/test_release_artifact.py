@@ -1960,6 +1960,29 @@ def test_explicit_db_cli_has_no_global_db_side_effects():
     assert result.stdout.strip() == "0"
 
 
+def test_isolated_tool_contract_allows_slow_verified_runner(monkeypatch, tmp_path):
+    """Release verification must accommodate a compact runtime on modest CPUs."""
+    from kreports import release_artifact
+
+    observed = {}
+
+    def completed_runner(*args, **kwargs):
+        observed["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="KREPORTS_RELEASE_CONTRACT=1\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(release_artifact.subprocess, "run", completed_runner)
+
+    assert release_artifact._isolated_catalog_dispatch_contract(
+        tmp_path / "runtime.db"
+    )
+    assert observed["timeout"] == 300
+
+
 def test_wheel_contains_approved_golden_package_resource_and_hash(
     tmp_path,
 ):

@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import subprocess
 
 from kreports.runtime import (
@@ -95,14 +96,15 @@ def test_readonly_cache_miss_message_does_not_request_dart_key():
     assert "DART_API_KEY" not in msg
 
 
-def test_mcp_smoke_cli_fails_closed_without_seeded_data_or_dart_key():
+def test_mcp_smoke_cli_fails_closed_without_seeded_data_or_dart_key(tmp_path):
+    empty_database = tmp_path / "empty-runtime.db"
+    sqlite3.connect(empty_database).close()
     environment = {
         "PATH": os.environ["PATH"],
         "KREPORTS_RUNTIME_MODE": "readonly",
         "DART_API_KEY": "",
+        "DB_URL": f"sqlite:///{empty_database}",
     }
-    if db_url := os.environ.get("DB_URL"):
-        environment["DB_URL"] = db_url
     proc = subprocess.run(
         [".venv/bin/kreports", "mcp-smoke", "--company", "005930"],
         text=True,

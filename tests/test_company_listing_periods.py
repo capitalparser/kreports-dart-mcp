@@ -267,6 +267,8 @@ def test_migration_only_listing_contract_accepts_orm_import(tmp_path, monkeypatc
             "20260805_17_listing_period_named_unique_index",
             "20260810_18_year_listing_membership",
             "20260810_19_year_membership_indexes",
+            "20260812_20_audit_procedure_recovery_fallback",
+            "20260812_21_source_document_pdf_provenance",
         ]
         columns = {
             column["name"]
