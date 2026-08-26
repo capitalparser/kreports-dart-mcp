@@ -1279,6 +1279,24 @@ def release_gate_is_ready(report: dict[str, Any]) -> bool:
     )
 
 
+def _stable_release_gate_metadata(
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep release proof bound to the immutable runtime artifact only.
+
+    Listing eligibility diagnostics resolve retained source-file URIs. Those
+    maintainer-side files are deliberately absent from the public compact
+    runtime, so their availability cannot be a reproducible release proof.
+    The database retains each URI, size, and checksum as provenance; source
+    artifact availability is validated before compact export instead.
+    """
+    return {
+        key: value
+        for key, value in (metadata or {}).items()
+        if key != "listing_eligibility"
+    }
+
+
 def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
     """Collect every proof field from the explicit immutable SQLite file."""
     from kreports.quality.release_gate import evaluate_release_gate
@@ -1382,7 +1400,9 @@ def _collect_current_evidence(db_path: Path, profile: str) -> dict[str, Any]:
             ),
             "coverage_year": coverage_year,
             "feature_coverage": gate_report.get("coverage") or {},
-            "coverage_metadata": gate_report.get("coverage_metadata") or {},
+            "coverage_metadata": _stable_release_gate_metadata(
+                gate_report.get("coverage_metadata")
+            ),
             "coverage_denominators": gate_report.get("denominators") or {},
             "coverage_exclusions": (
                 gate_report.get("excluded_populations") or {}

@@ -1983,6 +1983,33 @@ def test_isolated_tool_contract_allows_slow_verified_runner(monkeypatch, tmp_pat
     assert observed["timeout"] == 300
 
 
+def test_release_gate_evidence_excludes_host_local_listing_diagnostics():
+    """A compact runtime proof must not depend on a builder's source-file cache."""
+    from kreports import release_artifact
+
+    builder_metadata = {
+        "investor_core_3y": {"membership_status": "verified"},
+        "listing_eligibility": {
+            "verified_full_year": 2655,
+            "normalized_artifact_available": 2655,
+        },
+    }
+    runtime_metadata = {
+        "investor_core_3y": {"membership_status": "verified"},
+        "listing_eligibility": {
+            "conflict": 2655,
+            "normalized_artifact_unavailable": 2655,
+        },
+    }
+
+    assert release_artifact._stable_release_gate_metadata(
+        builder_metadata
+    ) == release_artifact._stable_release_gate_metadata(runtime_metadata)
+    assert release_artifact._stable_release_gate_metadata(
+        builder_metadata
+    ) == {"investor_core_3y": {"membership_status": "verified"}}
+
+
 def test_wheel_contains_approved_golden_package_resource_and_hash(
     tmp_path,
 ):
