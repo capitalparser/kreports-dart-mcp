@@ -37,6 +37,36 @@ def test_container_healthcheck_uses_authenticated_readiness_without_token_argv(m
     assert 'test: ["CMD", "python", "-m", "kreports.deployment_healthcheck"]' in compose
 
 
+def test_lightsail_healthcheck_allows_release_artifact_readiness_latency(monkeypatch):
+    """A verified multi-gigabyte runtime may need longer than a probe default."""
+    from kreports import deployment_healthcheck
+
+    captured = {}
+
+    class ReadyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def ready(ready_request, **kwargs):
+        captured["authorization"] = ready_request.get_header("Authorization")
+        captured["timeout"] = kwargs["timeout"]
+        return ReadyResponse()
+
+    monkeypatch.setenv("KREPORTS_MCP_TOKEN", "secret")
+    monkeypatch.setattr(deployment_healthcheck.request, "urlopen", ready)
+
+    assert deployment_healthcheck.main() == 0
+    assert captured == {"authorization": "Bearer secret", "timeout": 20}
+    assert "timeout: 25s" in Path("deploy/lightsail/compose.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_lightsail_readonly_runtime_puts_settings_data_on_tmpfs():
     """Settings import must not attempt to create /root/.local on a readonly root."""
     compose = Path("deploy/lightsail/compose.yaml").read_text(encoding="utf-8")

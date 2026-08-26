@@ -6,6 +6,7 @@ from urllib import error, request
 
 
 READY_URL = "http://127.0.0.1:8765/readyz"
+READY_TIMEOUT_SECONDS = 20
 
 
 def main() -> int:
@@ -18,7 +19,10 @@ def main() -> int:
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        with request.urlopen(ready_request, timeout=4) as response:
+        with request.urlopen(
+            ready_request,
+            timeout=READY_TIMEOUT_SECONDS,
+        ) as response:
             return 0 if response.status == 200 else 1
     except (error.HTTPError, error.URLError, TimeoutError):
         return 1
