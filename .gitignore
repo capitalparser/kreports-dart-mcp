@@ -65,3 +65,5 @@ artifacts/
 
 # Isolated implementation worktrees
 .worktrees/
+deploy/lightsail/production.env
+deploy/lightsail/data/

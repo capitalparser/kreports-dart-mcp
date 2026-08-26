@@ -1,0 +1,3 @@
+mcp.dartmcp.com {
+	reverse_proxy kreports-mcp:8765
+}

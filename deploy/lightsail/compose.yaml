@@ -1,0 +1,72 @@
+# Public HTTPS terminates at Caddy. The MCP process has no host-published port.
+# Promote a verified DB and its same-named sidecar to data/active atomically.
+services:
+  kreports-mcp:
+    build:
+      context: ../..
+    image: kreports-mcp:lightsail
+    restart: unless-stopped
+    env_file:
+      - production.env
+    environment:
+      KREPORTS_RUNTIME_MODE: readonly
+      DB_URL: sqlite:////data/kreports-compact-2021-2025-v2.db
+    command:
+      - kreports
+      - serve-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+      - --path
+      - /mcp
+      - --stateless
+      - --allowed-hosts
+      - mcp.dartmcp.com
+    expose:
+      - "8765"
+    volumes:
+      - type: bind
+        source: ./data/active/kreports-compact-2021-2025-v2.db
+        target: /data/kreports-compact-2021-2025-v2.db
+        read_only: true
+      - type: bind
+        source: ./data/active/kreports-compact-2021-2025-v2.db.release.json
+        target: /data/kreports-compact-2021-2025-v2.db.release.json
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-m", "kreports.deployment_healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      kreports-mcp:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - type: bind
+        source: ./conf
+        target: /etc/caddy
+        read_only: true
+      - type: volume
+        source: caddy_data
+        target: /data
+      - type: volume
+        source: caddy_config
+        target: /config
+
+volumes:
+  caddy_data:
+  caddy_config:
