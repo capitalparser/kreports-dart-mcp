@@ -398,6 +398,16 @@ DCF packs keep four boundaries visible: source filing actuals, explicit
 assumptions, Decimal model mechanics, and analyst judgment. The model does not
 turn missing inputs into inferred actuals.
 
+### Maintainer source-archive operations
+
+The five-year source archive is a local collector workflow, not a public MCP
+feature or a statement that all source reports have already been collected.
+It preserves original DART containers/members and generic structure packages in
+Google Drive, then keeps candidate-DB and runtime-artifact promotion as
+separate approval gates. See [Drive-first annual source archive backfill](docs/source-archive-backfill.md)
+for the bounded-spool, dry-run, 64-shard resume, Drive accounting, and
+release-boundary procedure. Public MCP queries never call Google Drive.
+
 ### Architecture
 
 ```
@@ -778,6 +788,15 @@ blocker가 있으면 non-zero로 종료합니다. 공개 33개 도구 smoke는 �
 회계정책·감사절차·그룹감사 등 감사인 기능은 artifact의 개별 등급에 따라
 conditional일 수 있습니다. DCF는 공시 실제값, 명시적 가정, 모델 계산,
 분석가 판단을 서로 섞지 않습니다.
+
+### 관리자의 원문 아카이브 운영
+
+5개년 원문 아카이브는 공개 MCP 기능이나 모든 원문 적재 완료 주장과는 별개의
+로컬 collector 작업입니다. DART original container/member와 일반 구조 패키지를
+Google Drive에 보전하고, 후보 DB 생성 및 runtime artifact promotion은 각각
+별도 승인 단계로 둡니다. bounded spool, dry run, 64-shard 재개, Drive 용량
+정산, 릴리스 경계는 [Drive-first annual source archive backfill](docs/source-archive-backfill.md)
+가이드에서 확인합니다. 공개 MCP 질의는 Google Drive를 호출하지 않습니다.
 
 ### 아키텍처
 

@@ -232,3 +232,12 @@ def test_documented_promotion_leaves_service_stopped_when_final_verification_fai
     assert result.returncode == 44
     assert (state / "service.stopped").read_text() == "stopped"
     assert not (state / "service.running").exists()
+
+
+def test_source_archive_guide_keeps_drive_and_public_runtime_separate():
+    """The archival path must never become a Drive-mounted MCP database."""
+    guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
+
+    assert "Do not mount SQLite on Google Drive" in guide
+    assert "--apply" in guide
+    assert "public MCP queries do not call Google Drive" in guide
