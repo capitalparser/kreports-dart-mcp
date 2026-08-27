@@ -978,4 +978,3 @@ git commit -m "docs: record raw storage migration runbook"
 - Spec coverage: This plan covers raw preservation, evidence DB, financial fact separation, migration safety, and deployment readiness.
 - Placeholder scan: No TBD or deferred implementation placeholders remain.
 - Type consistency: `storage_uri`, `content_length`, `compressed_length`, `storage_status`, `RawDocumentStore`, `migrate_raw_documents_to_storage`, and `verify_raw_storage` are introduced before use.
-

@@ -15,6 +15,14 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session
 
 import kreports.db.engine as _engine_module
+from kreports.analysis.note_evidence import (
+    NOTE_PAGE_URI_TEMPLATE,
+    NOTE_PARAGRAPH_URI_TEMPLATE,
+    NOTE_REF_TOKEN_PATTERN,
+    NOTE_SUMMARY_URI_TEMPLATE,
+    NoteReferenceError,
+    read_note_resource,
+)
 from kreports.db.models import (
     Company,
     CompanyYearQuality,
@@ -53,6 +61,18 @@ _COMPANY_RESOURCE_PATH = re.compile(
 )
 _EVIDENCE_RESOURCE_PATH = re.compile(r"/([0-9]{14})", re.ASCII)
 _VISUALIZATION_RESOURCE_PATH = re.compile(r"/([0-9a-f]{64})", re.ASCII)
+_NOTE_SUMMARY_RESOURCE_PATH = re.compile(
+    rf"/({NOTE_REF_TOKEN_PATTERN})",
+    re.ASCII,
+)
+_NOTE_PARAGRAPH_RESOURCE_PATH = re.compile(
+    rf"/({NOTE_REF_TOKEN_PATTERN})/paragraph",
+    re.ASCII,
+)
+_NOTE_PAGE_RESOURCE_PATH = re.compile(
+    rf"/({NOTE_REF_TOKEN_PATTERN})/page/([1-9][0-9]{{0,4}})",
+    re.ASCII,
+)
 _DART_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 _VISUALIZATION_RESOURCES: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _VISUALIZATION_CACHE_BYTES = 0
@@ -168,6 +188,30 @@ def list_resource_templates() -> list[ResourceTemplateDescriptor]:
             ),
         ),
         ResourceTemplateDescriptor(
+            uri_template=NOTE_SUMMARY_URI_TEMPLATE,
+            name="accounting_note_summary",
+            description=(
+                "One accounting note's identity, disclosure-depth profile, "
+                "related paragraphs, source link, and full-text availability."
+            ),
+        ),
+        ResourceTemplateDescriptor(
+            uri_template=NOTE_PARAGRAPH_URI_TEMPLATE,
+            name="accounting_note_related_paragraphs",
+            description=(
+                "The filing paragraphs most relevant to the note topic or "
+                "matched expression, without loading the full note into model context."
+            ),
+        ),
+        ResourceTemplateDescriptor(
+            uri_template=NOTE_PAGE_URI_TEMPLATE,
+            name="accounting_note_full_page",
+            description=(
+                "A bounded page of the complete accounting-note text with "
+                "previous/next resource links and explicit completeness status."
+            ),
+        ),
+        ResourceTemplateDescriptor(
             uri_template=VISUALIZATION_URI_TEMPLATE,
             name="visualization_html",
             description=(
@@ -239,6 +283,51 @@ def _parse_uri(uri: object) -> tuple[str, dict[str, Any]]:
         if raw != canonical:
             raise ResourceRequestError("invalid_resource_uri")
         return "filing_evidence", {"rcept_no": rcept_no}
+    if parsed.netloc == "note":
+        page_match = _NOTE_PAGE_RESOURCE_PATH.fullmatch(parsed.path)
+        if page_match:
+            note_ref, raw_page = page_match.groups()
+            page = int(raw_page)
+            canonical = NOTE_PAGE_URI_TEMPLATE.format(
+                note_ref=note_ref,
+                page=page,
+            )
+            if raw != canonical:
+                raise ResourceRequestError("invalid_resource_uri")
+            return "note_page", {
+                "note_ref": note_ref,
+                "view": "page",
+                "page": page,
+            }
+        paragraph_match = _NOTE_PARAGRAPH_RESOURCE_PATH.fullmatch(
+            parsed.path
+        )
+        if paragraph_match:
+            note_ref = paragraph_match.group(1)
+            canonical = NOTE_PARAGRAPH_URI_TEMPLATE.format(
+                note_ref=note_ref,
+            )
+            if raw != canonical:
+                raise ResourceRequestError("invalid_resource_uri")
+            return "note_paragraph", {
+                "note_ref": note_ref,
+                "view": "paragraph",
+                "page": 1,
+            }
+        summary_match = _NOTE_SUMMARY_RESOURCE_PATH.fullmatch(parsed.path)
+        if summary_match:
+            note_ref = summary_match.group(1)
+            canonical = NOTE_SUMMARY_URI_TEMPLATE.format(
+                note_ref=note_ref,
+            )
+            if raw != canonical:
+                raise ResourceRequestError("invalid_resource_uri")
+            return "note_summary", {
+                "note_ref": note_ref,
+                "view": "summary",
+                "page": 1,
+            }
+        raise ResourceRequestError("invalid_note_resource")
     visualization_match = _VISUALIZATION_RESOURCE_PATH.fullmatch(parsed.path)
     if parsed.netloc == "visualization" and visualization_match:
         digest = visualization_match.group(1)
@@ -534,6 +623,47 @@ def _company_year(corp_code: str, year: int) -> dict[str, Any]:
     }
 
 
+def _note(
+    note_ref: str,
+    *,
+    view: str,
+    page: int,
+) -> dict[str, Any]:
+    try:
+        with _resource_session() as session:
+            return read_note_resource(
+                note_ref,
+                view=view,  # type: ignore[arg-type]
+                page=page,
+                session=session,
+            )
+    except NoteReferenceError as exc:
+        raise ResourceRequestError(str(exc)) from None
+    except _ResourceDatabaseUnavailable as exc:
+        failure = str(exc)
+        return {
+            "resource_version": "note_evidence.v1",
+            "note_ref": note_ref,
+            "view": view,
+            "data_quality": {
+                "status": "error",
+                "limitations": [failure],
+            },
+            "errors": [failure],
+        }
+    except Exception:
+        return {
+            "resource_version": "note_evidence.v1",
+            "note_ref": note_ref,
+            "view": view,
+            "data_quality": {
+                "status": "error",
+                "limitations": ["note_resource_read_failed"],
+            },
+            "errors": ["note_resource_read_failed"],
+        }
+
+
 def _bounded_text(text: str) -> tuple[str, bool]:
     normalized = str(text or "")
     return (
@@ -730,6 +860,12 @@ def read_resource(uri: object) -> dict[str, Any]:
         return _dataset_readiness()
     if resource_type == "company_year":
         return _company_year(**arguments)
+    if resource_type in {
+        "note_summary",
+        "note_paragraph",
+        "note_page",
+    }:
+        return _note(**arguments)
     if resource_type == "visualization":
         return _visualization_resource(**arguments)
     return _evidence(**arguments)

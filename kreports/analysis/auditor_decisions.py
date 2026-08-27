@@ -383,10 +383,15 @@ def compare_peer_kam_topics(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict[str, Any]:
     """Add Task-5 KAM semantics without altering the shared peer collector."""
     legacy_result = _legacy_compare_peer_kam_topics(
-        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+        company=company,
+        year=year,
+        peer_limit=peer_limit,
+        fs_strategy=fs_strategy,
+        _peer_group=_peer_group,
     )
     if not isinstance(legacy_result, dict) or "error" in legacy_result:
         return legacy_result
@@ -518,10 +523,15 @@ def compare_peer_audit_report_matters(
     year: int = 2025,
     peer_limit: int = 30,
     fs_strategy: str = "auto",
+    _peer_group: dict | None = None,
 ) -> dict[str, Any]:
     """Apply receipt and boilerplate guards after the shared peer query."""
     legacy_result = _legacy_compare_peer_audit_report_matters(
-        company=company, year=year, peer_limit=peer_limit, fs_strategy=fs_strategy,
+        company=company,
+        year=year,
+        peer_limit=peer_limit,
+        fs_strategy=fs_strategy,
+        _peer_group=_peer_group,
     )
     if not isinstance(legacy_result, dict) or "error" in legacy_result:
         return legacy_result

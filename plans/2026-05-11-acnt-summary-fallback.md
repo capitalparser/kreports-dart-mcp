@@ -39,7 +39,7 @@ Out (이번 변경 아님):
 
 ## 데이터 출처 태깅 (Why source column)
 
-`source='acntall'`: 기존 동작. financial_facts + Financial 양쪽 모두 채움.  
+`source='acntall'`: 기존 동작. financial_facts + Financial 양쪽 모두 채움.
 `source='acnt'`: 신규 폴백 경로. Financial만 채움. revenue/operating_profit/net_income/total_assets/total_debt/total_equity 6개 외 모든 Judge 컬럼은 부분 None 허용. financial_facts 없음.
 
 다운스트림(`get_financial_snapshot`, `score_going_concern`, `compare_to_industry*`)은 `source`를 응답 메타에 포함해야 함 — 이는 후속 변경 (이번 plan 밖). 일단 컬럼만 추가하고 도구는 다음 PR에서 활용.

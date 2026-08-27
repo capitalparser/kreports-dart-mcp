@@ -52,7 +52,7 @@ allowed to finish when live data is not ready; the artifact then contains
 Verify is the deployment gate. It reopens the explicit DB immutably and
 recomputes its hash and size, schema/table/index contract, dataset manifest,
 inline raw count, current release gate, feature coverage and grades, the frozen
-v1.3 33-tool public wire hash, isolated real-dispatch smoke for every public
+v1.4 33-tool public wire hash, isolated real-dispatch smoke for every public
 tool, and the approved packaged golden-contract hash. The operator-opt-in
 user-keyed DART fetch is outside the public release contract; the release check
 never injects or persists a credential.

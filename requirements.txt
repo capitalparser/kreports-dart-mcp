@@ -7,6 +7,7 @@ streamlit>=1.35
 plotly>=5.20
 pandas>=2.0
 lxml>=5.0
+mcp>=1.0,<2.0
 fastapi>=0.115
 uvicorn[standard]>=0.30
 apscheduler>=3.10

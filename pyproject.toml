@@ -32,7 +32,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "pandas>=2.0",
     "lxml>=5.0",
-    "mcp>=1.0",
+    "mcp>=1.0,<2.0",
     "pypdf>=6.15.0",
 ]
 
@@ -60,6 +60,10 @@ dev = [
 kreports = "kreports.cli.main:app"
 kreports-mcp = "kreports.mcp.server:main"
 kreports-mcp-http = "kreports.mcp.http_server:main"
+# This entry point imports only in the isolated environment described in
+# requirements-mcp-v2.txt. The default installation intentionally stays on
+# MCP 1.x until the compatibility sidecar has completed validation.
+kreports-mcp-v2 = "kreports.mcp.v2_server:main"
 
 [project.urls]
 Homepage = "https://github.com/capitalparser/kreports-dart-mcp"

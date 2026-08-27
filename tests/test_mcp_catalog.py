@@ -47,7 +47,7 @@ EXPECTED_TOOL_NAMES = [
     "get_industry_audit_landscape",
     "build_dcf_model_pack",
 ]
-EXPECTED_INTERFACE_SHA256 = "cda74732e55d5215a0b14ac9520be1353d39921fc25c2ad68ff0589869c197d2"
+EXPECTED_INTERFACE_SHA256 = "2100ea75ac13f6e0d0117753815383d6a43e263418423b6703d7aecb82063e37"
 PUBLIC_TOOL_NAMES = [
     name for name in EXPECTED_TOOL_NAMES
     if name != "fetch_disclosure_on_demand"
@@ -111,6 +111,17 @@ def test_catalog_is_complete_ordered_and_immutable():
     )
     with pytest.raises(FrozenInstanceError):
         TOOL_CATALOG["search_company"].name = "changed"
+
+
+def test_dispatcher_exposes_the_extended_peer_tool_schemas():
+    from kreports.mcp.dispatch import list_mcp_tools
+
+    tools = {tool.name: tool for tool in list_mcp_tools()}
+
+    assert "year" in tools["select_peer_group"].inputSchema["properties"]
+    assert "peer_criteria" in tools["compare_to_industry_multi"].inputSchema[
+        "properties"
+    ]
 
 
 def test_generated_tool_interface_keeps_the_approved_public_snapshot_hash():

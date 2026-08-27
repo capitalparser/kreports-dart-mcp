@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import subprocess
-
 from kreports.runtime import (
     is_readonly_mode,
     readonly_cache_miss,
@@ -115,3 +114,46 @@ def test_mcp_smoke_cli_fails_closed_without_seeded_data_or_dart_key(tmp_path):
     assert "RESULT: CHECK REQUIRED" in proc.stdout
     assert "DART_API_KEY" not in proc.stdout
     assert "DART_API_KEY" not in proc.stderr
+
+
+def test_mcp_smoke_cli_works_without_dart_key(temp_engine, monkeypatch):
+    from typer.testing import CliRunner
+
+    from kreports.cli.main import app
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Financial
+
+    with get_session() as session:
+        session.add_all([
+            Company(
+                corp_code="00126380",
+                stock_code="005930",
+                corp_name="삼성전자",
+                market="KOSPI",
+                induty_code="26410",
+            ),
+            Financial(
+                corp_code="00126380",
+                year=2025,
+                quarter=4,
+                fs_div="CFS",
+                revenue=1000,
+                operating_profit=100,
+                net_income=80,
+                total_assets=2000,
+                total_debt=800,
+                total_equity=1200,
+                operating_cf=90,
+            ),
+        ])
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "readonly")
+    result = CliRunner().invoke(
+        app,
+        ["mcp-smoke", "--company", "005930"],
+    )
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert "RESULT: OK" in result.output
+    assert "DART_API_KEY" not in result.output

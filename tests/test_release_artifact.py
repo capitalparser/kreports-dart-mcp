@@ -39,7 +39,7 @@ def _minimal_manifest_payload() -> dict:
             "manifest_state": {"manifest_id": "fixture-v1"},
         },
         "tool_contract": {
-            "version": "1.3",
+            "version": "1.4",
             "tool_count": FROZEN_TOOL_COUNT,
             "wire_sha256": FROZEN_TOOL_WIRE_SHA256,
         },

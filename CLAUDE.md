@@ -87,4 +87,3 @@ streamlit run dashboard/app.py
 - `DART API를 MCP로 어떻게 안정적으로 노출할지`를 중심 질문으로 삼는다.
 - 새 파일을 만들기 전에 기존 `kreports`, `api`, `dashboard`, `tests` 구조에서 수용 가능한 위치를 먼저 찾는다.
 - 문서 초안, TODO, 실험 코드를 남길 때도 최종적으로는 제품 구조에 편입될 수 있는 형태를 선호한다.
-

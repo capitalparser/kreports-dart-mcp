@@ -4,7 +4,6 @@ set -euo pipefail
 raw_backfill_enabled() {
   [[ "${KREPORTS_ENABLE_RAW_BACKFILL:-0}" == "1" ]]
 }
-
 require_external_raw_backfill() {
   local operation="${1:-raw backfill}"
   if ! raw_backfill_enabled; then
@@ -29,4 +28,3 @@ require_external_raw_backfill() {
       ;;
   esac
 }
-

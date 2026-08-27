@@ -1291,4 +1291,3 @@ git commit -m "docs: record compact runtime db operations"
 - The first export implementation copies whole tables except excluded tables. A later slice should add year filters and table-specific projections to reduce artifact size further.
 - Postgres/Supabase migration is intentionally out of scope for this plan. This plan keeps SQLite artifact deployment as the near-term path.
 - Search ranking may need improvement after long text is replaced by excerpts; this should be measured after Task 4.
-
