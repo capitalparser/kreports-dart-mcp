@@ -39,22 +39,26 @@ used zero DART calls and performed no Drive or local raw-file write.
 
 ## Apply and verification result
 
-The single bounded apply (`--max-dart-calls 100`) was **not started**. The
-collector environment did not contain a DART API key, so authentication could
-not be proven. The source-archive safety contract requires stopping before the
-first DART request when authentication is unavailable.
+The single bounded shard-0 apply was invoked with `--max-dart-calls 100` after
+the credential, prefix, catalog, and quota gates passed. It produced no output
+for more than two minutes while the pre-request Drive target-freeze step was in
+progress, so the process was safely stopped. No second apply, retry, or shard
+was started.
 
-- DART budget: `100` authorized; `0` used.
-- Drive objects/bytes created: `0` / `0`.
-- Source statuses produced by apply: none.
-- `source-archive-verify`: not run because no frozen apply target manifest was
-  created.
+- DART budget: `100` authorized; `0` calls reported or observed.
+- No DART source status, local frozen apply manifest, shard outcome, or
+  `COMMITTED.json` was produced.
+- Drive objects/bytes: `0` / `0` observed; no successful source archive write
+  was recorded before the bounded run was stopped.
+- `source-archive-verify`: not run because the apply did not produce the
+  frozen apply target manifest.
 - No database, candidate artifact, runtime artifact, Lightsail deployment,
   promotion, push, v2 state, or existing spool was modified.
 
 ## Limitations and next gate
 
-This is measured v3 planning and dry-run evidence, not raw archive coverage.
-The missing DART credential is the blocking concern. Historical unlisted
-classification, candidate database construction, and runtime promotion remain
-outside this result and require separate evidence and approval.
+This is measured v3 planning and dry-run evidence only; the bounded apply was
+blocked during its pre-request Drive target-freeze operation. Historical
+unlisted classification, candidate database construction, and runtime
+promotion remain outside this result and require separate evidence and
+approval.
