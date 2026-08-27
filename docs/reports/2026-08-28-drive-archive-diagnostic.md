@@ -49,3 +49,20 @@ campaign run, DART request, database operation, Lightsail call, deployment,
 release promotion, or candidate database release. No pre-existing v2 spool or
 state was deleted or modified, and no credential/configuration change was
 made.
+
+## Post-review deadline-bound read-only verification
+
+- Reviewed implementation head: `1596990b2438c75f8341205a08db859f4e906f3e`.
+- The fixed diagnostic object above was verified once with
+  `DriveArchive.verify_object` using the explicit 60-second command deadline.
+- Result: passed; decompression, raw byte length, and SHA-256 matched the
+  recorded identity (`1,760,285` bytes and the SHA-256 above).
+- The shell-level 75-second outer boundary was unavailable in this
+  environment; the adapter-level 60-second boundary was applied.
+- This was read-only verification only: no `archive_bytes`, `copyto`, listing,
+  campaign, DART, database, Lightsail, deployment, or configuration action was
+  performed.
+
+This completes the required post-review deadline-bound readback for the
+existing diagnostic object. v3 may proceed to a separately authorized,
+no-write preflight; this result does not authorize a campaign run or any write.
