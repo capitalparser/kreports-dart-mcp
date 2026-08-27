@@ -187,6 +187,24 @@ def _is_primary_audit_attachment(title: str) -> bool:
     return True
 
 
+def select_primary_audit_report_attachments(main_html: str) -> list[dict[str, str]]:
+    """Select canonical primary audit-package attachments from a DART page.
+
+    The campaign reuses this owner rather than maintaining its own title-based
+    audit selector.  Duplicate document numbers are deliberately collapsed so
+    a package is archived once under its canonical root filing family.
+    """
+    attachments: list[dict[str, str]] = []
+    seen_dcm_nos: set[str] = set()
+    for option in parse_attachment_options(main_html):
+        dcm_no = option.get("dcm_no", "")
+        if dcm_no in seen_dcm_nos or not _is_primary_audit_attachment(option.get("title", "")):
+            continue
+        seen_dcm_nos.add(dcm_no)
+        attachments.append(option)
+    return attachments
+
+
 def _looks_unreadable_korean_audit_report(content: str) -> bool:
     """Detect DART viewer bodies that are mojibaked before parser storage."""
     text = content or ""
@@ -194,6 +212,11 @@ def _looks_unreadable_korean_audit_report(content: str) -> bool:
         return False
     mojibake_markers = ("媛", "蹂", "닿", "퀬", "?꽌", "?쓽", "?옱", "?젣", "?몴")
     return sum(text.count(marker) for marker in mojibake_markers) >= 2
+
+
+def audit_viewer_requires_pdf_fallback(content: str | None) -> bool:
+    """Return the canonical collector decision for audit viewer/PDF fallback."""
+    return not bool(content) or _looks_unreadable_korean_audit_report(content)
 
 
 _MAX_AUDIT_PDF_PAGES = 200
@@ -499,14 +522,7 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
             _log_fetch(meta["corp_code"], "audit_report", meta["bsns_year"], "error", "DART main HTML empty")
         return {"ok": 0, "documents": 0, "sections": 0, "error": "DART main HTML empty", **meta}
 
-    attachments = []
-    seen_dcm_nos: set[str] = set()
-    for option in parse_attachment_options(main_html):
-        dcm_no = option.get("dcm_no", "")
-        if dcm_no in seen_dcm_nos or not _is_primary_audit_attachment(option.get("title", "")):
-            continue
-        seen_dcm_nos.add(dcm_no)
-        attachments.append(option)
+    attachments = select_primary_audit_report_attachments(main_html)
     if not attachments:
         if log_fetch:
             _log_fetch(meta["corp_code"], "audit_report", meta["bsns_year"], "error", "audit report attachment not found")
@@ -525,7 +541,7 @@ def _collect_attached_audit_reports(meta: dict, *, log_fetch: bool = True) -> di
         viewer_error = None
         if not content:
             viewer_error = "viewer HTML empty"
-        elif _looks_unreadable_korean_audit_report(content):
+        elif audit_viewer_requires_pdf_fallback(content):
             viewer_error = "viewer HTML unreadable"
         content_type = None
         if viewer_error is not None:

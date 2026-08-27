@@ -137,10 +137,11 @@ uv run kreports source-archive-plan \
 ```
 
 `TARGET.json` is the frozen denominator. It records both canonical annual
-filing targets and explicit `no_source_metadata` gaps; a missing anchor is not
-evidence that a filing has no disclosure. Do not replace a manifest after a
-run has started. Create a new campaign directory when source-selection rules
-or target years change.
+filing targets and explicit `no_source_metadata` gaps, from verified
+year-specific KOSPI/KOSDAQ membership evidence; a missing anchor is not
+evidence that a filing has no disclosure. A current `companies` row alone is
+not eligibility. Do not replace a manifest after a run has started. Create a
+new campaign directory when source-selection rules or target years change.
 
 Previewing a shard performs no DART request, Drive request, local source-state
 write, or raw-file creation:
@@ -168,17 +169,33 @@ export RAW_STORAGE_SPOOL_DIR="$HOME/.cache/kreports/source-archive-spool"
 uv run kreports source-archive-run \
   --db /path/to/candidate.db \
   --state-dir ~/.local/share/kreports/source-archive-2021-2025 \
-  --shard 7 --apply \
+  --shard 7 --apply --max-dart-calls 100 \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
 ```
 
-The runner handles one asset at a time: raw bytes are hashed, immutably
-archived and read-back verified, structurally parsed, and the parse package is
-archived before the local spool may be released. `outcomes.jsonl` is append-only
-and records `discovered`, archive/parse success, `partial_source`,
-`no_source_metadata`, and failures. `COMMITTED.json` appears only when every
-company-year in the shard reaches `structurally_complete`; it is deliberately
-absent for partial results.
+`--max-dart-calls` is mandatory with `--apply`; the runner consumes one unit
+before every DART request and stops with a resumable `dart_budget_exhausted`
+outcome when it reaches zero. The runner handles one source asset at a time:
+the original ZIP entry, viewer response, or PDF bytes are hashed, immutably
+archived and read-back verified *before* any parser decoding; the generic parse
+package is then archived. There is no replacement-decoding path for retained
+raw bytes.
+
+Both report families are required: the business-report assets and the selected
+primary audit-report package (viewer with official-PDF fallback). A
+business-only result, missing audit attachment, unreadable audit source, or
+parser-review requirement is `partial_source`, never a completed company-year.
+Each asset also creates an immutable Drive-side document manifest containing
+company-year, report kind, receipt, source locator/filename, content type, raw
+and parse object URIs/hashes, parser version, and status. Append-only
+Drive-side campaign events plus these document manifests are the reconstruction
+evidence; local `outcomes.jsonl` is a cache/checkpoint.
+
+`COMMITTED.json` appears only when every company-year in the shard reaches
+`structurally_complete`. It binds the frozen target digest, shard number, and
+the current outcomes checksum; `source-archive-run` and
+`source-archive-verify` fail closed if this marker or the local outcome cache is
+tampered with. It is deliberately absent for partial results.
 
 Inspect local campaign progress without contacting DART or Drive:
 

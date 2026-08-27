@@ -1,9 +1,9 @@
-"""Frozen, resumable source-archive campaigns for annual DART reports.
+"""Frozen, Drive-manifested annual DART source archive campaigns.
 
-This module owns campaign orchestration only.  It deliberately keeps the
-public/runtime database out of the write path: the campaign reads a supplied
-collector session, writes append-only local manifests, and delegates object
-storage and generic parsing to their respective canonical services.
+The campaign is a local collector workflow.  It derives its denominator from
+historical listing evidence, retains exact source bytes before parsing, and
+requires both the business-report and audit-report families before a
+company-year can be structurally complete.
 """
 
 from __future__ import annotations
@@ -14,14 +14,25 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
+from urllib.parse import unquote, urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from kreports.analysis.filing_provenance import latest_annual_filing_anchor_from_rows
-from kreports.collector.fetcher import fetch_document_zip_files
-from kreports.db.models import Company, Disclosure
-from kreports.processor.document_structure import parse_document_structure
+from kreports.collector.fetcher import (
+    fetch_audit_report_pdf,
+    fetch_dart_main_html,
+    fetch_document_zip_asset_bytes,
+    fetch_viewer_bytes,
+)
+from kreports.collector.report_document_collector import (
+    audit_viewer_requires_pdf_fallback,
+    select_primary_audit_report_attachments,
+)
+from kreports.db.models import CompanyYearListingMembership, Disclosure
+from kreports.processor.document_structure import PARSER_VERSION, parse_document_structure
 from kreports.storage.source_archive import archive_structured_document
 
 
@@ -36,43 +47,44 @@ __all__ = [
 ]
 
 
-CAMPAIGN_SCHEMA = "source-archive-campaign.v1"
+CAMPAIGN_SCHEMA = "source-archive-campaign.v2"
 DEFAULT_SHARD_COUNT = 64
+_REQUIRED_MEMBERSHIP_COLUMNS = {
+    "corp_code", "bsns_year", "market", "status", "evidence_basis",
+    "manifest_checksum", "manifest_storage_uri", "normalized_checksum",
+    "normalized_storage_uri",
+}
 
 
 class SourceArchiveCampaignError(RuntimeError):
-    """Raised when campaign input or persisted state is unsafe to use."""
+    """Campaign evidence, state, or safety precondition is invalid."""
 
 
 class ArchiveWriter(Protocol):
-    """The narrow immutable-object boundary used by one source asset."""
-
-    def archive_bytes(
-        self, *, data: bytes, extension: str, metadata: Mapping[str, str]
-    ) -> Any:
-        """Archive verified bytes and return an object identity."""
+    def archive_bytes(self, *, data: bytes, extension: str, metadata: Mapping[str, str]) -> Any:
+        """Archive one immutable byte payload and return object identity."""
 
 
 @dataclass(frozen=True)
 class SourceArchiveTarget:
-    """One company-year canonical annual filing target (or explicit gap)."""
-
     corp_code: str
     bsns_year: int
+    market: str
     shard: int
     source_receipt: str | None
     report_nm: str | None
     source_uri: str | None
     source_status: str
+    required_report_kinds: tuple[str, str] = ("business_report", "audit_report")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        result["required_report_kinds"] = list(self.required_report_kinds)
+        return result
 
 
 @dataclass(frozen=True)
 class SourceArchivePlan:
-    """Deterministic target universe frozen before any DART source request."""
-
     years: tuple[int, ...]
     shard_count: int
     targets: tuple[SourceArchiveTarget, ...]
@@ -100,14 +112,14 @@ class SourceArchivePlan:
 
 @dataclass(frozen=True)
 class SourceArchiveReport:
-    """One shard attempt, including explicit gap/failure outcomes."""
-
     shard: int
     apply: bool
     status: str
     target_digest: str
     outcomes: tuple[dict[str, Any], ...]
     manifest_path: Path | None = None
+    dart_calls_used: int = 0
+    dart_calls_budget: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,74 +131,63 @@ class SourceArchiveReport:
             "outcome_count": len(self.outcomes),
             "outcomes": list(self.outcomes),
             "manifest_path": str(self.manifest_path) if self.manifest_path else None,
+            "dart_calls_used": self.dart_calls_used,
+            "dart_calls_budget": self.dart_calls_budget,
         }
 
 
-def build_source_archive_plan(
-    session: Session,
-    years: Iterable[int],
-    shard_count: int = DEFAULT_SHARD_COUNT,
-) -> SourceArchivePlan:
-    """Create a no-write frozen target plan using canonical annual anchors.
+@dataclass
+class _DartBudget:
+    maximum: int
+    used: int = 0
 
-    The plan includes every requested company-year.  A missing disclosure is a
-    visible ``no_source_metadata`` target, never silently removed from the
-    denominator.  The latest annual selector validates the newest correction
-    instead of borrowing an older receipt.
-    """
+    def consume(self) -> bool:
+        if self.used >= self.maximum:
+            return False
+        self.used += 1
+        return True
+
+
+def build_source_archive_plan(session: Session, years: Iterable[int], shard_count: int = DEFAULT_SHARD_COUNT) -> SourceArchivePlan:
+    """Build a no-write plan from verified KOSPI/KOSDAQ year memberships only."""
     _require_non_runtime_source_session(session)
     normalized_years = _normalize_years(years)
     _validate_shard_count(shard_count)
-    corp_codes = tuple(session.scalars(select(Company.corp_code).order_by(Company.corp_code)))
-    rows = session.execute(
-        select(
-            Disclosure.corp_code,
-            Disclosure.rcept_no,
-            Disclosure.disc_date,
-            Disclosure.report_nm,
-        ).where(Disclosure.corp_code.in_(corp_codes)).order_by(
-            Disclosure.corp_code, Disclosure.disc_date.desc(), Disclosure.rcept_no.desc()
-        )
-    ).mappings().all() if corp_codes else []
-    rows_by_company: dict[str, list[dict[str, Any]]] = {str(code): [] for code in corp_codes}
-    for row in rows:
-        rows_by_company[str(row["corp_code"])].append(dict(row))
+    memberships = _verified_memberships(session, normalized_years)
+    membership_by_pair = {(row["corp_code"], row["bsns_year"]): row for row in memberships}
+    disclosure_rows = session.execute(select(
+        Disclosure.corp_code, Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm,
+    ).where(Disclosure.corp_code.in_({corp for corp, _year in membership_by_pair})).order_by(
+        Disclosure.corp_code, Disclosure.disc_date.desc(), Disclosure.rcept_no.desc(),
+    )).mappings().all() if membership_by_pair else []
+    rows_by_company: dict[str, list[dict[str, Any]]] = {}
+    for row in disclosure_rows:
+        rows_by_company.setdefault(str(row["corp_code"]), []).append(dict(row))
 
     targets: list[SourceArchiveTarget] = []
-    for corp_code in sorted(rows_by_company):
-        shard = _company_shard(corp_code, shard_count)
-        for year in normalized_years:
-            anchor = latest_annual_filing_anchor_from_rows(
-                rows_by_company[corp_code], corp_code=corp_code, bsns_year=year
-            )
-            if anchor is None:
-                targets.append(SourceArchiveTarget(
-                    corp_code=corp_code,
-                    bsns_year=year,
-                    shard=shard,
-                    source_receipt=None,
-                    report_nm=None,
-                    source_uri=None,
-                    source_status="no_source_metadata",
-                ))
-                continue
-            receipt = str(anchor["rcept_no"])
+    for corp_code, year in sorted(membership_by_pair):
+        membership = membership_by_pair[(corp_code, year)]
+        anchor = latest_annual_filing_anchor_from_rows(
+            rows_by_company.get(corp_code, ()), corp_code=corp_code, bsns_year=year
+        )
+        if anchor is None:
             targets.append(SourceArchiveTarget(
-                corp_code=corp_code,
-                bsns_year=year,
-                shard=shard,
-                source_receipt=receipt,
-                report_nm=str(anchor["report_nm"]),
-                source_uri=_document_source_uri(receipt),
-                source_status="discovered",
+                corp_code=corp_code, bsns_year=year, market=membership["market"],
+                shard=_company_shard(corp_code, shard_count), source_receipt=None,
+                report_nm=None, source_uri=None, source_status="no_source_metadata",
             ))
+            continue
+        receipt = str(anchor["rcept_no"])
+        targets.append(SourceArchiveTarget(
+            corp_code=corp_code, bsns_year=year, market=membership["market"],
+            shard=_company_shard(corp_code, shard_count), source_receipt=receipt,
+            report_nm=str(anchor["report_nm"]), source_uri=_document_source_uri(receipt),
+            source_status="discovered",
+        ))
     frozen_targets = tuple(targets)
-    digest = _target_digest(normalized_years, shard_count, frozen_targets)
     return SourceArchivePlan(
-        years=normalized_years,
-        shard_count=shard_count,
-        targets=frozen_targets,
-        target_digest=digest,
+        years=normalized_years, shard_count=shard_count, targets=frozen_targets,
+        target_digest=_target_digest(normalized_years, shard_count, frozen_targets),
     )
 
 
@@ -196,25 +197,17 @@ def run_source_archive_shard(
     archive: ArchiveWriter | None,
     *,
     apply: bool,
+    max_dart_calls: int | None = None,
 ) -> SourceArchiveReport:
-    """Run one stable shard one source asset at a time.
-
-    ``apply=False`` is a strict no-write/no-fetch preview: it neither creates
-    a local manifest nor touches DART/Drive.  ``apply=True`` requires collector
-    mode and writes the frozen target manifest before the first fetch.
-    """
+    """Run one frozen shard, requiring a finite DART call budget for apply."""
     _validate_shard(shard, plan.shard_count)
     selected = plan.targets_for_shard(shard)
     if not apply:
-        return SourceArchiveReport(
-            shard=shard,
-            apply=False,
-            status="dry_run",
-            target_digest=plan.target_digest,
-            outcomes=(),
-        )
+        return SourceArchiveReport(shard, False, "dry_run", plan.target_digest, ())
     if archive is None:
         raise SourceArchiveCampaignError("--apply requires a configured immutable Drive archive")
+    if not isinstance(max_dart_calls, int) or max_dart_calls < 1:
+        raise SourceArchiveCampaignError("--apply requires a finite positive max_dart_calls budget")
     from kreports.runtime import require_collector_mode
 
     require_collector_mode("source archive campaign")
@@ -223,191 +216,284 @@ def run_source_archive_shard(
     shard_dir = state_dir / f"shard-{shard:02d}"
     shard_dir.mkdir(parents=True, exist_ok=True)
     outcomes_path = shard_dir / "outcomes.jsonl"
+    marker_path = shard_dir / "COMMITTED.json"
+    if marker_path.exists():
+        _verify_committed_marker(marker_path, plan, shard, outcomes_path, selected)
     previous = _completed_company_years(outcomes_path, plan.target_digest)
+    budget = _DartBudget(max_dart_calls)
     outcomes: list[dict[str, Any]] = []
-
     for target in selected:
-        target_key = (target.corp_code, target.bsns_year)
-        if target_key in previous:
+        if (target.corp_code, target.bsns_year) in previous:
             outcomes.append(_outcome(target, "already_structurally_complete"))
             continue
-        target_outcomes = _process_target(target, archive)
+        target_outcomes = _process_target(target, archive, budget)
         for outcome in target_outcomes:
-            _append_outcome(outcomes_path, outcome, plan.target_digest)
+            row = _append_outcome(outcomes_path, outcome, plan.target_digest)
+            _archive_campaign_event(archive, row)
         outcomes.extend(target_outcomes)
 
-    complete = bool(selected) and all(
-        outcome["status"] in {"structurally_complete", "already_structurally_complete"}
-        for outcome in outcomes
-        if outcome.get("company_year_terminal", True)
+    terminal = [row for row in outcomes if row.get("company_year_terminal", True)]
+    complete = bool(selected) and len(terminal) == len(selected) and all(
+        row["status"] in {"structurally_complete", "already_structurally_complete"} for row in terminal
     )
-    marker = shard_dir / "COMMITTED.json"
     if complete:
-        _write_committed_marker(marker, plan, shard, outcomes_path)
-    elif marker.exists():
-        raise SourceArchiveCampaignError(
-            "partial shard cannot retain a COMMITTED.json marker; investigate state manually"
-        )
+        _write_committed_marker(marker_path, plan, shard, outcomes_path, selected)
+    elif marker_path.exists():
+        raise SourceArchiveCampaignError("partial shard cannot retain a COMMITTED.json marker")
     return SourceArchiveReport(
-        shard=shard,
-        apply=True,
-        status="complete" if complete else "partial",
-        target_digest=plan.target_digest,
-        outcomes=tuple(outcomes),
-        manifest_path=outcomes_path,
+        shard, True, "complete" if complete else "partial", plan.target_digest, tuple(outcomes),
+        outcomes_path, budget.used, budget.maximum,
     )
 
 
 def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None) -> dict[str, Any]:
-    """Read local campaign state only; it never contacts Drive or DART."""
+    """Verify local cache integrity only; this performs no DART or Drive call."""
     root = Path(state_dir)
-    manifest_path = root / "TARGET.json"
-    if not manifest_path.is_file():
-        raise SourceArchiveCampaignError("frozen TARGET.json is missing")
-    manifest = _read_json(manifest_path)
+    manifest = _read_json(root / "TARGET.json")
     if manifest.get("schema") != CAMPAIGN_SCHEMA:
         raise SourceArchiveCampaignError("TARGET.json schema is unsupported")
-    requested = [shard] if shard is not None else list(range(int(manifest["shard_count"])))
+    shard_count = int(manifest["shard_count"])
+    targets = tuple(_target_from_dict(value) for value in manifest.get("targets", ()))
+    requested = [shard] if shard is not None else list(range(shard_count))
     records: list[dict[str, Any]] = []
     for shard_number in requested:
-        _validate_shard(shard_number, int(manifest["shard_count"]))
-        shard_dir = root / f"shard-{shard_number:02d}"
-        outcome_path = shard_dir / "outcomes.jsonl"
-        outcome_count = len(outcome_path.read_text(encoding="utf-8").splitlines()) if outcome_path.is_file() else 0
+        _validate_shard(shard_number, shard_count)
+        directory = root / f"shard-{shard_number:02d}"
+        outcomes = directory / "outcomes.jsonl"
+        marker = directory / "COMMITTED.json"
+        selected = tuple(target for target in targets if target.shard == shard_number)
+        if marker.exists():
+            plan = SourceArchivePlan(tuple(manifest["years"]), shard_count, targets, str(manifest["target_digest"]), root)
+            _verify_committed_marker(marker, plan, shard_number, outcomes, selected)
         records.append({
             "shard": shard_number,
-            "outcome_count": outcome_count,
-            "committed": (shard_dir / "COMMITTED.json").is_file(),
+            "outcome_count": len(outcomes.read_text(encoding="utf-8").splitlines()) if outcomes.exists() else 0,
+            "committed": marker.exists(),
         })
-    return {
-        "schema": CAMPAIGN_SCHEMA,
-        "target_digest": manifest["target_digest"],
-        "target_count": manifest["target_count"],
-        "shards": records,
-    }
+    return {"schema": CAMPAIGN_SCHEMA, "target_digest": manifest["target_digest"], "target_count": manifest["target_count"], "shards": records}
 
 
-def _process_target(target: SourceArchiveTarget, archive: ArchiveWriter) -> list[dict[str, Any]]:
+def _verified_memberships(session: Session, years: tuple[int, ...]) -> list[dict[str, Any]]:
+    inspector = inspect(session.get_bind())
+    table = CompanyYearListingMembership.__tablename__
+    if table not in inspector.get_table_names():
+        raise SourceArchiveCampaignError("historical listing membership evidence is unavailable: table missing")
+    columns = {column["name"] for column in inspector.get_columns(table)}
+    missing = sorted(_REQUIRED_MEMBERSHIP_COLUMNS - columns)
+    if missing:
+        raise SourceArchiveCampaignError("historical listing membership evidence is unavailable: missing " + ",".join(missing))
+    rows = session.execute(select(
+        CompanyYearListingMembership.corp_code, CompanyYearListingMembership.bsns_year,
+        CompanyYearListingMembership.market, CompanyYearListingMembership.evidence_basis,
+        CompanyYearListingMembership.manifest_checksum, CompanyYearListingMembership.manifest_storage_uri,
+        CompanyYearListingMembership.normalized_checksum, CompanyYearListingMembership.normalized_storage_uri,
+    ).where(
+        CompanyYearListingMembership.bsns_year.in_(years),
+        CompanyYearListingMembership.market.in_(("KOSPI", "KOSDAQ")),
+        CompanyYearListingMembership.status == "verified",
+    )).mappings().all()
+    market_years = {(int(row["bsns_year"]), str(row["market"])) for row in rows}
+    missing_market_years = [f"{year}:{market}" for year in years for market in ("KOSPI", "KOSDAQ") if (year, market) not in market_years]
+    if missing_market_years:
+        raise SourceArchiveCampaignError("historical listing membership evidence is unavailable: missing verified " + ",".join(missing_market_years))
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        value = dict(row)
+        if not all(str(value[field] or "").strip() for field in (
+            "evidence_basis", "manifest_checksum", "manifest_storage_uri", "normalized_checksum", "normalized_storage_uri",
+        )):
+            raise SourceArchiveCampaignError("historical listing membership evidence is invalid")
+        normalized.append({"corp_code": str(value["corp_code"]), "bsns_year": int(value["bsns_year"]), "market": str(value["market"])})
+    return normalized
+
+
+def _process_target(target: SourceArchiveTarget, archive: ArchiveWriter, budget: _DartBudget) -> list[dict[str, Any]]:
     if target.source_status != "discovered" or not target.source_receipt or not target.source_uri:
         return [_outcome(target, target.source_status)]
-    discovered = _outcome(target, "discovered", company_year_terminal=False)
+    outcomes = [_outcome(target, "discovered", report_kind="company_year", company_year_terminal=False)]
+    business, business_outcomes = _business_family(target, archive, budget)
+    audit, audit_outcomes = _audit_family(target, archive, budget)
+    outcomes.extend(business_outcomes)
+    outcomes.extend(audit_outcomes)
+    outcomes.append(_outcome(target, "structurally_complete" if business and audit else "partial_source", report_kind="company_year"))
+    return outcomes
+
+
+def _business_family(target: SourceArchiveTarget, archive: ArchiveWriter, budget: _DartBudget) -> tuple[bool, list[dict[str, Any]]]:
+    if not budget.consume():
+        return False, [_outcome(target, "dart_budget_exhausted", report_kind="business_report", error="document_xml")]
     try:
-        documents = fetch_document_zip_files(target.source_receipt)
-    except Exception as exc:  # The campaign records a retryable external failure.
-        return [discovered, _outcome(target, "fetch_failed", error=_bounded_error(exc))]
-    if not documents:
-        return [discovered, _outcome(target, "partial_source", error="document_xml_empty")]
-    asset_failures: list[dict[str, Any]] = []
-    asset_successes: list[dict[str, Any]] = []
-    for name, content in sorted(documents.items()):
-        if not isinstance(content, str) or not content.strip():
-            asset_failures.append(_outcome(target, "asset_empty", asset_name=name, company_year_terminal=False))
+        assets = fetch_document_zip_asset_bytes(target.source_receipt or "")
+    except Exception as exc:
+        return False, [_outcome(target, "fetch_failed", report_kind="business_report", error=_bounded_error(exc))]
+    if not assets:
+        return False, [_outcome(target, "partial_source", report_kind="business_report", error="document_xml_empty")]
+    outcomes: list[dict[str, Any]] = []
+    success = True
+    for filename, raw in sorted(assets.items()):
+        complete, asset_outcomes = _archive_asset(
+            target, archive, report_kind="business_report", source_locator=filename,
+            filename=filename, content_type="xml", raw_bytes=raw,
+        )
+        success = success and complete
+        outcomes.extend(asset_outcomes)
+    return success, outcomes
+
+
+def _audit_family(target: SourceArchiveTarget, archive: ArchiveWriter, budget: _DartBudget) -> tuple[bool, list[dict[str, Any]]]:
+    if not budget.consume():
+        return False, [_outcome(target, "dart_budget_exhausted", report_kind="audit_report", error="main_html")]
+    main_html = fetch_dart_main_html(target.source_receipt or "")
+    if not main_html:
+        return False, [_outcome(target, "partial_source", report_kind="audit_report", error="audit_main_html_empty")]
+    attachments = select_primary_audit_report_attachments(main_html)
+    if not attachments:
+        return False, [_outcome(target, "partial_source", report_kind="audit_report", error="audit_attachment_missing")]
+    outcomes: list[dict[str, Any]] = []
+    success = True
+    for attachment in attachments:
+        dcm_no = str(attachment.get("dcm_no") or "")
+        receipt = str(attachment.get("rcept_no") or target.source_receipt)
+        if not dcm_no:
+            success = False
+            outcomes.append(_outcome(target, "partial_source", report_kind="audit_report", error="audit_attachment_locator_missing"))
             continue
+        content_type, raw, exhausted = _fetch_audit_attachment(receipt, dcm_no, budget)
+        if exhausted:
+            success = False
+            outcomes.append(_outcome(
+                target, "dart_budget_exhausted", report_kind="audit_report",
+                source_locator=f"dcm:{dcm_no}", error="audit_attachment",
+            ))
+            continue
+        if raw is None:
+            success = False
+            outcomes.append(_outcome(target, "partial_source", report_kind="audit_report", source_locator=f"dcm:{dcm_no}", error="audit_attachment_unavailable"))
+            continue
+        complete, asset_outcomes = _archive_asset(
+            target, archive, report_kind="audit_report", source_locator=f"dcm:{dcm_no}",
+            filename=str(attachment.get("title") or f"{dcm_no}.{content_type}"), content_type=content_type,
+            raw_bytes=raw, source_receipt=receipt,
+        )
+        success = success and complete
+        outcomes.extend(asset_outcomes)
+    return success, outcomes
+
+
+def _fetch_audit_attachment(receipt: str, dcm_no: str, budget: _DartBudget) -> tuple[str, bytes | None, bool]:
+    if not budget.consume():
+        return "html", None, True
+    viewer = fetch_viewer_bytes(receipt, dcm_no)
+    if viewer is not None:
         try:
-            raw_bytes = content.encode("utf-8")
-            source_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-            metadata = {
-                "source_receipt": target.source_receipt,
-                "source_uri": target.source_uri,
-                "archive_version": "raw-source-v1",
-                "corp_code": target.corp_code,
-                "bsns_year": str(target.bsns_year),
-                "asset_name": name,
-            }
-            raw_object = archive.archive_bytes(data=raw_bytes, extension="xml", metadata=metadata)
-            asset_successes.append(_outcome(
-                target,
-                "archived_verified",
-                asset_name=name,
-                company_year_terminal=False,
-                raw_object=_object_summary(raw_object),
-            ))
-            parsed = parse_document_structure(
-                raw_bytes,
-                content_type="xml",
-                source_sha256=source_sha256,
-                source_receipt=target.source_receipt,
-                source_uri=target.source_uri,
-            )
-            parsed_object = archive_structured_document(archive, parsed)  # type: ignore[arg-type]
-            parsed_outcome = _outcome(
-                target,
-                "generically_parsed",
-                asset_name=name,
-                company_year_terminal=False,
-                structural_status=parsed.structural_status,
-                parsed_object=_object_summary(parsed_object),
-            )
-            if parsed.structural_status != "complete":
-                asset_successes.append(parsed_outcome)
-                asset_failures.append(_outcome(
-                    target, "asset_requires_review", asset_name=name,
-                    company_year_terminal=False,
-                ))
-                continue
-            asset_successes.append(parsed_outcome)
-        except Exception as exc:
-            asset_failures.append(_outcome(
-                target, "asset_failed", asset_name=name, error=_bounded_error(exc),
-                company_year_terminal=False,
-            ))
-    if asset_failures:
-        return [discovered, *asset_successes, *asset_failures, _outcome(target, "partial_source")]
-    return [discovered, *asset_successes, _outcome(target, "structurally_complete")]
+            decoded = _decode_for_parser(viewer)
+        except UnicodeDecodeError:
+            decoded = None
+        if decoded is not None and not audit_viewer_requires_pdf_fallback(decoded):
+            return "html", viewer, False
+    if not budget.consume():
+        return "pdf", None, True
+    return "pdf", fetch_audit_report_pdf(receipt, dcm_no), False
 
 
-def _outcome(
+def _archive_asset(
     target: SourceArchiveTarget,
-    status: str,
+    archive: ArchiveWriter,
     *,
-    asset_name: str | None = None,
-    error: str | None = None,
-    company_year_terminal: bool = True,
-    **extra: Any,
-) -> dict[str, Any]:
+    report_kind: str,
+    source_locator: str,
+    filename: str,
+    content_type: str,
+    raw_bytes: bytes,
+    source_receipt: str | None = None,
+) -> tuple[bool, list[dict[str, Any]]]:
+    receipt = source_receipt or target.source_receipt
+    if not isinstance(raw_bytes, bytes) or not raw_bytes:
+        return False, [_outcome(target, "asset_empty", report_kind=report_kind, source_locator=source_locator)]
+    raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    source_uri = _asset_source_uri(receipt or "", source_locator, content_type)
+    metadata = {
+        "source_receipt": receipt or "", "source_uri": source_uri, "archive_version": "raw-source-v1",
+        "corp_code": target.corp_code, "bsns_year": str(target.bsns_year), "report_kind": report_kind,
+        "source_locator": source_locator,
+    }
+    try:
+        raw_object = archive.archive_bytes(data=raw_bytes, extension=_extension(content_type), metadata=metadata)
+        outcomes = [_outcome(
+            target, "archived_verified", report_kind=report_kind, source_locator=source_locator,
+            filename=filename, content_type=content_type, source_receipt=receipt,
+            raw_object=_object_summary(raw_object), raw_sha256=raw_sha256, company_year_terminal=False,
+        )]
+        parsed = parse_document_structure(
+            raw_bytes, content_type=content_type, source_sha256=raw_sha256,
+            source_receipt=receipt, source_uri=source_uri,
+        )
+        parsed_object = archive_structured_document(archive, parsed)  # type: ignore[arg-type]
+        outcomes.append(_outcome(
+            target, "generically_parsed", report_kind=report_kind, source_locator=source_locator,
+            filename=filename, content_type=content_type, source_receipt=receipt,
+            structural_status=parsed.structural_status, parsed_object=_object_summary(parsed_object),
+            parser_version=PARSER_VERSION, company_year_terminal=False,
+        ))
+        document = {
+            "schema": "source-archive-document-manifest.v1", "corp_code": target.corp_code,
+            "bsns_year": target.bsns_year, "market": target.market, "report_kind": report_kind,
+            "source_receipt": receipt, "source_uri": source_uri, "source_locator": source_locator,
+            "filename": filename, "content_type": content_type, "raw": _object_summary(raw_object),
+            "parse": {**_object_summary(parsed_object), "parser_version": PARSER_VERSION, "structural_status": parsed.structural_status},
+            "status": "structurally_complete" if parsed.structural_status == "complete" else "requires_review",
+        }
+        manifest = archive.archive_bytes(
+            data=_canonical_json(document), extension="json",
+            metadata={"source_receipt": receipt or "", "source_uri": source_uri, "archive_version": "source-archive-document-manifest-v1"},
+        )
+        outcomes[-1]["document_manifest"] = _object_summary(manifest)
+        return parsed.structural_status == "complete", outcomes
+    except Exception as exc:
+        return False, [_outcome(target, "asset_failed", report_kind=report_kind, source_locator=source_locator, error=_bounded_error(exc))]
+
+
+def _archive_campaign_event(archive: ArchiveWriter, row: Mapping[str, Any]) -> None:
+    receipt = str(row.get("source_receipt") or "campaign")
+    uri = str(row.get("source_uri") or f"campaign://{row['target_digest']}/{row['shard']}")
+    archive.archive_bytes(
+        data=_canonical_json({"schema": "source-archive-campaign-manifest.v1", **dict(row)}), extension="json",
+        metadata={"source_receipt": receipt, "source_uri": uri, "archive_version": "source-archive-campaign-manifest-v1"},
+    )
+
+
+def _outcome(target: SourceArchiveTarget, status: str, *, report_kind: str = "company_year", source_locator: str | None = None, error: str | None = None, company_year_terminal: bool = True, **extra: Any) -> dict[str, Any]:
     return {
-        "schema": CAMPAIGN_SCHEMA,
-        "recorded_at": datetime.now(UTC).isoformat(),
-        "corp_code": target.corp_code,
-        "bsns_year": target.bsns_year,
-        "shard": target.shard,
-        "source_receipt": target.source_receipt,
-        "source_uri": target.source_uri,
-        "status": status,
-        "asset_name": asset_name,
-        "error": error,
-        "company_year_terminal": company_year_terminal,
-        **extra,
+        "schema": CAMPAIGN_SCHEMA, "recorded_at": datetime.now(UTC).isoformat(),
+        "corp_code": target.corp_code, "bsns_year": target.bsns_year, "market": target.market,
+        "shard": target.shard, "source_receipt": target.source_receipt, "source_uri": target.source_uri,
+        "report_kind": report_kind, "source_locator": source_locator, "status": status,
+        "error": error, "company_year_terminal": company_year_terminal, **extra,
     }
 
 
 def _write_frozen_target_manifest(plan: SourceArchivePlan, state_dir: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    destination = state_dir / "TARGET.json"
+    path = state_dir / "TARGET.json"
     payload = _canonical_json(plan.target_manifest)
-    if destination.exists():
-        if destination.read_bytes() != payload:
-            raise SourceArchiveCampaignError(
-                "campaign TARGET.json conflicts with the supplied frozen target plan"
-            )
-        return
-    _atomic_write(destination, payload)
+    if path.exists() and path.read_bytes() != payload:
+        raise SourceArchiveCampaignError("campaign TARGET.json conflicts with the supplied frozen target plan")
+    if not path.exists():
+        _atomic_write(path, payload)
 
 
-def _append_outcome(path: Path, outcome: Mapping[str, Any], target_digest: str) -> None:
-    row = dict(outcome)
-    row["target_digest"] = target_digest
+def _append_outcome(path: Path, outcome: Mapping[str, Any], target_digest: str) -> dict[str, Any]:
+    row = {**dict(outcome), "target_digest": target_digest}
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        handle.write("\n")
+        handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+    return row
 
 
 def _completed_company_years(path: Path, target_digest: str) -> set[tuple[str, int]]:
-    if not path.is_file():
+    if not path.exists():
         return set()
     completed: set[tuple[str, int]] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        row = json.loads(line)
+    for row in _outcome_rows(path):
         if row.get("target_digest") != target_digest:
             raise SourceArchiveCampaignError("shard outcomes belong to a different frozen target plan")
         if row.get("status") == "structurally_complete":
@@ -415,53 +501,104 @@ def _completed_company_years(path: Path, target_digest: str) -> set[tuple[str, i
     return completed
 
 
-def _write_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, outcomes_path: Path) -> None:
-    payload = {
-        "schema": CAMPAIGN_SCHEMA,
-        "target_digest": plan.target_digest,
-        "shard": shard,
-        "outcomes_sha256": hashlib.sha256(outcomes_path.read_bytes()).hexdigest(),
-        "committed_at": datetime.now(UTC).isoformat(),
-    }
+def _write_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, outcomes: Path, selected: tuple[SourceArchiveTarget, ...]) -> None:
     if path.exists():
-        existing = _read_json(path)
-        if existing.get("target_digest") != plan.target_digest:
-            raise SourceArchiveCampaignError("COMMITTED.json belongs to a different target plan")
+        _verify_committed_marker(path, plan, shard, outcomes, selected)
         return
-    _atomic_write(path, _canonical_json(payload))
+    _atomic_write(path, _canonical_json({
+        "schema": CAMPAIGN_SCHEMA, "target_digest": plan.target_digest, "shard": shard,
+        "outcomes_sha256": hashlib.sha256(outcomes.read_bytes()).hexdigest(),
+        "committed_at": datetime.now(UTC).isoformat(),
+    }))
+
+
+def _verify_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, outcomes: Path, selected: tuple[SourceArchiveTarget, ...]) -> None:
+    marker = _read_json(path)
+    if marker.get("schema") != CAMPAIGN_SCHEMA or marker.get("target_digest") != plan.target_digest or marker.get("shard") != shard:
+        raise SourceArchiveCampaignError("COMMITTED.json identity does not match the frozen target plan")
+    actual = hashlib.sha256(outcomes.read_bytes()).hexdigest() if outcomes.exists() else ""
+    if marker.get("outcomes_sha256") != actual:
+        raise SourceArchiveCampaignError("COMMITTED.json outcomes checksum mismatch")
+    latest: dict[tuple[str, int], str] = {}
+    for row in _outcome_rows(outcomes):
+        if row.get("company_year_terminal", True):
+            latest[(str(row["corp_code"]), int(row["bsns_year"]))] = str(row["status"])
+    expected = {(target.corp_code, target.bsns_year) for target in selected}
+    if set(latest) != expected or any(latest[key] != "structurally_complete" for key in expected):
+        raise SourceArchiveCampaignError("COMMITTED.json terminal outcomes are incomplete")
+
+
+def _outcome_rows(path: Path) -> list[dict[str, Any]]:
+    try:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SourceArchiveCampaignError("invalid shard outcomes manifest") from exc
+
+
+def _require_non_runtime_source_session(session: Session) -> None:
+    from kreports.config import settings
+
+    left = _sqlite_identity(str(session.get_bind().url))
+    right = _sqlite_identity(str(settings.db_url))
+    if left is not None and right is not None and _same_file_identity(left, right):
+        raise SourceArchiveCampaignError("source archive planning requires a non-runtime collector database")
+
+
+def _sqlite_identity(value: str) -> Path | None:
+    try:
+        parsed = make_url(value)
+    except Exception:
+        return None
+    if parsed.get_backend_name() != "sqlite" or not parsed.database or parsed.database == ":memory:":
+        return None
+    database = str(parsed.database)
+    if database.startswith("file:"):
+        uri = urlsplit(database)
+        database = unquote(uri.path)
+    return Path(database).expanduser().resolve()
+
+
+def _same_file_identity(left: Path, right: Path) -> bool:
+    try:
+        return left.samefile(right)
+    except OSError:
+        return left == right
 
 
 def _target_digest(years: tuple[int, ...], shard_count: int, targets: tuple[SourceArchiveTarget, ...]) -> str:
-    payload = {
-        "schema": CAMPAIGN_SCHEMA,
-        "years": list(years),
-        "shard_count": shard_count,
-        "targets": [target.to_dict() for target in targets],
-    }
-    return hashlib.sha256(_canonical_json(payload)).hexdigest()
+    return hashlib.sha256(_canonical_json({"schema": CAMPAIGN_SCHEMA, "years": list(years), "shard_count": shard_count, "targets": [target.to_dict() for target in targets]})).hexdigest()
+
+
+def _target_from_dict(value: Mapping[str, Any]) -> SourceArchiveTarget:
+    return SourceArchiveTarget(
+        corp_code=str(value["corp_code"]), bsns_year=int(value["bsns_year"]), market=str(value["market"]),
+        shard=int(value["shard"]), source_receipt=value.get("source_receipt"), report_nm=value.get("report_nm"),
+        source_uri=value.get("source_uri"), source_status=str(value["source_status"]),
+        required_report_kinds=tuple(value.get("required_report_kinds", ("business_report", "audit_report"))),  # type: ignore[arg-type]
+    )
 
 
 def _company_shard(corp_code: str, shard_count: int) -> int:
-    return int.from_bytes(hashlib.sha256(corp_code.encode("utf-8")).digest(), "big") % shard_count
+    return int.from_bytes(hashlib.sha256(corp_code.encode()).digest(), "big") % shard_count
 
 
 def _normalize_years(years: Iterable[int]) -> tuple[int, ...]:
     try:
-        normalized = tuple(sorted({int(year) for year in years}))
+        result = tuple(sorted({int(year) for year in years}))
     except (TypeError, ValueError) as exc:
         raise SourceArchiveCampaignError("years must be integer business years") from exc
-    if not normalized or any(year < 1900 or year > 3000 for year in normalized):
+    if not result or any(year < 1900 or year > 3000 for year in result):
         raise SourceArchiveCampaignError("years must be a non-empty reasonable business-year set")
-    return normalized
+    return result
 
 
 def _validate_shard_count(shard_count: int) -> None:
-    if not isinstance(shard_count, int) or shard_count < 1 or shard_count > 1024:
+    if not isinstance(shard_count, int) or not 1 <= shard_count <= 1024:
         raise SourceArchiveCampaignError("shard_count must be an integer from 1 to 1024")
 
 
 def _validate_shard(shard: int, shard_count: int) -> None:
-    if not isinstance(shard, int) or shard < 0 or shard >= shard_count:
+    if not isinstance(shard, int) or not 0 <= shard < shard_count:
         raise SourceArchiveCampaignError(f"shard must be between 0 and {shard_count - 1}")
 
 
@@ -471,44 +608,36 @@ def _required_state_dir(plan: SourceArchivePlan) -> Path:
     return Path(plan.state_dir)
 
 
-def _require_non_runtime_source_session(session: Session) -> None:
-    """Refuse the configured public/runtime database even for read-only planning.
-
-    A campaign target manifest becomes durable operational state, so accepting
-    the active runtime handle would invite an operator to treat production as a
-    collector source.  Tests and explicit candidate sessions use a different
-    bind and remain valid.
-    """
-    from kreports.config import settings
-
-    bind = session.get_bind()
-    bound_url = str(getattr(bind, "url", ""))
-    configured_url = str(settings.db_url)
-    if bound_url == configured_url:
-        raise SourceArchiveCampaignError(
-            "source archive planning requires a non-runtime collector database"
-        )
-    if bound_url.startswith("sqlite:///") and configured_url.startswith("sqlite:///"):
-        bound_path = Path(bound_url.removeprefix("sqlite:///"))
-        configured_path = Path(configured_url.removeprefix("sqlite:///"))
+def _decode_for_parser(value: bytes) -> str:
+    for encoding in ("utf-8", "euc-kr", "cp949"):
         try:
-            if bound_path.expanduser().resolve() == configured_path.expanduser().resolve():
-                raise SourceArchiveCampaignError(
-                    "source archive planning requires a non-runtime collector database"
-                )
-        except OSError:
-            return
+            return value.decode(encoding, errors="strict")
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("source", value, 0, len(value), "no strict DART text decoder matched")
 
 
 def _document_source_uri(receipt: str) -> str:
     return f"https://opendart.fss.or.kr/api/document.xml?rcept_no={receipt}"
 
 
+def _asset_source_uri(receipt: str, locator: str, content_type: str) -> str:
+    if content_type == "pdf":
+        return f"https://dart.fss.or.kr/pdf/download/pdf.do?rcp_no={receipt}&{locator}"
+    if locator.startswith("dcm:"):
+        return f"https://dart.fss.or.kr/report/viewer.do?rcpNo={receipt}&dcmNo={locator[4:]}"
+    return _document_source_uri(receipt)
+
+
+def _extension(content_type: str) -> str:
+    return {"html": "html", "pdf": "pdf", "xml": "xml"}.get(content_type, "bin")
+
+
 def _object_summary(value: Any) -> dict[str, Any]:
-    if hasattr(value, "sha256"):
-        return {"sha256": value.sha256, "byte_length": value.byte_length}
+    if hasattr(value, "storage_uri"):
+        return {"storage_uri": value.storage_uri, "sha256": value.sha256, "byte_length": value.byte_length}
     if isinstance(value, Mapping):
-        return {key: value[key] for key in ("sha256", "byte_length") if key in value}
+        return {key: value[key] for key in ("storage_uri", "sha256", "byte_length") if key in value}
     return {"identity": str(value)}
 
 
@@ -517,7 +646,7 @@ def _bounded_error(exc: BaseException) -> str:
 
 
 def _canonical_json(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
@@ -528,9 +657,9 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SourceArchiveCampaignError(f"invalid campaign state: {path}") from exc
-    if not isinstance(loaded, dict):
+    if not isinstance(value, dict):
         raise SourceArchiveCampaignError(f"campaign state must be an object: {path}")
-    return loaded
+    return value

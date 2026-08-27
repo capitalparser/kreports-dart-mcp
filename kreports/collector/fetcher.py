@@ -429,10 +429,12 @@ def fetch_xbrl_zip(rcept_no: str, reprt_code: str) -> bytes | None:
 # 사업보고서 document.xml 다운로드
 # ---------------------------------------------------------------------------
 
-def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
-    """
-    DART document.xml ZIP의 모든 XML 파일을 반환한다.
-    Returns: {filename: content_str} — 메인 파일 포함 전체
+def fetch_document_zip_asset_bytes(rcept_no: str) -> dict[str, bytes]:
+    """Return original ``document.xml`` ZIP entry bytes without decoding.
+
+    This is the canonical raw-retention boundary.  Callers that archive source
+    evidence must use these exact bytes; text decoding is a later parser-only
+    operation and must never determine the raw object hash.
     """
     _check_api_key()
     params = {"crtfc_key": settings.dart_api_key, "rcept_no": rcept_no}
@@ -444,33 +446,44 @@ def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
         logger.warning("document.xml ZIP 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
         return {}
 
-    result: dict[str, str] = {}
+    result: dict[str, bytes] = {}
     try:
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
             for name in zf.namelist():
                 if not name.endswith(".xml"):
                     continue
                 with zf.open(name) as f:
-                    raw = f.read()
-                for enc in ("utf-8", "euc-kr", "cp949"):
-                    try:
-                        result[name] = raw.decode(enc)
-                        break
-                    except (UnicodeDecodeError, LookupError):
-                        continue
-                else:
-                    result[name] = raw.decode("utf-8", errors="replace")
+                    result[name] = f.read()
     except Exception as e:
-        raw_xml = _raw_document_xml_from_response(resp.content, resp.encoding)
-        if raw_xml is not None:
-            return {f"{rcept_no}.xml": raw_xml}
+        raw_xml = resp.content
         text = _decode_dart_text(resp.content, resp.encoding).strip()
         status, message = _dart_error_from_xml(text)
         if status:
             _raise_if_dart_limit(status, message)
             logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
             return {}
+        if raw_xml.lstrip().startswith(b"<"):
+            return {f"{rcept_no}.xml": raw_xml}
         logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, redact_external_error(e))
+    return result
+
+
+def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
+    """Decode document ZIP assets for legacy text consumers only.
+
+    New archive code must use :func:`fetch_document_zip_asset_bytes` so the
+    immutable raw object remains exactly the DART response entry bytes.
+    """
+    result: dict[str, str] = {}
+    for name, raw in fetch_document_zip_asset_bytes(rcept_no).items():
+        for enc in ("utf-8", "euc-kr", "cp949"):
+            try:
+                result[name] = raw.decode(enc)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        else:
+            result[name] = raw.decode("utf-8", errors="replace")
     return result
 
 
@@ -595,7 +608,7 @@ def parse_viewer_tree_nodes(main_html: str) -> list[dict[str, str]]:
     return nodes
 
 
-def fetch_viewer_html(
+def fetch_viewer_bytes(
     rcept_no: str,
     dcm_no: str,
     *,
@@ -603,8 +616,8 @@ def fetch_viewer_html(
     offset: str = "0",
     length: str = "0",
     dtd: str = "HTML",
-) -> str | None:
-    """Fetch a DART attachment viewer body by rcpNo/dcmNo."""
+) -> bytes | None:
+    """Fetch original DART attachment viewer bytes without decoding."""
     for attempt in range(1, 4):
         try:
             with _get_client() as client:
@@ -622,13 +635,29 @@ def fetch_viewer_html(
                 )
                 resp.raise_for_status()
                 time.sleep(settings.request_delay)
-                return _decode_dart_text(resp.content, resp.encoding)
+                return resp.content
         except Exception as e:
             if attempt == 3:
                 logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, redact_external_error(e))
                 return None
             time.sleep(settings.request_delay * attempt)
     return None
+
+
+def fetch_viewer_html(
+    rcept_no: str,
+    dcm_no: str,
+    *,
+    ele_id: str = "0",
+    offset: str = "0",
+    length: str = "0",
+    dtd: str = "HTML",
+) -> str | None:
+    """Fetch a DART attachment viewer body for legacy text consumers."""
+    payload = fetch_viewer_bytes(
+        rcept_no, dcm_no, ele_id=ele_id, offset=offset, length=length, dtd=dtd
+    )
+    return _decode_dart_text(payload, None) if payload is not None else None
 
 
 def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:

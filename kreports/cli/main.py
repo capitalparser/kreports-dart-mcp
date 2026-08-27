@@ -2663,6 +2663,10 @@ def source_archive_run_cmd(
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
     apply: bool = typer.Option(False, "--apply", help="DART/Drive 쓰기를 명시적으로 허용"),
+    max_dart_calls: Optional[int] = typer.Option(
+        None, "--max-dart-calls", min=1,
+        help="--apply 실행에 허용할 유한한 DART 호출 횟수",
+    ),
 ) -> None:
     """Preview or explicitly run exactly one source-archive shard."""
     try:
@@ -2671,12 +2675,16 @@ def source_archive_run_cmd(
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count
         ).with_state_dir(state_dir)
+        if apply and max_dart_calls is None:
+            raise ValueError("--apply requires --max-dart-calls")
         archive = None
         if apply:
             from kreports.storage.drive_archive import drive_archive_from_runtime
 
             archive = drive_archive_from_runtime()
-        report = run_source_archive_shard(plan, shard, archive, apply=apply)
+        report = run_source_archive_shard(
+            plan, shard, archive, apply=apply, max_dart_calls=max_dart_calls
+        )
     except Exception as exc:
         _source_archive_cli_error(exc)
     typer.echo(json.dumps(
