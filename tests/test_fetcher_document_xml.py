@@ -1,3 +1,6 @@
+import io
+import zipfile
+
 import pytest
 
 from kreports.collector import fetcher
@@ -82,6 +85,21 @@ def test_fetch_document_zip_files_accepts_raw_document_xml(monkeypatch):
     assert "원문입니다" in out["20250331000001.xml"]
 
 
+def test_fetch_document_zip_assets_retains_exact_response_container_and_members(monkeypatch):
+    """The archive workflow needs both original ZIP evidence and parseable entries."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("main.xml", b"<DOCUMENT><P>\x80\xff</P></DOCUMENT>")
+    original_zip = buffer.getvalue()
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(fetcher, "_get_client", lambda: _FakeClient(_FakeResponse(original_zip, "application/zip")))
+
+    assets = fetcher.fetch_document_zip_asset_bytes("20250331000001")
+
+    assert assets.container_bytes == original_zip
+    assert assets["main.xml"] == b"<DOCUMENT><P>\x80\xff</P></DOCUMENT>"
+
+
 def test_fetch_document_xml_raises_on_dart_limit_xml(monkeypatch):
     raw = b"<result><status>020</status><message>limit exceeded</message></result>"
     monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
@@ -151,6 +169,44 @@ def test_fetch_audit_report_pdf_uses_official_endpoint_and_safe_headers(monkeypa
     assert kwargs["params"] == {"rcp_no": "20260428000679", "dcm_no": "11351227"}
     assert kwargs["headers"]["Referer"].endswith("main.do?rcpNo=20260428000679")
     assert "Mozilla" in kwargs["headers"]["User-Agent"]
+
+
+def test_request_budget_counts_each_viewer_retry_and_pdf_fallback_attempt(monkeypatch):
+    """A campaign limit must cap physical HTTP attempts, not logical fetches."""
+    attempts: list[str] = []
+
+    class FlakyViewerThenPdf:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, *_args, **_kwargs):
+            attempts.append("viewer")
+            raise RuntimeError("temporary viewer failure")
+
+        def stream(self, *_args, **_kwargs):
+            attempts.append("pdf")
+            return _FakeResponse(b"%PDF-1.7\nbody", "application/pdf")
+
+    monkeypatch.setattr(fetcher, "_get_client", FlakyViewerThenPdf)
+    monkeypatch.setattr(fetcher.time, "sleep", lambda _seconds: None)
+
+    with fetcher.request_budget(4) as budget:
+        assert fetcher.fetch_viewer_bytes("20260428000679", "11351227") is None
+        assert fetcher.fetch_audit_report_pdf("20260428000679", "11351227") == b"%PDF-1.7\nbody"
+
+    assert attempts == ["viewer", "viewer", "viewer", "pdf"]
+    assert budget.used_calls == 4
+
+    attempts.clear()
+    with fetcher.request_budget(3) as budget:
+        assert fetcher.fetch_viewer_bytes("20260428000679", "11351227") is None
+        with pytest.raises(fetcher.DartRequestBudgetExceeded):
+            fetcher.fetch_audit_report_pdf("20260428000679", "11351227")
+    assert attempts == ["viewer", "viewer", "viewer"]
+    assert budget.used_calls == 3
 
 
 def test_fetch_audit_report_pdf_stops_streaming_at_the_byte_cap(monkeypatch):

@@ -2637,21 +2637,21 @@ def source_archive_plan_cmd(
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
 ) -> None:
-    """Freeze an auditable target manifest without making external requests."""
+    """Write a no-network target preview; --apply freezes the Drive-backed target."""
     try:
-        from kreports.maintenance.source_archive_campaign import _write_frozen_target_manifest
+        from kreports.maintenance.source_archive_campaign import write_source_archive_plan_preview
 
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count
         ).with_state_dir(state_dir)
-        _write_frozen_target_manifest(plan, plan.state_dir)
+        manifest_path = write_source_archive_plan_preview(plan, plan.state_dir)
     except Exception as exc:
         _source_archive_cli_error(exc)
     typer.echo(json.dumps({
         "status": "frozen",
         "target_digest": plan.target_digest,
         "target_count": len(plan.targets),
-        "manifest_path": str(plan.state_dir / "TARGET.json"),
+        "manifest_path": str(manifest_path),
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 

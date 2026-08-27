@@ -36,6 +36,14 @@ _CORP_ZIP_CACHE = _CACHE_DIR / "corp_code.zip"
 _CACHE_MAX_AGE_DAYS = 30
 
 
+class DocumentZipAssets(dict[str, bytes]):
+    """Indexed original ZIP members, retaining the exact response container bytes."""
+
+    def __init__(self, assets: dict[str, bytes], *, container_bytes: bytes) -> None:
+        super().__init__(assets)
+        self.container_bytes = container_bytes
+
+
 class DartBoundedStop(RuntimeError):
     """Base class for stop signals that a bounded collector must propagate."""
 
@@ -429,7 +437,7 @@ def fetch_xbrl_zip(rcept_no: str, reprt_code: str) -> bytes | None:
 # 사업보고서 document.xml 다운로드
 # ---------------------------------------------------------------------------
 
-def fetch_document_zip_asset_bytes(rcept_no: str) -> dict[str, bytes]:
+def fetch_document_zip_asset_bytes(rcept_no: str) -> DocumentZipAssets:
     """Return original ``document.xml`` ZIP entry bytes without decoding.
 
     This is the canonical raw-retention boundary.  Callers that archive source
@@ -440,8 +448,11 @@ def fetch_document_zip_asset_bytes(rcept_no: str) -> dict[str, bytes]:
     params = {"crtfc_key": settings.dart_api_key, "rcept_no": rcept_no}
     try:
         with _get_client() as client:
+            _record_request_attempt("document.xml")
             resp = client.get(f"{DART_BASE}/document.xml", params=params, timeout=60.0)
             resp.raise_for_status()
+    except DartRequestBudgetExceeded:
+        raise
     except Exception as e:
         logger.warning("document.xml ZIP 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
         return {}
@@ -463,9 +474,9 @@ def fetch_document_zip_asset_bytes(rcept_no: str) -> dict[str, bytes]:
             logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
             return {}
         if raw_xml.lstrip().startswith(b"<"):
-            return {f"{rcept_no}.xml": raw_xml}
+            return DocumentZipAssets({f"{rcept_no}.xml": raw_xml}, container_bytes=raw_xml)
         logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, redact_external_error(e))
-    return result
+    return DocumentZipAssets(result, container_bytes=resp.content)
 
 
 def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:
@@ -548,6 +559,7 @@ def fetch_dart_main_html(rcept_no: str) -> str | None:
     for attempt in range(1, 4):
         try:
             with _get_client() as client:
+                _record_request_attempt("dsaf001/main.do")
                 resp = client.get(
                     f"{DART_WEB_BASE}/dsaf001/main.do",
                     params={"rcpNo": rcept_no},
@@ -555,6 +567,8 @@ def fetch_dart_main_html(rcept_no: str) -> str | None:
                 )
                 resp.raise_for_status()
                 return _decode_dart_text(resp.content, resp.encoding)
+        except DartRequestBudgetExceeded:
+            raise
         except Exception as e:
             if attempt == 3:
                 logger.warning("DART main HTML 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
@@ -621,6 +635,7 @@ def fetch_viewer_bytes(
     for attempt in range(1, 4):
         try:
             with _get_client() as client:
+                _record_request_attempt("report/viewer.do")
                 resp = client.get(
                     f"{DART_WEB_BASE}/report/viewer.do",
                     params={
@@ -636,6 +651,8 @@ def fetch_viewer_bytes(
                 resp.raise_for_status()
                 time.sleep(settings.request_delay)
                 return resp.content
+        except DartRequestBudgetExceeded:
+            raise
         except Exception as e:
             if attempt == 3:
                 logger.warning("DART viewer HTML 수집 실패 [%s/%s]: %s", rcept_no, dcm_no, redact_external_error(e))
@@ -671,6 +688,7 @@ def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:
         return None
     try:
         with _get_client() as client:
+            _record_request_attempt("pdf/download/pdf.do")
             with client.stream(
                 "GET",
                 f"{DART_WEB_BASE}/pdf/download/pdf.do",
@@ -701,6 +719,8 @@ def fetch_audit_report_pdf(rcept_no: str, dcm_no: str) -> bytes | None:
                         return None
                     chunks.append(chunk)
                 payload = b"".join(chunks)
+    except DartRequestBudgetExceeded:
+        raise
     except Exception as exc:  # External transport must remain fail-closed.
         logger.warning(
             "DART audit PDF fetch failed [%s/%s]: %s",

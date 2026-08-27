@@ -123,7 +123,7 @@ frozen company-year target list. Never point these commands at the active MCP
 runtime DB. A company receives the same deterministic shard in every selected
 year, so operators can resume a shard without changing its membership.
 
-First perform a no-network, no-write preflight and freeze the target manifest:
+First perform a no-network, no-write preflight and create a target preview:
 
 ```bash
 uv run kreports source-archive-preflight \
@@ -136,6 +136,9 @@ uv run kreports source-archive-plan \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
 ```
 
+`TARGET.preview.json` is a local planning preview. On the first `--apply`, the
+runner archives the complete target list to Drive *before any DART request*,
+then writes the immutable Drive object URI and SHA-256 into `TARGET.json`.
 `TARGET.json` is the frozen denominator. It records both canonical annual
 filing targets and explicit `no_source_metadata` gaps, from verified
 year-specific KOSPI/KOSDAQ membership evidence; a missing anchor is not
@@ -174,8 +177,12 @@ uv run kreports source-archive-run \
 ```
 
 `--max-dart-calls` is mandatory with `--apply`; the runner consumes one unit
-before every DART request and stops with a resumable `dart_budget_exhausted`
-outcome when it reaches zero. The runner handles one source asset at a time:
+before every physical DART HTTP attempt, including retry attempts, attachment
+viewer requests, and PDF fallback. It stops with a resumable
+`dart_budget_exhausted` outcome when it reaches zero. Each business report
+retains the original DART ZIP response/container first; indexed XML members
+carry its SHA-256, Drive URI, and member-name lineage. XML/HTML structure is
+the primary parse path, while PDF is an original-byte audit fallback only. The runner handles one source asset at a time:
 the original ZIP entry, viewer response, or PDF bytes are hashed, immutably
 archived and read-back verified *before* any parser decoding; the generic parse
 package is then archived. There is no replacement-decoding path for retained

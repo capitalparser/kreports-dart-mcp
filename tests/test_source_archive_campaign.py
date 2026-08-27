@@ -30,6 +30,18 @@ class _Archive:
         return result
 
 
+class _BusinessAssets(dict[str, bytes]):
+    """Test double matching the fetcher's ZIP-member plus raw-container contract."""
+
+    def __init__(self, assets: dict[str, bytes], *, container_bytes: bytes | None = None) -> None:
+        super().__init__(assets)
+        self.container_bytes = container_bytes or b"PK\x03\x04test-original-document-zip"
+
+
+def _business_assets(raw: bytes = b"<DOCUMENT><P>x</P></DOCUMENT>") -> _BusinessAssets:
+    return _BusinessAssets({"main.xml": raw})
+
+
 def _membership(corp_code: str, year: int, market: str) -> CompanyYearListingMembership:
     normalized_checksum = hashlib.sha256(f"{corp_code}:{year}:{market}".encode()).hexdigest()
     return CompanyYearListingMembership(
@@ -79,9 +91,10 @@ def _plan(temp_engine, years=range(2021, 2026)):
 
 
 def _install_complete_family(monkeypatch, campaign):
-    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _receipt: {
-        "main.xml": b"<DOCUMENT><P>business</P></DOCUMENT>",
-    })
+    monkeypatch.setattr(
+        campaign, "fetch_document_zip_asset_bytes",
+        lambda _receipt: _business_assets(b"<DOCUMENT><P>business</P></DOCUMENT>"),
+    )
     monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: "attachments")
     monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _html: [{
         "rcept_no": "20250401126380", "dcm_no": "99", "title": "감사보고서",
@@ -139,7 +152,11 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
     raw = b"<DOCUMENT><P>\x80\xff</P></DOCUMENT>"
-    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _receipt: {"main.xml": raw})
+    original_zip = b"PK\x03\x04original-document-zip\x80\xff"
+    monkeypatch.setattr(
+        campaign, "fetch_document_zip_asset_bytes",
+        lambda _receipt: _BusinessAssets({"main.xml": raw}, container_bytes=original_zip),
+    )
     monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: None)
     archive = _Archive()
 
@@ -149,6 +166,15 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     raw_call = next(call for call in archive.calls if call["metadata"]["archive_version"] == "raw-source-v1")
     assert raw_call["data"] == raw
     assert raw_call["object"].sha256 == hashlib.sha256(raw).hexdigest()
+    container_call = next(
+        call for call in archive.calls
+        if call["metadata"]["archive_version"] == "raw-document-zip-container-v1"
+    )
+    assert container_call["data"] == original_zip
+    assert container_call["object"].sha256 == hashlib.sha256(original_zip).hexdigest()
+    assert raw_call["metadata"]["container_sha256"] == container_call["object"].sha256
+    assert raw_call["metadata"]["container_storage_uri"] == container_call["object"].storage_uri
+    assert raw_call["metadata"]["container_member_name"] == "main.xml"
     document_manifest = next(
         json.loads(call["data"])
         for call in archive.calls
@@ -159,6 +185,9 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     assert document_manifest["source_receipt"] == target.source_receipt
     assert document_manifest["source_locator"] == "main.xml"
     assert document_manifest["raw"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert document_manifest["raw_container"]["sha256"] == hashlib.sha256(original_zip).hexdigest()
+    assert document_manifest["raw_container"]["storage_uri"] == container_call["object"].storage_uri
+    assert document_manifest["container_member_name"] == "main.xml"
 
 
 def test_business_only_is_partial_and_never_committed(temp_engine, tmp_path, monkeypatch):
@@ -167,7 +196,7 @@ def test_business_only_is_partial_and_never_committed(temp_engine, tmp_path, mon
     _seed_annual_disclosures(temp_engine)
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
-    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: {"main.xml": b"<DOCUMENT><P>x</P></DOCUMENT>"})
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: _business_assets())
     monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: "no audit attachment")
     monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _: [])
 
@@ -184,7 +213,7 @@ def test_audit_attachment_pdf_fallback_is_explicit_partial_boundary(temp_engine,
     _seed_annual_disclosures(temp_engine)
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
-    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: {"main.xml": b"<DOCUMENT><P>x</P></DOCUMENT>"})
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: _business_assets())
     monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: "attachments")
     monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _: [{
         "rcept_no": target.source_receipt, "dcm_no": "77", "title": "감사보고서",
@@ -192,21 +221,98 @@ def test_audit_attachment_pdf_fallback_is_explicit_partial_boundary(temp_engine,
     monkeypatch.setattr(campaign, "fetch_viewer_bytes", lambda *_args: None)
     monkeypatch.setattr(campaign, "fetch_audit_report_pdf", lambda *_args: b"%PDF-1.7\noriginal\n%%EOF")
 
-    report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=4)
+    archive = _Archive()
+    report = campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=4)
 
     assert report.status == "partial"
     audit = next(item for item in report.outcomes if item.get("report_kind") == "audit_report" and item["status"] == "archived_verified")
     assert audit["content_type"] == "pdf"
     assert audit["source_locator"] == "dcm:77"
+    assert audit["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
+    raw = next(call for call in archive.calls if call["metadata"]["archive_version"] == "raw-source-v1" and call["metadata"]["report_kind"] == "audit_report")
+    assert raw["metadata"]["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
+    parsed = next(
+        call for call in archive.calls
+        if call["metadata"]["archive_version"] == "document-structure-v1"
+        and call["metadata"]["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
+    )
+    assert parsed["metadata"]["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
+    document = next(
+        json.loads(call["data"])
+        for call in archive.calls
+        if call["metadata"]["archive_version"] == "source-archive-document-manifest-v1"
+        and b'"report_kind":"audit_report"' in call["data"]
+    )
+    assert document["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
 
 
-def test_budget_exhaustion_is_resumable_and_never_commits(temp_engine, tmp_path, monkeypatch):
+def test_full_frozen_target_is_archived_before_source_fetch_and_referenced_by_drive_events(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.source_archive_campaign as campaign
 
     _seed_annual_disclosures(temp_engine)
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
-    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: {"main.xml": b"<DOCUMENT><P>x</P></DOCUMENT>"})
+    archive = _Archive()
+
+    def fetch_business(_receipt):
+        assert any(call["metadata"]["archive_version"] == "source-archive-target-manifest-v1" for call in archive.calls)
+        return _business_assets()
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: None)
+
+    campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
+
+    target_call = next(call for call in archive.calls if call["metadata"]["archive_version"] == "source-archive-target-manifest-v1")
+    target_payload = json.loads(target_call["data"])
+    assert target_payload["target_digest"] == plan.target_digest
+    assert target_payload["targets"] == plan.target_manifest["targets"]
+    local_target = json.loads((plan.state_dir / "TARGET.json").read_text())
+    assert local_target["drive_target_manifest"]["storage_uri"] == target_call["object"].storage_uri
+    event = next(
+        json.loads(call["data"])
+        for call in archive.calls
+        if call["metadata"]["archive_version"] == "source-archive-campaign-manifest-v1"
+    )
+    assert event["drive_target_manifest"]["sha256"] == target_call["object"].sha256
+
+
+def test_apply_fails_closed_when_existing_target_lacks_drive_identity(temp_engine, tmp_path):
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    plan.state_dir.mkdir()
+    (plan.state_dir / "TARGET.json").write_text(
+        json.dumps(plan.target_manifest), encoding="utf-8"
+    )
+    archive = _Archive()
+
+    with pytest.raises(campaign.SourceArchiveCampaignError, match="immutable Drive target manifest identity"):
+        campaign.run_source_archive_shard(
+            plan, target.shard, archive, apply=True, max_dart_calls=1
+        )
+    assert archive.calls == []
+
+
+def test_budget_exhaustion_is_resumable_and_never_commits(temp_engine, tmp_path, monkeypatch):
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    def business(_receipt):
+        fetcher._record_request_attempt("document.xml")
+        return _business_assets()
+
+    def audit_main(_receipt):
+        fetcher._record_request_attempt("dsaf001/main.do")
+        return "attachments"
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", business)
+    monkeypatch.setattr(campaign, "fetch_dart_main_html", audit_main)
 
     report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=1)
 
@@ -217,15 +323,29 @@ def test_budget_exhaustion_is_resumable_and_never_commits(temp_engine, tmp_path,
 
 def test_budget_exhaustion_before_audit_viewer_is_explicit(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
 
     _seed_annual_disclosures(temp_engine)
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
-    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: {"main.xml": b"<DOCUMENT><P>x</P></DOCUMENT>"})
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: "attachments")
+    def business(_receipt):
+        fetcher._record_request_attempt("document.xml")
+        return _business_assets()
+
+    def audit_main(_receipt):
+        fetcher._record_request_attempt("dsaf001/main.do")
+        return "attachments"
+
+    def viewer(*_args):
+        fetcher._record_request_attempt("report/viewer.do")
+        return b"<DOCUMENT><P>audit</P></DOCUMENT>"
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", business)
+    monkeypatch.setattr(campaign, "fetch_dart_main_html", audit_main)
     monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _: [{
         "rcept_no": target.source_receipt, "dcm_no": "77", "title": "감사보고서",
     }])
+    monkeypatch.setattr(campaign, "fetch_viewer_bytes", viewer)
 
     report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=2)
 
