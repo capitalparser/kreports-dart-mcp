@@ -220,6 +220,28 @@ runtime DB, or Lightsail artifact, and it does not promote a release. A later,
 separately verified candidate-artifact build consumes the archived parse
 objects.
 
+### All-issuer v3 source archive boundary
+
+The existing listed workflow remains the v2 historical KOSPI/KOSDAQ universe.
+To preserve raw sources for every canonical annual-report issuer, operators
+must use `--universe all-annual-issuers` with a new v3 Drive prefix and a new
+local state directory. Never reuse, replace, or resume a v2 target manifest as
+a v3 checkpoint. Review the v3 preflight's cohort counts and target digest
+before a dry run; only then may one finite `--apply --max-dart-calls` shard be
+considered.
+
+The added cohort is
+`annual_report_issuer_outside_verified_markets`, and its default historic status
+is `unclassified`. Missing KOSPI/KOSDAQ evidence is not proof of unlisted, so
+raw archive inclusion is not a historic-listing conclusion. A dated official
+KRX KOSPI/KOSDAQ/KONEX raw export and normalization manifest are required before
+`not_krx_listed_verified`; `unlisted_confirmed` additionally requires a dated
+issuer-status source. These later labels do not alter the frozen source target
+or demonstrate full archive coverage.
+
+The detailed commands, fresh-root requirement, and evidence limits are in
+[Drive-first annual source archive backfill](source-archive-backfill.md).
+
 Uninstall:
 
 ```bash

@@ -406,7 +406,12 @@ It preserves original DART containers/members and generic structure packages in
 Google Drive, then keeps candidate-DB and runtime-artifact promotion as
 separate approval gates. See [Drive-first annual source archive backfill](docs/source-archive-backfill.md)
 for the bounded-spool, dry-run, 64-shard resume, Drive accounting, and
-release-boundary procedure. Public MCP queries never call Google Drive.
+release-boundary procedure. The all-issuer v3 option,
+`--universe all-annual-issuers`, uses a fresh Drive/state root and includes
+`annual_report_issuer_outside_verified_markets` as `unclassified`; missing
+KOSPI/KOSDAQ evidence is not proof of unlisted. The guide defines the required
+KRX and dated issuer-status evidence before any historic-status promotion.
+Public MCP queries never call Google Drive.
 
 ### Architecture
 
@@ -796,7 +801,12 @@ conditional일 수 있습니다. DCF는 공시 실제값, 명시적 가정, 모�
 Google Drive에 보전하고, 후보 DB 생성 및 runtime artifact promotion은 각각
 별도 승인 단계로 둡니다. bounded spool, dry run, 64-shard 재개, Drive 용량
 정산, 릴리스 경계는 [Drive-first annual source archive backfill](docs/source-archive-backfill.md)
-가이드에서 확인합니다. 공개 MCP 질의는 Google Drive를 호출하지 않습니다.
+가이드에서 확인합니다. all-issuer v3는 새 Drive/state root와
+`--universe all-annual-issuers`를 사용하며,
+`annual_report_issuer_outside_verified_markets`를 `unclassified`로 보전합니다.
+KOSPI/KOSDAQ 근거가 없다는 사실은 비상장 증명이 아니며, 역사적 상태의 승격은
+가이드가 정한 KRX 및 dated issuer-status 근거 없이는 할 수 없습니다. 공개 MCP
+질의는 Google Drive를 호출하지 않습니다.
 
 ### 아키텍처
 

@@ -246,6 +246,27 @@ def test_source_archive_guide_keeps_drive_and_public_runtime_separate():
     assert "--max-dart-calls` is a local physical-request cap" in guide
 
 
+def test_all_issuer_source_archive_guide_preserves_cohort_and_historic_status_boundaries():
+    """Catches all-issuer operations that conflate archive inclusion with listing proof."""
+    guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
+
+    for phrase in (
+        "--universe all-annual-issuers",
+        "annual_report_issuer_outside_verified_markets",
+        "unclassified",
+        "not proof of unlisted",
+        "not_krx_listed_verified",
+        "unlisted_confirmed",
+    ):
+        assert phrase in guide
+
+    assert "fresh v3 Drive prefix and local state directory" in guide
+    assert "cohort counts and target digest" in guide
+    assert "dated official KRX KOSPI/KOSDAQ/KONEX raw exports" in guide
+    assert "normalization manifest" in guide
+    assert "dated issuer-status source" in guide
+
+
 def test_drive_archive_diagnostic_is_safe_pre_deadline_evidence():
     """The prior observation must not be presented as deadline-bound v3 readiness."""
     diagnostic = (

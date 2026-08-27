@@ -114,6 +114,43 @@ shell history, 화면 공유에 넣지 않는다.
 입력으로 쓰지 않는다. 대상 연도나 선정 규칙이 달라지면 기존 campaign을
 바꾸지 말고 새 state directory를 만든다.
 
+## all-issuer v3 universe: archive inclusion and historic status are separate
+
+기본 `listed` universe는 검증된 해당 연도 KOSPI/KOSDAQ membership만 대상으로
+하는 기존 v2 절차다. 모든 annual-report issuer를 원문 보전 분모에 넣을 때는
+명시적으로 `--universe all-annual-issuers`를 사용한다. 이 v3 universe는 기존
+verified listed pair를 모두 유지하고, canonical annual-report anchor가 있으나
+검증된 KOSPI/KOSDAQ membership이 없는 issuer를
+`annual_report_issuer_outside_verified_markets` cohort로 추가한다.
+
+이 outside cohort의 historic status는 `unclassified`다. KOSPI/KOSDAQ membership이
+없다는 것은 `not proof of unlisted`다. KONEX, 상장 이전·이전상장·상장폐지,
+누락된 historical snapshot 또는 비상장 등 여러 가능성이 남아 있다. 따라서
+archive inclusion은 현재 원문 보전 대상이라는 뜻일 뿐 historic listing conclusion이
+아니다.
+
+all-issuer apply는 기존 v2 campaign과 절대 섞지 않는다. 새 campaign마다 fresh v3 Drive prefix and local state directory를 만들고, v2 `TARGET.json`, event,
+checkpoint, Drive target manifest를 복사·변경·resume 대상으로 쓰지 않는다. v3
+target manifest는 `universe_mode`, cohort, historic-status basis와 frozen digest를
+함께 묶는다. 기존 raw object를 재사용할 수 있는 경우도 SHA-256 read-back
+verification으로 byte-identical임을 확인한 경우에 한한다.
+
+현재 사용할 수 있는 bounded archive status와 이후의 historic-status promotion은
+다음처럼 분리한다.
+
+| 상태/근거 | 현재 할 수 있는 일 | historic claim |
+|---|---|---|
+| `annual_report_issuer_outside_verified_markets` + `unclassified` | canonical annual-report anchor를 v3 raw archive에 포함 | KOSPI/KOSDAQ 부재만으로 unlisted라고 말하지 않음 |
+| dated official KRX KOSPI/KOSDAQ/KONEX raw exports와 year-specific normalization manifest | issuer-year를 all-market evidence와 대조 | `KONEX_verified` 또는 `not_krx_listed_verified` 가능 |
+| dated issuer-status source | 위 evidence에 추가하여 issuer status를 확인 | 이때만 `unlisted_confirmed` 가능 |
+
+`not_krx_listed_verified` 전에는 dated official KRX KOSPI/KOSDAQ/KONEX raw exports와
+각 raw object의 source URI, retrieval/date, SHA-256, transformation version을 남긴
+normalization manifest가 필요하다. `unlisted_confirmed`에는 그보다 한 단계 더
+강한 dated issuer-status source가 필요하다. 이 분류 근거는 additive metadata이며,
+이미 frozen된 v3 target을 제거·대체하거나 raw archive coverage를 완전하다고
+주장하는 근거가 아니다.
+
 ### 1. no-write preflight
 
 먼저 대상의 historical membership, 연도별 시장 근거, anchor metadata를 읽기
@@ -124,11 +161,14 @@ metadata가 부족하다는 명시적 gap이다.
 ```bash
 uv run kreports source-archive-preflight \
   --db /path/to/candidate.db \
+  --universe all-annual-issuers \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
 ```
 
-출력의 target digest, discovered count, `no_source_metadata` count를 campaign
-기록에 남긴다. 이 결과는 Drive 용량·rclone 접근을 확인한 결과가 아니며,
+all-issuer preflight의 `universe_mode`, cohort counts and target digest,
+discovered count, `no_source_metadata` count를 campaign 기록에 남긴다. cohort별
+대상·발견·gap count가 기대한 v3 분모와 맞지 않으면 plan 또는 apply로 진행하지
+않는다. 이 결과는 Drive 용량·rclone 접근을 확인한 결과가 아니며,
 **does not perform a reliable remaining-DART-quota preflight**. DART의 남은
 quota/rate 상태는 조회 가능한 신뢰성 있는 사전검사로 가정하지 않는다. 실제
 반응은 첫 bounded apply shard에서 발견·기록한다. Drive target manifest는 첫
@@ -139,18 +179,23 @@ quota를 별도로 확인해야 한다.
 
 64개 shard가 기본값이며, 같은 `corp_code`는 모든 선택 연도에서 항상 같은
 `sha256(corp_code) % 64` shard에 속한다. 따라서 한 shard를 중단·재개해도
-회사 membership이 바뀌지 않는다.
+회사 membership이 바뀌지 않는다. 아래 all-issuer v3 예시는 v2와 구별되는 Drive
+prefix와 local state root를 사용한다. 이 예시의 placeholder는 실제 credential이나
+private path를 뜻하지 않는다.
 
 ```bash
-CAMPAIGN_DIR="$HOME/.local/share/kreports/source-archive-2021-2025"
+CAMPAIGN_DIR="$HOME/.local/share/kreports/source-archive-2021-2025-all-issuers-v3"
+export RAW_STORAGE_PREFIX='<archive-root>/source-archive-v3-all-annual-issuers'
 
 uv run kreports source-archive-plan \
   --db /path/to/candidate.db \
+  --universe all-annual-issuers \
   --state-dir "$CAMPAIGN_DIR" \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
 
 uv run kreports source-archive-run \
   --db /path/to/candidate.db \
+  --universe all-annual-issuers \
   --state-dir "$CAMPAIGN_DIR" \
   --shard 7 \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
@@ -170,6 +215,7 @@ budget은 retry, attachment viewer, PDF fallback을 포함한 실제 DART HTTP
 ```bash
 uv run kreports source-archive-run \
   --db /path/to/candidate.db \
+  --universe all-annual-issuers \
   --state-dir "$CAMPAIGN_DIR" \
   --shard 7 \
   --apply --max-dart-calls 100 \
