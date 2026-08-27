@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import gzip
 import hashlib
 from io import BytesIO
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -370,14 +371,32 @@ def drive_archive_from_runtime(*, runner: CommandRunner | None = None) -> DriveA
         raise DriveArchiveConfigurationError(
             "Drive archive requires RAW_STORAGE_SPOOL_DIR."
         )
+    command_timeout_seconds = _collector_command_timeout_seconds()
     archive = DriveArchive(
         remote=remote,
         root=root,
         spool_dir=Path(spool_dir),
         runner=runner or SubprocessCommandRunner(),
+        command_timeout_seconds=command_timeout_seconds,
     )
     archive._validate_drive_remote()
     return archive
+
+
+def _collector_command_timeout_seconds() -> int:
+    configured_timeout = os.environ.get("RAW_STORAGE_COMMAND_TIMEOUT_SECONDS")
+    if configured_timeout is None:
+        return 60
+    if not re.fullmatch(r"[0-9]+", configured_timeout):
+        raise DriveArchiveConfigurationError(
+            "RAW_STORAGE_COMMAND_TIMEOUT_SECONDS must be an integer from 1 through 300."
+        )
+    command_timeout_seconds = int(configured_timeout)
+    if not 1 <= command_timeout_seconds <= 300:
+        raise DriveArchiveConfigurationError(
+            "RAW_STORAGE_COMMAND_TIMEOUT_SECONDS must be an integer from 1 through 300."
+        )
+    return command_timeout_seconds
 
 
 def _normalized_extension(extension: str) -> str:

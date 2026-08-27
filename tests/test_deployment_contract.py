@@ -246,6 +246,16 @@ def test_source_archive_guide_keeps_drive_and_public_runtime_separate():
     assert "--max-dart-calls` is a local physical-request cap" in guide
 
 
+def test_source_archive_deadline_guide_keeps_the_collector_override_bounded():
+    """The measured override must remain a finite, single-run collector setting."""
+    guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
+
+    assert "RAW_STORAGE_COMMAND_TIMEOUT_SECONDS=180" in guide
+    assert "default 60 seconds" in guide
+    assert "maximum 300 seconds" in guide
+    assert "not a retry, DART-budget, or shard authorization" in guide
+
+
 def test_all_issuer_source_archive_guide_preserves_cohort_and_historic_status_boundaries():
     """Catches all-issuer operations that conflate archive inclusion with listing proof."""
     guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()

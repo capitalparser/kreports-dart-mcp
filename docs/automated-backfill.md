@@ -169,12 +169,21 @@ export RAW_STORAGE_DRIVE_REMOTE=vault:
 export RAW_STORAGE_PREFIX='KReports Data Lake'
 export RAW_STORAGE_SPOOL_DIR="$HOME/.cache/kreports/source-archive-spool"
 
+# Only for the reviewed v3 shard-0 target-freeze resume after a successful no-write preflight.
+export RAW_STORAGE_COMMAND_TIMEOUT_SECONDS=180
+
 uv run kreports source-archive-run \
   --db /path/to/candidate.db \
   --state-dir ~/.local/share/kreports/source-archive-2021-2025 \
   --shard 7 --apply --max-dart-calls 100 \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
 ```
+
+`RAW_STORAGE_COMMAND_TIMEOUT_SECONDS` is a collector-only bounded archive
+deadline: the default is 60 seconds and the allowed range is 1 through 300
+seconds. The explicit 180-second setting remains finite for each rclone content
+command; it is not a retry, DART-budget, or shard authorization and does not
+permit another shard or production promotion.
 
 `--max-dart-calls` is mandatory with `--apply`; the runner consumes one unit
 before every physical DART HTTP attempt, including retry attempts, attachment

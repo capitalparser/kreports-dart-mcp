@@ -411,6 +411,59 @@ def test_drive_archive_from_runtime_requires_a_drive_target_before_runner_use(
     assert runner.metadata_calls == []
 
 
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout"),
+    [(None, 60), ("180", 180)],
+)
+def test_collector_command_timeout_uses_default_or_explicit_bounded_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_timeout: str | None,
+    expected_timeout: int,
+):
+    """A missing or measured collector deadline must reach the Drive archive unchanged."""
+    runner = FakeRcloneRunner()
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "drive")
+    monkeypatch.setenv("RAW_STORAGE_DRIVE_REMOTE", "team-drive:")
+    monkeypatch.setenv("RAW_STORAGE_PREFIX", "kreports/raw")
+    monkeypatch.setenv("RAW_STORAGE_SPOOL_DIR", str(tmp_path))
+    if configured_timeout is None:
+        monkeypatch.delenv("RAW_STORAGE_COMMAND_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("RAW_STORAGE_COMMAND_TIMEOUT_SECONDS", configured_timeout)
+
+    archive = drive_archive_from_runtime(runner=runner)
+
+    assert archive.command_timeout_seconds == expected_timeout
+    assert runner.config_calls == ["team-drive"]
+    assert runner.copyto_calls == []
+    assert runner.cat_calls == []
+
+
+@pytest.mark.parametrize("configured_timeout", ["", "0", "301", "1.5", "fast"])
+def test_collector_command_timeout_rejects_invalid_setting_before_rclone_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_timeout: str,
+):
+    """Invalid collector deadlines must fail before the Drive target is probed."""
+    runner = FakeRcloneRunner()
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "drive")
+    monkeypatch.setenv("RAW_STORAGE_DRIVE_REMOTE", "team-drive:")
+    monkeypatch.setenv("RAW_STORAGE_PREFIX", "kreports/raw")
+    monkeypatch.setenv("RAW_STORAGE_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setenv("RAW_STORAGE_COMMAND_TIMEOUT_SECONDS", configured_timeout)
+
+    with pytest.raises(
+        DriveArchiveConfigurationError, match="RAW_STORAGE_COMMAND_TIMEOUT_SECONDS"
+    ):
+        drive_archive_from_runtime(runner=runner)
+
+    assert runner.config_calls == []
+    assert runner.copyto_calls == []
+    assert runner.cat_calls == []
+
+
 def test_drive_archive_from_runtime_validates_the_configured_rclone_remote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

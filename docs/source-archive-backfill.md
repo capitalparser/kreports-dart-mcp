@@ -212,12 +212,21 @@ preflight와 dry run을 검토한 뒤에만 한 shard를 실행한다. `--apply`
 budget은 retry, attachment viewer, PDF fallback을 포함한 실제 DART HTTP
 시도마다 먼저 하나씩 소진된다.
 
+기본 Drive archive command deadline은 **default 60 seconds**다. 성공한
+no-write preflight 뒤 reviewed v3 shard 0의 target freeze를 재개할 때만
+`RAW_STORAGE_COMMAND_TIMEOUT_SECONDS=180`을 한 번 명시할 수 있다. 이 값은
+1~**maximum 300 seconds** 범위의 collector 전용 설정이며, 각 rclone content
+command의 deadline은 계속 유한하다. 이는 **not a retry, DART-budget, or shard authorization**이며, 다른 shard 실행·추가 DART 호출·production promotion을
+허용하지 않는다.
+
 ```bash
+export RAW_STORAGE_COMMAND_TIMEOUT_SECONDS=180
+
 uv run kreports source-archive-run \
   --db /path/to/candidate.db \
   --universe all-annual-issuers \
   --state-dir "$CAMPAIGN_DIR" \
-  --shard 7 \
+  --shard 0 \
   --apply --max-dart-calls 100 \
   --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
 ```
