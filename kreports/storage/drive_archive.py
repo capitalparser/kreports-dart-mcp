@@ -97,10 +97,11 @@ class DriveArchive:
         root: str,
         spool_dir: Path,
         runner: CommandRunner,
-        command_timeout_seconds: float = 60,
         readback_retries: int = 2,
         readback_delay_seconds: float = 1.0,
         sleeper: Callable[[float], None] = time.sleep,
+        *,
+        command_timeout_seconds: float = 60,
     ) -> None:
         self.remote = remote.strip()
         self.root = root.strip("/")

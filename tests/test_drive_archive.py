@@ -357,6 +357,22 @@ def test_archive_retry_configuration_rejects_more_than_two_readbacks(tmp_path: P
         )
 
 
+def test_archive_keeps_legacy_positional_zero_as_readback_retries(tmp_path: Path):
+    """The fifth positional argument must retain its original retry-count meaning."""
+    runner = FakeRcloneRunner()
+    runner.post_copy_missing_reads = 1
+    archive = DriveArchive("team-drive:", "kreports/raw", tmp_path, runner, 0)
+
+    with pytest.raises(DriveArchiveVerificationError, match="object is missing"):
+        archive.archive_bytes(
+            data=b"official filing bytes", extension="xml", metadata=_source_metadata()
+        )
+
+    assert archive.command_timeout_seconds == 60
+    assert len(runner.copyto_calls) == 1
+    assert len(runner.cat_calls) == 2
+
+
 @pytest.mark.parametrize("remote, root", [("", "kreports/raw"), ("team-drive:", "")])
 def test_archive_rejects_missing_drive_target_before_calling_runner(
     tmp_path: Path, remote: str, root: str
