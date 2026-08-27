@@ -76,6 +76,16 @@ def drive_archive_policy() -> tuple[str, str, str, str]:
     return backend, remote, root, spool_dir
 
 
+def require_drive_archive_mode(operation: str) -> None:
+    """Require the explicit collector-only boundary for Drive source archival."""
+    require_runtime_write(operation)
+    if not raw_backfill_enabled():
+        raise RuntimeError(
+            f"{operation} is blocked by the raw retention policy. Set "
+            "KREPORTS_ENABLE_RAW_BACKFILL=1 only for an explicit source archive operation."
+        )
+
+
 def raw_persistence_allowed(*, backend: str | None = None, bucket: str | None = None) -> bool:
     """Return true only for explicit external, non-inline raw retention."""
     configured_backend, keep_inline, configured_bucket = raw_storage_policy()
