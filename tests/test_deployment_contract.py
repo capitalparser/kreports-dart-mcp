@@ -244,3 +244,14 @@ def test_source_archive_guide_keeps_drive_and_public_runtime_separate():
     assert "rclone about '<drive-remote-name>:' --json" in guide
     assert "does not perform a reliable remaining-DART-quota preflight" in guide
     assert "--max-dart-calls` is a local physical-request cap" in guide
+
+
+def test_drive_archive_diagnostic_is_safe_pre_deadline_evidence():
+    """The prior observation must not be presented as deadline-bound v3 readiness."""
+    diagnostic = (
+        REPO_ROOT / "docs" / "reports" / "2026-08-28-drive-archive-diagnostic.md"
+    ).read_text()
+
+    assert "/private/" not in diagnostic
+    assert "pre-deadline" in diagnostic
+    assert "not a time-bounded v3 readiness result" in diagnostic

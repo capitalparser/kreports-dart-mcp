@@ -18,6 +18,7 @@ __all__ = [
     "ArchivedObject",
     "CommandRunner",
     "DriveArchive",
+    "DriveArchiveCommandTimeoutError",
     "DriveArchiveConfigurationError",
     "DriveArchiveProvenanceError",
     "DriveArchiveUploadError",
@@ -48,6 +49,10 @@ class DriveArchiveVerificationError(RuntimeError):
     """Raised when a remote archive object differs from its expected source."""
 
 
+class DriveArchiveCommandTimeoutError(DriveArchiveVerificationError):
+    """Raised when a remote archive content operation exceeds its deadline."""
+
+
 class DriveArchiveUploadError(DriveArchiveVerificationError):
     """Raised when a failed upload cannot be verified by remote readback."""
 
@@ -59,15 +64,19 @@ class _DriveArchiveObjectMissing(DriveArchiveVerificationError):
 class CommandRunner(Protocol):
     """Small rclone command boundary so archive behavior stays deterministic."""
 
-    def run(self, args: list[str]) -> bytes:
+    def run(self, args: list[str], *, timeout_seconds: float | None = None) -> bytes:
         """Run a command and return its stdout bytes."""
 
 
 class SubprocessCommandRunner:
     """Execute rclone without a shell or embedded archive credentials."""
 
-    def run(self, args: list[str]) -> bytes:
-        return subprocess.run(args, check=True, capture_output=True).stdout
+    def run(self, args: list[str], *, timeout_seconds: float | None = None) -> bytes:
+        if timeout_seconds is None:
+            return subprocess.run(args, check=True, capture_output=True).stdout
+        return subprocess.run(
+            args, check=True, capture_output=True, timeout=timeout_seconds
+        ).stdout
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,7 @@ class DriveArchive:
         root: str,
         spool_dir: Path,
         runner: CommandRunner,
+        command_timeout_seconds: float = 60,
         readback_retries: int = 2,
         readback_delay_seconds: float = 1.0,
         sleeper: Callable[[float], None] = time.sleep,
@@ -96,6 +106,7 @@ class DriveArchive:
         self.root = root.strip("/")
         self.spool_dir = Path(spool_dir)
         self.runner = runner
+        self.command_timeout_seconds = command_timeout_seconds
         self.readback_retries = readback_retries
         self.readback_delay_seconds = readback_delay_seconds
         self.sleeper = sleeper
@@ -106,6 +117,10 @@ class DriveArchive:
             raise DriveArchiveConfigurationError("Drive archive remote must not be blank")
         if not self.root:
             raise DriveArchiveConfigurationError("Drive archive root must not be blank")
+        if self.command_timeout_seconds <= 0:
+            raise DriveArchiveConfigurationError(
+                "Drive archive command deadline must be positive."
+            )
         if not 0 <= self.readback_retries <= 2:
             raise DriveArchiveConfigurationError(
                 "Drive archive readback retries must be between zero and at most two."
@@ -179,7 +194,15 @@ class DriveArchive:
     ) -> None:
         """Read and validate a compressed remote object before accepting it."""
         try:
-            compressed = self.runner.run(["rclone", "cat", storage_uri])
+            compressed = self.runner.run(
+                ["rclone", "cat", storage_uri],
+                timeout_seconds=self.command_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DriveArchiveCommandTimeoutError(
+                "Drive archive cat command timed out after "
+                f"{self.command_timeout_seconds:g} seconds."
+            ) from exc
         except (FileNotFoundError, subprocess.CalledProcessError) as exc:
             raise _DriveArchiveObjectMissing(
                 f"Drive archive object is missing: {storage_uri}"
@@ -224,7 +247,18 @@ class DriveArchive:
         for key, value in sorted(metadata.items()):
             command.extend(["--metadata-set", f"{key}={value}"])
         try:
-            self.runner.run(command)
+            self.runner.run(command, timeout_seconds=self.command_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                self.verify_object(
+                    storage_uri,
+                    expected_sha256=sha256,
+                    expected_bytes=byte_length,
+                )
+            except DriveArchiveVerificationError:
+                raise DriveArchiveUploadError(
+                    "Drive archive upload timed out and object could not be verified."
+                ) from exc
         except subprocess.CalledProcessError as exc:
             try:
                 self.verify_object(

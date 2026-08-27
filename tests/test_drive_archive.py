@@ -11,6 +11,7 @@ import pytest
 from kreports.storage.drive_archive import (
     DriveArchive,
     DriveArchiveConfigurationError,
+    DriveArchiveCommandTimeoutError,
     DriveArchiveProvenanceError,
     DriveArchiveUploadError,
     DriveArchiveVerificationError,
@@ -34,9 +35,13 @@ class FakeRcloneRunner:
         self.reject_oversized_metadata = False
         self.copyto_error: subprocess.CalledProcessError | None = None
         self.post_copy_missing_reads = 0
+        self.timeout_seconds: list[tuple[str, float | None]] = []
+        self.timeout_after_copy_on_cat = False
+        self.timeout_on_copyto = False
 
-    def run(self, args: list[str]) -> bytes:
+    def run(self, args: list[str], *, timeout_seconds: float | None = None) -> bytes:
         command = args[1]
+        self.timeout_seconds.append((command, timeout_seconds))
         if command == "copyto":
             source, destination = args[2:4]
             self.copyto_calls.append((source, destination))
@@ -56,6 +61,8 @@ class FakeRcloneRunner:
                 )
             if self.copyto_error is not None:
                 raise self.copyto_error
+            if self.timeout_on_copyto:
+                raise subprocess.TimeoutExpired(args, timeout_seconds)
             compressed = Path(source).read_bytes()
             self.uploaded_payloads.append(compressed)
             self.objects[destination] = compressed
@@ -67,6 +74,8 @@ class FakeRcloneRunner:
         if command == "cat":
             storage_uri = args[2]
             self.cat_calls.append(storage_uri)
+            if self.timeout_after_copy_on_cat and self.copyto_calls:
+                raise subprocess.TimeoutExpired(args, timeout_seconds)
             try:
                 compressed = self.objects[storage_uri]
             except KeyError as exc:
@@ -274,6 +283,66 @@ def test_archive_retries_one_missing_post_copy_readback_without_a_second_upload(
     assert len(runner.copyto_calls) == 1
     assert len(sleeps) == 1
     assert list(tmp_path.iterdir()) == []
+
+
+def test_archive_stops_after_post_copy_readback_timeout_and_retains_spool(tmp_path: Path):
+    """A deadline-exceeded readback must not enter the missing-object retry loop."""
+    runner = FakeRcloneRunner()
+    runner.timeout_after_copy_on_cat = True
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/raw", spool_dir=tmp_path, runner=runner
+    )
+
+    with pytest.raises(DriveArchiveCommandTimeoutError, match=r"cat.*60"):
+        archive.archive_bytes(
+            data=b"official filing bytes", extension="xml", metadata=_source_metadata()
+        )
+
+    assert len(runner.copyto_calls) == 1
+    assert len(runner.cat_calls) == 2
+    assert [timeout for command, timeout in runner.timeout_seconds if command == "copyto"] == [60]
+    assert [timeout for command, timeout in runner.timeout_seconds if command == "cat"] == [60, 60]
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_archive_copy_timeout_reports_redacted_upload_failure_and_retains_spool(tmp_path: Path):
+    """A timed-out copy is accepted only if an independent bounded readback proves it."""
+    runner = FakeRcloneRunner()
+    runner.timeout_on_copyto = True
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/raw", spool_dir=tmp_path, runner=runner
+    )
+
+    with pytest.raises(DriveArchiveUploadError) as exc:
+        archive.archive_bytes(
+            data=b"official filing bytes", extension="xml", metadata=_source_metadata()
+        )
+
+    assert "super-secret-value" not in str(exc.value)
+    assert len(runner.copyto_calls) == 1
+    assert len(runner.cat_calls) == 2
+    assert [timeout for command, timeout in runner.timeout_seconds if command == "copyto"] == [60]
+    assert [timeout for command, timeout in runner.timeout_seconds if command == "cat"] == [60, 60]
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+@pytest.mark.parametrize("command_timeout_seconds", [0, -1])
+def test_archive_rejects_non_positive_command_deadline_before_calling_runner(
+    tmp_path: Path, command_timeout_seconds: float
+):
+    """A non-positive deadline must fail before any remote archive operation starts."""
+    runner = FakeRcloneRunner()
+
+    with pytest.raises(DriveArchiveConfigurationError, match="deadline must be positive"):
+        DriveArchive(
+            remote="team-drive:",
+            root="kreports/raw",
+            spool_dir=tmp_path,
+            runner=runner,
+            command_timeout_seconds=command_timeout_seconds,
+        )
+
+    assert runner.timeout_seconds == []
 
 
 def test_archive_retry_configuration_rejects_more_than_two_readbacks(tmp_path: Path):

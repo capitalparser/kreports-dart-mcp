@@ -12,7 +12,7 @@
   `5,461,211,200,579` bytes (plus `270,717,607` trashed and
   `1,747,373,138` other bytes).
 
-## Controlled write and readback
+## Pre-deadline controlled write and readback
 
 One pre-existing v2 `drive-archive-*.xml.gz` spool was read and decompressed
 in memory. No source body or source credentials are included here. The
@@ -34,11 +34,13 @@ deliberately over-limit optional `container_storage_uri`.
   contains exactly the one object above.
 
 The first post-copy readback exceeded the 60-second operational observation
-boundary and was stopped after the object had been created. No second upload
-was attempted. A bounded, read-only `DriveArchive.verify_object` readback
-then passed for the existing object. The adapter-created diagnostic spool was
-removed only after this successful verification; all four pre-existing v2 XML
-spools remained untouched.
+boundary and was stopped after the object had been created. This is
+pre-deadline metadata evidence, not a time-bounded v3 readiness result: one
+read-only deadline-bound reverification is still required after code review.
+No second upload was attempted. A bounded, read-only `DriveArchive.verify_object`
+readback then passed for the existing object. The adapter-created diagnostic
+spool was removed only after this successful verification; all four pre-existing
+v2 XML spools remained untouched.
 
 ## Scope and limitations
 
@@ -47,4 +49,3 @@ campaign run, DART request, database operation, Lightsail call, deployment,
 release promotion, or candidate database release. No pre-existing v2 spool or
 state was deleted or modified, and no credential/configuration change was
 made.
-
