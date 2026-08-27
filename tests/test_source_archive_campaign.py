@@ -120,6 +120,72 @@ def test_plan_uses_verified_year_memberships_and_canonical_latest_anchor(temp_en
     assert corrected.source_receipt == "20250401126380"
     assert len({target.shard for target in plan.targets if target.corp_code == "00126380"}) == 1
     assert plan.shard_count == 64
+    # The default remains the byte-compatible listed-v2 identity used by
+    # already-frozen campaign manifests and their target digests.
+    assert plan.target_manifest["schema"] == "source-archive-campaign.v2"
+    assert "universe_mode" not in plan.target_manifest
+    assert "universe_cohort" not in corrected.to_dict()
+    legacy_digest_payload = {
+        "schema": "source-archive-campaign.v2",
+        "years": list(plan.years),
+        "shard_count": plan.shard_count,
+        "targets": [target.to_dict() for target in plan.targets],
+    }
+    assert plan.target_digest == hashlib.sha256(
+        json.dumps(legacy_digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_all_annual_issuers_unions_verified_markets_with_outside_canonical_anchors(temp_engine):
+    """Current company metadata cannot classify a historic outside-market issuer."""
+    from sqlalchemy.orm import sessionmaker
+    from kreports.maintenance.source_archive_campaign import build_source_archive_plan
+
+    with sessionmaker(bind=temp_engine)() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="코스피", market="KOSPI"),
+            Company(corp_code="00000002", corp_name="코스닥", market="KOSDAQ"),
+            Company(corp_code="00000003", corp_name="외부연차", market=None),
+            # This is deliberately a current-market-like hint only.  It has
+            # neither dated membership nor an annual anchor, so it is excluded.
+            Company(corp_code="00000004", corp_name="현재메타데이터", market="KOSPI"),
+            Disclosure(
+                rcept_no="20250331000001", corp_code="00000001", corp_name="코스피",
+                disc_date=date(2025, 3, 31), disc_type="A", report_nm="[기재정정]사업보고서 (2024.12)",
+            ),
+            Disclosure(
+                rcept_no="20250331000003", corp_code="00000003", corp_name="외부연차",
+                disc_date=date(2025, 3, 31), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            _membership("00000001", 2024, "KOSPI"),
+            _membership("00000002", 2024, "KOSDAQ"),
+        ])
+        session.commit()
+
+    with sessionmaker(bind=temp_engine)() as session:
+        plan = build_source_archive_plan(session, [2024], universe_mode="all_annual_issuers")
+
+    assert {(target.corp_code, target.bsns_year) for target in plan.targets} == {
+        ("00000001", 2024), ("00000002", 2024), ("00000003", 2024),
+    }
+    assert len(plan.targets) == 3
+    listed = {target.corp_code: target for target in plan.targets if target.corp_code != "00000003"}
+    assert listed["00000001"].universe_cohort == "verified_kospi"
+    assert listed["00000002"].universe_cohort == "verified_kosdaq"
+    outside = next(target for target in plan.targets if target.corp_code == "00000003")
+    assert outside.universe_cohort == "annual_report_issuer_outside_verified_markets"
+    assert outside.historical_listing_status == "unclassified"
+    assert outside.historical_listing_basis == "no_verified_kospi_kosdaq_membership"
+    assert outside.market is None
+    assert outside.shard == next(target.shard for target in plan.targets if target.corp_code == "00000003")
+    assert "unlisted_confirmed" not in json.dumps(plan.target_manifest)
+    assert plan.target_manifest["schema"] == "source-archive-campaign.v3"
+    assert plan.target_manifest["universe_mode"] == "all_annual_issuers"
+    assert plan.target_manifest["cohort_counts"] == {
+        "annual_report_issuer_outside_verified_markets": 1,
+        "verified_kosdaq": 1,
+        "verified_kospi": 1,
+    }
 
 
 def test_plan_fails_closed_without_verified_historical_memberships(temp_engine):
@@ -131,6 +197,16 @@ def test_plan_fails_closed_without_verified_historical_memberships(temp_engine):
     with sessionmaker(bind=temp_engine)() as session:
         with pytest.raises(SourceArchiveCampaignError, match="historical listing membership"):
             build_source_archive_plan(session, years=[2024])
+
+
+def test_plan_rejects_unsupported_source_universe(temp_engine):
+    from sqlalchemy.orm import sessionmaker
+    from kreports.maintenance.source_archive_campaign import SourceArchiveCampaignError, build_source_archive_plan
+
+    _seed_annual_disclosures(temp_engine)
+    with sessionmaker(bind=temp_engine)() as session:
+        with pytest.raises(SourceArchiveCampaignError, match="universe_mode"):
+            build_source_archive_plan(session, years=[2024], universe_mode="all_issuers")
 
 
 def test_dry_run_makes_no_fetch_or_archive_writes(temp_engine, tmp_path, monkeypatch):

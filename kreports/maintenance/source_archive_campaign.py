@@ -51,7 +51,16 @@ __all__ = [
 
 
 CAMPAIGN_SCHEMA = "source-archive-campaign.v2"
+ALL_ISSUER_CAMPAIGN_SCHEMA = "source-archive-campaign.v3"
 DEFAULT_SHARD_COUNT = 64
+_UNIVERSE_MODES = {"listed", "all_annual_issuers"}
+_VERIFIED_KOSPI = ("verified_kospi", "KOSPI", "verified_year_specific_membership")
+_VERIFIED_KOSDAQ = ("verified_kosdaq", "KOSDAQ", "verified_year_specific_membership")
+_OUTSIDE_VERIFIED_MARKETS = (
+    "annual_report_issuer_outside_verified_markets",
+    "unclassified",
+    "no_verified_kospi_kosdaq_membership",
+)
 _REQUIRED_MEMBERSHIP_COLUMNS = {
     "corp_code", "bsns_year", "market", "status", "evidence_basis",
     "manifest_checksum", "manifest_storage_uri", "normalized_checksum",
@@ -72,17 +81,26 @@ class ArchiveWriter(Protocol):
 class SourceArchiveTarget:
     corp_code: str
     bsns_year: int
-    market: str
+    market: str | None
     shard: int
     source_receipt: str | None
     report_nm: str | None
     source_uri: str | None
     source_status: str
     required_report_kinds: tuple[str, str] = ("business_report", "audit_report")
+    universe_cohort: str | None = None
+    historical_listing_status: str | None = None
+    historical_listing_basis: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["required_report_kinds"] = list(self.required_report_kinds)
+        # `listed` is an already frozen v2 public identity.  The new evidence
+        # fields are emitted only by the explicitly selected v3 denominator.
+        if self.universe_cohort is None:
+            result.pop("universe_cohort")
+            result.pop("historical_listing_status")
+            result.pop("historical_listing_basis")
         return result
 
 
@@ -93,17 +111,26 @@ class SourceArchivePlan:
     targets: tuple[SourceArchiveTarget, ...]
     target_digest: str
     state_dir: Path | None = None
+    universe_mode: str = "listed"
+
+    @property
+    def campaign_schema(self) -> str:
+        return ALL_ISSUER_CAMPAIGN_SCHEMA if self.universe_mode == "all_annual_issuers" else CAMPAIGN_SCHEMA
 
     @property
     def target_manifest(self) -> dict[str, Any]:
-        return {
-            "schema": CAMPAIGN_SCHEMA,
+        manifest = {
+            "schema": self.campaign_schema,
             "years": list(self.years),
             "shard_count": self.shard_count,
             "target_digest": self.target_digest,
             "target_count": len(self.targets),
             "targets": [target.to_dict() for target in self.targets],
         }
+        if self.universe_mode == "all_annual_issuers":
+            manifest["universe_mode"] = self.universe_mode
+            manifest["cohort_counts"] = _cohort_counts(self.targets)
+        return manifest
 
     def with_state_dir(self, state_dir: Path) -> "SourceArchivePlan":
         return replace(self, state_dir=Path(state_dir))
@@ -139,18 +166,31 @@ class SourceArchiveReport:
         }
 
 
-def build_source_archive_plan(session: Session, years: Iterable[int], shard_count: int = DEFAULT_SHARD_COUNT) -> SourceArchivePlan:
-    """Build a no-write plan from verified KOSPI/KOSDAQ year memberships only."""
+def build_source_archive_plan(
+    session: Session,
+    years: Iterable[int],
+    shard_count: int = DEFAULT_SHARD_COUNT,
+    universe_mode: str = "listed",
+) -> SourceArchivePlan:
+    """Build a no-write listed-v2 or all-annual-issuer-v3 source plan."""
     _require_non_runtime_source_session(session)
     normalized_years = _normalize_years(years)
     _validate_shard_count(shard_count)
+    _validate_universe_mode(universe_mode)
     memberships = _verified_memberships(session, normalized_years)
     membership_by_pair = {(row["corp_code"], row["bsns_year"]): row for row in memberships}
-    disclosure_rows = session.execute(select(
+    disclosure_query = select(
         Disclosure.corp_code, Disclosure.rcept_no, Disclosure.disc_date, Disclosure.report_nm,
-    ).where(Disclosure.corp_code.in_({corp for corp, _year in membership_by_pair})).order_by(
+    ).order_by(
         Disclosure.corp_code, Disclosure.disc_date.desc(), Disclosure.rcept_no.desc(),
-    )).mappings().all() if membership_by_pair else []
+    )
+    if universe_mode == "listed":
+        disclosure_query = disclosure_query.where(
+            Disclosure.corp_code.in_({corp for corp, _year in membership_by_pair})
+        )
+    disclosure_rows = session.execute(disclosure_query).mappings().all() if (
+        membership_by_pair or universe_mode == "all_annual_issuers"
+    ) else []
     rows_by_company: dict[str, list[dict[str, Any]]] = {}
     for row in disclosure_rows:
         rows_by_company.setdefault(str(row["corp_code"]), []).append(dict(row))
@@ -162,23 +202,51 @@ def build_source_archive_plan(session: Session, years: Iterable[int], shard_coun
             rows_by_company.get(corp_code, ()), corp_code=corp_code, bsns_year=year
         )
         if anchor is None:
-            targets.append(SourceArchiveTarget(
+            target = SourceArchiveTarget(
                 corp_code=corp_code, bsns_year=year, market=membership["market"],
                 shard=_company_shard(corp_code, shard_count), source_receipt=None,
                 report_nm=None, source_uri=None, source_status="no_source_metadata",
-            ))
+            )
+            if universe_mode == "all_annual_issuers":
+                target = replace(target, **_listed_membership_evidence(membership["market"]))
+            targets.append(target)
             continue
         receipt = str(anchor["rcept_no"])
-        targets.append(SourceArchiveTarget(
+        target = SourceArchiveTarget(
             corp_code=corp_code, bsns_year=year, market=membership["market"],
             shard=_company_shard(corp_code, shard_count), source_receipt=receipt,
             report_nm=str(anchor["report_nm"]), source_uri=_document_source_uri(receipt),
             source_status="discovered",
-        ))
-    frozen_targets = tuple(targets)
+        )
+        if universe_mode == "all_annual_issuers":
+            target = replace(target, **_listed_membership_evidence(membership["market"]))
+        targets.append(target)
+
+    if universe_mode == "all_annual_issuers":
+        for corp_code in sorted(rows_by_company):
+            for year in normalized_years:
+                if (corp_code, year) in membership_by_pair:
+                    continue
+                anchor = latest_annual_filing_anchor_from_rows(
+                    rows_by_company[corp_code], corp_code=corp_code, bsns_year=year
+                )
+                if anchor is None:
+                    continue
+                receipt = str(anchor["rcept_no"])
+                targets.append(SourceArchiveTarget(
+                    corp_code=corp_code, bsns_year=year, market=None,
+                    shard=_company_shard(corp_code, shard_count), source_receipt=receipt,
+                    report_nm=str(anchor["report_nm"]), source_uri=_document_source_uri(receipt),
+                    source_status="discovered",
+                    universe_cohort=_OUTSIDE_VERIFIED_MARKETS[0],
+                    historical_listing_status=_OUTSIDE_VERIFIED_MARKETS[1],
+                    historical_listing_basis=_OUTSIDE_VERIFIED_MARKETS[2],
+                ))
+    frozen_targets = tuple(sorted(targets, key=lambda target: (target.corp_code, target.bsns_year)))
     return SourceArchivePlan(
         years=normalized_years, shard_count=shard_count, targets=frozen_targets,
-        target_digest=_target_digest(normalized_years, shard_count, frozen_targets),
+        target_digest=_target_digest(normalized_years, shard_count, frozen_targets, universe_mode=universe_mode),
+        universe_mode=universe_mode,
     )
 
 
@@ -301,6 +369,29 @@ def _verified_memberships(session: Session, years: tuple[int, ...]) -> list[dict
             raise SourceArchiveCampaignError("historical listing membership evidence is invalid")
         normalized.append({"corp_code": str(value["corp_code"]), "bsns_year": int(value["bsns_year"]), "market": str(value["market"])})
     return normalized
+
+
+def _listed_membership_evidence(market: str) -> dict[str, str]:
+    if market == "KOSPI":
+        cohort, _market, basis = _VERIFIED_KOSPI
+    elif market == "KOSDAQ":
+        cohort, _market, basis = _VERIFIED_KOSDAQ
+    else:  # _verified_memberships() is the only caller and already filters this.
+        raise SourceArchiveCampaignError("verified membership market is unsupported")
+    return {
+        "universe_cohort": cohort,
+        "historical_listing_status": market,
+        "historical_listing_basis": basis,
+    }
+
+
+def _cohort_counts(targets: Iterable[SourceArchiveTarget]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for target in targets:
+        if target.universe_cohort is None:
+            raise SourceArchiveCampaignError("all-issuer target lacks a universe cohort")
+        counts[target.universe_cohort] = counts.get(target.universe_cohort, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _process_target(
@@ -717,16 +808,42 @@ def _same_file_identity(left: Path, right: Path) -> bool:
         return left == right
 
 
-def _target_digest(years: tuple[int, ...], shard_count: int, targets: tuple[SourceArchiveTarget, ...]) -> str:
-    return hashlib.sha256(_canonical_json({"schema": CAMPAIGN_SCHEMA, "years": list(years), "shard_count": shard_count, "targets": [target.to_dict() for target in targets]})).hexdigest()
+def _target_digest(
+    years: tuple[int, ...],
+    shard_count: int,
+    targets: tuple[SourceArchiveTarget, ...],
+    *,
+    universe_mode: str = "listed",
+) -> str:
+    if universe_mode == "listed":
+        # Preserve the v2 digest byte-for-byte for existing frozen campaigns.
+        payload = {
+            "schema": CAMPAIGN_SCHEMA,
+            "years": list(years),
+            "shard_count": shard_count,
+            "targets": [target.to_dict() for target in targets],
+        }
+    else:
+        payload = {
+            "schema": ALL_ISSUER_CAMPAIGN_SCHEMA,
+            "universe_mode": universe_mode,
+            "years": list(years),
+            "shard_count": shard_count,
+            "targets": [target.to_dict() for target in targets],
+        }
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()
 
 
 def _target_from_dict(value: Mapping[str, Any]) -> SourceArchiveTarget:
     return SourceArchiveTarget(
-        corp_code=str(value["corp_code"]), bsns_year=int(value["bsns_year"]), market=str(value["market"]),
+        corp_code=str(value["corp_code"]), bsns_year=int(value["bsns_year"]),
+        market=str(value["market"]) if value.get("market") is not None else None,
         shard=int(value["shard"]), source_receipt=value.get("source_receipt"), report_nm=value.get("report_nm"),
         source_uri=value.get("source_uri"), source_status=str(value["source_status"]),
         required_report_kinds=tuple(value.get("required_report_kinds", ("business_report", "audit_report"))),  # type: ignore[arg-type]
+        universe_cohort=value.get("universe_cohort"),
+        historical_listing_status=value.get("historical_listing_status"),
+        historical_listing_basis=value.get("historical_listing_basis"),
     )
 
 
@@ -747,6 +864,12 @@ def _normalize_years(years: Iterable[int]) -> tuple[int, ...]:
 def _validate_shard_count(shard_count: int) -> None:
     if not isinstance(shard_count, int) or not 1 <= shard_count <= 1024:
         raise SourceArchiveCampaignError("shard_count must be an integer from 1 to 1024")
+
+
+def _validate_universe_mode(universe_mode: str) -> None:
+    if not isinstance(universe_mode, str) or universe_mode not in _UNIVERSE_MODES:
+        allowed = ", ".join(sorted(_UNIVERSE_MODES))
+        raise SourceArchiveCampaignError(f"universe_mode must be one of: {allowed}")
 
 
 def _validate_shard(shard: int, shard_count: int) -> None:
