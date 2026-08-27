@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     raw_storage_bucket: str = ""
     raw_storage_prefix: str = ""
     raw_storage_keep_inline: bool = False
+    raw_storage_drive_remote: str = ""
+    raw_storage_spool_dir: str = ""
 
 
 settings = Settings()

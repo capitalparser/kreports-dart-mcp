@@ -61,6 +61,21 @@ def raw_storage_policy() -> tuple[str, bool, str]:
     return backend, keep_inline_value, bucket
 
 
+def drive_archive_policy() -> tuple[str, str, str, str]:
+    """Read Drive archive configuration at call time without network access."""
+    from kreports.config import settings
+
+    backend = os.environ.get("RAW_STORAGE_BACKEND", settings.raw_storage_backend).strip().lower()
+    remote = os.environ.get(
+        "RAW_STORAGE_DRIVE_REMOTE", settings.raw_storage_drive_remote
+    ).strip()
+    root = os.environ.get("RAW_STORAGE_PREFIX", settings.raw_storage_prefix).strip().strip("/")
+    spool_dir = os.environ.get(
+        "RAW_STORAGE_SPOOL_DIR", settings.raw_storage_spool_dir
+    ).strip()
+    return backend, remote, root, spool_dir
+
+
 def raw_persistence_allowed(*, backend: str | None = None, bucket: str | None = None) -> bool:
     """Return true only for explicit external, non-inline raw retention."""
     configured_backend, keep_inline, configured_bucket = raw_storage_policy()
