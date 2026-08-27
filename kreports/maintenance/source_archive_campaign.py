@@ -132,6 +132,13 @@ class SourceArchivePlan:
             manifest["cohort_counts"] = _cohort_counts(self.targets)
         return manifest
 
+    @property
+    def campaign_counts(self) -> dict[str, dict[str, int]]:
+        """Return v3 cohort/status counts directly from this frozen target set."""
+        if self.universe_mode == "listed":
+            return {}
+        return _all_issuer_campaign_counts(self.targets)
+
     def with_state_dir(self, state_dir: Path) -> "SourceArchivePlan":
         return replace(self, state_dir=Path(state_dir))
 
@@ -150,10 +157,12 @@ class SourceArchiveReport:
     manifest_path: Path | None = None
     dart_calls_used: int = 0
     dart_calls_budget: int | None = None
+    universe_mode: str = "listed"
+    campaign_counts: Mapping[str, Mapping[str, int]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema": CAMPAIGN_SCHEMA,
+        result = {
+            "schema": ALL_ISSUER_CAMPAIGN_SCHEMA if self.universe_mode == "all_annual_issuers" else CAMPAIGN_SCHEMA,
             "shard": self.shard,
             "apply": self.apply,
             "status": self.status,
@@ -164,6 +173,9 @@ class SourceArchiveReport:
             "dart_calls_used": self.dart_calls_used,
             "dart_calls_budget": self.dart_calls_budget,
         }
+        if self.universe_mode == "all_annual_issuers":
+            result.update({"universe_mode": self.universe_mode, **dict(self.campaign_counts or {})})
+        return result
 
 
 def build_source_archive_plan(
@@ -262,7 +274,10 @@ def run_source_archive_shard(
     _validate_shard(shard, plan.shard_count)
     selected = plan.targets_for_shard(shard)
     if not apply:
-        return SourceArchiveReport(shard, False, "dry_run", plan.target_digest, ())
+        return SourceArchiveReport(
+            shard, False, "dry_run", plan.target_digest, (),
+            universe_mode=plan.universe_mode, campaign_counts=plan.campaign_counts,
+        )
     if archive is None:
         raise SourceArchiveCampaignError("--apply requires a configured immutable Drive archive")
     if not isinstance(max_dart_calls, int) or max_dart_calls < 1:
@@ -306,6 +321,7 @@ def run_source_archive_shard(
     return SourceArchiveReport(
         shard, True, "complete" if complete else "partial", plan.target_digest, tuple(outcomes),
         outcomes_path, budget.used_calls, budget.max_calls,
+        plan.universe_mode, plan.campaign_counts,
     )
 
 
@@ -313,11 +329,19 @@ def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None)
     """Verify local cache integrity only; this performs no DART or Drive call."""
     root = Path(state_dir)
     manifest = _read_json(root / "TARGET.json")
-    if manifest.get("schema") != CAMPAIGN_SCHEMA:
+    schema = manifest.get("schema")
+    if schema == CAMPAIGN_SCHEMA:
+        universe_mode = "listed"
+    elif schema == ALL_ISSUER_CAMPAIGN_SCHEMA and manifest.get("universe_mode") == "all_annual_issuers":
+        universe_mode = "all_annual_issuers"
+    else:
         raise SourceArchiveCampaignError("TARGET.json schema is unsupported")
     _validate_drive_target_manifest_identity(manifest)
     shard_count = int(manifest["shard_count"])
     targets = tuple(_target_from_dict(value) for value in manifest.get("targets", ()))
+    target_digest = str(manifest["target_digest"])
+    if _target_digest(tuple(manifest["years"]), shard_count, targets, universe_mode=universe_mode) != target_digest:
+        raise SourceArchiveCampaignError("TARGET.json target digest does not match its frozen target plan")
     requested = [shard] if shard is not None else list(range(shard_count))
     records: list[dict[str, Any]] = []
     for shard_number in requested:
@@ -327,14 +351,22 @@ def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None)
         marker = directory / "COMMITTED.json"
         selected = tuple(target for target in targets if target.shard == shard_number)
         if marker.exists():
-            plan = SourceArchivePlan(tuple(manifest["years"]), shard_count, targets, str(manifest["target_digest"]), root)
+            plan = SourceArchivePlan(tuple(manifest["years"]), shard_count, targets, target_digest, root, universe_mode)
             _verify_committed_marker(marker, plan, shard_number, outcomes, selected)
         records.append({
             "shard": shard_number,
             "outcome_count": len(outcomes.read_text(encoding="utf-8").splitlines()) if outcomes.exists() else 0,
             "committed": marker.exists(),
         })
-    return {"schema": CAMPAIGN_SCHEMA, "target_digest": manifest["target_digest"], "target_count": manifest["target_count"], "shards": records}
+    result: dict[str, Any] = {
+        "schema": schema,
+        "target_digest": target_digest,
+        "target_count": manifest["target_count"],
+        "shards": records,
+    }
+    if universe_mode == "all_annual_issuers":
+        result.update({"universe_mode": universe_mode, **_all_issuer_campaign_counts(targets)})
+    return result
 
 
 def _verified_memberships(session: Session, years: tuple[int, ...]) -> list[dict[str, Any]]:
@@ -392,6 +424,43 @@ def _cohort_counts(targets: Iterable[SourceArchiveTarget]) -> dict[str, int]:
             raise SourceArchiveCampaignError("all-issuer target lacks a universe cohort")
         counts[target.universe_cohort] = counts.get(target.universe_cohort, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _all_issuer_campaign_counts(targets: Iterable[SourceArchiveTarget]) -> dict[str, dict[str, int]]:
+    """Count the frozen v3 targets rather than estimating operational coverage."""
+    frozen_targets = tuple(targets)
+    return {
+        "cohort_counts": _cohort_counts(frozen_targets),
+        "cohort_target_counts": _cohort_counts(frozen_targets),
+        "cohort_discovered_counts": _cohort_counts(
+            target for target in frozen_targets if target.source_status == "discovered"
+        ),
+        "cohort_gap_counts": _cohort_counts(
+            target for target in frozen_targets if target.source_status != "discovered"
+        ),
+        "historical_status_counts": _historical_status_counts(frozen_targets),
+    }
+
+
+def _historical_status_counts(targets: Iterable[SourceArchiveTarget]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for target in targets:
+        if target.historical_listing_status is None:
+            raise SourceArchiveCampaignError("all-issuer target lacks a historical listing status")
+        counts[target.historical_listing_status] = counts.get(target.historical_listing_status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _target_universe_fields(target: SourceArchiveTarget) -> dict[str, str]:
+    if target.universe_cohort is None:
+        return {}
+    if target.historical_listing_status is None or target.historical_listing_basis is None:
+        raise SourceArchiveCampaignError("all-issuer target lacks historical listing evidence")
+    return {
+        "universe_cohort": target.universe_cohort,
+        "historical_listing_status": target.historical_listing_status,
+        "historical_listing_basis": target.historical_listing_basis,
+    }
 
 
 def _process_target(
@@ -613,6 +682,7 @@ def _archive_asset(
         document = {
             "schema": "source-archive-document-manifest.v1", "corp_code": target.corp_code,
             "bsns_year": target.bsns_year, "market": target.market, "report_kind": report_kind,
+            **_target_universe_fields(target),
             "source_receipt": receipt, "source_uri": source_uri, "source_locator": source_locator,
             "filename": filename, "content_type": content_type, "raw": _object_summary(raw_object),
             "raw_container": dict(raw_container) if raw_container is not None else None,
@@ -642,8 +712,10 @@ def _archive_campaign_event(archive: ArchiveWriter, row: Mapping[str, Any]) -> N
 
 def _outcome(target: SourceArchiveTarget, status: str, *, report_kind: str = "company_year", source_locator: str | None = None, error: str | None = None, company_year_terminal: bool = True, **extra: Any) -> dict[str, Any]:
     return {
-        "schema": CAMPAIGN_SCHEMA, "recorded_at": datetime.now(UTC).isoformat(),
+        "schema": ALL_ISSUER_CAMPAIGN_SCHEMA if target.universe_cohort is not None else CAMPAIGN_SCHEMA,
+        "recorded_at": datetime.now(UTC).isoformat(),
         "corp_code": target.corp_code, "bsns_year": target.bsns_year, "market": target.market,
+        **_target_universe_fields(target),
         "shard": target.shard, "source_receipt": target.source_receipt, "source_uri": target.source_uri,
         "report_kind": report_kind, "source_locator": source_locator, "status": status,
         "error": error, "company_year_terminal": company_year_terminal, **extra,
@@ -676,8 +748,13 @@ def _write_frozen_target_manifest(
     existing: dict[str, Any] | None = None
     if path.exists():
         existing = _read_json(path)
-        if {key: value for key, value in existing.items() if key != "drive_target_manifest"} != canonical:
-            raise SourceArchiveCampaignError("campaign TARGET.json conflicts with the supplied frozen target plan")
+        existing_payload = _canonical_json({
+            key: value for key, value in existing.items() if key != "drive_target_manifest"
+        })
+        if existing_payload != payload:
+            raise SourceArchiveCampaignError(
+                "TARGET.json schema, universe mode, or target digest conflicts with the supplied frozen target plan"
+            )
         _validate_drive_target_manifest_identity(existing, expected_sha256=expected_sha256)
 
     receipt = next((target.source_receipt for target in plan.targets if target.source_receipt), None)
@@ -749,7 +826,7 @@ def _write_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, out
         _verify_committed_marker(path, plan, shard, outcomes, selected)
         return
     _atomic_write(path, _canonical_json({
-        "schema": CAMPAIGN_SCHEMA, "target_digest": plan.target_digest, "shard": shard,
+        "schema": plan.campaign_schema, "target_digest": plan.target_digest, "shard": shard,
         "outcomes_sha256": hashlib.sha256(outcomes.read_bytes()).hexdigest(),
         "committed_at": datetime.now(UTC).isoformat(),
     }))
@@ -757,7 +834,7 @@ def _write_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, out
 
 def _verify_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, outcomes: Path, selected: tuple[SourceArchiveTarget, ...]) -> None:
     marker = _read_json(path)
-    if marker.get("schema") != CAMPAIGN_SCHEMA or marker.get("target_digest") != plan.target_digest or marker.get("shard") != shard:
+    if marker.get("schema") != plan.campaign_schema or marker.get("target_digest") != plan.target_digest or marker.get("shard") != shard:
         raise SourceArchiveCampaignError("COMMITTED.json identity does not match the frozen target plan")
     actual = hashlib.sha256(outcomes.read_bytes()).hexdigest() if outcomes.exists() else ""
     if marker.get("outcomes_sha256") != actual:

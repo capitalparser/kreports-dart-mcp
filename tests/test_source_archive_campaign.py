@@ -209,6 +209,140 @@ def test_plan_rejects_unsupported_source_universe(temp_engine):
             build_source_archive_plan(session, years=[2024], universe_mode="all_issuers")
 
 
+def _all_issuer_fixture_plan(temp_engine):
+    """Return the Task 1 three-cohort fixture as a v3 plan."""
+    from sqlalchemy.orm import sessionmaker
+    from kreports.maintenance.source_archive_campaign import build_source_archive_plan
+
+    with sessionmaker(bind=temp_engine)() as session:
+        session.add_all([
+            Company(corp_code="00000001", corp_name="코스피"),
+            Company(corp_code="00000002", corp_name="코스닥"),
+            Company(corp_code="00000003", corp_name="외부연차"),
+            Disclosure(
+                rcept_no="20250331000001", corp_code="00000001", corp_name="코스피",
+                disc_date=date(2025, 3, 31), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            Disclosure(
+                rcept_no="20250331000003", corp_code="00000003", corp_name="외부연차",
+                disc_date=date(2025, 3, 31), disc_type="A", report_nm="사업보고서 (2024.12)",
+            ),
+            _membership("00000001", 2024, "KOSPI"),
+            _membership("00000002", 2024, "KOSDAQ"),
+        ])
+        session.commit()
+    with sessionmaker(bind=temp_engine)() as session:
+        return build_source_archive_plan(session, [2024], universe_mode="all_annual_issuers")
+
+
+def test_all_issuer_preflight_reports_actual_cohort_and_historic_status_counts(temp_engine, monkeypatch):
+    from typer.testing import CliRunner
+    import kreports.cli.main as cli
+
+    plan = _all_issuer_fixture_plan(temp_engine)
+    requested_modes: list[str] = []
+
+    def source_plan(_db_path, *, years, shard_count, universe_mode):
+        assert years == [2024]
+        assert shard_count == 64
+        requested_modes.append(universe_mode)
+        return plan
+
+    monkeypatch.setattr(cli, "_source_archive_plan_from_database", source_plan)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "source-archive-preflight", "--db", "candidate.db", "--year", "2024",
+            "--universe", "all-annual-issuers",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert requested_modes == ["all_annual_issuers"]
+    assert payload["universe_mode"] == "all_annual_issuers"
+    assert payload["cohort_counts"]["annual_report_issuer_outside_verified_markets"] == 1
+    assert payload["cohort_target_counts"] == {
+        "annual_report_issuer_outside_verified_markets": 1,
+        "verified_kosdaq": 1,
+        "verified_kospi": 1,
+    }
+    assert payload["cohort_discovered_counts"] == {
+        "annual_report_issuer_outside_verified_markets": 1,
+        "verified_kospi": 1,
+    }
+    assert payload["cohort_gap_counts"] == {"verified_kosdaq": 1}
+    assert payload["historical_status_counts"] == {
+        "KOSDAQ": 1,
+        "KOSPI": 1,
+        "unclassified": 1,
+    }
+
+
+def test_v3_apply_rejects_v2_target_state_before_archive_or_fetch(temp_engine, tmp_path):
+    from kreports.maintenance.source_archive_campaign import (
+        SourceArchiveCampaignError,
+        run_source_archive_shard,
+    )
+
+    plan = _all_issuer_fixture_plan(temp_engine).with_state_dir(tmp_path / "v3-campaign")
+    target = next(item for item in plan.targets if item.source_status == "discovered")
+    plan.state_dir.mkdir()
+    v2_target = {
+        "schema": "source-archive-campaign.v2",
+        "years": list(plan.years),
+        "shard_count": plan.shard_count,
+        "target_digest": "v2-state-cannot-resume-v3",
+        "target_count": 0,
+        "targets": [],
+    }
+    (plan.state_dir / "TARGET.json").write_text(json.dumps(v2_target), encoding="utf-8")
+    archive = _Archive()
+
+    with pytest.raises(SourceArchiveCampaignError, match="schema|universe|target"):
+        run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=1)
+
+    assert archive.calls == []
+
+
+def test_v3_run_binds_scope_to_report_document_and_event_manifests(temp_engine, tmp_path, monkeypatch):
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    plan = _all_issuer_fixture_plan(temp_engine).with_state_dir(tmp_path / "v3-campaign")
+    target = next(
+        item for item in plan.targets
+        if item.universe_cohort == "annual_report_issuer_outside_verified_markets"
+    )
+    _install_complete_family(monkeypatch, campaign)
+    archive = _Archive()
+
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, archive, apply=True, max_dart_calls=3
+    )
+
+    payload = report.to_dict()
+    assert payload["schema"] == "source-archive-campaign.v3"
+    assert payload["universe_mode"] == "all_annual_issuers"
+    assert payload["cohort_counts"]["annual_report_issuer_outside_verified_markets"] == 1
+    document = next(
+        json.loads(call["data"])
+        for call in archive.calls
+        if call["metadata"]["archive_version"] == "source-archive-document-manifest-v1"
+        and b'"corp_code":"00000003"' in call["data"]
+    )
+    event = next(
+        json.loads(call["data"])
+        for call in archive.calls
+        if call["metadata"]["archive_version"] == "source-archive-campaign-manifest-v1"
+        and b'"corp_code":"00000003"' in call["data"]
+    )
+    for manifest in (document, event):
+        assert manifest["universe_cohort"] == "annual_report_issuer_outside_verified_markets"
+        assert manifest["historical_listing_status"] == "unclassified"
+        assert manifest["historical_listing_basis"] == "no_verified_kospi_kosdaq_membership"
+
+
 def test_dry_run_makes_no_fetch_or_archive_writes(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.source_archive_campaign as campaign
 
