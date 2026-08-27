@@ -188,13 +188,68 @@ Claude's current remote-connector instructions describe a public HTTPS URL and
 OAuth/no-auth flow; ChatGPT's Developer mode similarly asks the workspace to
 choose and scan an app's authentication mechanism. See the official
 [Claude remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
-and [ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta).
+and [ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
 
 For a true multi-user web-chatbot rollout, add an OAuth 2.1 authorization layer
 in front of this MCP service. Each user then signs in, receives a revocable
 per-user token, and the chatbot connector can complete its normal OAuth flow.
 That is a separate security feature; it is intentionally not simulated by a
 shared static bearer token.
+
+##### ChatGPT web setup after the OAuth adapter is available
+
+1. Use ChatGPT web with Developer mode enabled. Full MCP app support is
+   currently a Business or Enterprise/Edu workspace capability; Pro users have
+   Developer-mode read/fetch access only.
+2. As the workspace admin/owner, go to **Workspace settings → Apps → Create**.
+   Enter `https://mcp.dartmcp.com/mcp` as the remote MCP endpoint.
+3. Select the OAuth/OpenID Connect mechanism provided by the adapter. It must
+   issue refresh tokens; for OIDC, expose the `offline_access` scope in its
+   discovery metadata.
+4. Select **Scan Tools**, complete the authorization prompt, then **Create**.
+   The connector first appears as a draft. Test it from a new chat before an
+   admin/owner publishes it for other users.
+5. After an MCP deployment that changes tools or input schemas, an
+   admin/owner must refresh and review the actions. ChatGPT intentionally uses
+   a frozen tool snapshot; production changes are not auto-enabled.
+
+The current production service has no OAuth adapter, so stop at step 2 until
+that layer is deployed. Never paste the shared `KREPORTS_MCP_TOKEN` into a
+ChatGPT app or distribute it to users.
+
+##### Server-side OpenAI API chatbot
+
+For an application you operate yourself, keep both the OpenAI key and the
+KReports bearer token only in its server-side secret store. The Responses API
+remote MCP tool accepts request headers, so the application can attach the
+token without exposing it to a browser:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI()
+response = client.responses.create(
+    model="gpt-5",
+    input="Compare Samsung Electronics' ROE with its industry over three years.",
+    tools=[{
+        "type": "mcp",
+        "server_label": "kreports",
+        "server_url": "https://mcp.dartmcp.com/mcp",
+        "headers": {
+            "Authorization": (
+                f"Bearer {os.environ['KREPORTS_MCP_TOKEN']}"
+            ),
+        },
+        "require_approval": "never",  # all current KReports MCP tools are read-only
+    }],
+)
+print(response.output_text)
+```
+
+Do not place either secret in browser JavaScript, a mobile app bundle, or a
+public repository. If the chatbot will serve multiple users directly, use the
+OAuth path above instead of giving every request the same bearer token.
 
 ##### 4. Local Claude Desktop / Claude Code is a different mode
 
@@ -600,12 +655,65 @@ Authorization: Bearer <KREPORTS_MCP_TOKEN>
 Claude 원격 커넥터는 공개 HTTPS URL과 OAuth/무인증 흐름을 안내하며, ChatGPT
 Developer mode도 워크스페이스가 앱 인증 방식을 선택하고 도구를 스캔하도록
 합니다. 공식 안내는 [Claude remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)와
-[ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta)를 참고하세요.
+[ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)를 참고하세요.
 
 여러 사용자가 웹 챗봇에서 안전하게 쓰려면 이 MCP 앞에 OAuth 2.1 인증 계층을
 추가해야 합니다. 사용자는 로그인 후 취소 가능한 개인별 토큰을 받고, 챗봇
 커넥터는 표준 OAuth 흐름으로 연결합니다. 이는 별도의 보안 기능이며 공유 정적
 bearer token으로 흉내 내지 않습니다.
+
+##### OAuth adapter가 준비된 뒤 ChatGPT web 설정
+
+1. Developer mode를 켠 ChatGPT web을 사용합니다. 전체 MCP app 지원은 현재
+   Business 또는 Enterprise/Edu workspace 기능이며, Pro 사용자는
+   Developer-mode의 read/fetch 접근만 사용할 수 있습니다.
+2. workspace admin/owner가 **Workspace settings → Apps → Create**로 이동해
+   원격 MCP endpoint에 `https://mcp.dartmcp.com/mcp`를 입력합니다.
+3. adapter가 제공하는 OAuth/OpenID Connect 방식을 선택합니다. refresh token을
+   발급해야 하며, OIDC라면 discovery metadata에 `offline_access` scope를
+   노출해야 합니다.
+4. **Scan Tools**를 누르고 인증을 완료한 뒤 **Create**합니다. 처음에는 draft로
+   생기므로 새 채팅에서 검증하고 admin/owner가 다른 사용자에게 publish합니다.
+5. MCP 배포로 tool 또는 input schema가 바뀌면 admin/owner가 action을 refresh하고
+   검토해야 합니다. ChatGPT는 의도적으로 고정된 tool snapshot을 사용하므로
+   운영 변경이 자동 반영되지 않습니다.
+
+현재 운영 서비스에는 OAuth adapter가 없으므로 그 계층을 배포하기 전에는 2단계에서
+멈춥니다. 공유 `KREPORTS_MCP_TOKEN`을 ChatGPT app에 붙여넣거나 다른 사용자에게
+전달하면 안 됩니다.
+
+##### 서버 측 OpenAI API 챗봇
+
+직접 운영하는 애플리케이션은 OpenAI key와 KReports bearer token을 모두 서버의
+secret store에만 둡니다. Responses API의 remote MCP tool은 request header를
+지원하므로 browser에 토큰을 노출하지 않고 연결할 수 있습니다.
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI()
+response = client.responses.create(
+    model="gpt-5",
+    input="삼성전자의 최근 3개년 ROE를 동종업종과 비교해줘.",
+    tools=[{
+        "type": "mcp",
+        "server_label": "kreports",
+        "server_url": "https://mcp.dartmcp.com/mcp",
+        "headers": {
+            "Authorization": (
+                f"Bearer {os.environ['KREPORTS_MCP_TOKEN']}"
+            ),
+        },
+        "require_approval": "never",  # 현재 KReports MCP tool은 모두 read-only
+    }],
+)
+print(response.output_text)
+```
+
+어느 secret도 browser JavaScript, 모바일 앱 번들, 공개 저장소에 넣지 않습니다.
+여러 사용자가 챗봇에 직접 접속할 경우에는 모든 요청에 같은 bearer token을 쓰지
+말고 위 OAuth 경로를 사용합니다.
 
 ##### 4. 로컬 Claude Desktop / Claude Code는 별도 방식입니다
 
