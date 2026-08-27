@@ -256,6 +256,19 @@ def test_source_archive_deadline_guide_keeps_the_collector_override_bounded():
     assert "not a retry, DART-budget, or shard authorization" in guide
 
 
+def test_source_archive_deadline_override_is_exclusive_to_v3_shard_zero_resume():
+    """A generic or v2 shard example must not inherit the v3 target-freeze deadline."""
+    source_archive_guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
+    automated_backfill_guide = (REPO_ROOT / "docs" / "automated-backfill.md").read_text()
+
+    assert "RAW_STORAGE_COMMAND_TIMEOUT_SECONDS=180" not in automated_backfill_guide
+    resume_block = source_archive_guide.split("### 3. 명시적·유한한 apply", 1)[1]
+    assert resume_block.count("RAW_STORAGE_COMMAND_TIMEOUT_SECONDS=180") == 2
+    assert "--universe all-annual-issuers" in resume_block
+    assert "--shard 0" in resume_block
+    assert "--apply --max-dart-calls 100" in resume_block
+
+
 def test_all_issuer_source_archive_guide_preserves_cohort_and_historic_status_boundaries():
     """Catches all-issuer operations that conflate archive inclusion with listing proof."""
     guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
