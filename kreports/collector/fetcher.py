@@ -39,9 +39,18 @@ _CACHE_MAX_AGE_DAYS = 30
 class DocumentZipAssets(dict[str, bytes]):
     """Indexed original ZIP members, retaining the exact response container bytes."""
 
-    def __init__(self, assets: dict[str, bytes], *, container_bytes: bytes) -> None:
+    def __init__(
+        self,
+        assets: dict[str, bytes],
+        *,
+        container_bytes: bytes,
+        container_content_type: str,
+        is_zip: bool,
+    ) -> None:
         super().__init__(assets)
         self.container_bytes = container_bytes
+        self.container_content_type = container_content_type
+        self.is_zip = is_zip
 
 
 class DartBoundedStop(RuntimeError):
@@ -474,9 +483,19 @@ def fetch_document_zip_asset_bytes(rcept_no: str) -> DocumentZipAssets:
             logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
             return {}
         if raw_xml.lstrip().startswith(b"<"):
-            return DocumentZipAssets({f"{rcept_no}.xml": raw_xml}, container_bytes=raw_xml)
+            return DocumentZipAssets(
+                {f"{rcept_no}.xml": raw_xml},
+                container_bytes=raw_xml,
+                container_content_type="application/xml",
+                is_zip=False,
+            )
         logger.warning("document.xml ZIP 파싱 실패 [%s]: %s", rcept_no, redact_external_error(e))
-    return DocumentZipAssets(result, container_bytes=resp.content)
+    return DocumentZipAssets(
+        result,
+        container_bytes=resp.content,
+        container_content_type="application/zip",
+        is_zip=True,
+    )
 
 
 def fetch_document_zip_files(rcept_no: str) -> dict[str, str]:

@@ -188,6 +188,10 @@ archived and read-back verified *before* any parser decoding; the generic parse
 package is then archived. There is no replacement-decoding path for retained
 raw bytes.
 
+If DART returns a direct XML document instead of a ZIP, it is retained as an
+XML raw-response container with distinct media metadata and archive version;
+it is never mislabeled as a ZIP.
+
 Both report families are required: the business-report assets and the selected
 primary audit-report package (viewer with official-PDF fallback). A
 business-only result, missing audit attachment, unreadable audit source, or

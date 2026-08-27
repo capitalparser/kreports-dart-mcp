@@ -338,18 +338,33 @@ def _business_family(
             target, "partial_source", report_kind="business_report",
             error="document_zip_container_missing",
         )]
+    container_is_zip = getattr(assets, "is_zip", None)
+    container_content_type = getattr(assets, "container_content_type", None)
+    if not isinstance(container_is_zip, bool) or not isinstance(container_content_type, str):
+        return False, [_outcome(
+            target, "partial_source", report_kind="business_report",
+            error="document_container_media_metadata_missing",
+        )]
+    container_extension = "zip" if container_is_zip else _container_extension(container_content_type)
+    container_version = (
+        "raw-document-zip-container-v1"
+        if container_is_zip
+        else "raw-document-response-container-v1"
+    )
     container_sha256 = hashlib.sha256(container_bytes).hexdigest()
     try:
         container_object = archive.archive_bytes(
             data=container_bytes,
-            extension="zip",
+            extension=container_extension,
             metadata={
                 "source_receipt": target.source_receipt or "",
                 "source_uri": target.source_uri or "",
-                "archive_version": "raw-document-zip-container-v1",
+                "archive_version": container_version,
                 "corp_code": target.corp_code,
                 "bsns_year": str(target.bsns_year),
                 "report_kind": "business_report",
+                "container_content_type": container_content_type,
+                "container_is_zip": str(container_is_zip).lower(),
             },
         )
     except Exception as exc:
@@ -357,7 +372,11 @@ def _business_family(
             target, "asset_failed", report_kind="business_report",
             error=_bounded_error(exc),
         )]
-    container = _object_summary(container_object)
+    container = {
+        **_object_summary(container_object),
+        "content_type": container_content_type,
+        "is_zip": container_is_zip,
+    }
     if (
         not container.get("storage_uri")
         or container.get("sha256") != container_sha256
@@ -473,6 +492,8 @@ def _archive_asset(
             "container_storage_uri": str(raw_container.get("storage_uri") or ""),
             "container_sha256": str(raw_container.get("sha256") or ""),
             "container_member_name": container_member_name or filename,
+            "container_content_type": str(raw_container.get("content_type") or ""),
+            "container_is_zip": str(bool(raw_container.get("is_zip"))).lower(),
         })
     try:
         raw_object = archive.archive_bytes(data=raw_bytes, extension=_extension(content_type), metadata=metadata)
@@ -763,6 +784,16 @@ def _asset_source_uri(receipt: str, locator: str, content_type: str) -> str:
 
 def _extension(content_type: str) -> str:
     return {"html": "html", "pdf": "pdf", "xml": "xml"}.get(content_type, "bin")
+
+
+def _container_extension(content_type: str) -> str:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return {
+        "application/xml": "xml",
+        "text/xml": "xml",
+        "text/html": "html",
+        "application/pdf": "pdf",
+    }.get(media_type, "bin")
 
 
 def _object_summary(value: Any) -> dict[str, Any]:

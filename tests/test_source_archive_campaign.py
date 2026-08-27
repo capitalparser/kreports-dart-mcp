@@ -36,6 +36,8 @@ class _BusinessAssets(dict[str, bytes]):
     def __init__(self, assets: dict[str, bytes], *, container_bytes: bytes | None = None) -> None:
         super().__init__(assets)
         self.container_bytes = container_bytes or b"PK\x03\x04test-original-document-zip"
+        self.container_content_type = "application/zip"
+        self.is_zip = True
 
 
 def _business_assets(raw: bytes = b"<DOCUMENT><P>x</P></DOCUMENT>") -> _BusinessAssets:
@@ -172,6 +174,9 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     )
     assert container_call["data"] == original_zip
     assert container_call["object"].sha256 == hashlib.sha256(original_zip).hexdigest()
+    assert container_call["extension"] == "zip"
+    assert container_call["metadata"]["container_content_type"] == "application/zip"
+    assert container_call["metadata"]["container_is_zip"] == "true"
     assert raw_call["metadata"]["container_sha256"] == container_call["object"].sha256
     assert raw_call["metadata"]["container_storage_uri"] == container_call["object"].storage_uri
     assert raw_call["metadata"]["container_member_name"] == "main.xml"
@@ -188,6 +193,63 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     assert document_manifest["raw_container"]["sha256"] == hashlib.sha256(original_zip).hexdigest()
     assert document_manifest["raw_container"]["storage_uri"] == container_call["object"].storage_uri
     assert document_manifest["container_member_name"] == "main.xml"
+
+
+def test_direct_raw_xml_response_is_not_archived_as_a_zip_container(temp_engine, tmp_path, monkeypatch):
+    """A direct XML DART response must retain its own media/provenance representation."""
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    raw_xml = b"<DOCUMENT><P>direct response</P></DOCUMENT>"
+    response = type("Response", (), {
+        "content": raw_xml,
+        "encoding": "utf-8",
+        "headers": {"content-type": "application/xml"},
+        "raise_for_status": lambda self: None,
+    })()
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, *_args, **_kwargs):
+            return response
+
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(fetcher, "_get_client", Client)
+    assets = fetcher.fetch_document_zip_asset_bytes(target.source_receipt)
+    assert assets.is_zip is False
+    assert assets.container_content_type == "application/xml"
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _receipt: assets)
+    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: None)
+    archive = _Archive()
+
+    campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
+
+    container = next(
+        call for call in archive.calls
+        if call["metadata"]["archive_version"] == "raw-document-response-container-v1"
+    )
+    assert container["extension"] == "xml"
+    assert container["data"] == raw_xml
+    assert container["metadata"]["container_content_type"] == "application/xml"
+    assert container["metadata"]["container_is_zip"] == "false"
+    raw_member = next(call for call in archive.calls if call["metadata"]["archive_version"] == "raw-source-v1")
+    assert raw_member["metadata"]["container_content_type"] == "application/xml"
+    document = next(
+        json.loads(call["data"])
+        for call in archive.calls
+        if call["metadata"]["archive_version"] == "source-archive-document-manifest-v1"
+    )
+    assert document["content_type"] == "xml"
+    assert document["raw_container"]["content_type"] == "application/xml"
+    assert document["raw_container"]["is_zip"] is False
 
 
 def test_business_only_is_partial_and_never_committed(temp_engine, tmp_path, monkeypatch):
