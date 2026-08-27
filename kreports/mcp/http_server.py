@@ -129,7 +129,19 @@ def _validate_auth_configuration(
     token: str | None,
     host: str,
     allow_unauthenticated: bool,
+    public: bool,
 ) -> None:
+    if public:
+        if token:
+            raise RuntimeError(
+                "public mode cannot use KREPORTS_MCP_TOKEN or --token"
+            )
+        if allow_unauthenticated:
+            raise RuntimeError(
+                "public mode cannot be combined with "
+                "--allow-unauthenticated"
+            )
+        return
     if token:
         return
     if not allow_unauthenticated:
@@ -166,6 +178,7 @@ def create_app(
     token: str | None = None,
     host: str = DEFAULT_HOST,
     allow_unauthenticated: bool = False,
+    public: bool = False,
     stateless: bool = False,
     json_response: bool = False,
     allowed_hosts: str | Iterable[str] | None = None,
@@ -178,6 +191,7 @@ def create_app(
         token=token,
         host=host,
         allow_unauthenticated=allow_unauthenticated,
+        public=public,
     )
 
     session_manager = StreamableHTTPSessionManager(
@@ -203,7 +217,10 @@ def create_app(
         )
 
     async def ready(request: Request) -> JSONResponse:
-        if not _has_valid_bearer_token(request.headers.get("authorization"), token):
+        if token and not _has_valid_bearer_token(
+            request.headers.get("authorization"),
+            token,
+        ):
             return _unauthorized_response()
         return await _ready(request)
 
@@ -234,6 +251,7 @@ def run_http(
     path: str = DEFAULT_PATH,
     token: str | None = None,
     allow_unauthenticated: bool = False,
+    public: bool = False,
     stateless: bool = False,
     json_response: bool = False,
     allowed_hosts: str | Iterable[str] | None = None,
@@ -249,6 +267,7 @@ def run_http(
         token=auth_token,
         host=host,
         allow_unauthenticated=allow_unauthenticated,
+        public=public,
         stateless=stateless,
         json_response=json_response,
         allowed_hosts=allowed_hosts,
@@ -268,6 +287,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Allow unauthenticated requests only on a loopback host.",
     )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        help=(
+            "Explicitly expose the read-only MCP endpoint without bearer "
+            "authentication. Do not combine with a token."
+        ),
+    )
     parser.add_argument("--stateless", action="store_true")
     parser.add_argument("--json-response", action="store_true")
     parser.add_argument("--allowed-hosts", default=None, help="Comma-separated Host allowlist.")
@@ -280,6 +307,7 @@ def main(argv: list[str] | None = None) -> None:
         path=args.path,
         token=args.token,
         allow_unauthenticated=args.allow_unauthenticated,
+        public=args.public,
         stateless=args.stateless,
         json_response=args.json_response,
         allowed_hosts=args.allowed_hosts,

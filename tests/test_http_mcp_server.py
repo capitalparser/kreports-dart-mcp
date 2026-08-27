@@ -1,6 +1,8 @@
 import pytest
 from starlette.testclient import TestClient
+from typer.testing import CliRunner
 
+from kreports.cli.main import app as cli_app
 from kreports.mcp.http_server import create_app, run_http
 
 
@@ -38,6 +40,30 @@ def test_create_app_rejects_implicit_unauthenticated_mode():
     """Catches app-factory callers bypassing the explicit local-only escape hatch."""
     with pytest.raises(RuntimeError, match="KREPORTS_MCP_TOKEN is required"):
         create_app()
+
+
+def test_explicit_public_mode_allows_nonloopback_without_bearer():
+    """Public read-only deployments must opt in without sharing a token."""
+    app = create_app(host="0.0.0.0", public=True)
+
+    with TestClient(app) as client:
+        response = client.get("/mcp")
+
+    assert response.status_code != 401
+
+
+def test_public_mode_rejects_a_bearer_token_configuration():
+    """A public endpoint must not accidentally retain an unpublished secret."""
+    with pytest.raises(RuntimeError, match="public mode cannot use"):
+        create_app(host="0.0.0.0", token="secret", public=True)
+
+
+def test_serve_http_help_exposes_the_public_mode():
+    """The explicit public deployment switch must be discoverable from the CLI."""
+    result = CliRunner().invoke(cli_app, ["serve-http", "--help"])
+
+    assert result.exit_code == 0, result.exception
+    assert "--public" in result.output
 
 
 def test_remote_http_health_and_bearer_guard():

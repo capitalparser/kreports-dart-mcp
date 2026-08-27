@@ -1,4 +1,4 @@
-"""Container healthcheck for the authenticated public-runtime readiness gate."""
+"""Container healthcheck for the public-runtime readiness gate."""
 from __future__ import annotations
 
 import os
@@ -10,13 +10,16 @@ READY_TIMEOUT_SECONDS = 20
 
 
 def main() -> int:
-    """Return non-zero when the authenticated release gate is not ready."""
+    """Return non-zero when the internal release gate is not ready."""
     token = os.environ.get("KREPORTS_MCP_TOKEN", "")
-    if not token:
-        return 1
+    headers = (
+        {"Authorization": f"Bearer {token}"}
+        if token
+        else {}
+    )
     ready_request = request.Request(
         READY_URL,
-        headers={"Authorization": f"Bearer {token}"},
+        headers=headers,
     )
     try:
         with request.urlopen(

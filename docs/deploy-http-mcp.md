@@ -15,11 +15,29 @@ running endpoint continues to serve its previously verified release.
 
 The endpoint exposes **33 public tools**. Its database and the matching
 `kreports.db.release.json` are an inseparable deployment pair: mount both
-read-only at `/data/` from the same verified release. `/readyz` remains the
-authenticated release health gate and cannot report ready without matching
-artifact proof.
+read-only at `/data/` from the same verified release.
 
-## Health Endpoint Policy
+## Current Lightsail public endpoint
+
+`deploy/lightsail/` is the production configuration for
+`https://mcp.dartmcp.com/mcp`. It intentionally runs the read-only MCP process
+with `--public`: clients connect with the URL alone, with no bearer token,
+OAuth, DART key, or KReports account. The Caddy proxy routes only `/mcp` and
+the minimal `/healthz`; it returns `404` for `/readyz` and every other public
+path. The container healthcheck accesses `/readyz` internally and therefore
+continues to enforce artifact readiness without publishing the report.
+
+This direct MCP connection does not call the OpenAI API from the KReports
+server. A ChatGPT, Claude, Codex, or other client uses its own account for the
+model, while the KReports operator pays only for the hosted server and network.
+See [`deploy/lightsail/README.md`](../deploy/lightsail/README.md) for the
+reviewed deployment and verification commands.
+
+The generic `docker-compose.deploy.yml` and `deploy/public-mcp.env.example`
+below remain an **authenticated self-hosted template**. They are not the
+Lightsail production configuration and must not be mixed with `--public`.
+
+## Health Endpoint Policy for the authenticated self-hosted template
 
 `/healthz` is the public, unauthenticated liveness endpoint. It deliberately
 returns only `{"ok": true}` and does not disclose tool, prompt, resource, or

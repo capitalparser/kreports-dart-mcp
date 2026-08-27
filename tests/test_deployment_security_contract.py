@@ -67,6 +67,32 @@ def test_lightsail_healthcheck_allows_release_artifact_readiness_latency(monkeyp
     )
 
 
+def test_public_healthcheck_needs_no_bearer_token(monkeypatch):
+    """Public MCP mode keeps the release probe internal without a shared key."""
+    from kreports import deployment_healthcheck
+
+    captured = {}
+
+    class ReadyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def ready(ready_request, **_kwargs):
+        captured["authorization"] = ready_request.get_header("Authorization")
+        return ReadyResponse()
+
+    monkeypatch.delenv("KREPORTS_MCP_TOKEN", raising=False)
+    monkeypatch.setattr(deployment_healthcheck.request, "urlopen", ready)
+
+    assert deployment_healthcheck.main() == 0
+    assert captured == {"authorization": None}
+
+
 def test_lightsail_readonly_runtime_puts_settings_data_on_tmpfs():
     """Settings import must not attempt to create /root/.local on a readonly root."""
     compose = Path("deploy/lightsail/compose.yaml").read_text(encoding="utf-8")
@@ -74,6 +100,31 @@ def test_lightsail_readonly_runtime_puts_settings_data_on_tmpfs():
     assert "read_only: true" in compose
     assert "XDG_DATA_HOME: /tmp/xdg" in compose
     assert "- /tmp" in compose
+
+
+def test_lightsail_deployment_explicitly_enables_public_mcp_without_a_token():
+    """The hosted public endpoint is opt-in and never loads a shared bearer."""
+    compose = Path("deploy/lightsail/compose.yaml").read_text(
+        encoding="utf-8"
+    )
+    env_example = Path(
+        "deploy/lightsail/production.env.example"
+    ).read_text(encoding="utf-8")
+
+    assert "- --public" in compose
+    assert "KREPORTS_MCP_TOKEN" not in compose
+    assert "KREPORTS_MCP_TOKEN" not in env_example
+
+
+def test_lightsail_caddy_only_proxies_public_mcp_and_liveness():
+    """Detailed readiness remains a container-only release gate."""
+    caddyfile = Path("deploy/lightsail/conf/Caddyfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "handle /mcp" in caddyfile
+    assert "handle /healthz" in caddyfile
+    assert 'respond "Not Found" 404' in caddyfile
 
 
 def test_default_db_path_honors_xdg_data_home_on_linux(monkeypatch, tmp_path):

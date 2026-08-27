@@ -140,116 +140,72 @@ It serves the verified compact release artifact, not the writable collector
 database. It exposes 33 public read-only tools; no DART API key, raw filing
 backfill, or collector credentials are present on the public service.
 
-##### 1. Authentication and the safe sharing rule
+##### 1. Public, read-only access — no token or OAuth
 
-The endpoint currently requires a static bearer token on every `/mcp` and
-`/readyz` request:
+This production endpoint is intentionally a **public, no-auth, read-only MCP
+service**. Enter its URL only; do not add an `Authorization` header, API key,
+OAuth client, or DART key. It is not a web page, so opening `/mcp` directly in
+a browser is not a useful test.
 
-```http
-Authorization: Bearer <KREPORTS_MCP_TOKEN>
-```
+- `/mcp` is the public Streamable HTTP MCP endpoint.
+- `/healthz` is public liveness and returns only `{"ok": true}`.
+- `/readyz` is deliberately not published by the reverse proxy; it is an
+  in-container release gate for the operator.
 
-`/healthz` is the only unauthenticated route and returns only `{"ok": true}`.
-Opening `/mcp` in a browser without the header should return `401`; it is not a
-web page. Do not put the token in a prompt, screenshot, Git repository,
-bookmark, browser URL, or a shared chat. The current static token is a service
-credential, not a per-user account or an invitation mechanism. Rotate it when
-access changes.
+The process has a read-only filesystem, mounts only the compact SQLite artifact
+and its matching manifest, and rejects collector and DART credentials. The
+proxy accepts MCP and liveness paths only and caps a request body at 256 KB.
+This is public data access, not a user account system: do not send personal,
+confidential, or write instructions to it.
 
-##### 2. Header-capable MCP clients
+##### 2. Any remote MCP client
 
-Use the client's **remote / Streamable HTTP MCP** configuration and enter the
-endpoint above plus this header. Exact field names differ by client, but the
-connection contract is:
+Use the client's **remote / Streamable HTTP MCP** configuration and enter:
 
 ```json
 {
-  "url": "https://mcp.dartmcp.com/mcp",
-  "headers": {
-    "Authorization": "Bearer <token kept in the client's secret store>"
-  }
+  "url": "https://mcp.dartmcp.com/mcp"
 }
 ```
 
 First test with a read-only prompt such as: `삼성전자 2025년 투자자 신호를
 근거와 한계까지 요약해줘`. A working client discovers the tool list and may
-ask for per-tool permission; it must never receive a DART API key.
+ask for tool-use permission; it must never receive a DART API key.
 
-##### 3. Web chatbots: current support matrix
+##### 3. Web chatbots: direct connection, not an API integration
 
-| Client | What to enter | Current production status |
+| Client | What to enter | Who pays for the model |
 |---|---|---|
-| Header-capable MCP desktop/client apps | Endpoint and bearer header above | Supported for a trusted operator who can protect the token. |
-| Claude.ai / Claude remote connector | Public HTTPS MCP URL; its normal remote flow is OAuth or no-auth | **Not a safe self-service path yet.** The current server uses static bearer auth, not an OAuth authorization server. Do not share the bearer token among users to work around this. |
-| ChatGPT web custom app | A remote MCP URL in Developer mode, then the workspace's configured authentication flow | **OAuth adapter required first.** Availability and publishing controls depend on the ChatGPT plan and workspace admin settings. |
-| ChatGPT / OpenAI API application | Remote MCP URL and an `Authorization` header supplied by the application's server-side secret store | Possible for an application operator; this is API integration, not a user self-service web connector. |
+| Claude.ai / Claude remote connector | The MCP URL above; select **no authentication** if prompted. | The user's Claude plan/account. |
+| ChatGPT web | The MCP URL above; select **no authentication** if prompted. | The user's ChatGPT plan/account. |
+| Codex, Cursor, Claude Desktop, or another MCP client | The MCP URL above, with no headers. | The user's own client/account. |
 
-Claude's current remote-connector instructions describe a public HTTPS URL and
-OAuth/no-auth flow; ChatGPT's Developer mode similarly asks the workspace to
-choose and scan an app's authentication mechanism. See the official
-[Claude remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
-and [ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
+No KReports OAuth, shared token, Stripe checkout, or OpenAI API key is needed
+for this direct mode. Connecting this MCP in ChatGPT is **not** a server-side
+Responses API call made by KReports, so it does not make the MCP operator pay
+for the user's model requests. Building a separate custom chatbot with the
+OpenAI API is optional and would be a separate, billable application.
 
-For a true multi-user web-chatbot rollout, add an OAuth 2.1 authorization layer
-in front of this MCP service. Each user then signs in, receives a revocable
-per-user token, and the chatbot connector can complete its normal OAuth flow.
-That is a separate security feature; it is intentionally not simulated by a
-shared static bearer token.
+##### ChatGPT web setup
 
-##### ChatGPT web setup after the OAuth adapter is available
+1. In ChatGPT web, enable **Developer mode** if your plan/workspace exposes it.
+2. Open **Settings or Workspace settings → Apps → Create**.
+3. Enter `https://mcp.dartmcp.com/mcp` as the remote MCP endpoint and choose
+   **no authentication** when that choice is shown.
+4. Select **Scan Tools**, then **Create**. Test from a new chat using a
+   read-only question.
+5. A workspace admin/owner can publish the scanned app for its members. When
+   KReports changes its tool schema, refresh and review the actions before
+   enabling those changes for the workspace.
 
-1. Use ChatGPT web with Developer mode enabled. Full MCP app support is
-   currently a Business or Enterprise/Edu workspace capability; Pro users have
-   Developer-mode read/fetch access only.
-2. As the workspace admin/owner, go to **Workspace settings → Apps → Create**.
-   Enter `https://mcp.dartmcp.com/mcp` as the remote MCP endpoint.
-3. Select the OAuth/OpenID Connect mechanism provided by the adapter. It must
-   issue refresh tokens; for OIDC, expose the `offline_access` scope in its
-   discovery metadata.
-4. Select **Scan Tools**, complete the authorization prompt, then **Create**.
-   The connector first appears as a draft. Test it from a new chat before an
-   admin/owner publishes it for other users.
-5. After an MCP deployment that changes tools or input schemas, an
-   admin/owner must refresh and review the actions. ChatGPT intentionally uses
-   a frozen tool snapshot; production changes are not auto-enabled.
+ChatGPT availability and menus vary by plan. The current official guide says
+that Pro users can connect read/fetch MCPs in Developer mode, while full MCP
+app support is rolling out for Business and Enterprise/Edu workspaces. See the
+[official ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
 
-The current production service has no OAuth adapter, so stop at step 2 until
-that layer is deployed. Never paste the shared `KREPORTS_MCP_TOKEN` into a
-ChatGPT app or distribute it to users.
-
-##### Server-side OpenAI API chatbot
-
-For an application you operate yourself, keep both the OpenAI key and the
-KReports bearer token only in its server-side secret store. The Responses API
-remote MCP tool accepts request headers, so the application can attach the
-token without exposing it to a browser:
-
-```python
-import os
-from openai import OpenAI
-
-client = OpenAI()
-response = client.responses.create(
-    model="gpt-5",
-    input="Compare Samsung Electronics' ROE with its industry over three years.",
-    tools=[{
-        "type": "mcp",
-        "server_label": "kreports",
-        "server_url": "https://mcp.dartmcp.com/mcp",
-        "headers": {
-            "Authorization": (
-                f"Bearer {os.environ['KREPORTS_MCP_TOKEN']}"
-            ),
-        },
-        "require_approval": "never",  # all current KReports MCP tools are read-only
-    }],
-)
-print(response.output_text)
-```
-
-Do not place either secret in browser JavaScript, a mobile app bundle, or a
-public repository. If the chatbot will serve multiple users directly, use the
-OAuth path above instead of giving every request the same bearer token.
+OAuth is only an optional future feature if this public service later needs
+per-user access control, revocation, paid entitlements, or private data. It is
+not a prerequisite for the public read-only endpoint.
 
 ##### 4. Local Claude Desktop / Claude Code is a different mode
 
@@ -261,21 +217,20 @@ claude mcp add kreports -- uvx --from kreports kreports-mcp
 ```
 
 Use it for local development. For the hosted service, use the remote endpoint
-and authentication contract above.
+above; it has no client credential.
 
 ##### 5. Operator-only smoke checks
 
-Keep the token in a local environment variable rather than shell history:
-
 ```bash
 curl -fsS https://mcp.dartmcp.com/healthz
-curl -fsS -H "Authorization: Bearer $KREPORTS_MCP_TOKEN" \
-  https://mcp.dartmcp.com/readyz
+curl -sS -o /dev/null -w '%{http_code}\n' https://mcp.dartmcp.com/readyz
 ```
 
-The first command returns a liveness response. The second must return HTTP 200
-before inviting any client. A 401 means the header is missing or wrong; a 503
-means the release artifact is not ready and must not be bypassed.
+The first command returns liveness. The second must return `404` from the public
+proxy: detailed release readiness is intentionally available only to the
+container healthcheck. A public MCP request must never be accepted as a DB
+release-readiness proof; use the mounted artifact verification and container
+health status for that decision.
 
 ---
 
@@ -395,7 +350,7 @@ kreports serve
 
 ### Remote HTTP MCP
 
-For the production endpoint and web-chatbot/OAuth support boundaries, see
+For the production endpoint and public-client boundary, see
 [Hosted remote MCP](#option-a-hosted-remote-mcp-no-dart-key-needed). Do not
 expose a local `serve-http` process to the public internet with
 `--allow-unauthenticated`; that flag is only for short-lived loopback testing.
@@ -609,111 +564,69 @@ https://mcp.dartmcp.com/mcp
 제공합니다. 공개 읽기 도구 33개만 노출하며, DART API 키·원문 백필·수집기
 자격증명은 서비스에 넣지 않습니다.
 
-##### 1. 인증과 안전한 공유 원칙
+##### 1. 공개 읽기 전용 접근 — 토큰·OAuth 불필요
 
-현재 `/mcp`와 `/readyz`의 모든 요청에는 정적 bearer token이 필요합니다.
+이 운영 endpoint는 의도적으로 **공개·무인증·읽기 전용 MCP 서비스**입니다.
+URL만 입력하세요. `Authorization` header, API 키, OAuth client, DART API 키를
+추가하지 않습니다. `/mcp`는 웹 페이지가 아니므로 브라우저로 직접 여는 것은
+유효한 연결 테스트가 아닙니다.
 
-```http
-Authorization: Bearer <KREPORTS_MCP_TOKEN>
-```
+- `/mcp`는 공개 Streamable HTTP MCP endpoint입니다.
+- `/healthz`는 `{"ok": true}`만 반환하는 공개 liveness 경로입니다.
+- `/readyz`는 reverse proxy로 공개하지 않으며, 운영자 컨테이너 내부 release
+  gate입니다.
 
-인증 없이 열리는 경로는 `{"ok": true}`만 반환하는 `/healthz`뿐입니다.
-브라우저로 `/mcp`를 직접 열면 헤더가 없으므로 `401`이 정상이며, 웹 페이지가
-아닙니다. 토큰을 프롬프트, 스크린샷, Git 저장소, 북마크, URL, 공유 채팅에
-넣지 마세요. 현 정적 토큰은 서비스 자격증명이지 사용자 계정이나 초대장이
-아닙니다. 접근자가 바뀌면 교체합니다.
+프로세스는 읽기 전용 파일시스템에서 compact SQLite artifact와 일치하는 manifest만
+mount하며, 수집기·DART 자격증명을 거부합니다. proxy는 MCP와 liveness 경로만
+받고 request body를 256 KB로 제한합니다. 이는 사용자 계정 시스템이 아니라
+공개 데이터 접근입니다. 개인정보·기밀정보·쓰기 지시는 보내지 마세요.
 
-##### 2. 헤더를 지원하는 MCP 클라이언트
+##### 2. 모든 원격 MCP 클라이언트
 
-클라이언트의 **remote / Streamable HTTP MCP** 설정에 위 endpoint와 다음
-헤더를 입력하세요. 실제 필드명은 각 클라이언트 문서를 따르되, 연결 계약은
-다음과 같습니다.
+클라이언트의 **remote / Streamable HTTP MCP** 설정에 다음만 입력하세요.
 
 ```json
 {
-  "url": "https://mcp.dartmcp.com/mcp",
-  "headers": {
-    "Authorization": "Bearer <클라이언트 secret store에 보관한 토큰>"
-  }
+  "url": "https://mcp.dartmcp.com/mcp"
 }
 ```
 
 첫 질문은 `삼성전자 2025년 투자자 신호를 근거와 한계까지 요약해줘`처럼 읽기
-전용으로 시작하세요. 정상 클라이언트는 도구 목록을 발견하고 도구별 사용
-권한을 물을 수 있습니다. 어떤 경우에도 DART API 키를 MCP 클라이언트에 넣지
-않습니다.
+전용으로 시작하세요. 정상 클라이언트는 도구 목록을 발견하고 도구 사용 권한을
+물을 수 있습니다. 어떤 경우에도 DART API 키를 MCP 클라이언트에 넣지 않습니다.
 
-##### 3. 웹 챗봇 연결: 현재 지원 상태
+##### 3. 웹 챗봇 직접 연결 — API 연동이 아닙니다
 
-| 클라이언트 | 입력할 항목 | 현재 운영 상태 |
+| 클라이언트 | 입력할 항목 | 모델 비용 부담 |
 |---|---|---|
-| 헤더 지원 MCP 데스크톱/클라이언트 앱 | 위 endpoint와 bearer header | 토큰을 안전하게 보관할 수 있는 신뢰된 운영자에게 지원됩니다. |
-| Claude.ai / Claude 원격 커넥터 | 공개 HTTPS MCP URL, 일반적으로 OAuth 또는 무인증 원격 흐름 | **아직 안전한 셀프서비스 경로가 아닙니다.** 현재 서버는 OAuth 서버가 아닌 정적 bearer 인증입니다. 이를 우회하려고 사용자끼리 토큰을 공유하면 안 됩니다. |
-| ChatGPT 웹 custom app | Developer mode에서 원격 MCP URL 및 워크스페이스 인증 흐름 | **OAuth adapter를 먼저 추가해야 합니다.** 사용 가능 여부와 게시 권한은 ChatGPT 요금제·워크스페이스 관리자 설정에 따릅니다. |
-| ChatGPT / OpenAI API 애플리케이션 | 애플리케이션 서버의 secret store가 넣는 원격 MCP URL 및 `Authorization` header | 애플리케이션 운영자는 사용할 수 있습니다. 사용자가 직접 연결하는 웹 챗봇 경로와는 다릅니다. |
+| Claude.ai / Claude 원격 커넥터 | 위 MCP URL, 선택지가 나오면 **인증 없음** | 사용자 Claude 요금제/계정 |
+| ChatGPT web | 위 MCP URL, 선택지가 나오면 **인증 없음** | 사용자 ChatGPT 요금제/계정 |
+| Codex·Cursor·Claude Desktop 등 MCP 클라이언트 | 위 MCP URL, header 없음 | 각 사용자 클라이언트/계정 |
 
-Claude 원격 커넥터는 공개 HTTPS URL과 OAuth/무인증 흐름을 안내하며, ChatGPT
-Developer mode도 워크스페이스가 앱 인증 방식을 선택하고 도구를 스캔하도록
-합니다. 공식 안내는 [Claude remote connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)와
-[ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)를 참고하세요.
+이 직접 연결에는 KReports OAuth, 공유 토큰, Stripe 결제, OpenAI API 키가
+필요하지 않습니다. 특히 ChatGPT에서 MCP를 연결하는 것은 KReports가 서버에서
+Responses API를 호출하는 것이 아니므로, 운영자가 사용자의 모델 요청 API 비용을
+부담하지 않습니다. 별도 OpenAI API 기반 챗봇을 만들면 그때만 별도의 과금
+애플리케이션이 됩니다.
 
-여러 사용자가 웹 챗봇에서 안전하게 쓰려면 이 MCP 앞에 OAuth 2.1 인증 계층을
-추가해야 합니다. 사용자는 로그인 후 취소 가능한 개인별 토큰을 받고, 챗봇
-커넥터는 표준 OAuth 흐름으로 연결합니다. 이는 별도의 보안 기능이며 공유 정적
-bearer token으로 흉내 내지 않습니다.
+##### ChatGPT web 설정
 
-##### OAuth adapter가 준비된 뒤 ChatGPT web 설정
+1. ChatGPT web에서 요금제/워크스페이스가 제공하면 **Developer mode**를 켭니다.
+2. **Settings 또는 Workspace settings → Apps → Create**로 이동합니다.
+3. 원격 MCP endpoint에 `https://mcp.dartmcp.com/mcp`를 입력하고, 선택지가
+   나오면 **인증 없음**을 선택합니다.
+4. **Scan Tools** 후 **Create**를 누르고, 새 채팅에서 읽기 전용 질문으로
+   확인합니다.
+5. workspace admin/owner는 스캔한 app을 구성원에게 publish할 수 있습니다.
+   KReports의 tool schema가 바뀌면 action을 refresh·검토한 후 활성화합니다.
 
-1. Developer mode를 켠 ChatGPT web을 사용합니다. 전체 MCP app 지원은 현재
-   Business 또는 Enterprise/Edu workspace 기능이며, Pro 사용자는
-   Developer-mode의 read/fetch 접근만 사용할 수 있습니다.
-2. workspace admin/owner가 **Workspace settings → Apps → Create**로 이동해
-   원격 MCP endpoint에 `https://mcp.dartmcp.com/mcp`를 입력합니다.
-3. adapter가 제공하는 OAuth/OpenID Connect 방식을 선택합니다. refresh token을
-   발급해야 하며, OIDC라면 discovery metadata에 `offline_access` scope를
-   노출해야 합니다.
-4. **Scan Tools**를 누르고 인증을 완료한 뒤 **Create**합니다. 처음에는 draft로
-   생기므로 새 채팅에서 검증하고 admin/owner가 다른 사용자에게 publish합니다.
-5. MCP 배포로 tool 또는 input schema가 바뀌면 admin/owner가 action을 refresh하고
-   검토해야 합니다. ChatGPT는 의도적으로 고정된 tool snapshot을 사용하므로
-   운영 변경이 자동 반영되지 않습니다.
+ChatGPT 메뉴와 사용 가능 여부는 요금제에 따라 달라집니다. 현재 공식 안내에
+따르면 Pro 사용자는 Developer mode에서 read/fetch MCP를 연결할 수 있고, 전체
+MCP app 지원은 Business 및 Enterprise/Edu workspace에 순차 제공 중입니다.
+[ChatGPT Developer mode 공식 안내](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)를 참고하세요.
 
-현재 운영 서비스에는 OAuth adapter가 없으므로 그 계층을 배포하기 전에는 2단계에서
-멈춥니다. 공유 `KREPORTS_MCP_TOKEN`을 ChatGPT app에 붙여넣거나 다른 사용자에게
-전달하면 안 됩니다.
-
-##### 서버 측 OpenAI API 챗봇
-
-직접 운영하는 애플리케이션은 OpenAI key와 KReports bearer token을 모두 서버의
-secret store에만 둡니다. Responses API의 remote MCP tool은 request header를
-지원하므로 browser에 토큰을 노출하지 않고 연결할 수 있습니다.
-
-```python
-import os
-from openai import OpenAI
-
-client = OpenAI()
-response = client.responses.create(
-    model="gpt-5",
-    input="삼성전자의 최근 3개년 ROE를 동종업종과 비교해줘.",
-    tools=[{
-        "type": "mcp",
-        "server_label": "kreports",
-        "server_url": "https://mcp.dartmcp.com/mcp",
-        "headers": {
-            "Authorization": (
-                f"Bearer {os.environ['KREPORTS_MCP_TOKEN']}"
-            ),
-        },
-        "require_approval": "never",  # 현재 KReports MCP tool은 모두 read-only
-    }],
-)
-print(response.output_text)
-```
-
-어느 secret도 browser JavaScript, 모바일 앱 번들, 공개 저장소에 넣지 않습니다.
-여러 사용자가 챗봇에 직접 접속할 경우에는 모든 요청에 같은 bearer token을 쓰지
-말고 위 OAuth 경로를 사용합니다.
+OAuth는 나중에 사용자별 접근 제어, 취소, 유료 entitlement, 비공개 데이터를
+도입할 때의 선택 기능입니다. 공개 읽기 전용 endpoint의 선행조건이 아닙니다.
 
 ##### 4. 로컬 Claude Desktop / Claude Code는 별도 방식입니다
 
@@ -724,22 +637,20 @@ print(response.output_text)
 claude mcp add kreports -- uvx --from kreports kreports-mcp
 ```
 
-로컬 개발에는 이 방식을 쓰고, 호스팅 서비스는 위 원격 endpoint와 인증 계약을
-사용하세요.
+로컬 개발에는 이 방식을 쓰고, 호스팅 서비스는 위 원격 endpoint에 자격증명 없이
+연결하세요.
 
 ##### 5. 운영자 전용 점검
 
-토큰은 shell history에 직접 쓰지 말고 로컬 환경변수에 보관합니다.
-
 ```bash
 curl -fsS https://mcp.dartmcp.com/healthz
-curl -fsS -H "Authorization: Bearer $KREPORTS_MCP_TOKEN" \
-  https://mcp.dartmcp.com/readyz
+curl -sS -o /dev/null -w '%{http_code}\n' https://mcp.dartmcp.com/readyz
 ```
 
-첫 명령은 liveness만 확인합니다. 두 번째가 HTTP 200을 반환한 뒤에만 클라이언트를
-초대합니다. 401은 헤더 누락·오류, 503은 release artifact 미준비를 뜻하며 우회하면
-안 됩니다.
+첫 명령은 liveness를 확인합니다. 두 번째는 공개 proxy에서 `404`여야 합니다.
+상세 release readiness는 의도적으로 컨테이너 healthcheck에만 열려 있습니다.
+공개 MCP 요청 성공을 DB release readiness 증거로 사용하면 안 되며, mount한
+artifact 검증과 컨테이너 health 상태로 판정합니다.
 
 ---
 
@@ -825,7 +736,7 @@ kreports serve
 
 ### 원격 HTTP MCP
 
-운영 endpoint와 웹 챗봇/OAuth 지원 경계는 [호스팅 원격 MCP](#방법-a-호스팅-원격-mcp-api-키-불필요)를
+운영 endpoint와 공개 클라이언트 경계는 [호스팅 원격 MCP](#방법-a-호스팅-원격-mcp-api-키-불필요)를
 참고하세요. `serve-http` 로컬 프로세스를 `--allow-unauthenticated`로 외부 인터넷에
 노출하면 안 됩니다. 이 옵션은 짧은 loopback 테스트 전용입니다.
 

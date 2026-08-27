@@ -926,6 +926,14 @@ def serve_http(
         "--allow-unauthenticated",
         help="Allow requests without bearer authentication on a loopback host only.",
     ),
+    public: bool = typer.Option(
+        False,
+        "--public",
+        help=(
+            "Explicitly expose the read-only endpoint without bearer "
+            "authentication."
+        ),
+    ),
     stateless: bool = typer.Option(False, "--stateless", help="Use stateless Streamable HTTP sessions."),
     json_response: bool = typer.Option(False, "--json-response", help="Return JSON responses instead of SSE streams."),
     allowed_hosts: Optional[str] = typer.Option(
@@ -948,6 +956,7 @@ def serve_http(
         path=path,
         token=token,
         allow_unauthenticated=allow_unauthenticated,
+        public=public,
         stateless=stateless,
         json_response=json_response,
         allowed_hosts=allowed_hosts,

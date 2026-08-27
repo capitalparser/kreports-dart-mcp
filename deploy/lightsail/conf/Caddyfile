@@ -1,3 +1,14 @@
 mcp.dartmcp.com {
-	reverse_proxy kreports-mcp:8765
+	handle /mcp {
+		request_body {
+			max_size 256KB
+		}
+		reverse_proxy kreports-mcp:8765
+	}
+
+	handle /healthz {
+		reverse_proxy kreports-mcp:8765
+	}
+
+	respond "Not Found" 404
 }

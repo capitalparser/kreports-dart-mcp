@@ -81,47 +81,33 @@ duplicated in every client config.
 
 ## Claude Web / remote MCP
 
-Claude Web cannot start the local stdio launcher. It must connect to a public
-HTTP remote MCP endpoint. KReports now exposes the same tools through
-Streamable HTTP:
-
-```powershell
-cd "C:\Users\kkim44\Desktop\FY25\AI\Vive coding\KJ_Wiki\kreports-dart"
-$env:KREPORTS_MCP_TOKEN="replace-with-long-random-token"
-python -m kreports.cli.main serve-http --host 127.0.0.1 --port 8765 --path /mcp
-```
-
-Health check:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8765/healthz
-```
-
-For Claude Web, expose the local server through HTTPS, for example with a
-Cloudflare Tunnel:
-
-```powershell
-cloudflared tunnel --url http://127.0.0.1:8765
-```
-
-Then add the connector URL in Claude Web as:
+Claude Web cannot start a local stdio launcher. Use the production remote MCP
+endpoint instead:
 
 ```text
-https://<your-tunnel-host>/mcp
+https://mcp.dartmcp.com/mcp
 ```
 
-Security notes:
+This is a public, read-only, no-auth endpoint. Enter the URL in the client's
+remote MCP/Streamable HTTP setup and add **no headers, API key, bearer token, or
+OAuth client**. The service holds no DART key and cannot collect or write data.
 
-- Remote MCP traffic originates from Anthropic's cloud, not your browser.
-- Claude Web supports authless and OAuth remote MCP servers. This KReports
-  implementation currently provides static bearer-token protection for MCP
-  clients that can send an `Authorization: Bearer ...` header.
-- If you test Claude Web authless, start the server with
-  `--allow-unauthenticated` on `127.0.0.1`, `::1`, or `localhost` and use a
-  short-lived tunnel only. Wildcard and external bind addresses are rejected.
-  Do not expose a long-lived unauthenticated endpoint with audit/client data.
-- For production Claude Web use, put this behind an OAuth-capable gateway or a
-  deployment layer that restricts access appropriately.
+For ChatGPT web, enable Developer mode if it is available to your plan or
+workspace, create an app under **Settings or Workspace settings → Apps →
+Create**, enter the same URL, select no authentication if prompted, then scan
+the tools. Current plan availability is documented in the
+[official ChatGPT Developer mode guide](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt).
+
+`/healthz` is public liveness. `/readyz` is not externally routed; it is the
+container-only release gate. A direct MCP connection uses each user's own
+Claude, ChatGPT, Codex, Cursor, or other client account, so it does not require
+the KReports operator to make an OpenAI API call.
+
+For a private local experiment, keep `--allow-unauthenticated` on `127.0.0.1`,
+`::1`, or `localhost` only. It rejects wildcard and external bind addresses.
+The explicit `--public` flag is reserved for the reviewed Lightsail deployment
+in `deploy/lightsail/`, which adds TLS, a path-only proxy, immutable data mounts,
+and request-size limits.
 
 ## Useful CLI commands
 

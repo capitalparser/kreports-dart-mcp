@@ -22,6 +22,7 @@ services:
       - --path
       - /mcp
       - --stateless
+      - --public
       - --allowed-hosts
       - mcp.dartmcp.com
     expose:
