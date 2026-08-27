@@ -241,3 +241,6 @@ def test_source_archive_guide_keeps_drive_and_public_runtime_separate():
     assert "Do not mount SQLite on Google Drive" in guide
     assert "--apply" in guide
     assert "public MCP queries do not call Google Drive" in guide
+    assert "rclone about '<drive-remote-name>:' --json" in guide
+    assert "does not perform a reliable remaining-DART-quota preflight" in guide
+    assert "--max-dart-calls` is a local physical-request cap" in guide

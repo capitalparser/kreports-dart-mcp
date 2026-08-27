@@ -76,15 +76,18 @@ shell history, 화면 공유에 넣지 않는다.
    chmod 700 "$HOME/.cache/kreports/source-archive-spool"
    ```
 
-3. Drive 대상 경로의 여유 공간·보존 정책과 local spool의 여유 공간을 먼저
-   확인한다. `rclone size`는 Drive에 실제로 저장된 압축 object와 manifest/event
-   크기를 보여주는 점검용 수치다. 원문 uncompressed byte 합계, compressed
-   object byte 합계, object count, manifest/event overhead를 campaign별로
-   함께 기록한다. SHA-256 dedup 때문에 원문 합계와 Drive 사용량은 같지 않을
-   수 있다.
+3. Drive 대상 경로의 archive-root 사용량·보존 정책과 local spool의 여유 공간을
+   먼저 확인한다. `rclone size`는 archive root에 실제로 저장된 압축 object와
+   manifest/event 크기를 보여주는 usage/object-accounting 수치이며, Drive의
+   **남은 quota를 검사하지 않는다**. remote가 지원하면 `rclone about`으로
+   계정 quota를 확인하고, apply 전에는 Google Drive UI의 available quota와도
+   교차 확인한다. 원문 uncompressed byte 합계, compressed object byte 합계,
+   object count, manifest/event overhead를 campaign별로 함께 기록한다.
+   SHA-256 dedup 때문에 원문 합계와 Drive 사용량은 같지 않을 수 있다.
 
    ```bash
    rclone size '<drive-remote-name>:<archive-root>' --json
+   rclone about '<drive-remote-name>:' --json
    df -h "$HOME/.cache/kreports/source-archive-spool"
    ```
 
@@ -125,9 +128,12 @@ uv run kreports source-archive-preflight \
 ```
 
 출력의 target digest, discovered count, `no_source_metadata` count를 campaign
-기록에 남긴다. 이 결과는 Drive 용량·rclone 접근·DART quota를 확인한 결과가
-아니다. 그것들은 위의 로컬 운영 사전 점검과 실제 apply guard에서 별도로
-확인한다.
+기록에 남긴다. 이 결과는 Drive 용량·rclone 접근을 확인한 결과가 아니며,
+**does not perform a reliable remaining-DART-quota preflight**. DART의 남은
+quota/rate 상태는 조회 가능한 신뢰성 있는 사전검사로 가정하지 않는다. 실제
+반응은 첫 bounded apply shard에서 발견·기록한다. Drive target manifest는 첫
+DART 요청보다 먼저 생성될 수 있으므로, 그 shard를 시작하기 전 archive-root
+quota를 별도로 확인해야 한다.
 
 ### 2. local target preview와 shard dry run
 
@@ -157,8 +163,9 @@ DART/Drive 호출도 raw file 작성도 하지 않는다.
 ### 3. 명시적·유한한 apply
 
 preflight와 dry run을 검토한 뒤에만 한 shard를 실행한다. `--apply`와 유한한
-`--max-dart-calls`를 반드시 같이 지정한다. budget은 retry, attachment viewer,
-PDF fallback을 포함한 실제 DART HTTP 시도마다 먼저 하나씩 소진된다.
+`--max-dart-calls`를 반드시 같이 지정한다. `--max-dart-calls` is a local physical-request cap; DART 계정의 남은 quota를 측정하거나 예약하지 않는다.
+budget은 retry, attachment viewer, PDF fallback을 포함한 실제 DART HTTP
+시도마다 먼저 하나씩 소진된다.
 
 ```bash
 uv run kreports source-archive-run \
