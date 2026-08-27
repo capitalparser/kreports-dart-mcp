@@ -2553,6 +2553,152 @@ def collect_auditors_cmd(
 # collect-audit-report-sections (감사보고서 본문 섹션 수집)
 # ---------------------------------------------------------------------------
 
+def _source_archive_plan_from_database(
+    db_path: Path,
+    *,
+    years: list[int],
+    shard_count: int,
+):
+    """Open an explicit non-runtime candidate DB for source-archive planning."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from kreports.maintenance.source_archive_campaign import (
+        SourceArchiveCampaignError,
+        build_source_archive_plan,
+    )
+
+    resolved = db_path.expanduser().resolve(strict=True)
+    if not resolved.is_file():
+        raise SourceArchiveCampaignError("source archive DB must be a readable file")
+    configured_url = settings.db_url
+    configured_database = configured_url.removeprefix("sqlite:///")
+    if configured_database and configured_database != configured_url:
+        try:
+            if resolved == Path(configured_database).expanduser().resolve():
+                raise SourceArchiveCampaignError(
+                    "source archive commands require an explicit non-runtime collector database"
+                )
+        except OSError:
+            pass
+    engine = create_engine(
+        f"sqlite:///file:{resolved.as_posix()}?mode=ro&immutable=1&uri=true",
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        with sessionmaker(bind=engine)() as session:
+            return build_source_archive_plan(
+                session, years=years, shard_count=shard_count
+            )
+    finally:
+        engine.dispose()
+
+
+def _source_archive_cli_error(exc: Exception) -> None:
+    typer.echo(json.dumps(
+        {"error": str(exc)}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ), err=True)
+    raise typer.Exit(code=2) from exc
+
+
+@app.command("source-archive-preflight")
+def source_archive_preflight_cmd(
+    db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
+    year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
+    shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
+) -> None:
+    """No-write source campaign preflight; it never contacts DART or Drive."""
+    try:
+        plan = _source_archive_plan_from_database(
+            db_path, years=year, shard_count=shard_count
+        )
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps({
+        "schema": "source-archive-preflight.v1",
+        "status": "ready_for_explicit_apply",
+        "target_count": len(plan.targets),
+        "discovered_count": sum(target.source_status == "discovered" for target in plan.targets),
+        "no_source_metadata_count": sum(
+            target.source_status == "no_source_metadata" for target in plan.targets
+        ),
+        "target_digest": plan.target_digest,
+        "limitations": [
+            "No DART request, Drive upload, or archive verification was performed.",
+            "Run source-archive-run with --apply only from a configured collector machine.",
+        ],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+@app.command("source-archive-plan")
+def source_archive_plan_cmd(
+    db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
+    state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
+    year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
+    shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
+) -> None:
+    """Freeze an auditable target manifest without making external requests."""
+    try:
+        from kreports.maintenance.source_archive_campaign import _write_frozen_target_manifest
+
+        plan = _source_archive_plan_from_database(
+            db_path, years=year, shard_count=shard_count
+        ).with_state_dir(state_dir)
+        _write_frozen_target_manifest(plan, plan.state_dir)
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps({
+        "status": "frozen",
+        "target_digest": plan.target_digest,
+        "target_count": len(plan.targets),
+        "manifest_path": str(plan.state_dir / "TARGET.json"),
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+@app.command("source-archive-run")
+def source_archive_run_cmd(
+    db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
+    state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
+    shard: int = typer.Option(..., "--shard", min=0, help="고정 회사 shard (0부터 시작)"),
+    year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
+    shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
+    apply: bool = typer.Option(False, "--apply", help="DART/Drive 쓰기를 명시적으로 허용"),
+) -> None:
+    """Preview or explicitly run exactly one source-archive shard."""
+    try:
+        from kreports.maintenance.source_archive_campaign import run_source_archive_shard
+
+        plan = _source_archive_plan_from_database(
+            db_path, years=year, shard_count=shard_count
+        ).with_state_dir(state_dir)
+        archive = None
+        if apply:
+            from kreports.storage.drive_archive import drive_archive_from_runtime
+
+            archive = drive_archive_from_runtime()
+        report = run_source_archive_shard(plan, shard, archive, apply=apply)
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps(
+        report.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ))
+
+
+@app.command("source-archive-verify")
+def source_archive_verify_cmd(
+    state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
+    shard: Optional[int] = typer.Option(None, "--shard", min=0),
+) -> None:
+    """Inspect local campaign manifests without making any external request."""
+    try:
+        from kreports.maintenance.source_archive_campaign import verify_source_archive_campaign
+
+        result = verify_source_archive_campaign(state_dir, shard=shard)
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 @app.command("collect-audit-report-sections")
 def collect_audit_report_sections_cmd(
     year: int = typer.Option(2025, "--year", help="감사대상 사업연도"),

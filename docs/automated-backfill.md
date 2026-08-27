@@ -111,6 +111,87 @@ Do not run raw collection with `RAW_STORAGE_BACKEND=inline` or
 `RAW_STORAGE_KEEP_INLINE=true`; that stores DART XML/HTML in SQLite and can grow
 `kreports.db` by tens of GB.
 
+## Five-year source archive campaign (Google Drive)
+
+The source archive is a separate, local-collector workflow for preserving the
+original DART annual-report assets and a generic document structure. It is not
+part of the public MCP request path: the public server reads only a separately
+prepared, read-only database artifact and does not have Google Drive access.
+
+Use an explicit, read-only *candidate/collector* SQLite DB as the source of the
+frozen company-year target list. Never point these commands at the active MCP
+runtime DB. A company receives the same deterministic shard in every selected
+year, so operators can resume a shard without changing its membership.
+
+First perform a no-network, no-write preflight and freeze the target manifest:
+
+```bash
+uv run kreports source-archive-preflight \
+  --db /path/to/candidate.db \
+  --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
+
+uv run kreports source-archive-plan \
+  --db /path/to/candidate.db \
+  --state-dir ~/.local/share/kreports/source-archive-2021-2025 \
+  --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
+```
+
+`TARGET.json` is the frozen denominator. It records both canonical annual
+filing targets and explicit `no_source_metadata` gaps; a missing anchor is not
+evidence that a filing has no disclosure. Do not replace a manifest after a
+run has started. Create a new campaign directory when source-selection rules
+or target years change.
+
+Previewing a shard performs no DART request, Drive request, local source-state
+write, or raw-file creation:
+
+```bash
+uv run kreports source-archive-run \
+  --db /path/to/candidate.db \
+  --state-dir ~/.local/share/kreports/source-archive-2021-2025 \
+  --shard 7 \
+  --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
+```
+
+Only after preflight proves the local spool, DART credentials/quota, and Drive
+configuration should an operator opt in to a real shard. The command fails
+closed unless collector mode and raw retention are explicitly enabled:
+
+```bash
+export KREPORTS_RUNTIME_MODE=collector
+export KREPORTS_ENABLE_RAW_BACKFILL=1
+export RAW_STORAGE_BACKEND=drive
+export RAW_STORAGE_DRIVE_REMOTE=vault:
+export RAW_STORAGE_PREFIX='KReports Data Lake'
+export RAW_STORAGE_SPOOL_DIR="$HOME/.cache/kreports/source-archive-spool"
+
+uv run kreports source-archive-run \
+  --db /path/to/candidate.db \
+  --state-dir ~/.local/share/kreports/source-archive-2021-2025 \
+  --shard 7 --apply \
+  --year 2021 --year 2022 --year 2023 --year 2024 --year 2025
+```
+
+The runner handles one asset at a time: raw bytes are hashed, immutably
+archived and read-back verified, structurally parsed, and the parse package is
+archived before the local spool may be released. `outcomes.jsonl` is append-only
+and records `discovered`, archive/parse success, `partial_source`,
+`no_source_metadata`, and failures. `COMMITTED.json` appears only when every
+company-year in the shard reaches `structurally_complete`; it is deliberately
+absent for partial results.
+
+Inspect local campaign progress without contacting DART or Drive:
+
+```bash
+uv run kreports source-archive-verify \
+  --state-dir ~/.local/share/kreports/source-archive-2021-2025 --shard 7
+```
+
+This workflow archives evidence; it does not modify the candidate DB, active
+runtime DB, or Lightsail artifact, and it does not promote a release. A later,
+separately verified candidate-artifact build consumes the archived parse
+objects.
+
 Uninstall:
 
 ```bash
