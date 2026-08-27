@@ -28,8 +28,11 @@ __all__ = [
 
 DRIVE_PROPERTY_MAX_BYTES = 124
 _DRIVE_REQUIRED_METADATA_KEYS = ("source_receipt", "source_uri", "archive_version")
+_REDACT_BEARER = re.compile(
+    r"(?im)(\bauthorization\s*:\s*bearer\s+)([^\s,;]+)"
+)
 _REDACT_ASSIGNMENT = re.compile(
-    r"(?i)\b(token|authorization|password|secret)\b(\s*[:=]\s*)([^\s,;]+)"
+    r"(?im)(\b(?:access_token|client_secret|token|authorization|password|secret)\b\s*[:=]\s*)(?!Bearer\b)([^\s,;]+)"
 )
 
 
@@ -400,4 +403,5 @@ def _bounded_redacted_diagnostic(error: subprocess.CalledProcessError) -> str:
     else:
         diagnostic = str(raw)
     normalized = diagnostic.replace("\r\n", "\n").replace("\r", "\n")
-    return _REDACT_ASSIGNMENT.sub(r"\1\2[REDACTED]", normalized)[:500]
+    bearer_redacted = _REDACT_BEARER.sub(r"\1[REDACTED]", normalized)
+    return _REDACT_ASSIGNMENT.sub(r"\1[REDACTED]", bearer_redacted)[:500]

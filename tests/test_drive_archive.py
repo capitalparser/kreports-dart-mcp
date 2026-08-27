@@ -228,6 +228,34 @@ def test_archive_upload_reports_copy_failure_after_missing_readback_and_keeps_sp
     assert len(list(tmp_path.iterdir())) == 1
 
 
+def test_archive_upload_diagnostic_redacts_bearer_and_assignment_credentials(tmp_path: Path):
+    """A failed upload diagnostic must never expose copy-command credentials."""
+    runner = FakeRcloneRunner()
+    runner.copyto_error = subprocess.CalledProcessError(
+        1,
+        ["rclone", "copyto"],
+        stderr=(
+            b"PropertyLengthLimitExceeded\n"
+            b"Authorization: Bearer super-secret-value\n"
+            b"access_token=super-secret-value\n"
+            b"client_secret=super-secret-value"
+        ),
+    )
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/raw", spool_dir=tmp_path, runner=runner
+    )
+
+    with pytest.raises(DriveArchiveUploadError) as exc:
+        archive.archive_bytes(data=b"official filing bytes", extension="xml", metadata=_source_metadata())
+
+    message = str(exc.value)
+    assert "PropertyLengthLimitExceeded" in message
+    assert "super-secret-value" not in message
+    assert "Bearer [REDACTED]" in message
+    assert "access_token=[REDACTED]" in message
+    assert "client_secret=[REDACTED]" in message
+
+
 def test_archive_retries_one_missing_post_copy_readback_without_a_second_upload(tmp_path: Path):
     """Drive visibility lag after a completed copy must not cause a duplicate immutable upload."""
     runner = FakeRcloneRunner()
