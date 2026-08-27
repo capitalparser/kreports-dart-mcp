@@ -4,6 +4,7 @@ import gzip
 import hashlib
 from io import BytesIO
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -11,6 +12,7 @@ from kreports.storage.drive_archive import (
     DriveArchive,
     DriveArchiveConfigurationError,
     DriveArchiveProvenanceError,
+    DriveArchiveUploadError,
     DriveArchiveVerificationError,
     drive_archive_from_runtime,
 )
@@ -29,6 +31,9 @@ class FakeRcloneRunner:
         self.uploaded_payloads: list[bytes] = []
         self.corrupt_reads = False
         self.remote_type = "drive"
+        self.reject_oversized_metadata = False
+        self.copyto_error: subprocess.CalledProcessError | None = None
+        self.post_copy_missing_reads = 0
 
     def run(self, args: list[str]) -> bytes:
         command = args[1]
@@ -42,6 +47,15 @@ class FakeRcloneRunner:
                 if value == "--metadata-set"
             }
             self.metadata_calls.append((destination, metadata))
+            if self.reject_oversized_metadata and any(
+                len(key.encode("utf-8")) + len(value.encode("utf-8")) > 124
+                for key, value in metadata.items()
+            ):
+                raise subprocess.CalledProcessError(
+                    1, args, stderr=b"PropertyLengthLimitExceeded"
+                )
+            if self.copyto_error is not None:
+                raise self.copyto_error
             compressed = Path(source).read_bytes()
             self.uploaded_payloads.append(compressed)
             self.objects[destination] = compressed
@@ -57,6 +71,9 @@ class FakeRcloneRunner:
                 compressed = self.objects[storage_uri]
             except KeyError as exc:
                 raise FileNotFoundError(storage_uri) from exc
+            if self.post_copy_missing_reads:
+                self.post_copy_missing_reads -= 1
+                raise FileNotFoundError(storage_uri)
             if self.corrupt_reads:
                 return gzip.compress(b"x" * len(gzip.decompress(compressed)))
             return compressed
@@ -154,6 +171,93 @@ def test_archive_bytes_rejects_a_mismatched_readback_and_keeps_the_spool_file(tm
     assert len(runner.copyto_calls) == 1
     assert len(runner.cat_calls) == 2
     assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_archive_metadata_omits_an_oversized_optional_container_uri_from_drive_transport(tmp_path: Path):
+    """An optional index value past Drive's limit must not reject verified bytes."""
+    runner = FakeRcloneRunner()
+    runner.reject_oversized_metadata = True
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/raw", spool_dir=tmp_path, runner=runner
+    )
+    container_storage_uri = "drive:containers/" + "x" * 120
+
+    archive.archive_bytes(
+        data=b"official filing bytes",
+        extension="xml",
+        metadata={**_source_metadata(), "container_storage_uri": container_storage_uri},
+    )
+
+    assert len(runner.copyto_calls) == 1
+    assert "container_storage_uri" not in runner.metadata_calls[0][1]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_archive_metadata_rejects_an_oversized_required_source_uri_before_copyto(tmp_path: Path):
+    """A long source locator is required provenance and must fail rather than truncate."""
+    runner = FakeRcloneRunner()
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/raw", spool_dir=tmp_path, runner=runner
+    )
+
+    with pytest.raises(DriveArchiveProvenanceError, match="source_uri"):
+        archive.archive_bytes(
+            data=b"official filing bytes",
+            extension="xml",
+            metadata={**_source_metadata(), "source_uri": "https://dart.example.test/" + "x" * 120},
+        )
+
+    assert runner.copyto_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_archive_upload_reports_copy_failure_after_missing_readback_and_keeps_spool(tmp_path: Path):
+    """A rejected copy must retain its reason and local recovery object when absent remotely."""
+    runner = FakeRcloneRunner()
+    runner.copyto_error = subprocess.CalledProcessError(
+        1, ["rclone", "copyto"], stderr=b"PropertyLengthLimitExceeded"
+    )
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/raw", spool_dir=tmp_path, runner=runner
+    )
+
+    with pytest.raises(DriveArchiveUploadError, match="upload failed.*PropertyLengthLimitExceeded"):
+        archive.archive_bytes(data=b"official filing bytes", extension="xml", metadata=_source_metadata())
+
+    assert len(runner.copyto_calls) == 1
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_archive_retries_one_missing_post_copy_readback_without_a_second_upload(tmp_path: Path):
+    """Drive visibility lag after a completed copy must not cause a duplicate immutable upload."""
+    runner = FakeRcloneRunner()
+    runner.post_copy_missing_reads = 1
+    sleeps: list[float] = []
+    archive = DriveArchive(
+        remote="team-drive:",
+        root="kreports/raw",
+        spool_dir=tmp_path,
+        runner=runner,
+        sleeper=sleeps.append,
+    )
+
+    archive.archive_bytes(data=b"official filing bytes", extension="xml", metadata=_source_metadata())
+
+    assert len(runner.copyto_calls) == 1
+    assert len(sleeps) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_archive_retry_configuration_rejects_more_than_two_readbacks(tmp_path: Path):
+    """Allowing a third retry would violate the bounded Drive visibility contract."""
+    with pytest.raises(DriveArchiveConfigurationError, match="at most two"):
+        DriveArchive(
+            remote="team-drive:",
+            root="kreports/raw",
+            spool_dir=tmp_path,
+            runner=FakeRcloneRunner(),
+            readback_retries=3,
+        )
 
 
 @pytest.mark.parametrize("remote, root", [("", "kreports/raw"), ("team-drive:", "")])

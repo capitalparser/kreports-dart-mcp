@@ -7,9 +7,11 @@ import gzip
 import hashlib
 from io import BytesIO
 from pathlib import Path
+import re
 import subprocess
 from tempfile import NamedTemporaryFile
-from typing import Mapping, Protocol
+import time
+from typing import Callable, Mapping, Protocol
 
 
 __all__ = [
@@ -18,9 +20,17 @@ __all__ = [
     "DriveArchive",
     "DriveArchiveConfigurationError",
     "DriveArchiveProvenanceError",
+    "DriveArchiveUploadError",
     "DriveArchiveVerificationError",
     "drive_archive_from_runtime",
 ]
+
+
+DRIVE_PROPERTY_MAX_BYTES = 124
+_DRIVE_REQUIRED_METADATA_KEYS = ("source_receipt", "source_uri", "archive_version")
+_REDACT_ASSIGNMENT = re.compile(
+    r"(?i)\b(token|authorization|password|secret)\b(\s*[:=]\s*)([^\s,;]+)"
+)
 
 
 class DriveArchiveConfigurationError(ValueError):
@@ -33,6 +43,10 @@ class DriveArchiveProvenanceError(ValueError):
 
 class DriveArchiveVerificationError(RuntimeError):
     """Raised when a remote archive object differs from its expected source."""
+
+
+class DriveArchiveUploadError(DriveArchiveVerificationError):
+    """Raised when a failed upload cannot be verified by remote readback."""
 
 
 class _DriveArchiveObjectMissing(DriveArchiveVerificationError):
@@ -71,11 +85,17 @@ class DriveArchive:
         root: str,
         spool_dir: Path,
         runner: CommandRunner,
+        readback_retries: int = 2,
+        readback_delay_seconds: float = 1.0,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.remote = remote.strip()
         self.root = root.strip("/")
         self.spool_dir = Path(spool_dir)
         self.runner = runner
+        self.readback_retries = readback_retries
+        self.readback_delay_seconds = readback_delay_seconds
+        self.sleeper = sleeper
         self._verified_objects: set[str] = set()
         self._target_validated = False
 
@@ -83,6 +103,10 @@ class DriveArchive:
             raise DriveArchiveConfigurationError("Drive archive remote must not be blank")
         if not self.root:
             raise DriveArchiveConfigurationError("Drive archive root must not be blank")
+        if not 0 <= self.readback_retries <= 2:
+            raise DriveArchiveConfigurationError(
+                "Drive archive readback retries must be between zero and at most two."
+            )
 
     def archive_bytes(
         self,
@@ -109,6 +133,7 @@ class DriveArchive:
             byte_length=len(data),
             compressed_length=len(compressed),
         )
+        transport_metadata = _drive_transport_metadata(archive_metadata)
         self._validate_drive_remote()
 
         if storage_uri not in self._verified_objects:
@@ -123,7 +148,7 @@ class DriveArchive:
                     compressed=compressed,
                     storage_uri=storage_uri,
                     extension=normalized_extension,
-                    metadata=archive_metadata,
+                    metadata=transport_metadata,
                     sha256=sha256,
                     byte_length=len(data),
                 )
@@ -197,22 +222,46 @@ class DriveArchive:
             command.extend(["--metadata-set", f"{key}={value}"])
         try:
             self.runner.run(command)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
             try:
                 self.verify_object(
                     storage_uri,
                     expected_sha256=sha256,
                     expected_bytes=byte_length,
                 )
-            except DriveArchiveVerificationError:
-                raise
+            except _DriveArchiveObjectMissing:
+                diagnostic = _bounded_redacted_diagnostic(exc)
+                raise DriveArchiveUploadError(
+                    "Drive archive upload failed and object could not be verified: "
+                    f"{diagnostic}"
+                ) from exc
         else:
-            self.verify_object(
-                storage_uri,
-                expected_sha256=sha256,
-                expected_bytes=byte_length,
+            self._verify_successful_copy_readback(
+                storage_uri=storage_uri,
+                sha256=sha256,
+                byte_length=byte_length,
             )
         spool_path.unlink()
+
+    def _verify_successful_copy_readback(
+        self,
+        *,
+        storage_uri: str,
+        sha256: str,
+        byte_length: int,
+    ) -> None:
+        for attempt in range(self.readback_retries + 1):
+            try:
+                self.verify_object(
+                    storage_uri,
+                    expected_sha256=sha256,
+                    expected_bytes=byte_length,
+                )
+                return
+            except _DriveArchiveObjectMissing:
+                if attempt == self.readback_retries:
+                    raise
+                self.sleeper(self.readback_delay_seconds)
 
     def _write_spool_file(self, compressed: bytes, *, suffix: str) -> Path:
         self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -314,8 +363,7 @@ def _archive_metadata(
     byte_length: int,
     compressed_length: int,
 ) -> dict[str, str]:
-    required = ("source_receipt", "source_uri", "archive_version")
-    missing = [key for key in required if not metadata.get(key, "").strip()]
+    missing = [key for key in _DRIVE_REQUIRED_METADATA_KEYS if not metadata.get(key, "").strip()]
     if missing:
         raise DriveArchiveProvenanceError(
             "Drive archive requires provenance metadata: " + ", ".join(missing)
@@ -329,3 +377,27 @@ def _archive_metadata(
         }
     )
     return archived
+
+
+def _drive_transport_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
+    """Return Drive-safe custom properties without changing manifest provenance."""
+    transport: dict[str, str] = {}
+    for key, value in metadata.items():
+        encoded_length = len(key.encode("utf-8")) + len(value.encode("utf-8"))
+        if encoded_length <= DRIVE_PROPERTY_MAX_BYTES:
+            transport[key] = value
+        elif key in _DRIVE_REQUIRED_METADATA_KEYS:
+            raise DriveArchiveProvenanceError(
+                f"Drive archive provenance metadata exceeds {DRIVE_PROPERTY_MAX_BYTES} bytes: {key}"
+            )
+    return transport
+
+
+def _bounded_redacted_diagnostic(error: subprocess.CalledProcessError) -> str:
+    raw = error.stderr or error.stdout or str(error)
+    if isinstance(raw, bytes):
+        diagnostic = raw.decode("utf-8", errors="replace")
+    else:
+        diagnostic = str(raw)
+    normalized = diagnostic.replace("\r\n", "\n").replace("\r", "\n")
+    return _REDACT_ASSIGNMENT.sub(r"\1\2[REDACTED]", normalized)[:500]

@@ -18,12 +18,13 @@ class _Object:
 
 
 class _Archive:
-    def __init__(self) -> None:
+    def __init__(self, *, storage_uri_prefix: str = "drive:objects/") -> None:
         self.calls: list[dict[str, object]] = []
+        self.storage_uri_prefix = storage_uri_prefix
 
     def archive_bytes(self, *, data: bytes, extension: str, metadata: dict[str, str]):
         digest = hashlib.sha256(data).hexdigest()
-        result = _Object(f"drive:objects/{len(self.calls)}", digest, len(data))
+        result = _Object(f"{self.storage_uri_prefix}{len(self.calls)}", digest, len(data))
         self.calls.append({
             "data": data, "extension": extension, "metadata": dict(metadata), "object": result,
         })
@@ -370,7 +371,7 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
         lambda _receipt: _BusinessAssets({"main.xml": raw}, container_bytes=original_zip),
     )
     monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: None)
-    archive = _Archive()
+    archive = _Archive(storage_uri_prefix="drive:containers/" + "x" * 120)
 
     report = campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
 
@@ -389,6 +390,7 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     assert container_call["metadata"]["container_is_zip"] == "true"
     assert raw_call["metadata"]["container_sha256"] == container_call["object"].sha256
     assert raw_call["metadata"]["container_storage_uri"] == container_call["object"].storage_uri
+    assert len(raw_call["metadata"]["container_storage_uri"].encode("utf-8")) > 124
     assert raw_call["metadata"]["container_member_name"] == "main.xml"
     document_manifest = next(
         json.loads(call["data"])
