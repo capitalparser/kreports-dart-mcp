@@ -413,6 +413,18 @@ KOSPI/KOSDAQ evidence is not proof of unlisted. The guide defines the required
 KRX and dated issuer-status evidence before any historic-status promotion.
 Public MCP queries never call Google Drive.
 
+비활성 후보 DB와 과거 릴리스 DB는 별도 검증 절차로 Google Drive에 보관할 수
+있습니다. Drive는 불변 보관소이고, MCP의 현재 읽기 전용 DB는 계속 로컬에서만
+동작합니다. 검증 후 유예기간·여유공간 기준을 충족할 때만 로컬 사본을 정리하는
+운영 절차는 [Maintainer DB archive lifecycle](docs/database-archive-lifecycle.md)에
+정리했습니다.
+
+Inactive candidate and historic release databases have a separate, verified
+Google Drive lifecycle: Drive is an immutable archive, while the active MCP DB
+remains local and read-only. The maintainer can schedule only the safe
+archive-then-grace-then-capacity-prune workflow described in
+[Maintainer DB archive lifecycle](docs/database-archive-lifecycle.md).
+
 ### Architecture
 
 ```

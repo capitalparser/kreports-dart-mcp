@@ -2622,6 +2622,101 @@ def _source_archive_scope_output(plan) -> dict[str, object]:
     return {"universe_mode": plan.universe_mode, **plan.campaign_counts}
 
 
+def _database_archive_lifecycle(
+    *,
+    candidate_roots: list[Path],
+    protected_paths: list[Path],
+    ledger_path: Path,
+    grace_days: int,
+):
+    from datetime import timedelta
+
+    from kreports.maintenance.database_archive_lifecycle import DatabaseArchiveLifecycle
+
+    return DatabaseArchiveLifecycle(
+        candidate_roots=tuple(candidate_roots),
+        protected_paths=tuple(protected_paths),
+        ledger_path=ledger_path,
+        grace_period=timedelta(days=grace_days),
+    )
+
+
+@app.command("db-archive-plan")
+def database_archive_plan_cmd(
+    candidate_root: list[Path] = typer.Option(..., "--candidate-root", help="inactive 후보/이전 릴리스 DB 디렉터리 (반복 지정)"),
+    protected_path: list[Path] = typer.Option([], "--protect", help="현재 runtime 또는 진행 중 DB (반복 지정)"),
+    ledger: Path = typer.Option(..., "--ledger", help="append-only DB archive ledger JSONL"),
+    grace_days: int = typer.Option(7, "--grace-days", min=0, max=365),
+) -> None:
+    """List inactive DB files eligible for a later explicit Drive archive."""
+    try:
+        lifecycle = _database_archive_lifecycle(
+            candidate_roots=candidate_root,
+            protected_paths=protected_path,
+            ledger_path=ledger,
+            grace_days=grace_days,
+        )
+        plan = lifecycle.plan()
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps({
+        "schema": "kreports-db-archive-plan.v1",
+        "eligible_paths": [str(path) for path in plan.eligible],
+        "protected_paths": [str(path) for path in plan.protected_paths],
+        "excluded_sidecars": [str(path) for path in plan.excluded_sidecars],
+        "unsafe_paths": [str(path) for path in plan.unsafe_paths],
+        "limitations": ["No Drive request, ledger write, or local deletion was performed."],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+@app.command("db-archive-run")
+def database_archive_run_cmd(
+    candidate_root: list[Path] = typer.Option(..., "--candidate-root", help="inactive 후보/이전 릴리스 DB 디렉터리 (반복 지정)"),
+    protected_path: list[Path] = typer.Option([], "--protect", help="현재 runtime 또는 진행 중 DB (반복 지정)"),
+    ledger: Path = typer.Option(..., "--ledger", help="append-only DB archive ledger JSONL"),
+    grace_days: int = typer.Option(7, "--grace-days", min=0, max=365),
+    apply: bool = typer.Option(False, "--apply", help="Drive upload 및 ledger 기록을 명시적으로 허용"),
+    prune: bool = typer.Option(False, "--prune", help="검증·유예 완료본의 로컬 정리를 명시적으로 허용"),
+    min_free_gib: int = typer.Option(20, "--min-free-gib", min=0, max=10240),
+    target_free_gib: int = typer.Option(25, "--target-free-gib", min=0, max=10240),
+) -> None:
+    """Archive inactive DBs to Drive; prune is a separate verified, grace-bound action."""
+    try:
+        if not apply:
+            raise ValueError("db-archive-run requires --apply; use db-archive-plan for read-only preview")
+        from kreports.runtime import require_database_archive_mode
+        require_database_archive_mode("db-archive-run")
+        lifecycle = _database_archive_lifecycle(
+            candidate_roots=candidate_root,
+            protected_paths=protected_path,
+            ledger_path=ledger,
+            grace_days=grace_days,
+        )
+        plan = lifecycle.plan()
+        if plan.unsafe_paths:
+            from kreports.maintenance.database_archive_lifecycle import DatabaseArchiveSafetyError
+            raise DatabaseArchiveSafetyError("SQLite sidecar present; resolve unsafe_paths before apply")
+        from kreports.maintenance.database_archive_lifecycle import DatabaseArchiveResult
+        archived = DatabaseArchiveResult([], [], [])
+        if plan.eligible:
+            from kreports.storage.drive_archive import database_drive_archive_from_runtime
+            archived = lifecycle.archive(database_drive_archive_from_runtime())
+        pruned = lifecycle.prune(
+            only_when_below_free_bytes=min_free_gib * 1024**3,
+            target_free_bytes=target_free_gib * 1024**3,
+        ) if prune else None
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps({
+        "schema": "kreports-db-archive-run.v1",
+        "archived_paths": [str(path) for path in archived.archived_paths],
+        "archive_skipped_paths": [str(path) for path in archived.skipped_paths],
+        "pruned_paths": [] if pruned is None else [str(path) for path in pruned.pruned_paths],
+        "prune_skipped_paths": [] if pruned is None else [str(path) for path in pruned.skipped_paths],
+        "prune_requested": prune,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 @app.command("source-archive-preflight")
 def source_archive_preflight_cmd(
     db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),

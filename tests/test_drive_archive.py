@@ -93,6 +93,7 @@ class FakeRcloneRunner:
 def _allow_collector_archive(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("KREPORTS_RUNTIME_MODE", "collector")
     monkeypatch.setenv("KREPORTS_ENABLE_RAW_BACKFILL", "1")
+    monkeypatch.setenv("KREPORTS_ENABLE_DB_ARCHIVE", "1")
 
 
 def _source_metadata() -> dict[str, str]:
@@ -108,6 +109,23 @@ def _deterministic_gzip(data: bytes) -> bytes:
     with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0) as compressed:
         compressed.write(data)
     return output.getvalue()
+
+
+def test_archive_file_streams_a_sqlite_artifact_to_the_same_verified_content_address(tmp_path: Path):
+    """Database artifacts use the immutable Drive boundary without retaining a raw spool."""
+    runner = FakeRcloneRunner()
+    archive = DriveArchive(
+        remote="team-drive:", root="kreports/db-archive", spool_dir=tmp_path / "spool", runner=runner
+    )
+    database = tmp_path / "candidate.db"
+    database.write_bytes(b"sqlite bytes" * 1024)
+
+    result = archive.archive_file(path=database, metadata=_source_metadata())
+
+    assert result.sha256 == hashlib.sha256(database.read_bytes()).hexdigest()
+    assert result.byte_length == database.stat().st_size
+    assert runner.copyto_calls
+    assert not list((tmp_path / "spool").glob("drive-archive-*"))
 
 
 def test_archive_bytes_is_content_addressed_uploaded_once_and_verified(tmp_path: Path):

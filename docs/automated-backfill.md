@@ -111,6 +111,18 @@ Do not run raw collection with `RAW_STORAGE_BACKEND=inline` or
 `RAW_STORAGE_KEEP_INLINE=true`; that stores DART XML/HTML in SQLite and can grow
 `kreports.db` by tens of GB.
 
+## Local DB capacity lifecycle (Google Drive archive)
+
+Raw-source retention and local SQLite capacity are separate workflows. The
+maintainer workstation can archive **inactive candidate or historic release
+DBs** to verified Google Drive objects, then prune the local copy only after a
+grace period and only when the free-space threshold requires it. The current
+runtime DB and every active campaign/checkpoint are protected; public MCP never
+reads the Drive object.
+
+See [Maintainer DB archive lifecycle](database-archive-lifecycle.md) for the
+read-only plan, explicit apply/prune command, and daily macOS `launchd` job.
+
 ## Five-year source archive campaign (Google Drive)
 
 The source archive is a separate, local-collector workflow for preserving the

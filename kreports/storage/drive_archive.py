@@ -25,6 +25,7 @@ __all__ = [
     "DriveArchiveUploadError",
     "DriveArchiveVerificationError",
     "drive_archive_from_runtime",
+    "database_drive_archive_from_runtime",
 ]
 
 
@@ -188,6 +189,66 @@ class DriveArchive:
             compressed_length=len(compressed),
         )
 
+    def archive_file(
+        self,
+        *,
+        path: Path,
+        metadata: Mapping[str, str],
+    ) -> ArchivedObject:
+        """Archive one file through a bounded gzip spool and verify its raw bytes.
+
+        This is deliberately separate from :meth:`archive_bytes`: release and
+        candidate SQLite files can be several GiB and must never be loaded into
+        the maintainer process at once.
+        """
+        from kreports.runtime import require_database_archive_mode
+
+        require_database_archive_mode("archive local database artifact to Drive")
+        source = Path(path).expanduser().resolve(strict=True)
+        if not source.is_file():
+            raise DriveArchiveConfigurationError("Drive archive file must be a readable regular file")
+        sha256, byte_length = _sha256_file(source)
+        extension = _normalized_extension(source.suffix or ".bin")
+        object_path = (
+            f"objects/sha256/{sha256[:2]}/{sha256[2:4]}/"
+            f"{sha256}.{extension}.gz"
+        )
+        storage_uri = self._storage_uri(object_path)
+        archive_metadata = _archive_metadata(
+            metadata,
+            sha256=sha256,
+            byte_length=byte_length,
+            compressed_length=0,
+        )
+        self._validate_drive_remote()
+
+        try:
+            self._verify_file_object(
+                storage_uri, expected_sha256=sha256, expected_bytes=byte_length
+            )
+        except _DriveArchiveObjectMissing:
+            spool_path, compressed_length = self._write_gzip_file_spool(source, extension)
+            archive_metadata["compressed_length"] = str(compressed_length)
+            try:
+                self._upload_file_spool_and_verify(
+                    spool_path=spool_path,
+                    storage_uri=storage_uri,
+                    metadata=_drive_transport_metadata(archive_metadata),
+                    sha256=sha256,
+                    byte_length=byte_length,
+                )
+            finally:
+                if spool_path.exists() and storage_uri in self._verified_objects:
+                    spool_path.unlink()
+        self._verified_objects.add(storage_uri)
+        return ArchivedObject(
+            storage_uri=storage_uri,
+            object_path=object_path,
+            sha256=sha256,
+            byte_length=byte_length,
+            compressed_length=int(archive_metadata["compressed_length"]),
+        )
+
     def verify_object(
         self,
         storage_uri: str,
@@ -281,6 +342,99 @@ class DriveArchive:
                 byte_length=byte_length,
             )
         spool_path.unlink()
+
+    def _upload_file_spool_and_verify(
+        self,
+        *,
+        spool_path: Path,
+        storage_uri: str,
+        metadata: Mapping[str, str],
+        sha256: str,
+        byte_length: int,
+    ) -> None:
+        command = ["rclone", "copyto", str(spool_path), storage_uri, "--immutable", "--metadata"]
+        for key, value in sorted(metadata.items()):
+            command.extend(["--metadata-set", f"{key}={value}"])
+        try:
+            self.runner.run(command, timeout_seconds=self.command_timeout_seconds)
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+            try:
+                self._verify_file_object(
+                    storage_uri, expected_sha256=sha256, expected_bytes=byte_length
+                )
+            except DriveArchiveVerificationError:
+                raise DriveArchiveUploadError(
+                    "Drive archive file upload failed and object could not be verified."
+                ) from exc
+        else:
+            self._verify_file_object(
+                storage_uri, expected_sha256=sha256, expected_bytes=byte_length
+            )
+        self._verified_objects.add(storage_uri)
+
+    def _verify_file_object(
+        self,
+        storage_uri: str,
+        *,
+        expected_sha256: str,
+        expected_bytes: int,
+    ) -> None:
+        """Verify a remote gzip object without retaining its uncompressed body."""
+        if not isinstance(self.runner, SubprocessCommandRunner):
+            self.verify_object(storage_uri, expected_sha256, expected_bytes)
+            return
+        try:
+            process = subprocess.Popen(
+                ["rclone", "cat", storage_uri], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except OSError as exc:
+            raise _DriveArchiveObjectMissing(
+                f"Drive archive object is missing: {storage_uri}"
+            ) from exc
+        assert process.stdout is not None
+        digest = hashlib.sha256()
+        byte_length = 0
+        try:
+            with gzip.GzipFile(fileobj=process.stdout, mode="rb") as decompressed:
+                while chunk := decompressed.read(1024 * 1024):
+                    digest.update(chunk)
+                    byte_length += len(chunk)
+            process.stdout.close()
+            process.wait(timeout=self.command_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            raise DriveArchiveCommandTimeoutError(
+                "Drive archive cat command timed out after "
+                f"{self.command_timeout_seconds:g} seconds."
+            ) from exc
+        except (OSError, EOFError) as exc:
+            raise DriveArchiveVerificationError(
+                f"Drive archive readback could not be decompressed: {storage_uri}"
+            ) from exc
+        if process.returncode:
+            raise _DriveArchiveObjectMissing(f"Drive archive object is missing: {storage_uri}")
+        if byte_length != expected_bytes:
+            raise DriveArchiveVerificationError(
+                f"Drive archive byte length mismatch: expected {expected_bytes}, got {byte_length}"
+            )
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise DriveArchiveVerificationError(
+                "Drive archive SHA-256 mismatch: "
+                f"expected {expected_sha256}, got {actual_sha256}"
+            )
+
+    def _write_gzip_file_spool(self, source: Path, extension: str) -> tuple[Path, int]:
+        self.spool_dir.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(
+            mode="wb", dir=self.spool_dir, prefix="drive-archive-", suffix=f".{extension}.gz", delete=False
+        ) as raw_spool:
+            spool_path = Path(raw_spool.name)
+            with gzip.GzipFile(fileobj=raw_spool, mode="wb", filename="", mtime=0) as compressed:
+                with source.open("rb") as input_file:
+                    while chunk := input_file.read(1024 * 1024):
+                        compressed.write(chunk)
+        return spool_path, spool_path.stat().st_size
 
     def _verify_successful_copy_readback(
         self,
@@ -383,6 +537,40 @@ def drive_archive_from_runtime(*, runner: CommandRunner | None = None) -> DriveA
     return archive
 
 
+def database_drive_archive_from_runtime(*, runner: CommandRunner | None = None) -> DriveArchive:
+    """Build the separately opt-in Drive archive used for inactive DB artifacts."""
+    from kreports.runtime import drive_archive_policy, require_database_archive_mode
+
+    require_database_archive_mode("build Drive database archive")
+    backend, remote, _source_root, spool_dir = drive_archive_policy()
+    root = os.environ.get("KREPORTS_DB_ARCHIVE_PREFIX", "").strip().strip("/")
+    if backend != "drive":
+        raise DriveArchiveConfigurationError(
+            "Database archive requires RAW_STORAGE_BACKEND=drive."
+        )
+    if not remote:
+        raise DriveArchiveConfigurationError(
+            "Database archive requires RAW_STORAGE_DRIVE_REMOTE."
+        )
+    if not root:
+        raise DriveArchiveConfigurationError(
+            "Database archive requires KREPORTS_DB_ARCHIVE_PREFIX."
+        )
+    if not spool_dir:
+        raise DriveArchiveConfigurationError(
+            "Database archive requires RAW_STORAGE_SPOOL_DIR."
+        )
+    archive = DriveArchive(
+        remote=remote,
+        root=root,
+        spool_dir=Path(spool_dir),
+        runner=runner or SubprocessCommandRunner(),
+        command_timeout_seconds=_collector_command_timeout_seconds(),
+    )
+    archive._validate_drive_remote()
+    return archive
+
+
 def _collector_command_timeout_seconds() -> int:
     configured_timeout = os.environ.get("RAW_STORAGE_COMMAND_TIMEOUT_SECONDS")
     if configured_timeout is None:
@@ -411,6 +599,16 @@ def _deterministic_gzip(data: bytes) -> bytes:
     with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0) as compressed:
         compressed.write(data)
     return output.getvalue()
+
+
+def _sha256_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_length = 0
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+            byte_length += len(chunk)
+    return digest.hexdigest(), byte_length
 
 
 def _archive_metadata(

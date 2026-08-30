@@ -47,6 +47,11 @@ def raw_backfill_enabled() -> bool:
     return os.environ.get("KREPORTS_ENABLE_RAW_BACKFILL", "").strip() == "1"
 
 
+def database_archive_enabled() -> bool:
+    """Whether the maintainer explicitly authorized local DB archival to Drive."""
+    return os.environ.get("KREPORTS_ENABLE_DB_ARCHIVE", "").strip() == "1"
+
+
 def raw_storage_policy() -> tuple[str, bool, str]:
     """Read raw storage policy at call time so deploy settings fail closed."""
     from kreports.config import settings
@@ -83,6 +88,16 @@ def require_drive_archive_mode(operation: str) -> None:
         raise RuntimeError(
             f"{operation} is blocked by the raw retention policy. Set "
             "KREPORTS_ENABLE_RAW_BACKFILL=1 only for an explicit source archive operation."
+        )
+
+
+def require_database_archive_mode(operation: str) -> None:
+    """Guard Drive DB archival separately from source-retention collection."""
+    require_runtime_write(operation)
+    if not database_archive_enabled():
+        raise RuntimeError(
+            f"{operation} is blocked by the database archive policy. Set "
+            "KREPORTS_ENABLE_DB_ARCHIVE=1 only for an explicit local DB archival operation."
         )
 
 
