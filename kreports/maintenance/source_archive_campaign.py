@@ -317,13 +317,13 @@ def build_source_archive_plan(
 
     # Known limitation: `latest_annual_filing_anchor_from_rows` returning None here
     # does not distinguish "no business report was ever filed" from "a business
-    # report disclosure exists but failed exact receipt/date anchor validation."
-    # A company-year in the second (rare) case is misclassified into the
-    # audit-report-only cohort below and its business report is never fetched.
-    # See docs/superpowers/plans/2026-09-04-audit-report-only-backfill.md Task 4
-    # code-quality review for the full analysis; not fixed here because it
-    # requires understanding kreports/analysis/filing_provenance.py's exact
-    # validation semantics, which is out of scope for this task.
+    # report disclosure exists but failed exact receipt/date anchor validation"
+    # (see kreports/analysis/filing_provenance.py). A company-year in the second
+    # (rare) case is misclassified into the audit-report-only cohort below, and
+    # its business report is never fetched. Not fixed here: doing so requires
+    # a way to distinguish "no candidate row matched at all" from "a candidate
+    # matched but failed exact validation" inside filing_provenance.py, which is
+    # out of scope for this change.
     if universe_mode == "audit_report_only":
         for corp_code in sorted(rows_by_company):
             for year in normalized_years:
