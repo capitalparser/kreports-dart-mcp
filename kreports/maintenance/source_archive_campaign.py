@@ -60,13 +60,18 @@ CAMPAIGN_SCHEMA = "source-archive-campaign.v2"
 ALL_ISSUER_CAMPAIGN_SCHEMA = "source-archive-campaign.v3"
 DEFAULT_SHARD_COUNT = 64
 AUDIT_XML_RESOLVER_VERSION = 2
-_UNIVERSE_MODES = {"listed", "all_annual_issuers"}
+_UNIVERSE_MODES = {"listed", "all_annual_issuers", "audit_report_only"}
 _VERIFIED_KOSPI = ("verified_kospi", "KOSPI", "verified_year_specific_membership")
 _VERIFIED_KOSDAQ = ("verified_kosdaq", "KOSDAQ", "verified_year_specific_membership")
 _OUTSIDE_VERIFIED_MARKETS = (
     "annual_report_issuer_outside_verified_markets",
     "unclassified",
     "no_verified_kospi_kosdaq_membership",
+)
+_AUDIT_REPORT_ONLY = (
+    "audit_report_only_no_business_report",
+    "unclassified",
+    "audit_report_receipt_without_business_report",
 )
 _REQUIRED_MEMBERSHIP_COLUMNS = {
     "corp_code", "bsns_year", "market", "status", "evidence_basis",
@@ -122,7 +127,7 @@ class SourceArchivePlan:
 
     @property
     def campaign_schema(self) -> str:
-        return ALL_ISSUER_CAMPAIGN_SCHEMA if self.universe_mode == "all_annual_issuers" else CAMPAIGN_SCHEMA
+        return CAMPAIGN_SCHEMA if self.universe_mode == "listed" else ALL_ISSUER_CAMPAIGN_SCHEMA
 
     @property
     def target_manifest(self) -> dict[str, Any]:
@@ -134,7 +139,7 @@ class SourceArchivePlan:
             "target_count": len(self.targets),
             "targets": [target.to_dict() for target in self.targets],
         }
-        if self.universe_mode == "all_annual_issuers":
+        if self.universe_mode != "listed":
             manifest["universe_mode"] = self.universe_mode
             manifest["cohort_counts"] = _cohort_counts(self.targets)
         return manifest
@@ -192,7 +197,7 @@ class SourceArchiveReport:
             "drive_metrics": dict(self.drive_metrics or _empty_drive_metrics()),
             "target_year": self.target_year,
         }
-        if self.universe_mode == "all_annual_issuers":
+        if self.universe_mode != "listed":
             result.update({"universe_mode": self.universe_mode, **dict(self.campaign_counts or {})})
         return result
 
@@ -229,8 +234,9 @@ def build_source_archive_plan(
     years: Iterable[int],
     shard_count: int = DEFAULT_SHARD_COUNT,
     universe_mode: str = "listed",
+    excluded_pairs: frozenset[tuple[str, int]] = frozenset(),
 ) -> SourceArchivePlan:
-    """Build a no-write listed-v2 or all-annual-issuer-v3 source plan."""
+    """Build a no-write listed-v2, all-annual-issuer-v3, or audit-report-only source plan."""
     _require_non_runtime_source_session(session)
     normalized_years = _normalize_years(years)
     _validate_shard_count(shard_count)
@@ -247,43 +253,47 @@ def build_source_archive_plan(
             Disclosure.corp_code.in_({corp for corp, _year in membership_by_pair})
         )
     disclosure_rows = session.execute(disclosure_query).mappings().all() if (
-        membership_by_pair or universe_mode == "all_annual_issuers"
+        membership_by_pair or universe_mode in ("all_annual_issuers", "audit_report_only")
     ) else []
     rows_by_company: dict[str, list[dict[str, Any]]] = {}
     for row in disclosure_rows:
         rows_by_company.setdefault(str(row["corp_code"]), []).append(dict(row))
 
     targets: list[SourceArchiveTarget] = []
-    for corp_code, year in sorted(membership_by_pair):
-        membership = membership_by_pair[(corp_code, year)]
-        anchor = latest_annual_filing_anchor_from_rows(
-            rows_by_company.get(corp_code, ()), corp_code=corp_code, bsns_year=year
-        )
-        if anchor is None:
+
+    if universe_mode in ("listed", "all_annual_issuers"):
+        for corp_code, year in sorted(membership_by_pair):
+            membership = membership_by_pair[(corp_code, year)]
+            anchor = latest_annual_filing_anchor_from_rows(
+                rows_by_company.get(corp_code, ()), corp_code=corp_code, bsns_year=year
+            )
+            if anchor is None:
+                target = SourceArchiveTarget(
+                    corp_code=corp_code, bsns_year=year, market=membership["market"],
+                    shard=_company_shard(corp_code, shard_count), source_receipt=None,
+                    report_nm=None, source_uri=None, source_status="no_source_metadata",
+                )
+                if universe_mode == "all_annual_issuers":
+                    target = replace(target, **_listed_membership_evidence(membership["market"]))
+                targets.append(target)
+                continue
+            receipt = str(anchor["rcept_no"])
             target = SourceArchiveTarget(
                 corp_code=corp_code, bsns_year=year, market=membership["market"],
-                shard=_company_shard(corp_code, shard_count), source_receipt=None,
-                report_nm=None, source_uri=None, source_status="no_source_metadata",
+                shard=_company_shard(corp_code, shard_count), source_receipt=receipt,
+                report_nm=str(anchor["report_nm"]), source_uri=_document_source_uri(receipt),
+                source_status="discovered",
             )
             if universe_mode == "all_annual_issuers":
                 target = replace(target, **_listed_membership_evidence(membership["market"]))
             targets.append(target)
-            continue
-        receipt = str(anchor["rcept_no"])
-        target = SourceArchiveTarget(
-            corp_code=corp_code, bsns_year=year, market=membership["market"],
-            shard=_company_shard(corp_code, shard_count), source_receipt=receipt,
-            report_nm=str(anchor["report_nm"]), source_uri=_document_source_uri(receipt),
-            source_status="discovered",
-        )
-        if universe_mode == "all_annual_issuers":
-            target = replace(target, **_listed_membership_evidence(membership["market"]))
-        targets.append(target)
 
-    if universe_mode == "all_annual_issuers":
+    if universe_mode in ("all_annual_issuers", "audit_report_only"):
         for corp_code in sorted(rows_by_company):
             for year in normalized_years:
                 if (corp_code, year) in membership_by_pair:
+                    continue
+                if (corp_code, year) in excluded_pairs:
                     continue
                 anchor = latest_annual_filing_anchor_from_rows(
                     rows_by_company[corp_code], corp_code=corp_code, bsns_year=year
@@ -300,6 +310,35 @@ def build_source_archive_plan(
                     historical_listing_status=_OUTSIDE_VERIFIED_MARKETS[1],
                     historical_listing_basis=_OUTSIDE_VERIFIED_MARKETS[2],
                 ))
+
+    if universe_mode == "audit_report_only":
+        for corp_code in sorted(rows_by_company):
+            for year in normalized_years:
+                if (corp_code, year) in membership_by_pair:
+                    continue
+                if (corp_code, year) in excluded_pairs:
+                    continue
+                if latest_annual_filing_anchor_from_rows(
+                    rows_by_company[corp_code], corp_code=corp_code, bsns_year=year
+                ) is not None:
+                    continue  # already produced by the business-report loop above
+                audit_anchor = _latest_audit_report_anchor_from_rows(
+                    rows_by_company[corp_code], bsns_year=year
+                )
+                if audit_anchor is None:
+                    continue
+                receipt = str(audit_anchor["rcept_no"])
+                targets.append(SourceArchiveTarget(
+                    corp_code=corp_code, bsns_year=year, market=None,
+                    shard=_company_shard(corp_code, shard_count), source_receipt=receipt,
+                    report_nm=str(audit_anchor["report_nm"]), source_uri=_document_source_uri(receipt),
+                    source_status="discovered",
+                    required_report_kinds=("audit_report",),
+                    universe_cohort=_AUDIT_REPORT_ONLY[0],
+                    historical_listing_status=_AUDIT_REPORT_ONLY[1],
+                    historical_listing_basis=_AUDIT_REPORT_ONLY[2],
+                ))
+
     frozen_targets = tuple(sorted(targets, key=lambda target: (target.corp_code, target.bsns_year)))
     return SourceArchivePlan(
         years=normalized_years, shard_count=shard_count, targets=frozen_targets,
@@ -587,6 +626,28 @@ def _listed_membership_evidence(market: str) -> dict[str, str]:
         "historical_listing_status": market,
         "historical_listing_basis": basis,
     }
+
+
+def _latest_audit_report_anchor_from_rows(
+    rows: Iterable[Mapping[str, Any]], *, bsns_year: int,
+) -> dict[str, Any] | None:
+    """Find the latest primary audit-report disclosure anchoring one business year.
+
+    Mirrors ``latest_annual_filing_anchor_from_rows`` but matches on the
+    audit-report predicate, for company-years that never file a business
+    report at all (KONEX issuers below the annual-report threshold, and
+    unlisted 외감 issuers).
+    """
+    candidates = [
+        row for row in rows
+        if audit_report_receipt_matches_business_year(
+            row.get("report_nm"), row.get("disc_date"), bsns_year,
+        )
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (row["disc_date"], row["rcept_no"]), reverse=True)
+    return candidates[0]
 
 
 def _cohort_counts(targets: Iterable[SourceArchiveTarget]) -> dict[str, int]:

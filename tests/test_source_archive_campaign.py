@@ -1223,3 +1223,63 @@ def test_separate_audit_receipts_excludes_internal_control_report(monkeypatch):
     receipts = campaign._separate_audit_receipts(target)
 
     assert receipts == ("20220101000002",)
+
+
+def test_audit_report_only_plan_finds_business_gap_and_audit_only_targets_and_respects_exclusions(
+    temp_engine,
+):
+    from sqlalchemy.orm import sessionmaker
+    from kreports.maintenance.source_archive_campaign import build_source_archive_plan
+
+    with sessionmaker(bind=temp_engine)() as session:
+        session.add_all([
+            Company(corp_code="00200001", corp_name="정상사업보고서법인"),
+            Company(corp_code="00200002", corp_name="감사보고서전용법인"),
+            Company(corp_code="00200003", corp_name="제외대상법인"),
+        ])
+        for year in (2021, 2022, 2023):
+            session.add(_membership("00299999", year, "KOSPI"))
+            session.add(_membership("00299998", year, "KOSDAQ"))
+        session.add(Disclosure(
+            rcept_no="20240331200001", corp_code="00200001", corp_name="정상사업보고서법인",
+            disc_date=date(2024, 3, 31), disc_type="A", report_nm="사업보고서 (2023.12)",
+        ))
+        session.add(Disclosure(
+            rcept_no="20220331200002", corp_code="00200002", corp_name="감사보고서전용법인",
+            disc_date=date(2022, 3, 31), disc_type="F", report_nm="감사보고서",
+        ))
+        session.add(Disclosure(
+            rcept_no="20240331200003", corp_code="00200003", corp_name="제외대상법인",
+            disc_date=date(2024, 3, 31), disc_type="A", report_nm="사업보고서 (2023.12)",
+        ))
+        session.commit()
+
+    excluded = frozenset({("00200003", 2023)})
+    with sessionmaker(bind=temp_engine)() as session:
+        plan = build_source_archive_plan(
+            session, years=[2021, 2022, 2023], universe_mode="audit_report_only",
+            excluded_pairs=excluded,
+        )
+
+    by_pair = {(t.corp_code, t.bsns_year): t for t in plan.targets}
+
+    assert ("00200001", 2023) in by_pair
+    gap_fill_target = by_pair[("00200001", 2023)]
+    assert gap_fill_target.required_report_kinds == ("business_report", "audit_report")
+    assert gap_fill_target.universe_cohort == "annual_report_issuer_outside_verified_markets"
+
+    assert ("00200002", 2021) in by_pair
+    audit_only_target = by_pair[("00200002", 2021)]
+    assert audit_only_target.required_report_kinds == ("audit_report",)
+    assert audit_only_target.source_receipt == "20220331200002"
+    assert audit_only_target.universe_cohort == "audit_report_only_no_business_report"
+
+    assert ("00200003", 2023) not in by_pair
+    assert ("00299999", 2021) not in by_pair  # verified KOSPI/KOSDAQ rows never become targets here
+
+    assert plan.campaign_counts["cohort_counts"] == {
+        "annual_report_issuer_outside_verified_markets": 1,
+        "audit_report_only_no_business_report": 1,
+    }
+    assert plan.target_manifest["universe_mode"] == "audit_report_only"
+    assert "cohort_counts" in plan.target_manifest
