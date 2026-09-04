@@ -60,6 +60,38 @@ def sync_companies(market_filter: list[str] | None = None) -> int:
     return len(listed)
 
 
+def upsert_minimal_companies(records: list[dict]) -> int:
+    """Upsert bare corp_code/corp_name rows for issuers discovered without a stock_code.
+
+    Used when a company surfaces only through a disclosure sweep (e.g. an
+    unlisted 외감 issuer). A company that already exists (with or without a
+    stock_code) keeps its existing stock_code/market/corp_name unchanged;
+    only ``updated_at`` advances on conflict.
+    """
+    if not records:
+        return 0
+    now = datetime.utcnow()
+    with get_session() as session:
+        for chunk_start in range(0, len(records), 500):
+            chunk = records[chunk_start:chunk_start + 500]
+            stmt = sqlite_insert(Company).values([
+                {
+                    "corp_code": record["corp_code"],
+                    "stock_code": None,
+                    "corp_name": record["corp_name"],
+                    "market": None,
+                    "updated_at": now,
+                }
+                for record in chunk
+            ])
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["corp_code"],
+                set_={"updated_at": stmt.excluded.updated_at},
+            )
+            session.execute(stmt)
+    return len(records)
+
+
 def _fetch_company_info_with_retry(corp_code: str, max_attempts: int = 2) -> dict | None:
     """
     fetch_company_info를 재시도 로직과 함께 호출.
