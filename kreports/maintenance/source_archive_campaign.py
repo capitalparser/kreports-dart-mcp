@@ -180,7 +180,7 @@ class SourceArchiveReport:
 
     def to_dict(self) -> dict[str, Any]:
         result = {
-            "schema": ALL_ISSUER_CAMPAIGN_SCHEMA if self.universe_mode == "all_annual_issuers" else CAMPAIGN_SCHEMA,
+            "schema": CAMPAIGN_SCHEMA if self.universe_mode == "listed" else ALL_ISSUER_CAMPAIGN_SCHEMA,
             "shard": self.shard,
             "apply": self.apply,
             "status": self.status,
@@ -543,8 +543,8 @@ def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None)
     schema = manifest.get("schema")
     if schema == CAMPAIGN_SCHEMA:
         universe_mode = "listed"
-    elif schema == ALL_ISSUER_CAMPAIGN_SCHEMA and manifest.get("universe_mode") == "all_annual_issuers":
-        universe_mode = "all_annual_issuers"
+    elif schema == ALL_ISSUER_CAMPAIGN_SCHEMA and manifest.get("universe_mode") in ("all_annual_issuers", "audit_report_only"):
+        universe_mode = str(manifest["universe_mode"])
     else:
         raise SourceArchiveCampaignError("TARGET.json schema is unsupported")
     _validate_drive_target_manifest_identity(manifest)
@@ -575,7 +575,7 @@ def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None)
         "target_count": manifest["target_count"],
         "shards": records,
     }
-    if universe_mode == "all_annual_issuers":
+    if universe_mode != "listed":
         result.update({"universe_mode": universe_mode, **_all_issuer_campaign_counts(targets)})
     return result
 

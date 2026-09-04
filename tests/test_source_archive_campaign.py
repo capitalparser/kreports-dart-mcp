@@ -1283,3 +1283,39 @@ def test_audit_report_only_plan_finds_business_gap_and_audit_only_targets_and_re
     }
     assert plan.target_manifest["universe_mode"] == "audit_report_only"
     assert "cohort_counts" in plan.target_manifest
+
+
+def test_audit_report_only_report_and_verify_use_v3_schema(temp_engine, tmp_path, monkeypatch):
+    from sqlalchemy.orm import sessionmaker
+
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    with sessionmaker(bind=temp_engine)() as session:
+        session.add(Company(corp_code="00200002", corp_name="감사보고서전용법인"))
+        session.add(Disclosure(
+            rcept_no="20220331200002", corp_code="00200002", corp_name="감사보고서전용법인",
+            disc_date=date(2022, 3, 31), disc_type="F", report_nm="감사보고서",
+        ))
+        for year in (2021,):
+            session.add(_membership("00299999", year, "KOSPI"))
+            session.add(_membership("00299998", year, "KOSDAQ"))
+        session.commit()
+
+    with sessionmaker(bind=temp_engine)() as session:
+        plan = campaign.build_source_archive_plan(
+            session, years=[2021], universe_mode="audit_report_only",
+        ).with_state_dir(tmp_path / "audit-only-campaign")
+
+    assert len(plan.targets) == 1
+    _install_complete_family(monkeypatch, campaign)
+    archive = _Archive()
+    target = plan.targets[0]
+
+    report = campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=3)
+    payload = report.to_dict()
+    assert payload["schema"] == campaign.ALL_ISSUER_CAMPAIGN_SCHEMA
+    assert payload["universe_mode"] == "audit_report_only"
+
+    campaign.write_source_archive_plan_preview(plan, plan.state_dir)
+    verify_result = campaign.verify_source_archive_campaign(plan.state_dir, shard=target.shard)
+    assert verify_result["universe_mode"] == "audit_report_only"
