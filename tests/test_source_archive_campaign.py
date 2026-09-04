@@ -1487,3 +1487,29 @@ def test_source_archive_discover_gaps_cli_exits_nonzero_when_a_sweep_fails(temp_
     payload = json.loads(result.output)
     assert payload["audit_only"]["verdict"] == "fail"
     assert payload["audit_only"]["error_count"] == 1
+
+
+def test_source_archive_discover_gaps_cli_succeeds_when_gaps_found_with_no_errors(temp_engine, monkeypatch):
+    from typer.testing import CliRunner
+    import kreports.cli.main as cli
+    from kreports.collector import disc_collector
+
+    monkeypatch.setattr(cli.settings, "dart_api_key", "test-key")
+
+    def fake_audit_disclosure_window(**_kwargs):
+        # Mirrors the real audit_disclosure_window's own verdict formula:
+        # verdict is "fail" whenever missing_rows > 0, even with zero errors.
+        # The CLI command must gate its exit code on errors, not verdict.
+        return {
+            "target_rows": 5, "missing_rows": 3, "saved_missing": 0,
+            "missing_samples": [], "verdict": "fail", "errors": [],
+        }
+
+    monkeypatch.setattr(disc_collector, "audit_disclosure_window", fake_audit_disclosure_window)
+
+    result = CliRunner().invoke(cli.app, ["source-archive-discover-gaps"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["audit_only"]["verdict"] == "fail"
+    assert payload["audit_only"]["error_count"] == 0

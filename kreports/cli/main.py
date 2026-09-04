@@ -3000,7 +3000,7 @@ def source_archive_discover_gaps_cmd(
         "new_companies_upserted": new_companies,
     }
     typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    if audit_only_result["verdict"] == "fail" or business_gap_result["verdict"] == "fail":
+    if audit_only_result["errors"] or business_gap_result["errors"]:
         raise typer.Exit(code=1)
 
 
