@@ -34,19 +34,21 @@
    그 안의 XML member를 container SHA-256, Drive URI, member name과 함께
    연결한다. DART가 ZIP 대신 XML을 직접 주면 그 원본 응답 container를 XML
    media type으로 별도 표기하며 ZIP으로 가장하지 않는다.
-2. **감사보고서:** DART viewer에서 받은 HTML을 우선 원문으로 남긴다. viewer가
-   비어 있거나 PDF가 공식 fallback인 경우에는 official PDF bytes를 원문으로
-   남긴다.
+2. **감사보고서:** 사업보고서 `document.xml` ZIP 안의 명시적 감사보고서 XML
+   member를 먼저 찾는다. 없으면 같은 회사·사업연도의 별도 감사보고서 공시
+   receipt를 찾고, 그 receipt의 `document.xml` ZIP/XML을 수집한다. 두 경로 모두
+   `source_type='audit_report'`, receipt, container SHA-256, XML member name으로
+   사업보고서와 같은 형식에 보전한다.
 3. **일반 구조 패키지:** 각 원문 hash에 묶어 heading, block, table/cell,
    caption, footnote와 미해석 노드를 JSON으로 저장한다. 이것은 현 시점의
    기능별 추출 결과가 아니라, 이후 parser/LLM 기능을 재실행할 수 있는
    재사용 가능한 구조 근거다.
 
-HTML/XML은 표·섹션·각주 위치를 보존하는 **primary parse path**다. PDF는
-원본 byte의 감사 가능한 fallback이며, PDF가 존재한다는 이유만으로 HTML/XML
-원문을 대체하거나 구조 파싱이 완료되었다고 판단하지 않는다. 원문 byte와
-parse JSON은 content-addressed SHA-256 object로 압축 보관되며, 같은 byte는
-중복 업로드하지 않는다.
+XML은 표·섹션·각주 위치를 보존하는 **감사보고서의 required parse path**다.
+viewer/PDF는 XML 후보의 부재를 조사할 때 참고할 수 있는 보조 증거일 뿐,
+`audit_report` 원문이나 구조 파싱 완료를 대체하지 않는다. 원문 byte와 parse
+JSON은 content-addressed SHA-256 object로 압축 보관되며, 같은 byte는 중복
+업로드하지 않는다.
 
 ## 사전 준비: 로컬 collector와 Drive remote
 
@@ -101,13 +103,89 @@ shell history, 화면 공유에 넣지 않는다.
    export RAW_STORAGE_DRIVE_REMOTE='<drive-remote-name>:'
    export RAW_STORAGE_PREFIX='<archive-root>'
    export RAW_STORAGE_SPOOL_DIR="$HOME/.cache/kreports/source-archive-spool"
+   # 기존 API/Drive 파이프라인의 operator-owned 설정 파일을 그대로 재사용한다.
+   # 이 파일에는 OAuth credentials가 있으므로 Git/Drive/spool 밖에 두고:
+   export RAW_STORAGE_RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
+   chmod 600 "$RAW_STORAGE_RCLONE_CONFIG"
+   # The named rclone Drive remote must contain a dedicated client_id. Configure
+   # it with `rclone config` (preferred), or use a backend override rclone
+   # actually consumes, for example:
+   # export RCLONE_CONFIG_KREPORTS_DRIVE_CLIENT_ID='<dedicated-rclone-client-id>'
+   # export RCLONE_DRIVE_CLIENT_ID='<dedicated-rclone-client-id>'
+   # Conservative defaults; keep burst at 1 unless a reviewed quota change allows it.
+   export RAW_STORAGE_RCLONE_TPSLIMIT=0.5
+   export RAW_STORAGE_RCLONE_TPSLIMIT_BURST=1
+   export RAW_STORAGE_DRIVE_RATE_LIMIT_RETRIES=2
+   export RAW_STORAGE_DRIVE_RATE_LIMIT_COOLDOWN_SECONDS=60
+   export RAW_STORAGE_DRIVE_RATE_LIMIT_MAX_COOLDOWN_SECONDS=900
    ```
 
    실제 `DART_API_KEY` 값은 이 문서나 Git에 기록하지 않는다. `--apply`는
    collector mode, raw-backfill opt-in, named `type=drive` remote가 모두
-   갖춰지지 않으면 실패해야 한다.
+   갖춰지지 않으면 실패해야 한다. source-archive `--apply`는 기본적으로
+   named rclone remote의 `client_id` 또는 rclone이 소비하는 위 override가
+   확인되지 않으면 시작하지 않는다. `RAW_STORAGE_DRIVE_CLIENT_ID` 같은
+   애플리케이션 전용 marker는 증명으로 인정하지 않는다. 공유 OAuth client를
+   사용하는 진단용 예외는 `KREPORTS_DRIVE_ALLOW_SHARED_CLIENT_DIAGNOSTIC=1`을
+   명시적으로 설정한 일회성 점검에만 허용하며, 일반 백필에는 사용하지 않는다.
+
+   `RAW_STORAGE_RCLONE_CONFIG`를 지정하면 KReports는 기존 파이프라인의
+   rclone remote와 OAuth credentials를 새로 복사하지 않고 그 파일을 모든
+   `rclone` 호출에 `--config`로 고정한다. 파일은 collector 사용자 소유의 일반
+   파일이어야 하고 group/other 권한이 없어야 한다(`chmod 600`). 경로나 파일
+   내용은 manifest와 로그에 넣지 않는다. 이 방식은 기존 Google Cloud
+   프로젝트와 인증 파이프라인을 재사용하는 것이며, 별도 프로젝트를 새로 만들
+   필요는 없다. 단, 선택한 remote에 실제 전용 `client_id`가 있어야 한다는
+   source-archive apply gate는 그대로 유지된다.
+
+   `rclone` 명령에는 기본적으로 `--tpslimit 0.5 --tpslimit-burst 1`이 붙는다.
+   값은 위 환경변수로 조정할 수 있지만 TPS는 0.1~2.0, burst는 1~4 범위로
+   제한된다. Google Drive의 분당 query quota는 rclone 한 명령보다 넓은
+   계정·프로젝트 단위로 계산될 수 있으므로, 이 값은 안전한 전송 상한이지
+   정확한 API query 수의 보증이 아니다. 단일 collector의 writer lease는 그
+   collector의 local spool만 보호한다. 여러 사람의 로컬 worker에는 공유 lock이
+   아니므로, 동시 실행은 중앙 assignment가 서로 겹치지 않는 연도/shard를
+   배정하고 각 worker가 별도 Drive OAuth client와 DART key를 쓰는 경우에만
+   허용한다. 같은 content-addressed object는 `--ignore-existing`으로 합류하지만,
+   같은 assignment를 두 번 주거나 같은 OAuth client의 quota를 합산하는 운영은
+   금지한다. rate-limit cooldown의 not-before 시각은 현재 프로세스 메모리에만 있다.
+   프로세스를 재시작하면 cooldown 자체는 복원되지 않으므로, quota stop 뒤에는
+   운영자가 충분히 기다린 뒤 재개해야 한다. outbox/checkpoint 보존은 유지된다.
 
 ## campaign 생성과 실행 순서
+
+### Drive 탐색 구조
+
+Drive archive root의 첫 화면에는 `00_README.md`, `01_SKILL.md`, `00_PIPELINE/`를
+두고, 원문은 `2021`부터 `2025`까지 연도 폴더 아래에 둔다. 새 asset 경로는 다음과
+같다.
+
+```text
+<year>/<corp_code>/<receipt_no>/<business_report|audit_report>/<raw|container|parsed|manifest>/<sha256>.<extension>.gz
+```
+
+hash는 파일명으로 남겨 immutable identity를 유지한다. 기존 `objects/sha256/`는
+이미 기록된 URI의 legacy object 영역이므로 migration mapping 없이 이름을 바꾸거나
+삭제하지 않는다.
+
+### 공유 Drive worker 운영
+
+Drive의 `pipeline/`에는 검증된 worker bundle과 실행 문서를, archive root에는
+원문·parse·manifest object를 둔다. worker는 bundle을 **로컬에 내려 받아** 실행한다.
+Drive에서 Python 환경이나 secret을 직접 실행하지 않는다. 각 worker는 다음을
+독립적으로 보유한다.
+
+- 자기 DART API key와 자기 rclone OAuth config (공용 secret 전달 금지)
+- 고유 `KREPORTS_SOURCE_ARCHIVE_STATE_DIR`
+- 중앙 assignment에서 받은 비중복 `KREPORTS_SOURCE_ARCHIVE_YEARS` 또는 shard set
+
+모든 worker는 같은 frozen candidate DB revision, archive prefix, `SHARD_COUNT=64`,
+그리고 pipeline bundle SHA를 사용해야 한다. work assignment는 한 사람에게
+`2021`처럼 연도 전체를 주거나, 더 세분화가 필요하면 **연도 × shard** 단위를
+주되 절대 겹치지 않게 한다. 각각의 local `outcomes.jsonl`은 checkpoint이며,
+Drive의 immutable object가 공통 원문 저장소다. 중앙 담당자는 bundle 버전과
+assignment 표를 Drive `pipeline/`에 갱신하고, 나중의 candidate DB 생성 전에는
+각 worker의 outcome/Drive manifest를 한 번에 집계한다.
 
 `--db`는 historical KOSPI/KOSDAQ membership evidence와 disclosure metadata를
 가진 **읽기 전용 후보 DB**다. 활성 MCP DB, Lightsail mount, 혹은 그 복사본을
@@ -209,8 +287,8 @@ DART/Drive 호출도 raw file 작성도 하지 않는다.
 
 preflight와 dry run을 검토한 뒤에만 한 shard를 실행한다. `--apply`와 유한한
 `--max-dart-calls`를 반드시 같이 지정한다. `--max-dart-calls` is a local physical-request cap; DART 계정의 남은 quota를 측정하거나 예약하지 않는다.
-budget은 retry, attachment viewer, PDF fallback을 포함한 실제 DART HTTP
-시도마다 먼저 하나씩 소진된다.
+budget은 retry, 별도 감사보고서 receipt 탐색, `document.xml` 수집을 포함한 실제
+DART HTTP 시도마다 먼저 하나씩 소진된다.
 
 기본 Drive archive command deadline은 **default 60 seconds**다. 성공한
 no-write preflight 뒤 reviewed v3 shard 0의 target freeze를 재개할 때만
@@ -236,6 +314,98 @@ object로 보관하고, 그 URI/SHA-256을 `TARGET.json`에 결속한다. 이것
 frozen denominator다. 실행 중인 campaign에서 `TARGET.json`을 교체하거나
 대상을 추가·삭제하지 않는다.
 
+Drive 403 응답 중 `rateLimitExceeded`, `userRateLimitExceeded`,
+`rate_limit_exceeded`와 HTTP 429는 권한 오류나 404 missing과 구분한다. rate
+limit이면 첫 cooldown을 최소 60초로 두고 제한된 truncated-exponential retry를
+수행한다. 재시도가 소진되면 현재 shard는 `drive_quota_exhausted`라는
+non-terminal stop으로 즉시 끝나며 `COMMITTED.json`을 만들지 않는다. 현재
+company-year의 local outcome과 spool은 보존되고, 이후 target은 시도하지 않는다.
+`rclone copyto` 또는 선택된 `rclone cat` readback의 timeout/일시 command 오류도
+프로세스 오류로 종료하지 않고 `drive_transport_failure`로 기록한다. 이 경우 supervisor는
+**60 seconds** 뒤 같은 checkpoint를 재개한다. checksum 불일치·권한 오류·확정
+404는 이 transport 재시도 분류에 포함하지 않는다.
+
+company-year별 campaign event는 여러 개의 Drive event upload 대신 하나의
+`outbox/*.json` bundle로 먼저 local에 기록한다. 원문 source archive의 일반 성공
+경로는 SHA-256 content-addressed path의 `rclone copyto --ignore-existing` 성공만
+확인하고 (`RAW_STORAGE_VERIFY_READBACK_ON_SUCCESS=0`), 즉시 readback은 생략할 수
+있다. copy 실패·timeout 때는 spool을 삭제하지 않는다. 별도
+`source-archive-verify`/감사 작업은 필요한 범위에 strict readback을 수행한다. DB
+candidate/release artifact는 이 설정과 무관하게 항상 strict readback 검증을 유지한다.
+이후에만 outbox 파일을 삭제한다. 프로세스가 중단되면 다음 실행이 DART
+호출 전에 pending bundle을 먼저 flush하므로, source archive와 event checkpoint의
+순서를 잃지 않는다.
+
+### 4. 전 shard 자동 재개
+
+수동 `source-archive-run`은 한 shard를 점검할 때 사용한다. 장기 백필은
+`source-archive-auto-run`이 **연도 우선**으로 동작한다. 선택한 첫 연도의 64개
+shard를 모두 순회한 뒤 다음 연도로 넘어가며, 각 물리 배치를 계속 유한한
+`--max-dart-calls 100`으로 실행한다. 이 로컬 100호출 경계는 DART의 일일 한도
+응답이 아니다. `api_budget_exhausted`이면 **30 seconds** 뒤 같은 shard에서 새
+100호출 배치를 시작한다.
+
+DART가 실제 quota/limit 응답(`dart_quota_failure`, 예: status `020`)을 반환한
+경우에는 날짜나 자정 초기화를 추측하지 않는다. **15 minutes**를 기다린 뒤 같은
+미완료 target의 다음 실제 요청으로 이용 가능 여부를 다시 확인한다. 인증 실패는
+자동 재시도하지 않고 `AUTH_BLOCKED`를 만들며, credential을 고친 관리자가 해당
+파일을 제거해야 재개된다.
+
+한 번도 시도하지 않은 company-year를 먼저 처리한다. 회사의 shard 번호는 연도
+사이에서 고정되므로 중단 후에도 동일한 회사·연도 대상과 checkpoint를 재사용한다.
+terminal
+`partial_source`는 **24 hours**가 지난 뒤에만 재시도하여 같은 결손 보고서가 새
+대상을 가로막지 않게 한다. 로컬 budget/transport stop은 non-terminal이므로 이
+24시간 대기 대상이 아니며 다음 배치에서 즉시 이어진다. 다만 audit XML resolver
+version이 없는 이전 `partial_source`는 새 resolver가 사업보고서 내부 XML과 별도
+감사공시 XML을 한 번 다시 판별하도록 즉시 재시도한다. 새 version으로 기록된
+partial은 다시 24시간 cadence를 적용한다.
+
+```bash
+# repository 밖의 owner-only 파일이며 둘 다 chmod 600으로 유지한다.
+export KREPORTS_SOURCE_ARCHIVE_COLLECTOR_ENV=/path/to/.env.collector
+export KREPORTS_SOURCE_ARCHIVE_DRIVE_ENV=/path/to/.env.drive
+
+scripts/source_archive_auto_backfill.sh
+```
+
+macOS 로그인·재부팅 후 자동 시작하고 비정상 종료를 재기동하려면, 위 두 env
+파일의 기본 위치가 repository root일 때 다음을 실행한다. job은 15분 간격의
+안전망도 갖지만 정상 상태에서는 하나의 장기 실행 프로세스만 유지한다. 로컬
+PID lock과 Drive writer lease가 중복 writer를 막는다.
+
+```bash
+scripts/install_launchd_source_archive.sh
+launchctl print gui/$(id -u)/com.kjun.kreports-source-archive
+tail -f logs/source-archive-auto.out.log logs/source-archive-auto.err.log
+```
+
+### 5. 여러 DART API key의 순차 전환
+
+동시에 여러 worker를 실행하지 않는다. 기존 `DART_API_KEY`를 첫 키로 유지하고,
+추가로 사용 권한이 있는 키만 owner-only 파일에 한 줄씩 넣는다. `export`, 변수명,
+따옴표, 쉼표는 쓰지 않는다. 빈 줄과 `#` 주석은 무시한다.
+
+```bash
+export DART_API_KEYS_FILE="$HOME/.config/kreports/dart-api-keys"
+install -m 600 /dev/null "$DART_API_KEYS_FILE"
+
+# 편집기로 열어 한 줄에 키 하나를 입력한다.
+# 첫 줄: 두 번째 키
+# 둘째 줄: 세 번째 키
+```
+
+worker는 한 번에 키 하나만 요청에 주입한다. DART가
+`dart_quota_failure`/status `020`을 반환하면 같은 shard와 checkpoint를 유지한 채
+다음 키로 즉시 전환한다. 모든 키가 제한된 경우에만 15분을 기다린 뒤 새 probe
+cycle을 시작한다. 한 키의 인증 실패는 그 키만 격리하고 다음 키로 넘어가며,
+모든 키가 인증 실패한 경우에만 `AUTH_BLOCKED`로 중단한다.
+
+키 파일은 매 quota/auth 전환 시 다시 읽기 때문에 실행 중 키를 추가해도 다음
+전환부터 반영된다. local campaign의 `dart-api-key-rotation.json`에는 키 원문이
+아니라 SHA-256 식별자, 제한/격리 상태, 전환 시각만 기록한다. 키 원문은 log,
+outcome, Drive manifest, 후보 DB 또는 공개 MCP에 기록하지 않는다.
+
 ## 보전·검증·재개 상태
 
 각 asset은 다음 순서로 처리한다.
@@ -256,19 +426,28 @@ campaign outcome과 asset document manifest에는 아래 상태가 남는다.
 | 상태 | 뜻과 다음 행동 |
 |---|---|
 | `discovered` | annual anchor를 찾음. 아직 asset 수집 전이다. |
-| `archived_verified` | 원문 byte의 Drive read-back 검증까지 완료했다. |
+| `archived` | SHA-256 content-addressed Drive copy가 성공했다. 일반 백필은 즉시 readback을 생략할 수 있으며, 엄격 readback은 별도 audit/verify에서 수행한다. |
 | `generically_parsed` | source hash에 묶인 일반 구조 JSON을 보전했다. |
 | `structurally_complete` | 사업보고서와 primary 감사보고서 package가 모두 완전 구조 상태다. |
+| `family_complete` / `family_reused` | 해당 report family의 모든 발견 asset을 검증·보전했거나, 같은 frozen checkpoint에서 재사용했다. 다음 재개에서 family DART 조회와 Drive 재보전을 건너뛴다. |
+| `asset_reused` | 이전 실행에서 raw·generic parse·document manifest까지 검증된 asset을 재사용했다. 부분 family 재개에서도 이 asset은 DART/Drive 작업을 반복하지 않는다. |
 | `requires_review` / `partial_source` | `requires_review`는 asset document manifest의 parser 검토 상태이고, 그 결과 company-year outcome은 `partial_source`다. 완료로 취급하지 않고 재시도 또는 검토한다. |
 | `dart_budget_exhausted` | 이번 실행의 호출 상한에 도달했다. 다음 유한 budget 실행에서 재개한다. |
+| `dart_transport_failure` / `dart_auth_failure` / `dart_quota_failure` | DART provider가 bounded stop을 반환했다. 현재 미완료 target만 non-terminal checkpoint로 남기고 이후 target은 시도하지 않는다. |
+| `drive_quota_exhausted` | Drive 403 rate-limit 또는 429의 bounded retry가 소진됐다. 현재 shard를 즉시 중단하고 pending outbox/spool을 보존한 채 다음 실행에서 재개한다. |
+| `drive_transport_failure` | Drive copy/readback timeout 또는 일시 command 실패다. 현재 checkpoint와 outbox를 보존하고 supervisor가 60초 뒤 재개한다. |
 | `fetch_failed` / `asset_failed` | 원문 수신 또는 archive 검증이 실패했다. 오류와 raw evidence를 점검 후 재개한다. |
 | `no_source_metadata` | frozen target에 source anchor metadata가 없다. missing disclosure로 추정하지 않는다. |
 
 shard의 모든 company-year가 `structurally_complete`일 때만
 `shard-XX/COMMITTED.json`이 생긴다. marker는 frozen target digest와 outcomes
 checksum을 묶는다. partial shard에는 marker가 없으며, 다음 동일 shard 실행은
-이미 complete인 company-year만 건너뛰고 미완료 항목을 재개한다. local outcome
-cache와 marker의 결속이 완료된 shard에서 변조되면 verify/run은 실패해야 한다.
+이미 complete인 company-year를 건너뛰고, family·asset 단위로 검증된 prefix를
+재사용하면서 미완료 항목만 재개한다. DART budget/provider bounded stop이
+발생하면 현재 target의 non-terminal stop outcome만 남기고 이후 target을
+시도하지 않으므로, 미시도 target을 실패 또는 누락으로 기록하지 않는다. local
+outcome cache와 marker의 결속이 완료된 shard에서 변조되면 verify/run은 실패해야
+한다.
 
 진행 점검은 외부 호출 없이 할 수 있다.
 
@@ -302,7 +481,52 @@ coverage나 production release readiness가 증명되지는 않는다.
   dedup 설명과 용량 점검 시각;
 - parser version, raw/parse object URI·SHA-256, DART receipt와 source locator;
 - shard별 DART call budget/used count, terminal status, error/retry 사유;
+- Drive command attempts, rate-limit events, retry attempts, cooldown wait,
+  `commands_by_operation`, `dedicated_client_configured`, pending event bundle
+  count. 이 값은 rclone command metric이며 Google API query 수와 동일하지 않다;
 - candidate build와 release promotion의 별도 승인·검증 결과.
 
 이 기록은 raw filing 자체를 Git에 커밋하라는 뜻이 아니다. Git에는 코드와
 안전한 manifest/reference만 두고, 대용량 원문은 검증된 외부 archive에 둔다.
+
+## audit-report-only 캠페인 (감사보고서 전용 회사 + 사업보고서 공백 보강)
+
+`--universe all-annual-issuers` 캠페인은 사업보고서를 기준으로 대상을 고르기 때문에, 코넥스 상장사 중 사업보고서 미제출사와 비상장 외감법인처럼 감사보고서만 있는 회사는 구조적으로 빠진다. `--universe audit-report-only`는 이 공백과, 로컬 disclosures 수집 누락으로 생긴 2023-2024년 "검증된 상장 이력 없음" 코호트 공백을 함께 채우는 별도 캠페인이다. 지금 도는 `all-annual-issuers` 캠페인은 건드리지 않는다.
+
+**운영 순서:**
+
+1. **로컬 DB 보강 (DART 직접 조회, `--apply` 없이 먼저 드라이런):**
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-discover-gaps
+   ```
+   출력의 `audit_only`/`business_gap` 카운트를 확인한 뒤 실제로 반영한다:
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-discover-gaps --apply
+   ```
+
+2. **대상 건수 미리 확인 (`--exclude-manifest`는 필수에 가깝다 — 지금 도는 캠페인의 frozen TARGET.json을 가리켜서, 이미 그쪽이 수집 중인 회사-연도를 중복 수집하지 않게 한다):**
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-preflight \
+     --db <읽기 전용 후보 DB> \
+     --year 2021 --year 2022 --year 2023 --year 2024 --year 2025 \
+     --universe audit-report-only \
+     --exclude-manifest <지금 도는 all-annual-issuers 캠페인의 TARGET.json 경로>
+   ```
+   `--exclude-manifest` 없이 실행하면 경고가 출력된다 — 의도적으로 막지는 않지만, 실수로 빼먹으면 이미 다른 캠페인이 수집한 회사-연도를 중복 수집할 수 있다.
+
+3. **새 캠페인 실행 (지금 도는 캠페인과 별도의 state-dir 사용):**
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-auto-run \
+     --db <읽기 전용 후보 DB> \
+     --state-dir <새 캠페인 전용 디렉터리> \
+     --universe audit-report-only \
+     --exclude-manifest <지금 도는 캠페인의 TARGET.json 경로> \
+     --year 2021 --year 2022 --year 2023 --year 2024 --year 2025 \
+     --shard-count 64 --max-dart-calls 500 --partial-retry-after-seconds 86400
+   ```
+
+**알려진 한계:**
+
+- 코넥스 시장 구분은 DART가 현재 시점 기준으로 알려주는 정보(`corp_cls`)를 쓴다. 과거 연도에 시장을 옮겼거나 상장폐지된 회사는 놓치거나 잘못 분류될 수 있다.
+- `build_source_archive_plan`의 감사보고서 전용 발굴 루프는 "사업보고서 anchor가 없음"과 "사업보고서 anchor는 있으나 정확한 접수번호/날짜 검증에 실패함"을 구분하지 못한다. 후자에 해당하는 (드문) 회사-연도는 감사보고서 전용 코호트로 잘못 분류되어 사업보고서가 영영 수집되지 않을 수 있다 (`kreports/maintenance/source_archive_campaign.py`의 `audit_report_only` 발굴 루프 위 주석 참고).
+- 매년 새로 생기는 비상장 외감법인을 정기적으로 잡아내는 스케줄러 연동은 이번 범위 밖이다 — 1회성 공백 보강 캠페인이다.

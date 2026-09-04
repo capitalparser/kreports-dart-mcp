@@ -2559,8 +2559,15 @@ def _source_archive_plan_from_database(
     years: list[int],
     shard_count: int,
     universe_mode: str = "listed",
+    excluded_pairs: frozenset[tuple[str, int]] = frozenset(),
 ):
     """Open an explicit non-runtime candidate DB for source-archive planning."""
+    if universe_mode == "audit_report_only" and not excluded_pairs:
+        typer.echo(
+            "경고: --universe audit-report-only를 --exclude-manifest 없이 실행하면 "
+            "이미 다른 캠페인이 수집한 회사-연도를 중복 수집할 수 있습니다.",
+            err=True,
+        )
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -2589,7 +2596,8 @@ def _source_archive_plan_from_database(
     try:
         with sessionmaker(bind=engine)() as session:
             return build_source_archive_plan(
-                session, years=years, shard_count=shard_count, universe_mode=universe_mode
+                session, years=years, shard_count=shard_count, universe_mode=universe_mode,
+                excluded_pairs=excluded_pairs,
             )
     finally:
         engine.dispose()
@@ -2607,12 +2615,24 @@ def _source_archive_universe_mode(value: str) -> str:
     modes = {
         "listed": "listed",
         "all-annual-issuers": "all_annual_issuers",
+        "audit-report-only": "audit_report_only",
     }
     try:
         return modes[value]
     except KeyError as exc:
         allowed = ", ".join(modes)
         raise ValueError(f"--universe must be one of: {allowed}") from exc
+
+
+def _load_excluded_pairs(path: Optional[Path]) -> frozenset[tuple[str, int]]:
+    """Load a frozen target manifest's (corp_code, bsns_year) pairs to exclude."""
+    if path is None:
+        return frozenset()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return frozenset(
+        (str(item["corp_code"]), int(item["bsns_year"]))
+        for item in data["targets"]
+    )
 
 
 def _source_archive_scope_output(plan) -> dict[str, object]:
@@ -2722,13 +2742,18 @@ def source_archive_preflight_cmd(
     db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
-    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
 ) -> None:
     """No-write source campaign preflight; it never contacts DART or Drive."""
     try:
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         )
     except Exception as exc:
         _source_archive_cli_error(exc)
@@ -2756,7 +2781,11 @@ def source_archive_plan_cmd(
     state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
-    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
 ) -> None:
     """Write a no-network target preview; --apply freezes the Drive-backed target."""
     try:
@@ -2765,6 +2794,7 @@ def source_archive_plan_cmd(
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         ).with_state_dir(state_dir)
         manifest_path = write_source_archive_plan_preview(plan, plan.state_dir)
     except Exception as exc:
@@ -2786,7 +2816,11 @@ def source_archive_run_cmd(
     shard: int = typer.Option(..., "--shard", min=0, help="고정 회사 shard (0부터 시작)"),
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
-    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
     apply: bool = typer.Option(False, "--apply", help="DART/Drive 쓰기를 명시적으로 허용"),
     max_dart_calls: Optional[int] = typer.Option(
         None, "--max-dart-calls", min=1,
@@ -2800,6 +2834,7 @@ def source_archive_run_cmd(
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         ).with_state_dir(state_dir)
         if apply and max_dart_calls is None:
             raise ValueError("--apply requires --max-dart-calls")
@@ -2807,7 +2842,7 @@ def source_archive_run_cmd(
         if apply:
             from kreports.storage.drive_archive import drive_archive_from_runtime
 
-            archive = drive_archive_from_runtime()
+            archive = drive_archive_from_runtime(require_dedicated_client=True)
         report = run_source_archive_shard(
             plan, shard, archive, apply=apply, max_dart_calls=max_dart_calls
         )
@@ -2816,6 +2851,163 @@ def source_archive_run_cmd(
     typer.echo(json.dumps(
         report.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ))
+
+
+@app.command("source-archive-auto-run")
+def source_archive_auto_run_cmd(
+    db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
+    state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
+    year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
+    shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
+    universe: str = typer.Option(
+        "listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"
+    ),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
+    max_dart_calls: int = typer.Option(
+        100, "--max-dart-calls", min=1,
+        help="각 물리 배치에 허용할 유한한 DART 호출 횟수",
+    ),
+    partial_retry_after_seconds: int = typer.Option(
+        86_400, "--partial-retry-after-seconds", min=0,
+        help="terminal partial_source 재시도 최소 간격",
+    ),
+    max_batches: Optional[int] = typer.Option(
+        None, "--max-batches", min=1,
+        help="진단용 최대 배치 수; 생략하면 계속 실행",
+    ),
+) -> None:
+    """Continuously run finite source-archive batches across every shard."""
+    try:
+        from kreports.collector.dart_api_key_ring import DartApiKeyRing
+        from kreports.maintenance.source_archive_supervisor import supervise_source_archive
+        from kreports.storage.drive_archive import drive_archive_from_runtime
+
+        plan = _source_archive_plan_from_database(
+            db_path, years=year, shard_count=shard_count,
+            universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
+        ).with_state_dir(state_dir)
+        archive = drive_archive_from_runtime(require_dedicated_client=True)
+        key_ring = DartApiKeyRing.from_runtime(state_dir=state_dir)
+
+        def emit_batch(report) -> None:
+            typer.echo(json.dumps(
+                {"event": "source_archive_batch", **report.to_dict()},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ))
+
+        result = supervise_source_archive(
+            plan,
+            archive,
+            max_dart_calls=max_dart_calls,
+            partial_retry_after_seconds=partial_retry_after_seconds,
+            max_batches=max_batches,
+            on_report=emit_batch,
+            key_ring=key_ring,
+        )
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps({
+        "event": "source_archive_supervisor_stopped",
+        "batch_count": result.batch_count,
+        "sweep_count": result.sweep_count,
+        "stop_reason": result.stop_reason,
+        "key_count": key_ring.key_count,
+        "key_switch_count": result.key_switch_count,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    if result.stop_reason == "dart_auth_failure":
+        raise typer.Exit(code=78)
+
+
+@app.command("source-archive-discover-gaps")
+def source_archive_discover_gaps_cmd(
+    audit_only_start: str = typer.Option(
+        "20210101", "--audit-only-start", help="감사보고서 전용 발굴 시작일 YYYYMMDD",
+    ),
+    audit_only_end: str = typer.Option(
+        "20251231", "--audit-only-end", help="감사보고서 전용 발굴 종료일 YYYYMMDD",
+    ),
+    business_gap_start: str = typer.Option(
+        "20230101", "--business-gap-start", help="사업보고서 공백 재검증 시작일 YYYYMMDD",
+    ),
+    business_gap_end: str = typer.Option(
+        "20241231", "--business-gap-end", help="사업보고서 공백 재검증 종료일 YYYYMMDD",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="발견된 공시를 실제로 로컬 disclosures/companies에 반영 (미지정 시에도 DART 조회 자체는 발생함)",
+    ),
+) -> None:
+    """DART를 직접 훑어 감사보고서 전용 회사와 2023-2024 사업보고서 공백을 로컬 DB에 채운다."""
+    from kreports.runtime import require_collector_mode
+    from kreports.collector.disc_collector import audit_disclosure_window
+    from kreports.collector.corp_sync import upsert_minimal_companies
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Disclosure
+
+    try:
+        require_collector_mode("source-archive-discover-gaps")
+        if not settings.dart_api_key:
+            raise ValueError("DART_API_KEY가 설정되지 않았습니다")
+
+        init_db()
+
+        audit_only_result = audit_disclosure_window(
+            start_date=audit_only_start, end_date=audit_only_end, disc_type="F",
+            report_keyword="감사보고서",
+            exclude_keywords=["내부회계", "감사의감사보고서", "내부감시장치"],
+            persist_missing=apply,
+        )
+        business_gap_result = audit_disclosure_window(
+            start_date=business_gap_start, end_date=business_gap_end, disc_type="A",
+            report_keyword="사업보고서",
+            persist_missing=apply,
+        )
+
+        new_companies = 0
+        if apply:
+            with get_session() as session:
+                known_codes = session.query(Company.corp_code)
+                rows = (
+                    session.query(Disclosure.corp_code, Disclosure.corp_name)
+                    .filter(~Disclosure.corp_code.in_(known_codes))
+                    .order_by(Disclosure.corp_code, Disclosure.disc_date.desc())
+                    .all()
+                )
+            latest_name_by_corp: dict[str, str] = {}
+            for corp_code, corp_name in rows:
+                latest_name_by_corp.setdefault(corp_code, corp_name)
+            new_companies = upsert_minimal_companies([
+                {"corp_code": corp_code, "corp_name": corp_name}
+                for corp_code, corp_name in latest_name_by_corp.items()
+            ])
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+
+    payload = {
+        "event": "source_archive_discover_gaps",
+        "apply": apply,
+        "audit_only": {
+            "target_rows": audit_only_result["target_rows"],
+            "missing_rows": audit_only_result["missing_rows"],
+            "saved_missing": audit_only_result["saved_missing"],
+            "verdict": audit_only_result["verdict"],
+            "error_count": len(audit_only_result["errors"]),
+        },
+        "business_gap": {
+            "target_rows": business_gap_result["target_rows"],
+            "missing_rows": business_gap_result["missing_rows"],
+            "saved_missing": business_gap_result["saved_missing"],
+            "verdict": business_gap_result["verdict"],
+            "error_count": len(business_gap_result["errors"]),
+        },
+        "new_companies_upserted": new_companies,
+    }
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    if audit_only_result["errors"] or business_gap_result["errors"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("source-archive-verify")

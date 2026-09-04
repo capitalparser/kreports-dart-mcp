@@ -28,6 +28,7 @@ class FakeRcloneRunner:
         self.cat_calls: list[str] = []
         self.metadata_calls: list[tuple[str, dict[str, str]]] = []
         self.config_calls: list[str] = []
+        self.client_id = "test-dedicated-client"
         self.copyto_commands: list[list[str]] = []
         self.uploaded_payloads: list[bytes] = []
         self.corrupt_reads = False
@@ -70,7 +71,10 @@ class FakeRcloneRunner:
         if command == "config":
             assert args[2] == "show"
             self.config_calls.append(args[3])
-            return f"[{args[3]}]\ntype = {self.remote_type}\n".encode()
+            config = f"[{args[3]}]\ntype = {self.remote_type}\n"
+            if self.client_id:
+                config += f"client_id = {self.client_id}\n"
+            return config.encode()
         if command == "cat":
             storage_uri = args[2]
             self.cat_calls.append(storage_uri)
@@ -175,6 +179,61 @@ def test_archive_bytes_is_content_addressed_uploaded_once_and_verified(tmp_path:
         )
     ]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_fast_source_archive_accepts_successful_immutable_upload_without_readback(tmp_path: Path):
+    """Backfill mode avoids per-object Drive reads after a successful upload."""
+    runner = FakeRcloneRunner()
+    archive = DriveArchive(
+        remote="team-drive:",
+        root="kreports/raw",
+        spool_dir=tmp_path,
+        runner=runner,
+        verify_after_upload=False,
+    )
+
+    result = archive.archive_bytes(
+        data=b"official filing bytes", extension="xml", metadata=_source_metadata()
+    )
+
+    assert result.sha256 == hashlib.sha256(b"official filing bytes").hexdigest()
+    assert len(runner.copyto_calls) == 1
+    assert runner.cat_calls == []
+    assert "--ignore-existing" in runner.copyto_commands[0]
+    assert "--immutable" not in runner.copyto_commands[0]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_source_assets_are_grouped_under_their_fiscal_year(tmp_path: Path):
+    """Drive browsing starts with year, then issuer/receipt/report role."""
+    runner = FakeRcloneRunner()
+    archive = DriveArchive(
+        remote="team-drive:",
+        root="kreports/raw",
+        spool_dir=tmp_path,
+        runner=runner,
+        verify_after_upload=False,
+    )
+    data = b"official filing bytes"
+    sha256 = hashlib.sha256(data).hexdigest()
+
+    result = archive.archive_bytes(
+        data=data,
+        extension="xml",
+        metadata={
+            **_source_metadata(),
+            "archive_version": "raw-source-v1",
+            "corp_code": "00123456",
+            "bsns_year": "2023",
+            "report_kind": "business_report",
+        },
+    )
+
+    assert result.object_path == (
+        "2023/00123456/20260828000001/business_report/raw/"
+        f"{sha256}.xml.gz"
+    )
+    assert result.storage_uri.endswith(result.object_path)
 
 
 def test_archive_bytes_rejects_a_mismatched_readback_and_keeps_the_spool_file(tmp_path: Path):
@@ -456,6 +515,33 @@ def test_collector_command_timeout_uses_default_or_explicit_bounded_setting(
     assert runner.config_calls == ["team-drive"]
     assert runner.copyto_calls == []
     assert runner.cat_calls == []
+
+
+@pytest.mark.parametrize(
+    ("configured_readback", "expected_readback"),
+    [(None, True), ("1", True), ("0", False)],
+)
+def test_source_archive_readback_mode_is_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_readback: str | None,
+    expected_readback: bool,
+):
+    """Raw-source collection may opt out while strict mode remains the default."""
+    runner = FakeRcloneRunner()
+    monkeypatch.setenv("RAW_STORAGE_BACKEND", "drive")
+    monkeypatch.setenv("RAW_STORAGE_DRIVE_REMOTE", "team-drive:")
+    monkeypatch.setenv("RAW_STORAGE_PREFIX", "kreports/raw")
+    monkeypatch.setenv("RAW_STORAGE_SPOOL_DIR", str(tmp_path))
+    if configured_readback is None:
+        monkeypatch.delenv("RAW_STORAGE_VERIFY_READBACK_ON_SUCCESS", raising=False)
+    else:
+        monkeypatch.setenv("RAW_STORAGE_VERIFY_READBACK_ON_SUCCESS", configured_readback)
+
+    archive = drive_archive_from_runtime(runner=runner)
+
+    assert archive.verify_after_upload is expected_readback
+    assert runner.config_calls == ["team-drive"]
 
 
 @pytest.mark.parametrize("configured_timeout", ["", "0", "301", "1.5", "fast"])

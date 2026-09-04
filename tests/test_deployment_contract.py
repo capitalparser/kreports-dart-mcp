@@ -146,10 +146,15 @@ def test_role_separated_templates_never_offer_collector_credentials_to_public_mc
 
     assert "KREPORTS_RUNTIME_MODE=collector" in collector
     assert "DART_API_KEY=replace_with_opendart_key" in collector
+    assert "DART_API_KEYS_FILE=/absolute/private/path/to/dart-api-keys" in collector
     assert "DB_URL=sqlite:////path/to/writable/kreports.db" in collector
     assert "RAW_STORAGE_BACKEND=" in collector
     assert "RAW_STORAGE_BUCKET=" in collector
     assert "KREPORTS_ENABLE_RAW_BACKFILL=0" in collector
+    assert "RCLONE_CONFIG_KREPORTS_DRIVE_CLIENT_ID" in collector
+    assert "RAW_STORAGE_DRIVE_CLIENT_ID" not in collector
+    assert "RAW_STORAGE_RCLONE_TPSLIMIT=0.5" in collector
+    assert "RAW_STORAGE_RCLONE_TPSLIMIT_BURST=1" in collector
     assert "RAW_BACKFILL_ENABLED" not in collector
     assert "KREPORTS_MCP_TOKEN" not in collector
 
@@ -244,6 +249,20 @@ def test_source_archive_guide_keeps_drive_and_public_runtime_separate():
     assert "rclone about '<drive-remote-name>:' --json" in guide
     assert "does not perform a reliable remaining-DART-quota preflight" in guide
     assert "--max-dart-calls` is a local physical-request cap" in guide
+    assert "RCLONE_CONFIG_KREPORTS_DRIVE_CLIENT_ID" in guide
+    assert "RAW_STORAGE_DRIVE_CLIENT_ID" in guide  # documented as an ignored marker
+    assert "drive_quota_exhausted" in guide
+    assert "outbox/*.json" in guide
+
+
+def test_source_archive_reuses_an_explicit_operator_owned_rclone_pipeline():
+    guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
+    collector_env = (REPO_ROOT / "deploy" / "private-collector.env.example").read_text()
+
+    assert "RAW_STORAGE_RCLONE_CONFIG" in guide
+    assert "RAW_STORAGE_RCLONE_CONFIG" in collector_env
+    assert "chmod 600" in guide
+    assert "OAuth credentials" in guide
 
 
 def test_source_archive_deadline_guide_keeps_the_collector_override_bounded():
@@ -254,6 +273,30 @@ def test_source_archive_deadline_guide_keeps_the_collector_override_bounded():
     assert "default 60 seconds" in guide
     assert "maximum 300 seconds" in guide
     assert "not a retry, DART-budget, or shard authorization" in guide
+
+
+def test_source_archive_auto_runner_separates_local_and_provider_boundaries():
+    guide = (REPO_ROOT / "docs" / "source-archive-backfill.md").read_text()
+    runner = (REPO_ROOT / "scripts" / "source_archive_auto_backfill.sh").read_text()
+    installer = (REPO_ROOT / "scripts" / "install_launchd_source_archive.sh").read_text()
+    collector = (REPO_ROOT / "deploy" / "private-collector.env.example").read_text()
+
+    assert "source-archive-auto-run" in runner
+    assert "KREPORTS_SOURCE_ARCHIVE_MAX_DART_CALLS" in runner
+    assert "KREPORTS_SOURCE_ARCHIVE_PARTIAL_RETRY_SECONDS" in runner
+    assert "KREPORTS_SOURCE_ARCHIVE_AUTH_BLOCK" in runner
+    assert "StartInterval" in installer and "<integer>900</integer>" in installer
+    assert "KeepAlive" in installer and "SuccessfulExit" in installer
+    assert "KREPORTS_SOURCE_ARCHIVE_COLLECTOR_ENV" in installer
+    assert "KREPORTS_SOURCE_ARCHIVE_DRIVE_ENV" in installer
+    assert "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" in installer
+    assert ".venv/bin/python" in runner
+    assert "-m kreports.cli.main" in runner
+    assert "30 seconds" in guide
+    assert "15 minutes" in guide
+    assert "24 hours" in guide
+    assert "KREPORTS_SOURCE_ARCHIVE_DB=" in collector
+    assert "KREPORTS_SOURCE_ARCHIVE_STATE_DIR=" in collector
 
 
 def test_source_archive_deadline_override_is_exclusive_to_v3_shard_zero_resume():
