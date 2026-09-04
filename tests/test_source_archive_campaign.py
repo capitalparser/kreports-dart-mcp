@@ -1164,3 +1164,24 @@ def test_cli_exposes_explicit_source_archive_commands():
         "source-archive-auto-run", "source-archive-verify",
     ):
         assert command in result.output
+
+
+def test_separate_audit_receipts_excludes_internal_control_report(monkeypatch):
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    def fake_fetch(_corp_code, _start, _end, disc_type=""):
+        return [
+            {"report_nm": "내부회계관리제도감사보고서", "rcept_no": "20220101000001", "rcept_dt": "20220331"},
+            {"report_nm": "감사보고서 (첨부:재무제표)", "rcept_no": "20220101000002", "rcept_dt": "20220331"},
+        ]
+
+    monkeypatch.setattr(campaign, "fetch_disclosure_list", fake_fetch)
+    target = campaign.SourceArchiveTarget(
+        corp_code="00000001", bsns_year=2021, market="KOSPI", shard=0,
+        source_receipt="x", report_nm="사업보고서 (2021.12)", source_uri="x",
+        source_status="discovered",
+    )
+
+    receipts = campaign._separate_audit_receipts(target)
+
+    assert receipts == ("20220101000002",)

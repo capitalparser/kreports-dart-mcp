@@ -22,6 +22,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from kreports.analysis.filing_provenance import latest_annual_filing_anchor_from_rows
+from kreports.annual_filing_identity import audit_report_receipt_matches_business_year
 from kreports.collector.fetcher import (
     DartApiAuthError,
     DartApiLimitExceeded,
@@ -33,7 +34,6 @@ from kreports.collector.fetcher import (
     request_budget,
 )
 from kreports.db.models import CompanyYearListingMembership, Disclosure
-from kreports.processor.audit_parser import parse_bsns_year
 from kreports.processor.document_structure import PARSER_VERSION, parse_document_structure
 from kreports.storage.drive_archive import (
     DriveArchiveCommandError,
@@ -928,17 +928,11 @@ def _separate_audit_receipts(target: SourceArchiveTarget) -> tuple[str, ...]:
     )
     receipts: list[str] = []
     for row in rows:
-        report_name = str(row.get("report_nm") or "")
-        compact_name = "".join(report_name.split())
-        if "감사보고서" not in compact_name:
-            continue
-        if any(fragment in compact_name for fragment in (
-            "내부회계", "감사의감사보고서", "내부감시장치",
-        )):
-            continue
         receipt = str(row.get("rcept_no") or "")
         receipt_date = str(row.get("rcept_dt") or receipt[:8])
-        if not receipt or parse_bsns_year(report_name, receipt_date) != target.bsns_year:
+        if not receipt or not audit_report_receipt_matches_business_year(
+            row.get("report_nm"), receipt_date, target.bsns_year,
+        ):
             continue
         receipts.append(receipt)
     return tuple(sorted(set(receipts)))
