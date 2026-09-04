@@ -8,8 +8,9 @@ company-year can be structurally complete.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -22,19 +23,24 @@ from sqlalchemy.orm import Session
 
 from kreports.analysis.filing_provenance import latest_annual_filing_anchor_from_rows
 from kreports.collector.fetcher import (
+    DartApiAuthError,
+    DartApiLimitExceeded,
+    DartBoundedStop,
     DartRequestBudgetExceeded,
-    fetch_audit_report_pdf,
-    fetch_dart_main_html,
+    DartTransportError,
     fetch_document_zip_asset_bytes,
-    fetch_viewer_bytes,
+    fetch_disclosure_list,
     request_budget,
 )
-from kreports.collector.report_document_collector import (
-    audit_viewer_requires_pdf_fallback,
-    select_primary_audit_report_attachments,
-)
 from kreports.db.models import CompanyYearListingMembership, Disclosure
+from kreports.processor.audit_parser import parse_bsns_year
 from kreports.processor.document_structure import PARSER_VERSION, parse_document_structure
+from kreports.storage.drive_archive import (
+    DriveArchiveCommandError,
+    DriveArchiveCommandTimeoutError,
+    DriveArchiveMetrics,
+    DriveArchiveRateLimitError,
+)
 from kreports.storage.source_archive import archive_structured_document
 
 
@@ -53,6 +59,7 @@ __all__ = [
 CAMPAIGN_SCHEMA = "source-archive-campaign.v2"
 ALL_ISSUER_CAMPAIGN_SCHEMA = "source-archive-campaign.v3"
 DEFAULT_SHARD_COUNT = 64
+AUDIT_XML_RESOLVER_VERSION = 2
 _UNIVERSE_MODES = {"listed", "all_annual_issuers"}
 _VERIFIED_KOSPI = ("verified_kospi", "KOSPI", "verified_year_specific_membership")
 _VERIFIED_KOSDAQ = ("verified_kosdaq", "KOSDAQ", "verified_year_specific_membership")
@@ -159,6 +166,12 @@ class SourceArchiveReport:
     dart_calls_budget: int | None = None
     universe_mode: str = "listed"
     campaign_counts: Mapping[str, Mapping[str, int]] | None = None
+    stop_reason: str | None = None
+    unattempted_target_count: int = 0
+    deferred_retry_count: int = 0
+    permanent_gap_count: int = 0
+    drive_metrics: Mapping[str, Any] | None = None
+    target_year: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -172,10 +185,43 @@ class SourceArchiveReport:
             "manifest_path": str(self.manifest_path) if self.manifest_path else None,
             "dart_calls_used": self.dart_calls_used,
             "dart_calls_budget": self.dart_calls_budget,
+            "stop_reason": self.stop_reason,
+            "unattempted_target_count": self.unattempted_target_count,
+            "deferred_retry_count": self.deferred_retry_count,
+            "permanent_gap_count": self.permanent_gap_count,
+            "drive_metrics": dict(self.drive_metrics or _empty_drive_metrics()),
+            "target_year": self.target_year,
         }
         if self.universe_mode == "all_annual_issuers":
             result.update({"universe_mode": self.universe_mode, **dict(self.campaign_counts or {})})
         return result
+
+
+@dataclass(frozen=True)
+class _FamilyResult:
+    complete: bool
+    outcomes: tuple[dict[str, Any], ...]
+    stop: DartBoundedStop | DriveArchiveRateLimitError | DriveArchiveCommandError | DriveArchiveCommandTimeoutError | None = None
+    audit_xml_members: tuple[tuple[str, bytes], ...] = ()
+    raw_container: Mapping[str, Any] | None = None
+    audit_xml_checked: bool = False
+
+
+@dataclass(frozen=True)
+class _TargetResult:
+    outcomes: tuple[dict[str, Any], ...]
+    stop: DartBoundedStop | DriveArchiveRateLimitError | DriveArchiveCommandError | DriveArchiveCommandTimeoutError | None = None
+
+
+@dataclass
+class _ResumeState:
+    """Verified source checkpoints reconstructed from append-only outcomes."""
+
+    completed_company_years: set[tuple[str, int]]
+    complete_families: set[tuple[tuple[str, int], str]]
+    complete_assets: dict[tuple[tuple[str, int], str, str, str], dict[str, Any]]
+    containers: dict[tuple[tuple[str, int], str], dict[str, Any]]
+    latest_company_year_terminal: dict[tuple[str, int], dict[str, Any]]
 
 
 def build_source_archive_plan(
@@ -269,60 +315,186 @@ def run_source_archive_shard(
     *,
     apply: bool,
     max_dart_calls: int | None = None,
+    partial_retry_after_seconds: int = 0,
+    now: datetime | None = None,
+    target_year: int | None = None,
 ) -> SourceArchiveReport:
     """Run one frozen shard, requiring a finite DART call budget for apply."""
     _validate_shard(shard, plan.shard_count)
     selected = plan.targets_for_shard(shard)
+    if target_year is not None:
+        if target_year not in plan.years:
+            raise SourceArchiveCampaignError(
+                f"target_year must be one of the frozen plan years: {target_year}"
+            )
+        selected = tuple(target for target in selected if target.bsns_year == target_year)
     if not apply:
         return SourceArchiveReport(
             shard, False, "dry_run", plan.target_digest, (),
             universe_mode=plan.universe_mode, campaign_counts=plan.campaign_counts,
+            drive_metrics=_empty_drive_metrics(),
+            target_year=target_year,
         )
     if archive is None:
         raise SourceArchiveCampaignError("--apply requires a configured immutable Drive archive")
     if not isinstance(max_dart_calls, int) or max_dart_calls < 1:
         raise SourceArchiveCampaignError("--apply requires a finite positive max_dart_calls budget")
+    if not isinstance(partial_retry_after_seconds, int) or partial_retry_after_seconds < 0:
+        raise SourceArchiveCampaignError("partial_retry_after_seconds must be a non-negative integer")
     from kreports.runtime import require_collector_mode
 
     require_collector_mode("source archive campaign")
     state_dir = _required_state_dir(plan)
-    drive_target_manifest = _write_frozen_target_manifest(plan, state_dir, archive)
     shard_dir = state_dir / f"shard-{shard:02d}"
     shard_dir.mkdir(parents=True, exist_ok=True)
     outcomes_path = shard_dir / "outcomes.jsonl"
     marker_path = shard_dir / "COMMITTED.json"
-    if marker_path.exists():
-        _verify_committed_marker(marker_path, plan, shard, outcomes_path, selected)
-    previous = _completed_company_years(outcomes_path, plan.target_digest)
-    outcomes: list[dict[str, Any]] = []
-    with request_budget(max_dart_calls) as budget:
-        for target in selected:
-            if (target.corp_code, target.bsns_year) in previous:
-                outcomes.append(_outcome(target, "already_structurally_complete"))
-                continue
-            target_outcomes = _process_target(target, archive, drive_target_manifest)
-            for outcome in target_outcomes:
-                row = _append_outcome(
-                    outcomes_path,
-                    {**outcome, "drive_target_manifest": drive_target_manifest},
-                    plan.target_digest,
-                )
-                _archive_campaign_event(archive, row)
-            outcomes.extend(target_outcomes)
+    # The lock spans target freeze, pending event flush, DART reads, and Drive
+    # writes.  A test double may omit it; the production DriveArchive always
+    # provides this process-exclusive remote lease.
+    lease_factory = getattr(archive, "writer_lease", None)
+    lease = lease_factory() if callable(lease_factory) else nullcontext()
+    with lease:
+        try:
+            drive_target_manifest = _write_frozen_target_manifest(plan, state_dir, archive)
+        except DriveArchiveRateLimitError as exc:
+            return _rate_limit_report(
+                plan, shard, selected, outcomes_path, archive, exc,
+                unattempted=len(selected), target_year=target_year,
+            )
+        except (DriveArchiveCommandError, DriveArchiveCommandTimeoutError) as exc:
+            return _drive_transport_report(
+                plan, shard, selected, outcomes_path, archive, exc,
+                unattempted=len(selected), target_year=target_year,
+            )
+        # COMMITTED.json represents the complete all-year shard. Year-major
+        # batches must never create or validate that marker prematurely.
+        if target_year is None and marker_path.exists():
+            _verify_committed_marker(marker_path, plan, shard, outcomes_path, selected)
+        resume_state = _resume_state(outcomes_path, plan.target_digest)
+        previous = resume_state.completed_company_years
+        scheduled, deferred_retry_count, permanent_gap_count = _scheduled_targets(
+            selected,
+            resume_state,
+            now=now or datetime.now(UTC),
+            partial_retry_after=timedelta(seconds=partial_retry_after_seconds),
+        )
+        outcomes: list[dict[str, Any]] = []
 
-    terminal = [row for row in outcomes if row.get("company_year_terminal", True)]
-    complete = bool(selected) and len(terminal) == len(selected) and all(
-        row["status"] in {"structurally_complete", "already_structurally_complete"} for row in terminal
-    )
-    if complete:
-        _write_committed_marker(marker_path, plan, shard, outcomes_path, selected)
-    elif marker_path.exists():
-        raise SourceArchiveCampaignError("partial shard cannot retain a COMMITTED.json marker")
-    return SourceArchiveReport(
-        shard, True, "complete" if complete else "partial", plan.target_digest, tuple(outcomes),
-        outcomes_path, budget.used_calls, budget.max_calls,
-        plan.universe_mode, plan.campaign_counts,
-    )
+        # A prior worker may have completed DART processing but stopped while
+        # publishing the company-year event.  Flush that durable outbox before
+        # making a new DART request; a failure leaves it on disk for resume.
+        try:
+            _flush_event_bundles(archive, shard_dir)
+        except DriveArchiveRateLimitError as exc:
+            return _rate_limit_report(
+                plan, shard, selected, outcomes_path, archive, exc,
+                unattempted=len(selected), outcomes=tuple(outcomes),
+                target_year=target_year,
+            )
+        except (DriveArchiveCommandError, DriveArchiveCommandTimeoutError) as exc:
+            return _drive_transport_report(
+                plan, shard, selected, outcomes_path, archive, exc,
+                unattempted=len(selected), outcomes=tuple(outcomes),
+                target_year=target_year,
+            )
+
+        stop_reason: str | None = None
+        unattempted_target_count = 0
+        with request_budget(max_dart_calls) as budget:
+            for index, target in enumerate(scheduled):
+                if (target.corp_code, target.bsns_year) in previous:
+                    target_result = _TargetResult((_outcome(target, "already_structurally_complete"),))
+                else:
+                    try:
+                        target_result = _process_target(
+                            target, archive, drive_target_manifest, resume_state
+                        )
+                    except DartBoundedStop as exc:  # defensive boundary for new fetchers
+                        target_result = _TargetResult((_stop_outcome(target, exc),), exc)
+                    except DriveArchiveRateLimitError as exc:
+                        target_result = _TargetResult((_stop_outcome(target, exc),), exc)
+                    except (DriveArchiveCommandError, DriveArchiveCommandTimeoutError) as exc:
+                        target_result = _TargetResult((_stop_outcome(target, exc),), exc)
+
+                persisted: list[dict[str, Any]] = []
+                for outcome in target_result.outcomes:
+                    persisted.append(_append_outcome(
+                        outcomes_path,
+                        {**outcome, "drive_target_manifest": drive_target_manifest},
+                        plan.target_digest,
+                    ))
+                outcomes.extend(target_result.outcomes)
+                bundle_path = _write_event_bundle(shard_dir, persisted, plan.target_digest)
+
+                # If source archival itself hit the quota, do not immediately
+                # spend another Drive request on the event.  The outbox and
+                # non-terminal stop outcome are durable and resumed later.
+                if isinstance(target_result.stop, (DriveArchiveRateLimitError, DriveArchiveCommandError, DriveArchiveCommandTimeoutError)):
+                    stop_reason = _stop_reason(target_result.stop)
+                    unattempted_target_count = len(scheduled) - index - 1
+                    break
+                try:
+                    _flush_event_bundle(archive, bundle_path)
+                except DriveArchiveRateLimitError as exc:
+                    stop_row = _append_outcome(
+                        outcomes_path,
+                        {**_stop_outcome(target, exc), "drive_target_manifest": drive_target_manifest},
+                        plan.target_digest,
+                    )
+                    outcomes.append(stop_row)
+                    _write_event_bundle(shard_dir, [*persisted, stop_row], plan.target_digest)
+                    stop_reason = "drive_quota_exhausted"
+                    unattempted_target_count = len(scheduled) - index - 1
+                    break
+                except (DriveArchiveCommandError, DriveArchiveCommandTimeoutError) as exc:
+                    stop_row = _append_outcome(
+                        outcomes_path,
+                        {**_stop_outcome(target, exc), "drive_target_manifest": drive_target_manifest},
+                        plan.target_digest,
+                    )
+                    outcomes.append(stop_row)
+                    _write_event_bundle(shard_dir, [*persisted, stop_row], plan.target_digest)
+                    stop_reason = "drive_transport_failure"
+                    unattempted_target_count = len(scheduled) - index - 1
+                    break
+                if target_result.stop is not None:
+                    stop_reason = _stop_reason(target_result.stop)
+                    unattempted_target_count = len(scheduled) - index - 1
+                    break
+
+        terminal = [
+            row for row in outcomes
+            if row.get("company_year_terminal", True)
+            and row.get("report_kind", "company_year") == "company_year"
+        ]
+        completed_after_run = set(previous)
+        for row in terminal:
+            key = (str(row["corp_code"]), int(row["bsns_year"]))
+            if row["status"] == "structurally_complete":
+                completed_after_run.add(key)
+            else:
+                completed_after_run.discard(key)
+        expected_company_years = {
+            (target.corp_code, target.bsns_year) for target in selected
+        }
+        complete = (
+            stop_reason is None
+            and bool(selected)
+            and completed_after_run == expected_company_years
+        )
+        if complete and target_year is None:
+            _write_committed_marker(marker_path, plan, shard, outcomes_path, selected)
+        elif target_year is None and marker_path.exists():
+            raise SourceArchiveCampaignError("partial shard cannot retain a COMMITTED.json marker")
+        return SourceArchiveReport(
+            shard, True, "complete" if complete else "partial", plan.target_digest, tuple(outcomes),
+            outcomes_path, budget.used_calls, budget.max_calls,
+            plan.universe_mode, plan.campaign_counts, stop_reason, unattempted_target_count,
+            deferred_retry_count, permanent_gap_count,
+            _drive_metrics(archive, _pending_event_bundle_count(shard_dir)),
+            target_year,
+        )
 
 
 def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None) -> dict[str, Any]:
@@ -467,44 +639,66 @@ def _process_target(
     target: SourceArchiveTarget,
     archive: ArchiveWriter,
     drive_target_manifest: Mapping[str, Any],
-) -> list[dict[str, Any]]:
+    resume_state: _ResumeState,
+) -> _TargetResult:
     if target.source_status != "discovered" or not target.source_receipt or not target.source_uri:
-        return [_outcome(target, target.source_status)]
+        return _TargetResult((_outcome(target, target.source_status),))
     outcomes = [_outcome(target, "discovered", report_kind="company_year", company_year_terminal=False)]
-    business, business_outcomes = _business_family(target, archive, drive_target_manifest)
-    audit, audit_outcomes = _audit_family(target, archive, drive_target_manifest)
-    outcomes.extend(business_outcomes)
-    outcomes.extend(audit_outcomes)
-    outcomes.append(_outcome(target, "structurally_complete" if business and audit else "partial_source", report_kind="company_year"))
-    return outcomes
+    business_result = _business_family(target, archive, drive_target_manifest, resume_state)
+    outcomes.extend(business_result.outcomes)
+    if business_result.stop is not None:
+        return _TargetResult(tuple(outcomes), business_result.stop)
+    audit_result = _audit_family(
+        target,
+        archive,
+        drive_target_manifest,
+        resume_state,
+        business_xml_members=business_result.audit_xml_members,
+        business_raw_container=business_result.raw_container,
+        business_xml_checked=business_result.audit_xml_checked,
+    )
+    outcomes.extend(audit_result.outcomes)
+    if audit_result.stop is not None:
+        return _TargetResult(tuple(outcomes), audit_result.stop)
+    outcomes.append(_outcome(
+        target,
+        "structurally_complete" if business_result.complete and audit_result.complete else "partial_source",
+        report_kind="company_year",
+        audit_xml_resolver_version=AUDIT_XML_RESOLVER_VERSION,
+    ))
+    return _TargetResult(tuple(outcomes))
 
 
 def _business_family(
     target: SourceArchiveTarget,
     archive: ArchiveWriter,
     drive_target_manifest: Mapping[str, Any],
-) -> tuple[bool, list[dict[str, Any]]]:
+    resume_state: _ResumeState,
+) -> _FamilyResult:
+    family_key = _family_key(target, "business_report")
+    if family_key in resume_state.complete_families:
+        return _FamilyResult(True, (_family_reused_outcome(target, "business_report"),))
     try:
         assets = fetch_document_zip_asset_bytes(target.source_receipt or "")
-    except DartRequestBudgetExceeded:
-        return False, [_outcome(target, "dart_budget_exhausted", report_kind="business_report", error="document_xml")]
+    except DartBoundedStop as exc:
+        return _FamilyResult(False, (_stop_outcome(target, exc, report_kind="business_report", error="document_xml"),), exc)
     except Exception as exc:
-        return False, [_outcome(target, "fetch_failed", report_kind="business_report", error=_bounded_error(exc))]
+        return _FamilyResult(False, (_outcome(target, "fetch_failed", report_kind="business_report", error=_bounded_error(exc)),))
     if not assets:
-        return False, [_outcome(target, "partial_source", report_kind="business_report", error="document_xml_empty")]
+        return _FamilyResult(False, (_outcome(target, "partial_source", report_kind="business_report", error="document_xml_empty"),))
     container_bytes = getattr(assets, "container_bytes", None)
     if not isinstance(container_bytes, bytes) or not container_bytes:
-        return False, [_outcome(
+        return _FamilyResult(False, (_outcome(
             target, "partial_source", report_kind="business_report",
             error="document_zip_container_missing",
-        )]
+        ),))
     container_is_zip = getattr(assets, "is_zip", None)
     container_content_type = getattr(assets, "container_content_type", None)
     if not isinstance(container_is_zip, bool) or not isinstance(container_content_type, str):
-        return False, [_outcome(
+        return _FamilyResult(False, (_outcome(
             target, "partial_source", report_kind="business_report",
             error="document_container_media_metadata_missing",
-        )]
+        ),))
     container_extension = "zip" if container_is_zip else _container_extension(container_content_type)
     container_version = (
         "raw-document-zip-container-v1"
@@ -512,43 +706,68 @@ def _business_family(
         else "raw-document-response-container-v1"
     )
     container_sha256 = hashlib.sha256(container_bytes).hexdigest()
-    try:
-        container_object = archive.archive_bytes(
-            data=container_bytes,
-            extension=container_extension,
-            metadata={
-                "source_receipt": target.source_receipt or "",
-                "source_uri": target.source_uri or "",
-                "archive_version": container_version,
-                "corp_code": target.corp_code,
-                "bsns_year": str(target.bsns_year),
-                "report_kind": "business_report",
-                "container_content_type": container_content_type,
-                "container_is_zip": str(container_is_zip).lower(),
-            },
-        )
-    except Exception as exc:
-        return False, [_outcome(
-            target, "asset_failed", report_kind="business_report",
-            error=_bounded_error(exc),
-        )]
-    container = {
-        **_object_summary(container_object),
-        "content_type": container_content_type,
-        "is_zip": container_is_zip,
-    }
+    cached_container = resume_state.containers.get(family_key)
+    if _container_identity_matches(
+        cached_container,
+        sha256=container_sha256,
+        byte_length=len(container_bytes),
+        content_type=container_content_type,
+        is_zip=container_is_zip,
+    ):
+        container = dict(cached_container)
+    else:
+        try:
+            container_object = archive.archive_bytes(
+                data=container_bytes,
+                extension=container_extension,
+                metadata={
+                    "source_receipt": target.source_receipt or "",
+                    "source_uri": target.source_uri or "",
+                    "archive_version": container_version,
+                    "corp_code": target.corp_code,
+                    "bsns_year": str(target.bsns_year),
+                    "report_kind": "business_report",
+                    "container_content_type": container_content_type,
+                    "container_is_zip": str(container_is_zip).lower(),
+                },
+            )
+        except (DriveArchiveRateLimitError, DriveArchiveCommandError, DriveArchiveCommandTimeoutError):
+            raise
+        except Exception as exc:
+            return _FamilyResult(False, (_outcome(
+                target, "asset_failed", report_kind="business_report",
+                error=_bounded_error(exc),
+            ),))
+        container = {
+            **_object_summary(container_object),
+            "content_type": container_content_type,
+            "is_zip": container_is_zip,
+        }
     if (
         not container.get("storage_uri")
         or container.get("sha256") != container_sha256
         or container.get("byte_length") != len(container_bytes)
     ):
-        return False, [_outcome(
+        return _FamilyResult(False, (_outcome(
             target, "asset_failed", report_kind="business_report",
             error="document_zip_container_archive_identity_invalid",
-        )]
+        ),))
+    audit_xml_members = _audit_xml_members(assets)
+    audit_xml_names = {filename for filename, _raw in audit_xml_members}
     outcomes: list[dict[str, Any]] = []
     success = True
     for filename, raw in sorted(assets.items()):
+        if filename in audit_xml_names:
+            continue
+        cached_asset = resume_state.complete_assets.get(
+            _asset_key(target, "business_report", target.source_receipt or "", filename)
+        )
+        if cached_asset is not None:
+            outcomes.append(_asset_reused_outcome(
+                target, "business_report", filename, cached_asset
+            ))
+            success = success and cached_asset.get("structural_status") == "complete"
+            continue
         complete, asset_outcomes = _archive_asset(
             target, archive, report_kind="business_report", source_locator=filename,
             filename=filename, content_type="xml", raw_bytes=raw,
@@ -557,70 +776,254 @@ def _business_family(
         )
         success = success and complete
         outcomes.extend(asset_outcomes)
-    return success, outcomes
+    if success:
+        outcomes.append(_family_complete_outcome(
+            target, "business_report", assets=tuple(sorted(assets)), container=container
+        ))
+    return _FamilyResult(
+        success,
+        tuple(outcomes),
+        audit_xml_members=audit_xml_members,
+        raw_container=container,
+        audit_xml_checked=True,
+    )
 
 
 def _audit_family(
     target: SourceArchiveTarget,
     archive: ArchiveWriter,
     drive_target_manifest: Mapping[str, Any],
-) -> tuple[bool, list[dict[str, Any]]]:
+    resume_state: _ResumeState,
+    *,
+    business_xml_members: tuple[tuple[str, bytes], ...] = (),
+    business_raw_container: Mapping[str, Any] | None = None,
+    business_xml_checked: bool = False,
+) -> _FamilyResult:
+    family_key = _family_key(target, "audit_report")
+    if family_key in resume_state.complete_families:
+        return _FamilyResult(True, (_family_reused_outcome(target, "audit_report"),))
+    if business_xml_members:
+        return _archive_audit_xml_members(
+            target,
+            archive,
+            drive_target_manifest,
+            resume_state,
+            business_xml_members,
+            business_raw_container,
+        )
+    if not business_xml_checked:
+        try:
+            business_assets = fetch_document_zip_asset_bytes(target.source_receipt or "")
+        except DartBoundedStop as exc:
+            return _FamilyResult(False, (_stop_outcome(
+                target, exc, report_kind="audit_report", error="embedded_audit_document_xml",
+            ),), exc)
+        except Exception as exc:
+            return _FamilyResult(False, (_outcome(
+                target, "fetch_failed", report_kind="audit_report", error=_bounded_error(exc),
+            ),))
+        embedded_members = _audit_xml_members(business_assets)
+        if embedded_members:
+            container = _archive_audit_xml_container(
+                target, archive, target.source_receipt or "", business_assets,
+            )
+            if container is None:
+                return _FamilyResult(False, (_outcome(
+                    target, "asset_failed", report_kind="audit_report",
+                    error="embedded_audit_document_container_archive_failed",
+                ),))
+            return _archive_audit_xml_members(
+                target, archive, drive_target_manifest, resume_state, embedded_members, container,
+            )
     try:
-        main_html = fetch_dart_main_html(target.source_receipt or "")
-    except DartRequestBudgetExceeded:
-        return False, [_outcome(target, "dart_budget_exhausted", report_kind="audit_report", error="main_html")]
-    if not main_html:
-        return False, [_outcome(target, "partial_source", report_kind="audit_report", error="audit_main_html_empty")]
-    attachments = select_primary_audit_report_attachments(main_html)
-    if not attachments:
-        return False, [_outcome(target, "partial_source", report_kind="audit_report", error="audit_attachment_missing")]
+        receipts = _separate_audit_receipts(target)
+    except DartBoundedStop as exc:
+        return _FamilyResult(False, (_stop_outcome(
+            target, exc, report_kind="audit_report", error="audit_receipt_discovery",
+        ),), exc)
+    for receipt in receipts:
+        try:
+            assets = fetch_document_zip_asset_bytes(receipt)
+        except DartBoundedStop as exc:
+            return _FamilyResult(False, (_stop_outcome(
+                target, exc, report_kind="audit_report", error="audit_document_xml",
+            ),), exc)
+        except Exception as exc:
+            return _FamilyResult(False, (_outcome(
+                target, "fetch_failed", report_kind="audit_report", error=_bounded_error(exc),
+            ),))
+        members = _audit_xml_members(assets)
+        # The receipt itself was classified as a primary audit report.  Preserve
+        # every XML member of that package even when a member title is generic.
+        if not members:
+            members = tuple(sorted(assets.items()))
+        if not members:
+            continue
+        container = _archive_audit_xml_container(target, archive, receipt, assets)
+        if container is None:
+            return _FamilyResult(False, (_outcome(
+                target, "asset_failed", report_kind="audit_report", error="audit_document_container_archive_failed",
+            ),))
+        return _archive_audit_xml_members(
+            target, archive, drive_target_manifest, resume_state, members, container,
+            source_receipt=receipt,
+        )
+    return _FamilyResult(False, (_outcome(
+        target, "partial_source", report_kind="audit_report", error="audit_xml_unavailable",
+    ),))
+
+
+def _archive_audit_xml_members(
+    target: SourceArchiveTarget,
+    archive: ArchiveWriter,
+    drive_target_manifest: Mapping[str, Any],
+    resume_state: _ResumeState,
+    members: tuple[tuple[str, bytes], ...],
+    raw_container: Mapping[str, Any] | None,
+    *,
+    source_receipt: str | None = None,
+) -> _FamilyResult:
+    """Archive audit XML embedded in the business filing under audit provenance."""
     outcomes: list[dict[str, Any]] = []
     success = True
-    for attachment in attachments:
-        dcm_no = str(attachment.get("dcm_no") or "")
-        receipt = str(attachment.get("rcept_no") or target.source_receipt)
-        if not dcm_no:
-            success = False
-            outcomes.append(_outcome(target, "partial_source", report_kind="audit_report", error="audit_attachment_locator_missing"))
-            continue
-        content_type, raw, exhausted = _fetch_audit_attachment(receipt, dcm_no)
-        if exhausted:
-            success = False
-            outcomes.append(_outcome(
-                target, "dart_budget_exhausted", report_kind="audit_report",
-                source_locator=f"dcm:{dcm_no}", error="audit_attachment",
-            ))
-            continue
-        if raw is None:
-            success = False
-            outcomes.append(_outcome(target, "partial_source", report_kind="audit_report", source_locator=f"dcm:{dcm_no}", error="audit_attachment_unavailable"))
+    receipt = source_receipt or target.source_receipt or ""
+    for filename, raw in members:
+        cached_asset = resume_state.complete_assets.get(
+            _asset_key(target, "audit_report", receipt, filename)
+        )
+        if cached_asset is not None:
+            outcomes.append(_asset_reused_outcome(target, "audit_report", filename, cached_asset))
+            success = success and cached_asset.get("structural_status") == "complete"
             continue
         complete, asset_outcomes = _archive_asset(
-            target, archive, report_kind="audit_report", source_locator=f"dcm:{dcm_no}",
-            filename=str(attachment.get("title") or f"{dcm_no}.{content_type}"), content_type=content_type,
-            raw_bytes=raw, source_receipt=receipt, drive_target_manifest=drive_target_manifest,
+            target,
+            archive,
+            report_kind="audit_report",
+            source_locator=filename,
+            filename=filename,
+            content_type="xml",
+            raw_bytes=raw,
+            source_receipt=receipt,
+            drive_target_manifest=drive_target_manifest,
+            raw_container=raw_container,
+            container_member_name=filename,
         )
         success = success and complete
         outcomes.extend(asset_outcomes)
-    return success, outcomes
+    if success:
+        outcomes.append(_family_complete_outcome(
+            target,
+            "audit_report",
+            assets=tuple(filename for filename, _raw in members),
+        ))
+    return _FamilyResult(success, tuple(outcomes))
 
 
-def _fetch_audit_attachment(receipt: str, dcm_no: str) -> tuple[str, bytes | None, bool]:
+def _separate_audit_receipts(target: SourceArchiveTarget) -> tuple[str, ...]:
+    """Find primary audit-report submissions for the target fiscal year."""
+    rows = fetch_disclosure_list(
+        target.corp_code,
+        f"{target.bsns_year + 1:04d}0101",
+        f"{target.bsns_year + 1:04d}1231",
+    )
+    receipts: list[str] = []
+    for row in rows:
+        report_name = str(row.get("report_nm") or "")
+        compact_name = "".join(report_name.split())
+        if "감사보고서" not in compact_name:
+            continue
+        if any(fragment in compact_name for fragment in (
+            "내부회계", "감사의감사보고서", "내부감시장치",
+        )):
+            continue
+        receipt = str(row.get("rcept_no") or "")
+        receipt_date = str(row.get("rcept_dt") or receipt[:8])
+        if not receipt or parse_bsns_year(report_name, receipt_date) != target.bsns_year:
+            continue
+        receipts.append(receipt)
+    return tuple(sorted(set(receipts)))
+
+
+def _archive_audit_xml_container(
+    target: SourceArchiveTarget,
+    archive: ArchiveWriter,
+    receipt: str,
+    assets: Mapping[str, bytes],
+) -> Mapping[str, Any] | None:
+    container_bytes = getattr(assets, "container_bytes", None)
+    container_content_type = getattr(assets, "container_content_type", None)
+    container_is_zip = getattr(assets, "is_zip", None)
+    if (
+        not isinstance(container_bytes, bytes) or not container_bytes
+        or not isinstance(container_content_type, str) or not isinstance(container_is_zip, bool)
+    ):
+        return None
     try:
-        viewer = fetch_viewer_bytes(receipt, dcm_no)
-    except DartRequestBudgetExceeded:
-        return "html", None, True
-    if viewer is not None:
+        object_value = archive.archive_bytes(
+            data=container_bytes,
+            extension="zip" if container_is_zip else _container_extension(container_content_type),
+            metadata={
+                "source_receipt": receipt,
+                "source_uri": _document_source_uri(receipt),
+                "archive_version": (
+                    "raw-document-zip-container-v1" if container_is_zip
+                    else "raw-document-response-container-v1"
+                ),
+                "corp_code": target.corp_code,
+                "bsns_year": str(target.bsns_year),
+                "report_kind": "audit_report",
+                "container_content_type": container_content_type,
+                "container_is_zip": str(container_is_zip).lower(),
+            },
+        )
+    except (DriveArchiveRateLimitError, DriveArchiveCommandError, DriveArchiveCommandTimeoutError):
+        raise
+    except Exception:
+        return None
+    container = {
+        **_object_summary(object_value),
+        "content_type": container_content_type,
+        "is_zip": container_is_zip,
+    }
+    if (
+        not container.get("storage_uri")
+        or container.get("sha256") != hashlib.sha256(container_bytes).hexdigest()
+        or container.get("byte_length") != len(container_bytes)
+    ):
+        return None
+    return container
+
+
+def _audit_xml_members(assets: Mapping[str, bytes]) -> tuple[tuple[str, bytes], ...]:
+    """Return genuine audit-package XML members from a DART document response."""
+    members: list[tuple[str, bytes]] = []
+    for filename, raw in sorted(assets.items()):
         try:
-            decoded = _decode_for_parser(viewer)
+            content = _decode_for_parser(raw)
         except UnicodeDecodeError:
-            decoded = None
-        if decoded is not None and not audit_viewer_requires_pdf_fallback(decoded):
-            return "html", viewer, False
-    try:
-        return "pdf", fetch_audit_report_pdf(receipt, dcm_no), False
-    except DartRequestBudgetExceeded:
-        return "pdf", None, True
+            continue
+        title = _xml_document_title(content) or filename
+        compact_title = "".join(title.split())
+        if "감사보고서" not in compact_title:
+            continue
+        if any(fragment in compact_title for fragment in (
+            "내부회계", "감사의감사보고서", "내부감시장치",
+        )):
+            continue
+        members.append((filename, raw))
+    return tuple(members)
+
+
+def _xml_document_title(content: str) -> str:
+    for marker in ("DOCUMENT-NAME", "TITLE"):
+        start = content.find(f"<{marker}")
+        if start < 0:
+            continue
+        start = content.find(">", start)
+        end = content.find(f"</{marker}>", start + 1)
+        if start >= 0 and end >= 0:
+            return " ".join(content[start + 1:end].split())
+    return ""
 
 
 def _archive_asset(
@@ -658,7 +1061,7 @@ def _archive_asset(
     try:
         raw_object = archive.archive_bytes(data=raw_bytes, extension=_extension(content_type), metadata=metadata)
         outcomes = [_outcome(
-            target, "archived_verified", report_kind=report_kind, source_locator=source_locator,
+            target, "archived", report_kind=report_kind, source_locator=source_locator,
             filename=filename, content_type=content_type, source_receipt=receipt,
             raw_object=_object_summary(raw_object), raw_sha256=raw_sha256, company_year_terminal=False,
             source_uri=source_uri,
@@ -669,11 +1072,20 @@ def _archive_asset(
             raw_bytes, content_type=content_type, source_sha256=raw_sha256,
             source_receipt=receipt, source_uri=source_uri,
         )
-        parsed_object = archive_structured_document(archive, parsed)  # type: ignore[arg-type]
+        parsed_object = archive_structured_document(  # type: ignore[arg-type]
+            archive,
+            parsed,
+            archive_metadata={
+                "corp_code": target.corp_code,
+                "bsns_year": str(target.bsns_year),
+                "report_kind": report_kind,
+            },
+        )
         outcomes.append(_outcome(
             target, "generically_parsed", report_kind=report_kind, source_locator=source_locator,
             filename=filename, content_type=content_type, source_receipt=receipt,
             structural_status=parsed.structural_status, parsed_object=_object_summary(parsed_object),
+            raw_sha256=raw_sha256,
             parser_version=PARSER_VERSION, company_year_terminal=False,
             source_uri=source_uri,
             raw_container=dict(raw_container) if raw_container is not None else None,
@@ -693,10 +1105,19 @@ def _archive_asset(
         }
         manifest = archive.archive_bytes(
             data=_canonical_json(document), extension="json",
-            metadata={"source_receipt": receipt or "", "source_uri": source_uri, "archive_version": "source-archive-document-manifest-v1"},
+            metadata={
+                "source_receipt": receipt or "",
+                "source_uri": source_uri,
+                "archive_version": "source-archive-document-manifest-v1",
+                "corp_code": target.corp_code,
+                "bsns_year": str(target.bsns_year),
+                "report_kind": report_kind,
+            },
         )
         outcomes[-1]["document_manifest"] = _object_summary(manifest)
         return parsed.structural_status == "complete", outcomes
+    except (DriveArchiveRateLimitError, DriveArchiveCommandError, DriveArchiveCommandTimeoutError):
+        raise
     except Exception as exc:
         return False, [_outcome(target, "asset_failed", report_kind=report_kind, source_locator=source_locator, error=_bounded_error(exc))]
 
@@ -704,9 +1125,156 @@ def _archive_asset(
 def _archive_campaign_event(archive: ArchiveWriter, row: Mapping[str, Any]) -> None:
     receipt = str(row.get("source_receipt") or "campaign")
     uri = str(row.get("source_uri") or f"campaign://{row['target_digest']}/{row['shard']}")
+    outcomes = row.get("outcomes")
+    if not isinstance(outcomes, list):
+        outcomes = [dict(row)]
+    payload = {"schema": "source-archive-campaign-manifest.v1", **dict(row), "outcomes": outcomes}
     archive.archive_bytes(
-        data=_canonical_json({"schema": "source-archive-campaign-manifest.v1", **dict(row)}), extension="json",
+        data=_canonical_json(payload), extension="json",
         metadata={"source_receipt": receipt, "source_uri": uri, "archive_version": "source-archive-campaign-manifest-v1"},
+    )
+
+
+def _event_bundle_path(shard_dir: Path, row: Mapping[str, Any]) -> Path:
+    identity = f"{row.get('target_digest', '')}:{row.get('corp_code', '')}:{row.get('bsns_year', '')}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return shard_dir / "outbox" / f"{digest}.json"
+
+
+def _write_event_bundle(
+    shard_dir: Path,
+    rows: Iterable[Mapping[str, Any]],
+    target_digest: str,
+) -> Path:
+    materialized = [dict(row) for row in rows]
+    if not materialized:
+        raise SourceArchiveCampaignError("cannot write an empty source archive event bundle")
+    first = materialized[0]
+    path = _event_bundle_path(shard_dir, {**first, "target_digest": target_digest})
+    payload = {
+        "schema": "source-archive-event-bundle.v1",
+        "target_digest": target_digest,
+        "corp_code": first.get("corp_code"),
+        "bsns_year": first.get("bsns_year"),
+        "shard": first.get("shard"),
+        "source_receipt": first.get("source_receipt"),
+        "source_uri": first.get("source_uri"),
+        "drive_target_manifest": first.get("drive_target_manifest"),
+        **_target_universe_fields_from_row(first),
+        "outcomes": materialized,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, _canonical_json(payload))
+    return path
+
+
+def _flush_event_bundle(archive: ArchiveWriter, path: Path) -> None:
+    if not path.exists():
+        return
+    payload = _read_json(path)
+    _archive_campaign_event(archive, payload)
+    # The local event is removed only after archive_bytes returns, which means
+    # DriveArchive has completed upload and raw-byte readback verification.
+    path.unlink()
+
+
+def _flush_event_bundles(archive: ArchiveWriter, shard_dir: Path) -> None:
+    outbox = shard_dir / "outbox"
+    if not outbox.exists():
+        return
+    for path in sorted(outbox.glob("*.json")):
+        _flush_event_bundle(archive, path)
+
+
+def _pending_event_bundle_count(shard_dir: Path) -> int:
+    outbox = shard_dir / "outbox"
+    return len(tuple(outbox.glob("*.json"))) if outbox.exists() else 0
+
+
+def _target_universe_fields_from_row(row: Mapping[str, Any]) -> dict[str, str]:
+    fields = {}
+    for key in ("universe_cohort", "historical_listing_status", "historical_listing_basis"):
+        value = row.get(key)
+        if value is not None:
+            fields[key] = str(value)
+    return fields
+
+
+def _empty_drive_metrics() -> dict[str, Any]:
+    return DriveArchiveMetrics().to_dict()
+
+
+def _drive_metrics(archive: ArchiveWriter, pending: int) -> dict[str, Any]:
+    metrics = getattr(archive, "metrics", None)
+    if isinstance(metrics, DriveArchiveMetrics):
+        result = metrics.to_dict()
+    elif hasattr(metrics, "to_dict"):
+        result = dict(metrics.to_dict())
+    else:
+        result = _empty_drive_metrics()
+    result["pending_event_bundles"] = pending
+    return result
+
+
+def _rate_limit_report(
+    plan: SourceArchivePlan,
+    shard: int,
+    selected: tuple[SourceArchiveTarget, ...],
+    outcomes_path: Path,
+    archive: ArchiveWriter,
+    exc: DriveArchiveRateLimitError,
+    *,
+    unattempted: int,
+    outcomes: tuple[dict[str, Any], ...] = (),
+    target_year: int | None = None,
+) -> SourceArchiveReport:
+    return SourceArchiveReport(
+        shard=shard,
+        apply=True,
+        status="partial",
+        target_digest=plan.target_digest,
+        outcomes=outcomes,
+        manifest_path=outcomes_path,
+        dart_calls_used=0,
+        dart_calls_budget=None,
+        universe_mode=plan.universe_mode,
+        campaign_counts=plan.campaign_counts,
+        stop_reason="drive_quota_exhausted",
+        unattempted_target_count=unattempted,
+        drive_metrics=_drive_metrics(archive, _pending_event_bundle_count(outcomes_path.parent)),
+        target_year=target_year,
+    )
+
+
+def _drive_transport_report(
+    plan: SourceArchivePlan,
+    shard: int,
+    selected: tuple[SourceArchiveTarget, ...],
+    outcomes_path: Path,
+    archive: ArchiveWriter,
+    exc: DriveArchiveCommandError | DriveArchiveCommandTimeoutError,
+    *,
+    unattempted: int,
+    outcomes: tuple[dict[str, Any], ...] = (),
+    target_year: int | None = None,
+) -> SourceArchiveReport:
+    """Keep a transient Drive readback stall resumable without exiting the CLI."""
+    del exc
+    return SourceArchiveReport(
+        shard=shard,
+        apply=True,
+        status="partial",
+        target_digest=plan.target_digest,
+        outcomes=outcomes,
+        manifest_path=outcomes_path,
+        dart_calls_used=0,
+        dart_calls_budget=None,
+        universe_mode=plan.universe_mode,
+        campaign_counts=plan.campaign_counts,
+        stop_reason="drive_transport_failure",
+        unattempted_target_count=unattempted,
+        drive_metrics=_drive_metrics(archive, _pending_event_bundle_count(outcomes_path.parent)),
+        target_year=target_year,
     )
 
 
@@ -720,6 +1288,310 @@ def _outcome(target: SourceArchiveTarget, status: str, *, report_kind: str = "co
         "report_kind": report_kind, "source_locator": source_locator, "status": status,
         "error": error, "company_year_terminal": company_year_terminal, **extra,
     }
+
+
+def _family_key(target: SourceArchiveTarget, report_kind: str) -> tuple[tuple[str, int], str]:
+    return ((target.corp_code, target.bsns_year), report_kind)
+
+
+def _asset_key(
+    target: SourceArchiveTarget,
+    report_kind: str,
+    source_receipt: str,
+    source_locator: str,
+) -> tuple[tuple[str, int], str, str, str]:
+    return ((target.corp_code, target.bsns_year), report_kind, source_receipt, source_locator)
+
+
+def _family_complete_outcome(
+    target: SourceArchiveTarget,
+    report_kind: str,
+    *,
+    assets: tuple[str, ...],
+    container: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    extra: dict[str, Any] = {
+        "source_family": report_kind,
+        "asset_count": len(assets),
+        "asset_locators": list(assets),
+    }
+    if container is not None:
+        extra["raw_container"] = dict(container)
+    return _outcome(
+        target,
+        "family_complete",
+        report_kind=report_kind,
+        company_year_terminal=False,
+        **extra,
+    )
+
+
+def _family_reused_outcome(
+    target: SourceArchiveTarget,
+    report_kind: str,
+) -> dict[str, Any]:
+    return _outcome(
+        target,
+        "family_reused",
+        report_kind=report_kind,
+        company_year_terminal=False,
+        source_family=report_kind,
+    )
+
+
+def _asset_reused_outcome(
+    target: SourceArchiveTarget,
+    report_kind: str,
+    source_locator: str,
+    cached: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expose a local resume decision without re-archiving the asset."""
+    result: dict[str, Any] = {
+        "source_uri": cached.get("source_uri"),
+        "source_receipt": cached.get("source_receipt") or target.source_receipt,
+        "filename": cached.get("filename"),
+        "content_type": cached.get("content_type"),
+        "raw_sha256": cached.get("raw_sha256"),
+        "raw_object": cached.get("raw_object"),
+        "parsed_object": cached.get("parsed_object"),
+        "document_manifest": cached.get("document_manifest"),
+        "structural_status": cached.get("structural_status"),
+        "reused": True,
+    }
+    return _outcome(
+        target,
+        "asset_reused",
+        report_kind=report_kind,
+        source_locator=source_locator,
+        company_year_terminal=False,
+        **result,
+    )
+
+
+def _stop_reason(exc: DartBoundedStop | DriveArchiveRateLimitError | DriveArchiveCommandError | DriveArchiveCommandTimeoutError) -> str:
+    if isinstance(exc, DriveArchiveRateLimitError):
+        return "drive_quota_exhausted"
+    if isinstance(exc, (DriveArchiveCommandError, DriveArchiveCommandTimeoutError)):
+        return "drive_transport_failure"
+    if isinstance(exc, DartRequestBudgetExceeded):
+        return "api_budget_exhausted"
+    if isinstance(exc, DartApiAuthError):
+        return "dart_auth_failure"
+    if isinstance(exc, DartApiLimitExceeded):
+        return "dart_quota_failure"
+    if isinstance(exc, DartTransportError):
+        return "dart_transport_failure"
+    return "collector_bounded_stop"
+
+
+def _stop_status(exc: DartBoundedStop | DriveArchiveRateLimitError | DriveArchiveCommandError | DriveArchiveCommandTimeoutError) -> str:
+    return {
+        "drive_quota_exhausted": "drive_quota_exhausted",
+        "drive_transport_failure": "drive_transport_failure",
+        "api_budget_exhausted": "dart_budget_exhausted",
+        "dart_auth_failure": "dart_auth_failure",
+        "dart_quota_failure": "dart_quota_failure",
+        "dart_transport_failure": "dart_transport_failure",
+        "collector_bounded_stop": "collector_bounded_stop",
+    }[_stop_reason(exc)]
+
+
+def _stop_outcome(
+    target: SourceArchiveTarget,
+    exc: DartBoundedStop | DriveArchiveRateLimitError | DriveArchiveCommandError | DriveArchiveCommandTimeoutError,
+    *,
+    report_kind: str = "company_year",
+    source_locator: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return _outcome(
+        target,
+        _stop_status(exc),
+        report_kind=report_kind,
+        source_locator=source_locator,
+        error=error or _bounded_error(exc),
+        company_year_terminal=False,
+        stop_reason=_stop_reason(exc),
+    )
+
+
+def _object_identity(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    storage_uri = value.get("storage_uri")
+    sha256 = value.get("sha256")
+    byte_length = value.get("byte_length")
+    if (
+        not isinstance(storage_uri, str) or not storage_uri
+        or not isinstance(sha256, str) or len(sha256) != 64
+        or not isinstance(byte_length, int) or byte_length < 1
+    ):
+        return None
+    return {
+        "storage_uri": storage_uri,
+        "sha256": sha256,
+        "byte_length": byte_length,
+    }
+
+
+def _container_identity_matches(
+    container: Mapping[str, Any] | None,
+    *,
+    sha256: str,
+    byte_length: int,
+    content_type: str,
+    is_zip: bool,
+) -> bool:
+    if container is None:
+        return False
+    identity = _object_identity(container)
+    return bool(
+        identity
+        and identity["sha256"] == sha256
+        and identity["byte_length"] == byte_length
+        and container.get("content_type") == content_type
+        and container.get("is_zip") is is_zip
+    )
+
+
+def _verified_asset_record(parts: Mapping[str, Any]) -> dict[str, Any] | None:
+    if parts.get("status") == "asset_reused":
+        row = parts.get("reused")
+        if not isinstance(row, Mapping):
+            return None
+        if not _object_identity(row.get("raw_object")) or not _object_identity(row.get("parsed_object")):
+            return None
+        if not isinstance(row.get("document_manifest"), Mapping):
+            return None
+        return dict(row)
+
+    archived = parts.get("archived")
+    parsed = parts.get("parsed")
+    if not isinstance(archived, Mapping) or not isinstance(parsed, Mapping):
+        return None
+    if not _object_identity(archived.get("raw_object")) or not _object_identity(parsed.get("parsed_object")):
+        return None
+    if not isinstance(parsed.get("document_manifest"), Mapping):
+        return None
+    result = {**dict(archived), **dict(parsed)}
+    result["raw_object"] = dict(archived["raw_object"])
+    result["parsed_object"] = dict(parsed["parsed_object"])
+    result["raw_sha256"] = parsed.get("raw_sha256") or archived.get("raw_sha256") or archived["raw_object"].get("sha256")
+    return result
+
+
+def _resume_state(path: Path, target_digest: str) -> _ResumeState:
+    """Rebuild resumable source/family/asset state from append-only outcomes."""
+    if not path.exists():
+        return _ResumeState(set(), set(), {}, {}, {})
+    rows = _outcome_rows(path)
+    completed_company_years: set[tuple[str, int]] = set()
+    complete_families: set[tuple[tuple[str, int], str]] = set()
+    asset_parts: dict[tuple[tuple[str, int], str, str, str], dict[str, Any]] = {}
+    containers: dict[tuple[tuple[str, int], str], dict[str, Any]] = {}
+    latest_company_year_terminal: dict[tuple[str, int], dict[str, Any]] = {}
+
+    for row in rows:
+        if row.get("target_digest") != target_digest:
+            raise SourceArchiveCampaignError("shard outcomes belong to a different frozen target plan")
+        target_key = (str(row.get("corp_code")), int(row.get("bsns_year")))
+        status = row.get("status")
+        report_kind = str(row.get("report_kind") or "")
+        if row.get("company_year_terminal", True) and report_kind in {"", "company_year"}:
+            latest_company_year_terminal[target_key] = dict(row)
+        if status == "structurally_complete":
+            completed_company_years.add(target_key)
+        if report_kind in {"business_report", "audit_report"}:
+            family_key = (target_key, report_kind)
+            if status in {"family_complete", "family_reused"}:
+                complete_families.add(family_key)
+            if report_kind == "business_report" and isinstance(row.get("raw_container"), Mapping):
+                container = row["raw_container"]
+                if _object_identity(container):
+                    containers[family_key] = dict(container)
+            source_locator = row.get("source_locator")
+            source_receipt = row.get("source_receipt")
+            if isinstance(source_locator, str) and source_locator and isinstance(source_receipt, str):
+                key = (target_key, report_kind, source_receipt, source_locator)
+                parts = asset_parts.setdefault(key, {})
+                if status in {"archived", "archived_verified"}:
+                    parts.update({"archived": dict(row), "status": status})
+                elif status == "generically_parsed":
+                    parts.update({"parsed": dict(row), "status": status})
+                elif status == "asset_reused":
+                    parts.update({"reused": dict(row), "status": status})
+                elif status in {
+                    "asset_failed", "asset_empty", "partial_source", "requires_review",
+                    "asset_requires_review",
+                }:
+                    asset_parts.pop(key, None)
+
+    complete_assets: dict[tuple[tuple[str, int], str, str, str], dict[str, Any]] = {}
+    for key, parts in asset_parts.items():
+        verified = _verified_asset_record(parts)
+        if verified is not None:
+            complete_assets[key] = verified
+    return _ResumeState(
+        completed_company_years,
+        complete_families,
+        complete_assets,
+        containers,
+        latest_company_year_terminal,
+    )
+
+
+def _scheduled_targets(
+    selected: tuple[SourceArchiveTarget, ...],
+    resume_state: _ResumeState,
+    *,
+    now: datetime,
+    partial_retry_after: timedelta,
+) -> tuple[tuple[SourceArchiveTarget, ...], int, int]:
+    """Prioritize untouched targets and defer recent terminal partials.
+
+    Non-terminal budget and transport stops intentionally do not enter the
+    terminal map, so the interrupted company-year is immediately resumable.
+    Frozen targets without source metadata are permanent gaps for this plan;
+    rebuilding a newer plan is the only way to supply a new receipt.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    untouched: list[SourceArchiveTarget] = []
+    due_partial: list[tuple[datetime, SourceArchiveTarget]] = []
+    deferred = 0
+    permanent_gaps = 0
+    for target in selected:
+        key = (target.corp_code, target.bsns_year)
+        if key in resume_state.completed_company_years:
+            continue
+        terminal = resume_state.latest_company_year_terminal.get(key)
+        if terminal is None:
+            untouched.append(target)
+            continue
+        if terminal.get("status") != "partial_source":
+            permanent_gaps += 1
+            continue
+        recorded_at = _parse_recorded_at(terminal.get("recorded_at"))
+        resolver_version = terminal.get("audit_xml_resolver_version")
+        upgraded_partial = not isinstance(resolver_version, int) or resolver_version < AUDIT_XML_RESOLVER_VERSION
+        if upgraded_partial or recorded_at is None or now - recorded_at >= partial_retry_after:
+            due_partial.append((recorded_at or datetime.min.replace(tzinfo=UTC), target))
+        else:
+            deferred += 1
+    due_partial.sort(key=lambda item: (item[0], item[1].corp_code, item[1].bsns_year))
+    return tuple([*untouched, *(target for _at, target in due_partial)]), deferred, permanent_gaps
+
+
+def _parse_recorded_at(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def write_source_archive_plan_preview(plan: SourceArchivePlan, state_dir: Path) -> Path:
@@ -755,7 +1627,13 @@ def _write_frozen_target_manifest(
             raise SourceArchiveCampaignError(
                 "TARGET.json schema, universe mode, or target digest conflicts with the supplied frozen target plan"
             )
-        _validate_drive_target_manifest_identity(existing, expected_sha256=expected_sha256)
+        # The existing identity was read back and verified when the frozen
+        # campaign denominator was first archived.  Re-archiving it for every
+        # resumed shard creates a multi-megabyte Drive round trip before the
+        # first source request, while the immutable identity itself has not
+        # changed.  Validate the bound identity locally and reuse it; every
+        # newly archived source still has its own upload/readback verification.
+        return _validate_drive_target_manifest_identity(existing, expected_sha256=expected_sha256)
 
     receipt = next((target.source_receipt for target in plan.targets if target.source_receipt), None)
     target_object = archive.archive_bytes(
@@ -772,10 +1650,7 @@ def _write_frozen_target_manifest(
         raise SourceArchiveCampaignError("Drive target manifest checksum does not match frozen target bytes")
     if not identity.get("storage_uri") or not isinstance(identity.get("byte_length"), int):
         raise SourceArchiveCampaignError("Drive target manifest object identity is incomplete")
-    if existing is not None and existing["drive_target_manifest"] != identity:
-        raise SourceArchiveCampaignError("campaign TARGET.json Drive manifest identity mismatch")
-    if existing is None:
-        _atomic_write(path, _canonical_json({**canonical, "drive_target_manifest": identity}))
+    _atomic_write(path, _canonical_json({**canonical, "drive_target_manifest": identity}))
     return identity
 
 
@@ -810,15 +1685,7 @@ def _append_outcome(path: Path, outcome: Mapping[str, Any], target_digest: str) 
 
 
 def _completed_company_years(path: Path, target_digest: str) -> set[tuple[str, int]]:
-    if not path.exists():
-        return set()
-    completed: set[tuple[str, int]] = set()
-    for row in _outcome_rows(path):
-        if row.get("target_digest") != target_digest:
-            raise SourceArchiveCampaignError("shard outcomes belong to a different frozen target plan")
-        if row.get("status") == "structurally_complete":
-            completed.add((str(row["corp_code"]), int(row["bsns_year"])))
-    return completed
+    return _resume_state(path, target_digest).completed_company_years
 
 
 def _write_committed_marker(path: Path, plan: SourceArchivePlan, shard: int, outcomes: Path, selected: tuple[SourceArchiveTarget, ...]) -> None:

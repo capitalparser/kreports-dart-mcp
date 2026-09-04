@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -96,14 +96,19 @@ def _plan(temp_engine, years=range(2021, 2026)):
 def _install_complete_family(monkeypatch, campaign):
     monkeypatch.setattr(
         campaign, "fetch_document_zip_asset_bytes",
-        lambda _receipt: _business_assets(b"<DOCUMENT><P>business</P></DOCUMENT>"),
+        lambda _receipt: _BusinessAssets({
+            "main.xml": b"<DOCUMENT><P>business</P></DOCUMENT>",
+            "감사보고서.xml": b"<DOCUMENT><P>audit</P></DOCUMENT>",
+        }),
     )
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: "attachments")
-    monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _html: [{
-        "rcept_no": "20250401126380", "dcm_no": "99", "title": "감사보고서",
-    }])
-    monkeypatch.setattr(campaign, "fetch_viewer_bytes", lambda *_args: b"<DOCUMENT><P>audit</P></DOCUMENT>")
-    monkeypatch.setattr(campaign, "fetch_audit_report_pdf", lambda *_args: pytest.fail("viewer success must not fetch PDF"))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_separate_audit_discovery(monkeypatch):
+    """Campaign tests must opt into a concrete separate-filing response."""
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    monkeypatch.setattr(campaign, "fetch_disclosure_list", lambda *_args, **_kwargs: [])
 
 
 def test_plan_uses_verified_year_memberships_and_canonical_latest_anchor(temp_engine):
@@ -370,7 +375,6 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
         campaign, "fetch_document_zip_asset_bytes",
         lambda _receipt: _BusinessAssets({"main.xml": raw}, container_bytes=original_zip),
     )
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: None)
     archive = _Archive(storage_uri_prefix="drive:containers/" + "x" * 120)
 
     report = campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
@@ -407,6 +411,75 @@ def test_raw_archive_keeps_original_non_utf8_bytes_and_drive_lineage_manifest(te
     assert document_manifest["container_member_name"] == "main.xml"
 
 
+def test_audit_xml_member_inside_business_document_zip_completes_audit_family(temp_engine, tmp_path, monkeypatch):
+    """A genuine audit XML member must outrank the viewer/PDF attachment path."""
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    business_xml = b"<DOCUMENT><DOCUMENT-NAME>\xec\x82\xac\xec\x97\x85\xeb\xb3\xb4\xea\xb3\xa0\xec\x84\x9c</DOCUMENT-NAME></DOCUMENT>"
+    audit_xml = (
+        b"<DOCUMENT><DOCUMENT-NAME>\xea\xb0\x90\xec\x82\xac\xeb\xb3\xb4\xea\xb3\xa0\xec\x84\x9c</DOCUMENT-NAME>"
+        b"<P>\xea\xb0\x90\xec\x82\xac\xec\x9d\x98\xea\xb2\xac</P></DOCUMENT>"
+    )
+    monkeypatch.setattr(
+        campaign,
+        "fetch_document_zip_asset_bytes",
+        lambda _receipt: _BusinessAssets({"main.xml": business_xml, "audit.xml": audit_xml}),
+    )
+
+    archive = _Archive()
+    campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
+    audit_raw = next(
+        call for call in archive.calls
+        if call["metadata"].get("report_kind") == "audit_report"
+        and call["metadata"].get("archive_version") == "raw-source-v1"
+    )
+    assert audit_raw["data"] == audit_xml
+    assert audit_raw["metadata"]["source_receipt"] == target.source_receipt
+    assert audit_raw["metadata"]["source_locator"] == "audit.xml"
+
+
+def test_separate_audit_filing_xml_is_archived_when_business_zip_has_no_audit_xml(temp_engine, tmp_path, monkeypatch):
+    """An unlisted issuer's separately filed audit XML must use document.xml, not PDF."""
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    audit_receipt = "20250315000000"
+    business_xml = b"<DOCUMENT><DOCUMENT-NAME>\xec\x82\xac\xec\x97\x85\xeb\xb3\xb4\xea\xb3\xa0\xec\x84\x9c</DOCUMENT-NAME></DOCUMENT>"
+    audit_xml = (
+        b"<DOCUMENT><DOCUMENT-NAME>\xea\xb0\x90\xec\x82\xac\xeb\xb3\xb4\xea\xb3\xa0\xec\x84\x9c</DOCUMENT-NAME>"
+        b"<P>\xea\xb0\x90\xec\x82\xac\xec\x9d\x98\xea\xb2\xac</P></DOCUMENT>"
+    )
+    monkeypatch.setattr(
+        campaign,
+        "fetch_document_zip_asset_bytes",
+        lambda receipt: _BusinessAssets(
+            {"business.xml": business_xml} if receipt == target.source_receipt else {"audit.xml": audit_xml}
+        ),
+    )
+    monkeypatch.setattr(campaign, "fetch_disclosure_list", lambda *_args, **_kwargs: [{
+        "rcept_no": audit_receipt,
+        "report_nm": "감사보고서 (2024.12)",
+        "rcept_dt": "20250315",
+    }], raising=False)
+
+    archive = _Archive()
+    campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=3)
+
+    audit_raw = next(
+        call for call in archive.calls
+        if call["metadata"].get("report_kind") == "audit_report"
+        and call["metadata"].get("archive_version") == "raw-source-v1"
+    )
+    assert audit_raw["data"] == audit_xml
+    assert audit_raw["metadata"]["source_receipt"] == audit_receipt
+    assert audit_raw["metadata"]["source_locator"] == "audit.xml"
+
+
 def test_direct_raw_xml_response_is_not_archived_as_a_zip_container(temp_engine, tmp_path, monkeypatch):
     """A direct XML DART response must retain its own media/provenance representation."""
     import kreports.maintenance.source_archive_campaign as campaign
@@ -439,7 +512,6 @@ def test_direct_raw_xml_response_is_not_archived_as_a_zip_container(temp_engine,
     assert assets.is_zip is False
     assert assets.container_content_type == "application/xml"
     monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _receipt: assets)
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _receipt: None)
     archive = _Archive()
 
     campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
@@ -471,53 +543,36 @@ def test_business_only_is_partial_and_never_committed(temp_engine, tmp_path, mon
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
     monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: _business_assets())
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: "no audit attachment")
-    monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _: [])
 
-    report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=2)
+    report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=1)
 
     assert report.status == "partial"
     assert any(item["status"] == "partial_source" and item["report_kind"] == "audit_report" for item in report.outcomes)
     assert not (plan.state_dir / f"shard-{target.shard:02d}" / "COMMITTED.json").exists()
 
 
-def test_audit_attachment_pdf_fallback_is_explicit_partial_boundary(temp_engine, tmp_path, monkeypatch):
+def test_pdf_attachment_does_not_count_as_an_xml_audit_package(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.source_archive_campaign as campaign
 
     _seed_annual_disclosures(temp_engine)
     plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
     target = next(item for item in plan.targets if item.corp_code == "00126380")
     monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: _business_assets())
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: "attachments")
-    monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _: [{
-        "rcept_no": target.source_receipt, "dcm_no": "77", "title": "감사보고서",
-    }])
-    monkeypatch.setattr(campaign, "fetch_viewer_bytes", lambda *_args: None)
-    monkeypatch.setattr(campaign, "fetch_audit_report_pdf", lambda *_args: b"%PDF-1.7\noriginal\n%%EOF")
 
     archive = _Archive()
     report = campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=4)
 
     assert report.status == "partial"
-    audit = next(item for item in report.outcomes if item.get("report_kind") == "audit_report" and item["status"] == "archived_verified")
-    assert audit["content_type"] == "pdf"
-    assert audit["source_locator"] == "dcm:77"
-    assert audit["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
-    raw = next(call for call in archive.calls if call["metadata"]["archive_version"] == "raw-source-v1" and call["metadata"]["report_kind"] == "audit_report")
-    assert raw["metadata"]["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
-    parsed = next(
-        call for call in archive.calls
-        if call["metadata"]["archive_version"] == "document-structure-v1"
-        and call["metadata"]["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
+    assert any(
+        item["report_kind"] == "audit_report"
+        and item["status"] == "partial_source"
+        and item["error"] == "audit_xml_unavailable"
+        for item in report.outcomes
     )
-    assert parsed["metadata"]["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
-    document = next(
-        json.loads(call["data"])
+    assert not any(
+        call["metadata"].get("report_kind") == "audit_report"
         for call in archive.calls
-        if call["metadata"]["archive_version"] == "source-archive-document-manifest-v1"
-        and b'"report_kind":"audit_report"' in call["data"]
     )
-    assert document["source_uri"].endswith("?rcp_no=20250401126380&dcm_no=77")
 
 
 def test_full_frozen_target_is_archived_before_source_fetch_and_referenced_by_drive_events(temp_engine, tmp_path, monkeypatch):
@@ -533,7 +588,6 @@ def test_full_frozen_target_is_archived_before_source_fetch_and_referenced_by_dr
         return _business_assets()
 
     monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", lambda _: None)
 
     campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=2)
 
@@ -549,6 +603,124 @@ def test_full_frozen_target_is_archived_before_source_fetch_and_referenced_by_dr
         if call["metadata"]["archive_version"] == "source-archive-campaign-manifest-v1"
     )
     assert event["drive_target_manifest"]["sha256"] == target_call["object"].sha256
+
+
+def test_existing_frozen_target_reuses_verified_drive_identity_without_rearchiving(temp_engine, tmp_path, monkeypatch):
+    """A resumed shard must not re-upload/readback the 5-year denominator."""
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    first_archive = _Archive()
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _: _business_assets())
+
+    campaign.run_source_archive_shard(plan, target.shard, first_archive, apply=True, max_dart_calls=2)
+
+    # A fresh worker has no in-memory Drive cache.  The local frozen manifest
+    # is the durable record of the already verified content-addressed object.
+    resumed_archive = _Archive()
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, resumed_archive, apply=True, max_dart_calls=2
+    )
+
+    assert report.outcomes
+    assert not any(
+        call["metadata"]["archive_version"] == "source-archive-target-manifest-v1"
+        for call in resumed_archive.calls
+    )
+
+
+def test_resume_reuses_completed_business_family_after_budget_stop(temp_engine, tmp_path, monkeypatch):
+    """A family checkpoint avoids its DART and Drive work on the next run."""
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2021]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380" and item.bsns_year == 2021)
+    business_calls: list[str] = []
+
+    def fetch_business(receipt):
+        business_calls.append(receipt)
+        fetcher._record_request_attempt("document.xml")
+        return _business_assets()
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+    monkeypatch.setattr(
+        campaign, "fetch_disclosure_list",
+        lambda *_args, **_kwargs: (fetcher._record_request_attempt("list.json") or []),
+    )
+
+    first = campaign.run_source_archive_shard(
+        plan, target.shard, _Archive(), apply=True, max_dart_calls=1
+    )
+
+    assert first.status == "partial"
+    assert any(
+        item["status"] == "family_complete" and item["report_kind"] == "business_report"
+        for item in first.outcomes
+    )
+    assert not any(item["company_year_terminal"] for item in first.outcomes)
+
+    # A legacy business-family checkpoint is re-read once to inspect embedded
+    # audit XML under the upgraded resolver, without re-archiving its members.
+    resumed_archive = _Archive()
+    second = campaign.run_source_archive_shard(
+        plan, target.shard, resumed_archive, apply=True, max_dart_calls=1
+    )
+
+    assert second.status == "partial"
+    assert business_calls == [target.source_receipt, target.source_receipt]
+    assert any(
+        item["status"] == "family_reused" and item["report_kind"] == "business_report"
+        for item in second.outcomes
+    )
+    assert not any(call["metadata"]["archive_version"] == "raw-source-v1" for call in resumed_archive.calls)
+
+
+def test_resume_reuses_verified_assets_even_when_parser_requires_review(temp_engine, tmp_path, monkeypatch):
+    """A parser-quality gap must not redownload already verified raw XML."""
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    assets = {
+        "complete.xml": b"<DOCUMENT><P>complete</P></DOCUMENT>",
+        "partial.xml": b"<DOCUMENT>",
+    }
+    business_calls = 0
+
+    def fetch_business(_receipt):
+        nonlocal business_calls
+        business_calls += 1
+        return _BusinessAssets(assets)
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+
+    campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=1)
+    resumed_archive = _Archive()
+    second = campaign.run_source_archive_shard(
+        plan, target.shard, resumed_archive, apply=True, max_dart_calls=1
+    )
+
+    assert second.status == "partial"
+    assert business_calls == 2
+    reused = [
+        item for item in second.outcomes
+        if item["status"] == "asset_reused" and item["report_kind"] == "business_report"
+    ]
+    assert [item["source_locator"] for item in reused] == ["complete.xml", "partial.xml"]
+    raw_calls = [
+        call for call in resumed_archive.calls
+        if call["metadata"]["archive_version"] == "raw-source-v1"
+    ]
+    assert raw_calls == []
+    assert not any(
+        call["metadata"]["archive_version"] == "raw-document-zip-container-v1"
+        for call in resumed_archive.calls
+    )
 
 
 def test_apply_fails_closed_when_existing_target_lacks_drive_identity(temp_engine, tmp_path):
@@ -581,21 +753,218 @@ def test_budget_exhaustion_is_resumable_and_never_commits(temp_engine, tmp_path,
         fetcher._record_request_attempt("document.xml")
         return _business_assets()
 
-    def audit_main(_receipt):
-        fetcher._record_request_attempt("dsaf001/main.do")
-        return "attachments"
-
     monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", business)
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", audit_main)
+    monkeypatch.setattr(
+        campaign, "fetch_disclosure_list",
+        lambda *_args, **_kwargs: (fetcher._record_request_attempt("list.json") or []),
+    )
 
     report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=1)
 
     assert report.status == "partial"
     assert any(item["status"] == "dart_budget_exhausted" for item in report.outcomes)
+    assert report.stop_reason == "api_budget_exhausted"
+    assert {(item["corp_code"], item["bsns_year"]) for item in report.outcomes} == {
+        (target.corp_code, target.bsns_year),
+    }
+    assert not any(item["company_year_terminal"] for item in report.outcomes)
     assert not (plan.state_dir / f"shard-{target.shard:02d}" / "COMMITTED.json").exists()
 
 
-def test_budget_exhaustion_before_audit_viewer_is_explicit(temp_engine, tmp_path, monkeypatch):
+def test_recent_partial_source_does_not_starve_an_unattempted_company_year(
+    temp_engine, tmp_path, monkeypatch
+):
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2021, 2022]).with_state_dir(tmp_path / "campaign")
+    targets = tuple(
+        target for target in plan.targets_for_shard(
+            next(item.shard for item in plan.targets if item.corp_code == "00126380")
+        )
+        if target.corp_code == "00126380"
+    )
+    recent, untouched = targets
+    shard_dir = plan.state_dir / f"shard-{recent.shard:02d}"
+    shard_dir.mkdir(parents=True)
+    (shard_dir / "outcomes.jsonl").write_text(json.dumps({
+        "target_digest": plan.target_digest,
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "corp_code": recent.corp_code,
+        "bsns_year": recent.bsns_year,
+        "status": "partial_source",
+        "company_year_terminal": True,
+        "audit_xml_resolver_version": campaign.AUDIT_XML_RESOLVER_VERSION,
+    }) + "\n")
+    fetched: list[str] = []
+
+    def fetch_business(receipt):
+        fetched.append(receipt)
+        fetcher._record_request_attempt("document.xml")
+        return _business_assets()
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+    monkeypatch.setattr(
+        campaign, "fetch_disclosure_list",
+        lambda *_args, **_kwargs: (fetcher._record_request_attempt("list.json") or []),
+    )
+
+    report = campaign.run_source_archive_shard(
+        plan, recent.shard, _Archive(), apply=True, max_dart_calls=1,
+        partial_retry_after_seconds=24 * 60 * 60,
+    )
+
+    assert fetched == [untouched.source_receipt]
+    assert report.stop_reason == "api_budget_exhausted"
+    assert report.deferred_retry_count == 1
+
+
+def test_legacy_partial_source_is_immediately_retried_after_audit_xml_resolver_upgrade(
+    temp_engine, tmp_path, monkeypatch
+):
+    """A partial recorded before XML discovery must not wait out the old retry window."""
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    shard_dir = plan.state_dir / f"shard-{target.shard:02d}"
+    shard_dir.mkdir(parents=True)
+    (shard_dir / "outcomes.jsonl").write_text(json.dumps({
+        "target_digest": plan.target_digest,
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "corp_code": target.corp_code,
+        "bsns_year": target.bsns_year,
+        "status": "partial_source",
+        "company_year_terminal": True,
+    }) + "\n")
+    fetched: list[str] = []
+
+    def fetch_business(receipt):
+        fetched.append(receipt)
+        raise fetcher.DartRequestBudgetExceeded(1)
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, _Archive(), apply=True, max_dart_calls=1,
+        partial_retry_after_seconds=24 * 60 * 60,
+    )
+
+    assert fetched == [target.source_receipt]
+    assert report.stop_reason == "api_budget_exhausted"
+    assert report.deferred_retry_count == 0
+
+
+def test_partial_source_becomes_eligible_after_retry_interval(
+    temp_engine, tmp_path, monkeypatch
+):
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2021]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    shard_dir = plan.state_dir / f"shard-{target.shard:02d}"
+    shard_dir.mkdir(parents=True)
+    (shard_dir / "outcomes.jsonl").write_text(json.dumps({
+        "target_digest": plan.target_digest,
+        "recorded_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+        "corp_code": target.corp_code,
+        "bsns_year": target.bsns_year,
+        "status": "partial_source",
+        "company_year_terminal": True,
+    }) + "\n")
+    fetched: list[str] = []
+
+    def fetch_business(receipt):
+        fetched.append(receipt)
+        fetcher._record_request_attempt("document.xml")
+        raise fetcher.DartRequestBudgetExceeded("document.xml")
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, _Archive(), apply=True, max_dart_calls=1,
+        partial_retry_after_seconds=24 * 60 * 60,
+    )
+
+    assert fetched == [target.source_receipt]
+    assert report.stop_reason == "api_budget_exhausted"
+    assert report.deferred_retry_count == 0
+
+
+def test_requires_review_assets_are_reused_without_redownloading_the_raw_xml(
+    temp_engine, tmp_path, monkeypatch
+):
+    """A parser-quality gap stays partial but never redoes verified raw archival."""
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    assets = _BusinessAssets({"main.xml": b"<not xml"})
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _receipt: assets)
+    archive = _Archive()
+
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, archive, apply=True, max_dart_calls=3
+    )
+    assert any(
+        row["report_kind"] == "business_report"
+        and row["status"] == "generically_parsed"
+        and row["structural_status"] == "requires_review"
+        for row in report.outcomes
+    )
+
+    resume_state = campaign._resume_state(
+        plan.state_dir / f"shard-{target.shard:02d}" / "outcomes.jsonl",
+        plan.target_digest,
+    )
+    archive.calls.clear()
+    reused = campaign._business_family(
+        target,
+        archive,
+        {},
+        resume_state,
+    )
+
+    assert reused.complete is False
+    assert archive.calls == []
+    assert [row["status"] for row in reused.outcomes] == ["asset_reused"]
+
+
+def test_provider_unavailable_stops_before_unattempted_targets_and_is_nonterminal(
+    temp_engine, tmp_path, monkeypatch
+):
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.collector import fetcher
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380" and item.bsns_year == 2021)
+
+    def unavailable(_receipt):
+        raise fetcher.DartTransportError("document.xml")
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", unavailable)
+
+    report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=10)
+
+    assert report.status == "partial"
+    assert report.stop_reason == "dart_transport_failure"
+    assert report.unattempted_target_count == 4
+    assert {(item["corp_code"], item["bsns_year"]) for item in report.outcomes} == {
+        (target.corp_code, target.bsns_year),
+    }
+    stop = next(item for item in report.outcomes if item["status"] == "dart_transport_failure")
+    assert stop["company_year_terminal"] is False
+    assert not any(item["company_year_terminal"] for item in report.outcomes)
+
+
+def test_budget_exhaustion_before_separate_audit_xml_discovery_is_explicit(temp_engine, tmp_path, monkeypatch):
     import kreports.maintenance.source_archive_campaign as campaign
     from kreports.collector import fetcher
 
@@ -606,24 +975,144 @@ def test_budget_exhaustion_before_audit_viewer_is_explicit(temp_engine, tmp_path
         fetcher._record_request_attempt("document.xml")
         return _business_assets()
 
-    def audit_main(_receipt):
-        fetcher._record_request_attempt("dsaf001/main.do")
-        return "attachments"
-
-    def viewer(*_args):
-        fetcher._record_request_attempt("report/viewer.do")
-        return b"<DOCUMENT><P>audit</P></DOCUMENT>"
-
     monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", business)
-    monkeypatch.setattr(campaign, "fetch_dart_main_html", audit_main)
-    monkeypatch.setattr(campaign, "select_primary_audit_report_attachments", lambda _: [{
-        "rcept_no": target.source_receipt, "dcm_no": "77", "title": "감사보고서",
-    }])
-    monkeypatch.setattr(campaign, "fetch_viewer_bytes", viewer)
+    monkeypatch.setattr(
+        campaign, "fetch_disclosure_list",
+        lambda *_args, **_kwargs: (fetcher._record_request_attempt("list.json") or []),
+    )
 
-    report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=2)
+    report = campaign.run_source_archive_shard(plan, target.shard, _Archive(), apply=True, max_dart_calls=1)
 
     assert any(item["status"] == "dart_budget_exhausted" and item["report_kind"] == "audit_report" for item in report.outcomes)
+
+
+def test_drive_rate_limit_stops_shard_without_marking_later_targets_or_committing(
+    temp_engine, tmp_path, monkeypatch
+):
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.storage.drive_archive import DriveArchiveRateLimitError
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380" and item.bsns_year == 2021)
+    fetched: list[str] = []
+
+    class _RateLimitedArchive(_Archive):
+        def archive_bytes(self, *, data, extension, metadata):
+            if metadata.get("archive_version") == "raw-source-v1":
+                raise DriveArchiveRateLimitError(
+                    "quota exhausted; diagnostic=HTTP 429: Too Many Requests",
+                    operation="copyto",
+                    attempts=3,
+                    cooldown_seconds=240,
+                    diagnostic="HTTP 429: Too Many Requests",
+                )
+            return super().archive_bytes(data=data, extension=extension, metadata=metadata)
+
+    def fetch_business(receipt):
+        fetched.append(receipt)
+        return _business_assets()
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", fetch_business)
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, _RateLimitedArchive(), apply=True, max_dart_calls=10
+    )
+
+    assert report.status == "partial"
+    assert report.stop_reason == "drive_quota_exhausted"
+    assert report.unattempted_target_count == len(plan.targets_for_shard(target.shard)) - 1
+    assert fetched == [target.source_receipt]
+    assert not (plan.state_dir / f"shard-{target.shard:02d}" / "COMMITTED.json").exists()
+
+
+@pytest.mark.parametrize("failure_name", [
+    "DriveArchiveCommandTimeoutError",
+    "DriveArchiveCommandError",
+])
+def test_drive_readback_failure_stops_shard_as_resumable_transport_failure(
+    temp_engine, tmp_path, monkeypatch, failure_name
+):
+    """A temporary Drive readback stall must not crash the continuous runner."""
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.storage import drive_archive
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380" and item.bsns_year == 2021)
+
+    class _TimeoutArchive(_Archive):
+        def archive_bytes(self, *, data, extension, metadata):
+            if metadata.get("archive_version") == "raw-source-v1":
+                failure = getattr(drive_archive, failure_name)
+                raise failure("Drive archive cat command failed temporarily.")
+            return super().archive_bytes(data=data, extension=extension, metadata=metadata)
+
+    monkeypatch.setattr(campaign, "fetch_document_zip_asset_bytes", lambda _receipt: _business_assets())
+
+    report = campaign.run_source_archive_shard(
+        plan, target.shard, _TimeoutArchive(), apply=True, max_dart_calls=10
+    )
+
+    assert report.status == "partial"
+    assert report.stop_reason == "drive_transport_failure"
+    assert report.unattempted_target_count == len(plan.targets_for_shard(target.shard)) - 1
+    stop = next(item for item in report.outcomes if item["status"] == "drive_transport_failure")
+    assert stop["company_year_terminal"] is False
+    assert not (plan.state_dir / f"shard-{target.shard:02d}" / "COMMITTED.json").exists()
+
+
+def test_campaign_archives_one_event_bundle_per_company_year(temp_engine, tmp_path, monkeypatch):
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    _install_complete_family(monkeypatch, campaign)
+    archive = _Archive()
+
+    campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=3)
+
+    event_calls = [
+        call for call in archive.calls
+        if call["metadata"]["archive_version"] == "source-archive-campaign-manifest-v1"
+    ]
+    assert len(event_calls) == 1
+    event = json.loads(event_calls[0]["data"])
+    assert event["corp_code"] == target.corp_code
+    assert event["bsns_year"] == target.bsns_year
+    assert len(event["outcomes"]) >= 1
+
+
+def test_failed_event_archive_remains_in_local_outbox_for_resume(
+    temp_engine, tmp_path, monkeypatch
+):
+    import kreports.maintenance.source_archive_campaign as campaign
+    from kreports.storage.drive_archive import DriveArchiveRateLimitError
+
+    _seed_annual_disclosures(temp_engine)
+    plan = _plan(temp_engine, [2024]).with_state_dir(tmp_path / "campaign")
+    target = next(item for item in plan.targets if item.corp_code == "00126380")
+    _install_complete_family(monkeypatch, campaign)
+
+    class _EventRateLimitedArchive(_Archive):
+        def archive_bytes(self, *, data, extension, metadata):
+            if metadata.get("archive_version") == "source-archive-campaign-manifest-v1":
+                raise DriveArchiveRateLimitError(
+                    "quota exhausted; diagnostic=HTTP 429: Too Many Requests",
+                    operation="copyto",
+                    attempts=3,
+                    cooldown_seconds=240,
+                    diagnostic="HTTP 429: Too Many Requests",
+                )
+            return super().archive_bytes(data=data, extension=extension, metadata=metadata)
+
+    archive = _EventRateLimitedArchive()
+    report = campaign.run_source_archive_shard(plan, target.shard, archive, apply=True, max_dart_calls=3)
+
+    assert report.stop_reason == "drive_quota_exhausted"
+    assert report.drive_metrics["pending_event_bundles"] == 1
+    assert list((plan.state_dir / f"shard-{target.shard:02d}" / "outbox").glob("*.json"))
+    assert not (plan.state_dir / f"shard-{target.shard:02d}" / "COMMITTED.json").exists()
 
 
 def test_committed_marker_and_verify_fail_closed_when_outcomes_are_tampered(temp_engine, tmp_path, monkeypatch):
@@ -670,5 +1159,8 @@ def test_cli_exposes_explicit_source_archive_commands():
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("source-archive-preflight", "source-archive-plan", "source-archive-run", "source-archive-verify"):
+    for command in (
+        "source-archive-preflight", "source-archive-plan", "source-archive-run",
+        "source-archive-auto-run", "source-archive-verify",
+    ):
         assert command in result.output

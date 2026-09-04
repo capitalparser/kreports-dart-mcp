@@ -104,6 +104,10 @@ _REQUEST_BUDGET: ContextVar[RequestBudget | None] = ContextVar(
     "kreports_dart_request_budget",
     default=None,
 )
+_DART_API_KEY_OVERRIDE: ContextVar[str | None] = ContextVar(
+    "kreports_dart_api_key_override",
+    default=None,
+)
 
 
 @contextmanager
@@ -117,6 +121,23 @@ def request_budget(max_calls: int):
         yield budget
     finally:
         _REQUEST_BUDGET.reset(token)
+
+
+@contextmanager
+def dart_api_key_scope(api_key: str):
+    """Use one operator-owned API key without mutating global settings."""
+    normalized = api_key.strip()
+    if not normalized:
+        raise ValueError("DART API key scope requires a non-empty key")
+    token = _DART_API_KEY_OVERRIDE.set(normalized)
+    try:
+        yield
+    finally:
+        _DART_API_KEY_OVERRIDE.reset(token)
+
+
+def _dart_api_key() -> str:
+    return _DART_API_KEY_OVERRIDE.get() or settings.dart_api_key
 
 
 def _record_request_attempt(endpoint: str) -> None:
@@ -181,9 +202,11 @@ def _is_dart_auth_error(status: str | None, message: str | None) -> bool:
     return status != "000" and any(marker in msg for marker in _DART_AUTH_MARKERS)
 
 
-def _raise_if_dart_limit(status: str | None, message: str | None) -> None:
+def _raise_if_dart_bounded_stop(status: str | None, message: str | None) -> None:
     if _is_dart_limit_error(status, message):
         raise DartApiLimitExceeded(message or "DART API limit exceeded")
+    if _is_dart_auth_error(status, message):
+        raise DartApiAuthError("DART API authentication failed")
 
 
 def _looks_like_report_document_xml(text: str) -> bool:
@@ -203,7 +226,7 @@ def _raw_document_xml_from_response(content: bytes, fallback_encoding: str | Non
 
 
 def _check_api_key() -> None:
-    if not settings.dart_api_key:
+    if not _dart_api_key():
         raise ValueError(
             "DART_API_KEY가 설정되지 않았습니다. "
             ".env 파일에 DART_API_KEY=your_key 를 추가하세요."
@@ -237,7 +260,7 @@ def fetch_corp_code_xml() -> list[dict]:
     with _get_client() as client:
         resp = client.get(
             CORP_CODE_ZIP_URL,
-            params={"crtfc_key": settings.dart_api_key},
+            params={"crtfc_key": _dart_api_key()},
         )
         resp.raise_for_status()
 
@@ -295,7 +318,7 @@ def fetch_financial_statements(
     _check_api_key()
 
     params = {
-        "crtfc_key": settings.dart_api_key,
+        "crtfc_key": _dart_api_key(),
         "corp_code": corp_code,
         "bsns_year": str(bsns_year),
         "reprt_code": reprt_code,
@@ -356,7 +379,7 @@ def fetch_financial_summary(
     _check_api_key()
 
     params = {
-        "crtfc_key": settings.dart_api_key,
+        "crtfc_key": _dart_api_key(),
         "corp_code": corp_code,
         "bsns_year": str(bsns_year),
         "reprt_code": reprt_code,
@@ -411,7 +434,7 @@ def fetch_xbrl_zip(rcept_no: str, reprt_code: str) -> bytes | None:
     """
     _check_api_key()
     params = {
-        "crtfc_key": settings.dart_api_key,
+        "crtfc_key": _dart_api_key(),
         "rcept_no": rcept_no,
         "reprt_code": reprt_code,
     }
@@ -454,7 +477,7 @@ def fetch_document_zip_asset_bytes(rcept_no: str) -> DocumentZipAssets:
     operation and must never determine the raw object hash.
     """
     _check_api_key()
-    params = {"crtfc_key": settings.dart_api_key, "rcept_no": rcept_no}
+    params = {"crtfc_key": _dart_api_key(), "rcept_no": rcept_no}
     try:
         with _get_client() as client:
             _record_request_attempt("document.xml")
@@ -479,7 +502,7 @@ def fetch_document_zip_asset_bytes(rcept_no: str) -> DocumentZipAssets:
         text = _decode_dart_text(resp.content, resp.encoding).strip()
         status, message = _dart_error_from_xml(text)
         if status:
-            _raise_if_dart_limit(status, message)
+            _raise_if_dart_bounded_stop(status, message)
             logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
             return {}
         if raw_xml.lstrip().startswith(b"<"):
@@ -524,7 +547,7 @@ def fetch_document_xml(rcept_no: str) -> str | None:
     실패 시 None 반환.
     """
     _check_api_key()
-    params = {"crtfc_key": settings.dart_api_key, "rcept_no": rcept_no}
+    params = {"crtfc_key": _dart_api_key(), "rcept_no": rcept_no}
     try:
         with _get_client() as client:
             resp = client.get(f"{DART_BASE}/document.xml", params=params, timeout=60.0)
@@ -532,7 +555,7 @@ def fetch_document_xml(rcept_no: str) -> str | None:
             text = _decode_dart_text(resp.content, resp.encoding).strip()
             status, message = _dart_error_from_xml(text)
             if status:
-                _raise_if_dart_limit(status, message)
+                _raise_if_dart_bounded_stop(status, message)
                 logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
                 return None
             content_type = resp.headers.get("content-type", "")
@@ -566,7 +589,7 @@ def fetch_document_xml(rcept_no: str) -> str | None:
             text = _decode_dart_text(resp.content, getattr(resp, "encoding", None)).strip()
             status, message = _dart_error_from_xml(text)
             if status:
-                _raise_if_dart_limit(status, message)
+                _raise_if_dart_bounded_stop(status, message)
                 logger.warning("document.xml DART 오류 [%s]: status=%s message=%s", rcept_no, status, message or "")
                 return None
         logger.warning("document.xml 수집 실패 [%s]: %s", rcept_no, redact_external_error(e))
@@ -772,7 +795,7 @@ def fetch_affiliates(corp_code: str) -> list[dict]:
         실패 시 빈 리스트
     """
     _check_api_key()
-    params = {"crtfc_key": settings.dart_api_key, "corp_code": corp_code}
+    params = {"crtfc_key": _dart_api_key(), "corp_code": corp_code}
     try:
         with _get_client() as client:
             resp = client.get(f"{DART_BASE}/affcoInfo.json", params=params)
@@ -813,7 +836,7 @@ def fetch_company_info(corp_code: str) -> dict | None:
         {"corp_cls": str, "market": str|None} or None on failure
     """
     _check_api_key()
-    params = {"crtfc_key": settings.dart_api_key, "corp_code": corp_code}
+    params = {"crtfc_key": _dart_api_key(), "corp_code": corp_code}
     try:
         with _get_client() as client:
             resp = client.get(f"{DART_BASE}/company.json", params=params)
@@ -852,7 +875,7 @@ def fetch_audit_fee(corp_code: str, bsns_year: int) -> dict:
     """
     _check_api_key()
     params = {
-        "crtfc_key": settings.dart_api_key,
+        "crtfc_key": _dart_api_key(),
         "corp_code": corp_code,
         "bsns_year": str(bsns_year),
         "reprt_code": "11011",  # 사업보고서
@@ -915,7 +938,7 @@ def fetch_disclosure_list(
 
     while True:
         params = {
-            "crtfc_key": settings.dart_api_key,
+            "crtfc_key": _dart_api_key(),
             "bgn_de": start_date,
             "end_de": end_date,
             "page_no": page,

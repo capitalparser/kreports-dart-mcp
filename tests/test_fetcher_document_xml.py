@@ -111,6 +111,20 @@ def test_fetch_document_xml_raises_on_dart_limit_xml(monkeypatch):
         fetcher.fetch_document_zip_files("20250331000001")
 
 
+def test_fetch_document_assets_raise_on_dart_auth_xml(monkeypatch):
+    raw = (
+        b"<result><status>010</status>"
+        b"<message>unregistered api key</message></result>"
+    )
+    monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(fetcher, "_get_client", lambda: _FakeClient(_FakeResponse(raw)))
+
+    with pytest.raises(fetcher.DartApiAuthError):
+        fetcher.fetch_document_xml("20250331000001")
+    with pytest.raises(fetcher.DartApiAuthError):
+        fetcher.fetch_document_zip_files("20250331000001")
+
+
 def test_fetch_document_xml_rejects_non_limit_dart_error_xml(monkeypatch, caplog):
     raw = b"<result><status>013</status><message>no data</message></result>"
     monkeypatch.setattr(fetcher.settings, "dart_api_key", "test-key")

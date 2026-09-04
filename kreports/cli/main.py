@@ -2807,7 +2807,7 @@ def source_archive_run_cmd(
         if apply:
             from kreports.storage.drive_archive import drive_archive_from_runtime
 
-            archive = drive_archive_from_runtime()
+            archive = drive_archive_from_runtime(require_dedicated_client=True)
         report = run_source_archive_shard(
             plan, shard, archive, apply=apply, max_dart_calls=max_dart_calls
         )
@@ -2816,6 +2816,70 @@ def source_archive_run_cmd(
     typer.echo(json.dumps(
         report.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ))
+
+
+@app.command("source-archive-auto-run")
+def source_archive_auto_run_cmd(
+    db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
+    state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
+    year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
+    shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
+    universe: str = typer.Option(
+        "listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"
+    ),
+    max_dart_calls: int = typer.Option(
+        100, "--max-dart-calls", min=1,
+        help="각 물리 배치에 허용할 유한한 DART 호출 횟수",
+    ),
+    partial_retry_after_seconds: int = typer.Option(
+        86_400, "--partial-retry-after-seconds", min=0,
+        help="terminal partial_source 재시도 최소 간격",
+    ),
+    max_batches: Optional[int] = typer.Option(
+        None, "--max-batches", min=1,
+        help="진단용 최대 배치 수; 생략하면 계속 실행",
+    ),
+) -> None:
+    """Continuously run finite source-archive batches across every shard."""
+    try:
+        from kreports.collector.dart_api_key_ring import DartApiKeyRing
+        from kreports.maintenance.source_archive_supervisor import supervise_source_archive
+        from kreports.storage.drive_archive import drive_archive_from_runtime
+
+        plan = _source_archive_plan_from_database(
+            db_path, years=year, shard_count=shard_count,
+            universe_mode=_source_archive_universe_mode(universe),
+        ).with_state_dir(state_dir)
+        archive = drive_archive_from_runtime(require_dedicated_client=True)
+        key_ring = DartApiKeyRing.from_runtime(state_dir=state_dir)
+
+        def emit_batch(report) -> None:
+            typer.echo(json.dumps(
+                {"event": "source_archive_batch", **report.to_dict()},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ))
+
+        result = supervise_source_archive(
+            plan,
+            archive,
+            max_dart_calls=max_dart_calls,
+            partial_retry_after_seconds=partial_retry_after_seconds,
+            max_batches=max_batches,
+            on_report=emit_batch,
+            key_ring=key_ring,
+        )
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+    typer.echo(json.dumps({
+        "event": "source_archive_supervisor_stopped",
+        "batch_count": result.batch_count,
+        "sweep_count": result.sweep_count,
+        "stop_reason": result.stop_reason,
+        "key_count": key_ring.key_count,
+        "key_switch_count": result.key_switch_count,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    if result.stop_reason == "dart_auth_failure":
+        raise typer.Exit(code=78)
 
 
 @app.command("source-archive-verify")
