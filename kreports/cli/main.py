@@ -2931,60 +2931,77 @@ def source_archive_discover_gaps_cmd(
         "20241231", "--business-gap-end", help="사업보고서 공백 재검증 종료일 YYYYMMDD",
     ),
     apply: bool = typer.Option(
-        False, "--apply", help="발견된 공시를 실제로 로컬 disclosures/companies에 반영",
+        False, "--apply", help="발견된 공시를 실제로 로컬 disclosures/companies에 반영 (미지정 시에도 DART 조회 자체는 발생함)",
     ),
 ) -> None:
     """DART를 직접 훑어 감사보고서 전용 회사와 2023-2024 사업보고서 공백을 로컬 DB에 채운다."""
+    from kreports.runtime import require_collector_mode
     from kreports.collector.disc_collector import audit_disclosure_window
     from kreports.collector.corp_sync import upsert_minimal_companies
     from kreports.db.engine import get_session
     from kreports.db.models import Company, Disclosure
 
-    if not settings.dart_api_key:
-        typer.echo("오류: DART_API_KEY 미설정", err=True)
-        raise typer.Exit(1)
+    try:
+        require_collector_mode("source-archive-discover-gaps")
+        if not settings.dart_api_key:
+            raise ValueError("DART_API_KEY가 설정되지 않았습니다")
 
-    audit_only_result = audit_disclosure_window(
-        start_date=audit_only_start, end_date=audit_only_end, disc_type="F",
-        report_keyword="감사보고서",
-        exclude_keywords=["내부회계", "감사의감사보고서", "내부감시장치"],
-        persist_missing=apply,
-    )
-    business_gap_result = audit_disclosure_window(
-        start_date=business_gap_start, end_date=business_gap_end, disc_type="A",
-        report_keyword="사업보고서",
-        persist_missing=apply,
-    )
+        init_db()
 
-    new_companies = 0
-    if apply:
-        with get_session() as session:
-            known_codes = session.query(Company.corp_code)
-            rows = (
-                session.query(Disclosure.corp_code, Disclosure.corp_name)
-                .filter(~Disclosure.corp_code.in_(known_codes))
-                .distinct()
-                .all()
-            )
-        new_companies = upsert_minimal_companies([
-            {"corp_code": corp_code, "corp_name": corp_name} for corp_code, corp_name in rows
-        ])
+        audit_only_result = audit_disclosure_window(
+            start_date=audit_only_start, end_date=audit_only_end, disc_type="F",
+            report_keyword="감사보고서",
+            exclude_keywords=["내부회계", "감사의감사보고서", "내부감시장치"],
+            persist_missing=apply,
+        )
+        business_gap_result = audit_disclosure_window(
+            start_date=business_gap_start, end_date=business_gap_end, disc_type="A",
+            report_keyword="사업보고서",
+            persist_missing=apply,
+        )
 
-    typer.echo(json.dumps({
+        new_companies = 0
+        if apply:
+            with get_session() as session:
+                known_codes = session.query(Company.corp_code)
+                rows = (
+                    session.query(Disclosure.corp_code, Disclosure.corp_name)
+                    .filter(~Disclosure.corp_code.in_(known_codes))
+                    .order_by(Disclosure.corp_code, Disclosure.disc_date.desc())
+                    .all()
+                )
+            latest_name_by_corp: dict[str, str] = {}
+            for corp_code, corp_name in rows:
+                latest_name_by_corp.setdefault(corp_code, corp_name)
+            new_companies = upsert_minimal_companies([
+                {"corp_code": corp_code, "corp_name": corp_name}
+                for corp_code, corp_name in latest_name_by_corp.items()
+            ])
+    except Exception as exc:
+        _source_archive_cli_error(exc)
+
+    payload = {
         "event": "source_archive_discover_gaps",
         "apply": apply,
         "audit_only": {
             "target_rows": audit_only_result["target_rows"],
             "missing_rows": audit_only_result["missing_rows"],
             "saved_missing": audit_only_result["saved_missing"],
+            "verdict": audit_only_result["verdict"],
+            "error_count": len(audit_only_result["errors"]),
         },
         "business_gap": {
             "target_rows": business_gap_result["target_rows"],
             "missing_rows": business_gap_result["missing_rows"],
             "saved_missing": business_gap_result["saved_missing"],
+            "verdict": business_gap_result["verdict"],
+            "error_count": len(business_gap_result["errors"]),
         },
         "new_companies_upserted": new_companies,
-    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    }
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    if audit_only_result["verdict"] == "fail" or business_gap_result["verdict"] == "fail":
+        raise typer.Exit(code=1)
 
 
 @app.command("source-archive-verify")

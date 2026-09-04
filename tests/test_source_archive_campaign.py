@@ -1416,8 +1416,12 @@ def test_source_archive_discover_gaps_cli_reports_counts_and_upserts_companies(
             return {
                 "target_rows": 1, "missing_rows": 1,
                 "saved_missing": 1 if persist_missing else 0, "missing_samples": [],
+                "verdict": "pass", "errors": [],
             }
-        return {"target_rows": 0, "missing_rows": 0, "saved_missing": 0, "missing_samples": []}
+        return {
+            "target_rows": 0, "missing_rows": 0, "saved_missing": 0, "missing_samples": [],
+            "verdict": "pass", "errors": [],
+        }
 
     monkeypatch.setattr(disc_collector, "audit_disclosure_window", fake_audit_disclosure_window)
 
@@ -1426,6 +1430,7 @@ def test_source_archive_discover_gaps_cli_reports_counts_and_upserts_companies(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["audit_only"]["saved_missing"] == 1
+    assert payload["audit_only"]["verdict"] == "pass"
     assert payload["new_companies_upserted"] == 1
     with get_session() as session:
         row = session.get(Company, "00900001")
@@ -1441,7 +1446,10 @@ def test_source_archive_discover_gaps_cli_dry_run_does_not_upsert(temp_engine, m
     monkeypatch.setattr(cli.settings, "dart_api_key", "test-key")
     monkeypatch.setattr(
         disc_collector, "audit_disclosure_window",
-        lambda **_kwargs: {"target_rows": 5, "missing_rows": 5, "saved_missing": 0, "missing_samples": []},
+        lambda **_kwargs: {
+            "target_rows": 5, "missing_rows": 5, "saved_missing": 0, "missing_samples": [],
+            "verdict": "pass", "errors": [],
+        },
     )
 
     result = CliRunner().invoke(cli.app, ["source-archive-discover-gaps"])
@@ -1450,3 +1458,32 @@ def test_source_archive_discover_gaps_cli_dry_run_does_not_upsert(temp_engine, m
     payload = json.loads(result.output)
     assert payload["apply"] is False
     assert payload["new_companies_upserted"] == 0
+
+
+def test_source_archive_discover_gaps_cli_exits_nonzero_when_a_sweep_fails(temp_engine, monkeypatch):
+    from typer.testing import CliRunner
+    import kreports.cli.main as cli
+    from kreports.collector import disc_collector
+
+    monkeypatch.setattr(cli.settings, "dart_api_key", "test-key")
+
+    def fake_audit_disclosure_window(*, disc_type, **_kwargs):
+        if disc_type == "F":
+            return {
+                "target_rows": 0, "missing_rows": 0, "saved_missing": 0,
+                "missing_samples": [], "verdict": "fail",
+                "errors": [{"start_date": "20210101", "end_date": "20210131", "error": "boom"}],
+            }
+        return {
+            "target_rows": 0, "missing_rows": 0, "saved_missing": 0,
+            "missing_samples": [], "verdict": "pass", "errors": [],
+        }
+
+    monkeypatch.setattr(disc_collector, "audit_disclosure_window", fake_audit_disclosure_window)
+
+    result = CliRunner().invoke(cli.app, ["source-archive-discover-gaps"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["audit_only"]["verdict"] == "fail"
+    assert payload["audit_only"]["error_count"] == 1
