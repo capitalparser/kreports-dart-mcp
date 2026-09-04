@@ -1285,6 +1285,27 @@ def test_audit_report_only_plan_finds_business_gap_and_audit_only_targets_and_re
     assert "cohort_counts" in plan.target_manifest
 
 
+def test_build_source_archive_plan_rejects_excluded_pairs_outside_audit_report_only(temp_engine):
+    from sqlalchemy.orm import sessionmaker
+    from kreports.maintenance.source_archive_campaign import (
+        SourceArchiveCampaignError,
+        build_source_archive_plan,
+    )
+
+    with sessionmaker(bind=temp_engine)() as session:
+        for year in (2021,):
+            session.add(_membership("00299999", year, "KOSPI"))
+            session.add(_membership("00299998", year, "KOSDAQ"))
+        session.commit()
+
+    with sessionmaker(bind=temp_engine)() as session:
+        with pytest.raises(SourceArchiveCampaignError, match="excluded_pairs"):
+            build_source_archive_plan(
+                session, years=[2021], universe_mode="all_annual_issuers",
+                excluded_pairs=frozenset({("00299999", 2021)}),
+            )
+
+
 def test_audit_report_only_report_and_verify_use_v3_schema(temp_engine, tmp_path, monkeypatch):
     from sqlalchemy.orm import sessionmaker
 

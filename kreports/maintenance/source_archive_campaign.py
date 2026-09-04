@@ -99,7 +99,7 @@ class SourceArchiveTarget:
     report_nm: str | None
     source_uri: str | None
     source_status: str
-    required_report_kinds: tuple[str, str] = ("business_report", "audit_report")
+    required_report_kinds: tuple[str, ...] = ("business_report", "audit_report")
     universe_cohort: str | None = None
     historical_listing_status: str | None = None
     historical_listing_basis: str | None = None
@@ -241,6 +241,10 @@ def build_source_archive_plan(
     normalized_years = _normalize_years(years)
     _validate_shard_count(shard_count)
     _validate_universe_mode(universe_mode)
+    if excluded_pairs and universe_mode != "audit_report_only":
+        raise SourceArchiveCampaignError(
+            "excluded_pairs is only meaningful for universe_mode='audit_report_only'"
+        )
     memberships = _verified_memberships(session, normalized_years)
     membership_by_pair = {(row["corp_code"], row["bsns_year"]): row for row in memberships}
     disclosure_query = select(
@@ -311,6 +315,15 @@ def build_source_archive_plan(
                     historical_listing_basis=_OUTSIDE_VERIFIED_MARKETS[2],
                 ))
 
+    # Known limitation: `latest_annual_filing_anchor_from_rows` returning None here
+    # does not distinguish "no business report was ever filed" from "a business
+    # report disclosure exists but failed exact receipt/date anchor validation."
+    # A company-year in the second (rare) case is misclassified into the
+    # audit-report-only cohort below and its business report is never fetched.
+    # See docs/superpowers/plans/2026-09-04-audit-report-only-backfill.md Task 4
+    # code-quality review for the full analysis; not fixed here because it
+    # requires understanding kreports/analysis/filing_provenance.py's exact
+    # validation semantics, which is out of scope for this task.
     if universe_mode == "audit_report_only":
         for corp_code in sorted(rows_by_company):
             for year in normalized_years:
@@ -543,7 +556,7 @@ def verify_source_archive_campaign(state_dir: Path, *, shard: int | None = None)
     schema = manifest.get("schema")
     if schema == CAMPAIGN_SCHEMA:
         universe_mode = "listed"
-    elif schema == ALL_ISSUER_CAMPAIGN_SCHEMA and manifest.get("universe_mode") in ("all_annual_issuers", "audit_report_only"):
+    elif schema == ALL_ISSUER_CAMPAIGN_SCHEMA and manifest.get("universe_mode") in (_UNIVERSE_MODES - {"listed"}):
         universe_mode = str(manifest["universe_mode"])
     else:
         raise SourceArchiveCampaignError("TARGET.json schema is unsupported")
