@@ -2916,6 +2916,77 @@ def source_archive_auto_run_cmd(
         raise typer.Exit(code=78)
 
 
+@app.command("source-archive-discover-gaps")
+def source_archive_discover_gaps_cmd(
+    audit_only_start: str = typer.Option(
+        "20210101", "--audit-only-start", help="감사보고서 전용 발굴 시작일 YYYYMMDD",
+    ),
+    audit_only_end: str = typer.Option(
+        "20251231", "--audit-only-end", help="감사보고서 전용 발굴 종료일 YYYYMMDD",
+    ),
+    business_gap_start: str = typer.Option(
+        "20230101", "--business-gap-start", help="사업보고서 공백 재검증 시작일 YYYYMMDD",
+    ),
+    business_gap_end: str = typer.Option(
+        "20241231", "--business-gap-end", help="사업보고서 공백 재검증 종료일 YYYYMMDD",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="발견된 공시를 실제로 로컬 disclosures/companies에 반영",
+    ),
+) -> None:
+    """DART를 직접 훑어 감사보고서 전용 회사와 2023-2024 사업보고서 공백을 로컬 DB에 채운다."""
+    from kreports.collector.disc_collector import audit_disclosure_window
+    from kreports.collector.corp_sync import upsert_minimal_companies
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company, Disclosure
+
+    if not settings.dart_api_key:
+        typer.echo("오류: DART_API_KEY 미설정", err=True)
+        raise typer.Exit(1)
+
+    audit_only_result = audit_disclosure_window(
+        start_date=audit_only_start, end_date=audit_only_end, disc_type="F",
+        report_keyword="감사보고서",
+        exclude_keywords=["내부회계", "감사의감사보고서", "내부감시장치"],
+        persist_missing=apply,
+    )
+    business_gap_result = audit_disclosure_window(
+        start_date=business_gap_start, end_date=business_gap_end, disc_type="A",
+        report_keyword="사업보고서",
+        persist_missing=apply,
+    )
+
+    new_companies = 0
+    if apply:
+        with get_session() as session:
+            known_codes = session.query(Company.corp_code)
+            rows = (
+                session.query(Disclosure.corp_code, Disclosure.corp_name)
+                .filter(~Disclosure.corp_code.in_(known_codes))
+                .distinct()
+                .all()
+            )
+        new_companies = upsert_minimal_companies([
+            {"corp_code": corp_code, "corp_name": corp_name} for corp_code, corp_name in rows
+        ])
+
+    typer.echo(json.dumps({
+        "event": "source_archive_discover_gaps",
+        "apply": apply,
+        "audit_only": {
+            "target_rows": audit_only_result["target_rows"],
+            "missing_rows": audit_only_result["missing_rows"],
+            "saved_missing": audit_only_result["saved_missing"],
+        },
+        "business_gap": {
+            "target_rows": business_gap_result["target_rows"],
+            "missing_rows": business_gap_result["missing_rows"],
+            "saved_missing": business_gap_result["saved_missing"],
+        },
+        "new_companies_upserted": new_companies,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 @app.command("source-archive-verify")
 def source_archive_verify_cmd(
     state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),

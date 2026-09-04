@@ -1389,3 +1389,64 @@ def test_source_archive_preflight_cli_accepts_audit_report_only_universe_and_exc
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["target_count"] == 1
+
+
+def test_source_archive_discover_gaps_cli_reports_counts_and_upserts_companies(
+    temp_engine, monkeypatch,
+):
+    from typer.testing import CliRunner
+    import kreports.cli.main as cli
+    from kreports.collector import disc_collector
+    from kreports.db.engine import get_session
+    from kreports.db.models import Company
+
+    monkeypatch.setattr(cli.settings, "dart_api_key", "test-key")
+
+    def fake_audit_disclosure_window(
+        *, start_date, end_date, disc_type, report_keyword=None,
+        exclude_keywords=None, persist_missing=False, **_kwargs,
+    ):
+        if disc_type == "F":
+            if persist_missing:
+                with get_session() as session:
+                    session.add(Disclosure(
+                        rcept_no="20220331900001", corp_code="00900001", corp_name="신규비상장법인",
+                        disc_date=date(2022, 3, 31), disc_type="F", report_nm="감사보고서",
+                    ))
+            return {
+                "target_rows": 1, "missing_rows": 1,
+                "saved_missing": 1 if persist_missing else 0, "missing_samples": [],
+            }
+        return {"target_rows": 0, "missing_rows": 0, "saved_missing": 0, "missing_samples": []}
+
+    monkeypatch.setattr(disc_collector, "audit_disclosure_window", fake_audit_disclosure_window)
+
+    result = CliRunner().invoke(cli.app, ["source-archive-discover-gaps", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["audit_only"]["saved_missing"] == 1
+    assert payload["new_companies_upserted"] == 1
+    with get_session() as session:
+        row = session.get(Company, "00900001")
+        assert row is not None
+        assert row.corp_name == "신규비상장법인"
+
+
+def test_source_archive_discover_gaps_cli_dry_run_does_not_upsert(temp_engine, monkeypatch):
+    from typer.testing import CliRunner
+    import kreports.cli.main as cli
+    from kreports.collector import disc_collector
+
+    monkeypatch.setattr(cli.settings, "dart_api_key", "test-key")
+    monkeypatch.setattr(
+        disc_collector, "audit_disclosure_window",
+        lambda **_kwargs: {"target_rows": 5, "missing_rows": 5, "saved_missing": 0, "missing_samples": []},
+    )
+
+    result = CliRunner().invoke(cli.app, ["source-archive-discover-gaps"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["apply"] is False
+    assert payload["new_companies_upserted"] == 0
