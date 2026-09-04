@@ -1166,6 +1166,44 @@ def test_cli_exposes_explicit_source_archive_commands():
         assert command in result.output
 
 
+def test_run_source_archive_shard_skips_business_family_when_only_audit_report_required(
+    temp_engine, tmp_path, monkeypatch,
+):
+    import kreports.maintenance.source_archive_campaign as campaign
+
+    monkeypatch.setattr(
+        campaign, "fetch_document_zip_asset_bytes",
+        lambda _receipt: _BusinessAssets({"감사보고서.xml": b"<DOCUMENT><P>audit</P></DOCUMENT>"}),
+    )
+    target = campaign.SourceArchiveTarget(
+        corp_code="00000099", bsns_year=2023, market=None, shard=0,
+        source_receipt="20240101000099", report_nm="감사보고서",
+        source_uri="https://opendart.fss.or.kr/api/document.xml?rcept_no=20240101000099",
+        source_status="discovered", required_report_kinds=("audit_report",),
+        universe_cohort="audit_report_only_no_business_report",
+        historical_listing_status="unclassified",
+        historical_listing_basis="audit_report_receipt_without_business_report",
+    )
+    plan = campaign.SourceArchivePlan(
+        years=(2023,), shard_count=1, targets=(target,),
+        target_digest="test-digest-audit-only", universe_mode="audit_report_only",
+    ).with_state_dir(tmp_path / "audit-only-campaign")
+    archive = _Archive()
+
+    report = campaign.run_source_archive_shard(plan, 0, archive, apply=True, max_dart_calls=3)
+
+    payload = report.to_dict()
+    assert payload["status"] == "complete"
+    report_kinds = {outcome["report_kind"] for outcome in payload["outcomes"]}
+    assert "business_report" not in report_kinds
+    assert "audit_report" in report_kinds
+    terminal = next(
+        outcome for outcome in payload["outcomes"]
+        if outcome["report_kind"] == "company_year" and outcome["company_year_terminal"]
+    )
+    assert terminal["status"] == "structurally_complete"
+
+
 def test_separate_audit_receipts_excludes_internal_control_report(monkeypatch):
     import kreports.maintenance.source_archive_campaign as campaign
 

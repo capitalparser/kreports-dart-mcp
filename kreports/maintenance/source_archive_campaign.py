@@ -644,10 +644,13 @@ def _process_target(
     if target.source_status != "discovered" or not target.source_receipt or not target.source_uri:
         return _TargetResult((_outcome(target, target.source_status),))
     outcomes = [_outcome(target, "discovered", report_kind="company_year", company_year_terminal=False)]
-    business_result = _business_family(target, archive, drive_target_manifest, resume_state)
-    outcomes.extend(business_result.outcomes)
-    if business_result.stop is not None:
-        return _TargetResult(tuple(outcomes), business_result.stop)
+    if "business_report" in target.required_report_kinds:
+        business_result = _business_family(target, archive, drive_target_manifest, resume_state)
+        outcomes.extend(business_result.outcomes)
+        if business_result.stop is not None:
+            return _TargetResult(tuple(outcomes), business_result.stop)
+    else:
+        business_result = _FamilyResult(True, ())
     audit_result = _audit_family(
         target,
         archive,
