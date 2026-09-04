@@ -248,9 +248,10 @@ def test_all_issuer_preflight_reports_actual_cohort_and_historic_status_counts(t
     plan = _all_issuer_fixture_plan(temp_engine)
     requested_modes: list[str] = []
 
-    def source_plan(_db_path, *, years, shard_count, universe_mode):
+    def source_plan(_db_path, *, years, shard_count, universe_mode, excluded_pairs=frozenset()):
         assert years == [2024]
         assert shard_count == 64
+        assert excluded_pairs == frozenset()
         requested_modes.append(universe_mode)
         return plan
 
@@ -1340,3 +1341,51 @@ def test_audit_report_only_report_and_verify_use_v3_schema(temp_engine, tmp_path
     campaign.write_source_archive_plan_preview(plan, plan.state_dir)
     verify_result = campaign.verify_source_archive_campaign(plan.state_dir, shard=target.shard)
     assert verify_result["universe_mode"] == "audit_report_only"
+
+
+def test_source_archive_preflight_cli_accepts_audit_report_only_universe_and_exclude_manifest(
+    temp_engine, tmp_path,
+):
+    from sqlalchemy.orm import sessionmaker
+    from typer.testing import CliRunner
+    import kreports.cli.main as cli
+
+    with sessionmaker(bind=temp_engine)() as session:
+        session.add_all([
+            Company(corp_code="00200001", corp_name="정상사업보고서법인"),
+        ])
+        for year in (2021,):
+            session.add(_membership("00299999", year, "KOSPI"))
+            session.add(_membership("00299998", year, "KOSDAQ"))
+        session.add(Disclosure(
+            rcept_no="20220331200001", corp_code="00200001", corp_name="정상사업보고서법인",
+            disc_date=date(2022, 3, 31), disc_type="A", report_nm="사업보고서 (2021.12)",
+        ))
+        session.commit()
+
+    exclude_manifest = tmp_path / "exclude.json"
+    exclude_manifest.write_text(json.dumps({"targets": []}), encoding="utf-8")
+
+    # settings.db_url stays at its test-config default (unrelated to db_path) so
+    # `_source_archive_plan_from_database`'s "must not equal the runtime DB" guard
+    # does not fire against our own candidate file.
+    db_path = tmp_path / "candidate.db"
+    from sqlalchemy import create_engine
+    file_engine = create_engine(f"sqlite:///{db_path}")
+    from kreports.db.models import Base
+    Base.metadata.create_all(bind=file_engine)
+    with sessionmaker(bind=temp_engine)() as source_session, sessionmaker(bind=file_engine)() as dest_session:
+        for table in Base.metadata.sorted_tables:
+            rows = source_session.execute(table.select()).mappings().all()
+            if rows:
+                dest_session.execute(table.insert(), [dict(row) for row in rows])
+        dest_session.commit()
+
+    result = CliRunner().invoke(cli.app, [
+        "source-archive-preflight", "--db", str(db_path), "--year", "2021",
+        "--universe", "audit-report-only", "--exclude-manifest", str(exclude_manifest),
+    ])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["target_count"] == 1

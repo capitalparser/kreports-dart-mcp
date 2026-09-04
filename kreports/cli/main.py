@@ -2559,6 +2559,7 @@ def _source_archive_plan_from_database(
     years: list[int],
     shard_count: int,
     universe_mode: str = "listed",
+    excluded_pairs: frozenset[tuple[str, int]] = frozenset(),
 ):
     """Open an explicit non-runtime candidate DB for source-archive planning."""
     from sqlalchemy import create_engine
@@ -2589,7 +2590,8 @@ def _source_archive_plan_from_database(
     try:
         with sessionmaker(bind=engine)() as session:
             return build_source_archive_plan(
-                session, years=years, shard_count=shard_count, universe_mode=universe_mode
+                session, years=years, shard_count=shard_count, universe_mode=universe_mode,
+                excluded_pairs=excluded_pairs,
             )
     finally:
         engine.dispose()
@@ -2607,12 +2609,24 @@ def _source_archive_universe_mode(value: str) -> str:
     modes = {
         "listed": "listed",
         "all-annual-issuers": "all_annual_issuers",
+        "audit-report-only": "audit_report_only",
     }
     try:
         return modes[value]
     except KeyError as exc:
         allowed = ", ".join(modes)
         raise ValueError(f"--universe must be one of: {allowed}") from exc
+
+
+def _load_excluded_pairs(path: Optional[Path]) -> frozenset[tuple[str, int]]:
+    """Load a frozen target manifest's (corp_code, bsns_year) pairs to exclude."""
+    if path is None:
+        return frozenset()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return frozenset(
+        (str(item["corp_code"]), int(item["bsns_year"]))
+        for item in data["targets"]
+    )
 
 
 def _source_archive_scope_output(plan) -> dict[str, object]:
@@ -2723,12 +2737,17 @@ def source_archive_preflight_cmd(
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
     universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
 ) -> None:
     """No-write source campaign preflight; it never contacts DART or Drive."""
     try:
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         )
     except Exception as exc:
         _source_archive_cli_error(exc)
@@ -2757,6 +2776,10 @@ def source_archive_plan_cmd(
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
     universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
 ) -> None:
     """Write a no-network target preview; --apply freezes the Drive-backed target."""
     try:
@@ -2765,6 +2788,7 @@ def source_archive_plan_cmd(
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         ).with_state_dir(state_dir)
         manifest_path = write_source_archive_plan_preview(plan, plan.state_dir)
     except Exception as exc:
@@ -2787,6 +2811,10 @@ def source_archive_run_cmd(
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
     universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
     apply: bool = typer.Option(False, "--apply", help="DART/Drive 쓰기를 명시적으로 허용"),
     max_dart_calls: Optional[int] = typer.Option(
         None, "--max-dart-calls", min=1,
@@ -2800,6 +2828,7 @@ def source_archive_run_cmd(
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         ).with_state_dir(state_dir)
         if apply and max_dart_calls is None:
             raise ValueError("--apply requires --max-dart-calls")
@@ -2827,6 +2856,10 @@ def source_archive_auto_run_cmd(
     universe: str = typer.Option(
         "listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"
     ),
+    exclude_manifest: Optional[Path] = typer.Option(
+        None, "--exclude-manifest",
+        help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
+    ),
     max_dart_calls: int = typer.Option(
         100, "--max-dart-calls", min=1,
         help="각 물리 배치에 허용할 유한한 DART 호출 횟수",
@@ -2849,6 +2882,7 @@ def source_archive_auto_run_cmd(
         plan = _source_archive_plan_from_database(
             db_path, years=year, shard_count=shard_count,
             universe_mode=_source_archive_universe_mode(universe),
+            excluded_pairs=_load_excluded_pairs(exclude_manifest),
         ).with_state_dir(state_dir)
         archive = drive_archive_from_runtime(require_dedicated_client=True)
         key_ring = DartApiKeyRing.from_runtime(state_dir=state_dir)
