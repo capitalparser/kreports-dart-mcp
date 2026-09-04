@@ -488,3 +488,45 @@ coverage나 production release readiness가 증명되지는 않는다.
 
 이 기록은 raw filing 자체를 Git에 커밋하라는 뜻이 아니다. Git에는 코드와
 안전한 manifest/reference만 두고, 대용량 원문은 검증된 외부 archive에 둔다.
+
+## audit-report-only 캠페인 (감사보고서 전용 회사 + 사업보고서 공백 보강)
+
+`--universe all-annual-issuers` 캠페인은 사업보고서를 기준으로 대상을 고르기 때문에, 코넥스 상장사 중 사업보고서 미제출사와 비상장 외감법인처럼 감사보고서만 있는 회사는 구조적으로 빠진다. `--universe audit-report-only`는 이 공백과, 로컬 disclosures 수집 누락으로 생긴 2023-2024년 "검증된 상장 이력 없음" 코호트 공백을 함께 채우는 별도 캠페인이다. 지금 도는 `all-annual-issuers` 캠페인은 건드리지 않는다.
+
+**운영 순서:**
+
+1. **로컬 DB 보강 (DART 직접 조회, `--apply` 없이 먼저 드라이런):**
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-discover-gaps
+   ```
+   출력의 `audit_only`/`business_gap` 카운트를 확인한 뒤 실제로 반영한다:
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-discover-gaps --apply
+   ```
+
+2. **대상 건수 미리 확인 (`--exclude-manifest`는 필수에 가깝다 — 지금 도는 캠페인의 frozen TARGET.json을 가리켜서, 이미 그쪽이 수집 중인 회사-연도를 중복 수집하지 않게 한다):**
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-preflight \
+     --db <읽기 전용 후보 DB> \
+     --year 2021 --year 2022 --year 2023 --year 2024 --year 2025 \
+     --universe audit-report-only \
+     --exclude-manifest <지금 도는 all-annual-issuers 캠페인의 TARGET.json 경로>
+   ```
+   `--exclude-manifest` 없이 실행하면 경고가 출력된다 — 의도적으로 막지는 않지만, 실수로 빼먹으면 이미 다른 캠페인이 수집한 회사-연도를 중복 수집할 수 있다.
+
+3. **새 캠페인 실행 (지금 도는 캠페인과 별도의 state-dir 사용):**
+   ```bash
+   .venv/bin/python -m kreports.cli.main source-archive-auto-run \
+     --db <읽기 전용 후보 DB> \
+     --state-dir <새 캠페인 전용 디렉터리> \
+     --universe audit-report-only \
+     --exclude-manifest <지금 도는 캠페인의 TARGET.json 경로> \
+     --year 2021 --year 2022 --year 2023 --year 2024 --year 2025 \
+     --shard-count 64 --max-dart-calls 500 --partial-retry-after-seconds 86400
+   ```
+
+**알려진 한계:**
+
+- 코넥스 시장 구분은 DART가 현재 시점 기준으로 알려주는 정보(`corp_cls`)를 쓴다. 과거 연도에 시장을 옮겼거나 상장폐지된 회사는 놓치거나 잘못 분류될 수 있다.
+- `build_source_archive_plan`의 감사보고서 전용 발굴 루프는 "사업보고서 anchor가 없음"과 "사업보고서 anchor는 있으나 정확한 접수번호/날짜 검증에 실패함"을 구분하지 못한다. 후자에 해당하는 (드문) 회사-연도는 감사보고서 전용 코호트로 잘못 분류되어 사업보고서가 영영 수집되지 않을 수 있다 (`kreports/maintenance/source_archive_campaign.py`의 `audit_report_only` 발굴 루프 위 주석 참고).
+- 매년 새로 생기는 비상장 외감법인을 정기적으로 잡아내는 스케줄러 연동은 이번 범위 밖이다 — 1회성 공백 보강 캠페인이다.

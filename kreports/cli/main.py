@@ -2562,6 +2562,12 @@ def _source_archive_plan_from_database(
     excluded_pairs: frozenset[tuple[str, int]] = frozenset(),
 ):
     """Open an explicit non-runtime candidate DB for source-archive planning."""
+    if universe_mode == "audit_report_only" and not excluded_pairs:
+        typer.echo(
+            "경고: --universe audit-report-only를 --exclude-manifest 없이 실행하면 "
+            "이미 다른 캠페인이 수집한 회사-연도를 중복 수집할 수 있습니다.",
+            err=True,
+        )
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 

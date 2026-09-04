@@ -1363,8 +1363,15 @@ def test_source_archive_preflight_cli_accepts_audit_report_only_universe_and_exc
         ))
         session.commit()
 
+    # A non-empty manifest (even with a non-matching pair) keeps excluded_pairs
+    # truthy so `_source_archive_plan_from_database`'s missing-manifest warning
+    # (fired whenever excluded_pairs is empty) doesn't prepend stderr text to
+    # this CLI's stdout JSON payload.
     exclude_manifest = tmp_path / "exclude.json"
-    exclude_manifest.write_text(json.dumps({"targets": []}), encoding="utf-8")
+    exclude_manifest.write_text(
+        json.dumps({"targets": [{"corp_code": "00999999", "bsns_year": 1900}]}),
+        encoding="utf-8",
+    )
 
     # settings.db_url stays at its test-config default (unrelated to db_path) so
     # `_source_archive_plan_from_database`'s "must not equal the runtime DB" guard
@@ -1389,6 +1396,40 @@ def test_source_archive_preflight_cli_accepts_audit_report_only_universe_and_exc
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["target_count"] == 1
+
+
+def test_source_archive_plan_from_database_warns_when_audit_report_only_has_no_exclusions(
+    temp_engine, tmp_path,
+):
+    from sqlalchemy.orm import sessionmaker
+    import kreports.cli.main as cli
+
+    with sessionmaker(bind=temp_engine)() as session:
+        for year in (2021,):
+            session.add(_membership("00299999", year, "KOSPI"))
+            session.add(_membership("00299998", year, "KOSDAQ"))
+        session.commit()
+
+    db_path = tmp_path / "candidate.db"
+    from sqlalchemy import create_engine
+    file_engine = create_engine(f"sqlite:///{db_path}")
+    from kreports.db.models import Base
+    Base.metadata.create_all(bind=file_engine)
+    with sessionmaker(bind=temp_engine)() as source_session, sessionmaker(bind=file_engine)() as dest_session:
+        for table in Base.metadata.sorted_tables:
+            rows = source_session.execute(table.select()).mappings().all()
+            if rows:
+                dest_session.execute(table.insert(), [dict(row) for row in rows])
+        dest_session.commit()
+
+    from typer.testing import CliRunner
+    result = CliRunner().invoke(cli.app, [
+        "source-archive-preflight", "--db", str(db_path), "--year", "2021",
+        "--universe", "audit-report-only",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "경고" in result.output or "exclude-manifest" in result.output
 
 
 def test_source_archive_discover_gaps_cli_reports_counts_and_upserts_companies(
