@@ -2736,7 +2736,7 @@ def source_archive_preflight_cmd(
     db_path: Path = typer.Option(..., "--db", help="읽기 전용 후보 SQLite DB"),
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
-    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"),
     exclude_manifest: Optional[Path] = typer.Option(
         None, "--exclude-manifest",
         help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
@@ -2775,7 +2775,7 @@ def source_archive_plan_cmd(
     state_dir: Path = typer.Option(..., "--state-dir", help="캠페인 매니페스트 디렉터리"),
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
-    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"),
     exclude_manifest: Optional[Path] = typer.Option(
         None, "--exclude-manifest",
         help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
@@ -2810,7 +2810,7 @@ def source_archive_run_cmd(
     shard: int = typer.Option(..., "--shard", min=0, help="고정 회사 shard (0부터 시작)"),
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
-    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"),
+    universe: str = typer.Option("listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"),
     exclude_manifest: Optional[Path] = typer.Option(
         None, "--exclude-manifest",
         help="이미 다른 캠페인에 포함된 회사-연도를 제외할 frozen TARGET.json 경로",
@@ -2854,7 +2854,7 @@ def source_archive_auto_run_cmd(
     year: list[int] = typer.Option(..., "--year", help="대상 사업연도 (반복 지정)"),
     shard_count: int = typer.Option(64, "--shard-count", min=1, max=1024),
     universe: str = typer.Option(
-        "listed", "--universe", help="대상 범위: listed 또는 all-annual-issuers"
+        "listed", "--universe", help="대상 범위: listed, all-annual-issuers, 또는 audit-report-only"
     ),
     exclude_manifest: Optional[Path] = typer.Option(
         None, "--exclude-manifest",
